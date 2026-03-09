@@ -10,6 +10,7 @@ from .market_cn import ChinaMarketCollector
 from .market_drivers import MarketDriversCollector
 from .market_hk import HongKongMarketCollector
 from .market_monitor import MarketMonitorCollector
+from .market_overview import MarketOverviewCollector
 from .market_pulse import MarketPulseCollector
 from .market_us import USMarketCollector
 from .news import NewsCollector
@@ -22,6 +23,7 @@ __all__ = [
     "MarketDriversCollector",
     "HongKongMarketCollector",
     "MarketMonitorCollector",
+    "MarketOverviewCollector",
     "MarketPulseCollector",
     "USMarketCollector",
     "CommodityCollector",

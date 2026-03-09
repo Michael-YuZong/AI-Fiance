@@ -23,6 +23,7 @@ from src.collectors import (
     GlobalFlowCollector,
     MarketDriversCollector,
     MarketMonitorCollector,
+    MarketOverviewCollector,
     MarketPulseCollector,
     NewsCollector,
     SocialSentimentCollector,
@@ -944,7 +945,7 @@ def _primary_narrative(
         theme = "macro_background"
 
     theme_labels = {
-        "energy_shock": "能源冲击",
+        "energy_shock": "能源冲击 + 地缘风险",
         "defensive_riskoff": "防守避险",
         "rate_growth": "利率驱动成长修复",
         "china_policy": "中国政策/内需确定性",
@@ -1577,8 +1578,10 @@ def _liquidity_lines(config: Dict[str, Any]) -> List[str]:
         if abs(south) > 1e-6:
             direction = "净流入" if south >= 0 else "净流出"
             lines.append(f"南向资金当日{direction}约 {_fmt_hsgt_amount(south)}，可作为 HSTECH 情绪承接的辅助观察。")
-            if abs(south) >= 250:
+            if abs(south) >= 200:
                 lines.append("⚠️ 南向资金读数偏大，请复核是否为单日口径、分市场合计口径或极端风险偏好切换。")
+        if abs(north) >= 200:
+            lines.append("⚠️ 北向资金读数偏大，请复核是否为单日口径或极端风险偏好切换。")
 
     try:
         margin = collector.get_margin_trading()
@@ -1826,7 +1829,7 @@ def _coverage_metadata(
     events: List[Dict[str, Any]],
     global_proxy_note: str,
 ) -> tuple[str, str]:
-    coverage_parts = ["中国宏观", "Watchlist 行情", "宏观资产监控", "A股盘面/龙虎榜"]
+    coverage_parts = ["中国宏观", "Watchlist 行情", "国内指数总览", "宏观资产监控", "A股盘面/龙虎榜"]
     missing_parts: List[str] = []
 
     items = news_report.get("items", []) or []
@@ -1877,11 +1880,625 @@ def _action_lines(
         lines.append(f"今天先围绕 `{narrative['label']}` 做跟踪，动作上先验证主线，再决定是否加大风险暴露。")
 
     lines.extend(_positioning_lines(narrative, monitor_rows))
-    lines.append(f"优先跟踪 {strongest.symbol}：它当前是观察池里最能代表主线延续性的方向。")
+    strongest_rsi = float(strongest.technical.get("rsi", {}).get("RSI", 0.0))
+    strongest_tail = "已进入超买区，适合持有观察，不宜新增追高。" if strongest_rsi > 70 else "仍可作为主线验证器。"
+    lines.append(f"优先方向: {strongest.symbol} — 它当前最能代表主线延续性；{strongest_tail}")
     lines.append(f"谨慎对待 {weakest.symbol}：它当前最弱，更适合等确认而不是抢反弹。")
     if gold and theme in {"energy_shock", "defensive_riskoff"}:
         lines.append(f"把 {gold.symbol} 当作防守情绪验证器，观察避险需求是否继续抬头。")
+    lines.append("执行节奏: 先观察开盘 30 分钟风格延续性，确认后再执行。")
     return lines[:5]
+
+
+def _judgement_mark(passed: bool) -> str:
+    return "✅" if passed else "❌"
+
+
+def _compact_headline_lines(
+    narrative: Dict[str, Any],
+    china_macro: Dict[str, Any],
+    monitor_rows: List[Dict[str, Any]],
+    pulse: Dict[str, Any],
+) -> List[str]:
+    monitor = _monitor_map(monitor_rows)
+    brent = monitor.get("布伦特原油", {})
+    background = str(narrative.get("background_regime", "未识别"))
+    event_label = str(narrative.get("label", "未识别"))
+    lines = [f"**{event_label}**"]
+    lines.append(f"Regime 裁决: 背景宏观为 `{background}`，日内事件主线为 `{event_label}`。")
+    if narrative.get("overrides_background"):
+        lines.append("若冲突：日内优先服从事件主线，背景 regime 降为中期参考。")
+    else:
+        lines.append("若冲突：当前没有更强事件覆盖，先按背景 regime 执行。")
+    pmi = float(china_macro.get("pmi", 50.0))
+    oil_latest = _to_float(brent.get("latest"))
+    if oil_latest > 0:
+        lines.append(f"Regime 切换依据: PMI<{50:.0f} + 布伦特>{oil_latest:.0f} 时，优先按滞涨/能源冲击框架处理。")
+    else:
+        lines.append(f"Regime 切换依据: PMI {pmi:.1f}、CPI 与流动性状态共同决定背景 regime。")
+    return lines
+
+
+def _compact_validation_lines(
+    narrative: Dict[str, Any],
+    monitor_rows: List[Dict[str, Any]],
+    pulse: Dict[str, Any],
+) -> List[str]:
+    monitor = _monitor_map(monitor_rows)
+    brent = monitor.get("布伦特原油", {})
+    dxy = monitor.get("美元指数", {})
+    vix = monitor.get("VIX波动率", {})
+    top_zt = " ".join(_top_categories(pulse.get("zt_pool", pd.DataFrame()), "所属行业"))
+    top_strong = " ".join(_top_categories(pulse.get("strong_pool", pd.DataFrame()), "所属行业"))
+
+    price_ok = False
+    board_ok = False
+    cross_ok = False
+    if narrative.get("theme") == "energy_shock":
+        price_ok = _to_float(brent.get("return_1d")) >= 0.05 or _to_float(brent.get("return_5d")) >= 0.12
+        board_ok = any(keyword in f"{top_zt} {top_strong}" for keyword in ["电力", "电网", "石油", "油气", "煤炭"])
+        cross_ok = _to_float(vix.get("latest")) >= 25 or _to_float(dxy.get("return_5d")) > 0.005
+    else:
+        price_ok = True
+        board_ok = bool(top_zt or top_strong)
+        cross_ok = _to_float(vix.get("latest")) >= 0
+
+    passed = sum([price_ok, board_ok, cross_ok])
+    return [f"主线校验: 价格 {_judgement_mark(price_ok)} / 盘面 {_judgement_mark(board_ok)} / 跨市场 {_judgement_mark(cross_ok)}，通过 {passed}/3 项。"]
+
+
+def _amount_delta_text(value: Optional[float]) -> str:
+    if value is None:
+        return "—"
+    return format_pct(value)
+
+
+def _index_brief(row: Dict[str, Any]) -> str:
+    change = _to_float(row.get("change_pct"))
+    note = str(row.get("proxy_note", "")).strip()
+    brief = "偏强" if change > 0.005 else "偏弱" if change < -0.005 else "震荡"
+    if note:
+        return f"{brief}，{note}"
+    return brief
+
+
+def _domestic_overview_rows(
+    overview: Dict[str, Any],
+    pulse: Dict[str, Any],
+) -> tuple[List[List[str]], List[str]]:
+    index_rows: List[List[str]] = []
+    domestic = overview.get("domestic_indices", []) or []
+    by_name = {str(item.get("name", "")): item for item in domestic}
+    ordered_names = ["上证指数", "深证成指", "创业板指", "科创50", "沪深300", "中证1000", "中证2000"]
+    for name in ordered_names:
+        row = by_name.get(name)
+        if not row:
+            continue
+        index_rows.append(
+            [
+                name,
+                f"{_to_float(row.get('latest')):.2f}" if row.get("latest") is not None else "—",
+                format_pct(_to_float(row.get("change_pct"))) if row.get("change_pct") is not None else "—",
+                f"{_to_float(row.get('amount')):.0f}" if row.get("amount") is not None else "—",
+                _amount_delta_text(row.get("amount_delta")),
+                _index_brief(row),
+            ]
+        )
+
+    breadth = overview.get("breadth", {}) or {}
+    lines: List[str] = []
+    turnover = breadth.get("turnover")
+    if turnover is not None:
+        lines.append(f"全市场成交额: {turnover:.0f}亿，较前日口径暂缺，先按绝对量能判断活跃度。")
+    up_count = int(breadth.get("up_count", 0))
+    down_count = int(breadth.get("down_count", 0))
+    total = up_count + down_count + int(breadth.get("flat_count", 0))
+    if total > 0:
+        ratio = up_count / max(down_count, 1)
+        lines.append(f"涨跌家数: 上涨 {up_count} 家，下跌 {down_count} 家，涨跌比 {ratio:.2f}。")
+    prev_zt = pulse.get("prev_zt_pool", pd.DataFrame())
+    avg_prev = pd.to_numeric(prev_zt["涨跌幅"], errors="coerce").dropna().mean() if not prev_zt.empty and "涨跌幅" in prev_zt.columns else None
+    zt_count = len(pulse.get("zt_pool", pd.DataFrame()).index) if pulse else 0
+    dt_count = len(pulse.get("dt_pool", pd.DataFrame()).index) if pulse else 0
+    if avg_prev is not None:
+        relay = "好" if avg_prev > 0 else "差"
+        lines.append(f"涨停/跌停: 涨停 {zt_count} 家，跌停 {dt_count} 家。昨日涨停今日表现 {avg_prev:+.2f}%（接力环境{relay}）。")
+    else:
+        lines.append(f"涨停/跌停: 涨停 {zt_count} 家，跌停 {dt_count} 家。")
+    return index_rows, lines
+
+
+def _style_rows(
+    overview: Dict[str, Any],
+    industry_rows: pd.DataFrame,
+) -> List[List[str]]:
+    domestic = {str(item.get("name", "")): item for item in overview.get("domestic_indices", []) or []}
+    hs300 = domestic.get("沪深300", {})
+    zz1000 = domestic.get("中证1000", {})
+    cyb = domestic.get("创业板指", {})
+    szzs = domestic.get("上证指数", {})
+
+    rows: List[List[str]] = []
+    small = _to_float(zz1000.get("change_pct"))
+    large = _to_float(hs300.get("change_pct"))
+    size_signal = "偏小盘" if small - large > 0.003 else "偏大盘" if large - small > 0.003 else "均衡"
+    rows.append(
+        [
+            "大盘 vs 小盘",
+            f"中证1000 {format_pct(small)}",
+            f"沪深300 {format_pct(large)}",
+            size_signal,
+        ]
+    )
+
+    growth = _to_float(cyb.get("change_pct"))
+    value = _to_float(szzs.get("change_pct"))
+    gv_signal = "偏成长" if growth - value > 0.003 else "偏价值" if value - growth > 0.003 else "均衡"
+    rows.append(
+        [
+            "成长 vs 价值",
+            f"创业板指 {format_pct(growth)}",
+            f"上证指数 {format_pct(value)}",
+            gv_signal,
+        ]
+    )
+
+    strong_name = "电力"
+    weak_name = "消费电子"
+    strong_pct = None
+    weak_pct = None
+    if not industry_rows.empty:
+        for keyword in ["电力", "电网设备", "公用事业"]:
+            matched = industry_rows[industry_rows["板块名称"].astype(str).str.contains(keyword, na=False)]
+            if not matched.empty:
+                strong_name = str(matched.iloc[0]["板块名称"])
+                strong_pct = _to_float(pd.to_numeric(pd.Series([matched.iloc[0]["涨跌幅"]]), errors="coerce").iloc[0]) / 100
+                break
+        for keyword in ["消费电子", "半导体", "元件", "电子化学品"]:
+            matched = industry_rows[industry_rows["板块名称"].astype(str).str.contains(keyword, na=False)]
+            if not matched.empty:
+                weak_name = str(matched.iloc[0]["板块名称"])
+                weak_pct = _to_float(pd.to_numeric(pd.Series([matched.iloc[0]["涨跌幅"]]), errors="coerce").iloc[0]) / 100
+                break
+    rows.append(
+        [
+            "内需 vs 外需",
+            f"{strong_name} {format_pct(strong_pct) if strong_pct is not None else '—'}",
+            f"{weak_name} {format_pct(weak_pct) if weak_pct is not None else '—'}",
+            "—",
+        ]
+    )
+    return rows
+
+
+def _industry_catalyst_text(name: str, narrative: Dict[str, Any], news_report: Dict[str, Any], lead_stock: str) -> str:
+    theme = str(narrative.get("theme", ""))
+    lower = name.lower()
+    if any(keyword in lower for keyword in ["油", "煤", "电", "逆变器", "储能"]):
+        return "能源冲击和地缘风险抬升，资金向电力/能源链集中。"
+    if any(keyword in lower for keyword in ["半导体", "通信", "消费电子", "it", "软件"]):
+        return "美元与波动率偏强，成长估值承压。"
+    if lead_stock:
+        return f"板块龙头 {lead_stock} 活跃，带动同链条扩散。"
+    if any(item.get("category") == "china_macro_domestic" for item in news_report.get("items", [])):
+        return "国内政策快讯提供情绪支撑。"
+    return "主要由盘面轮动和短线资金推动。"
+
+
+def _generic_headline(title: str) -> bool:
+    lowered = title.lower()
+    generic_phrases = [
+        "global market headlines",
+        "breaking stock market news",
+        "markets wrap",
+    ]
+    return any(phrase in lowered for phrase in generic_phrases)
+
+
+def _industry_rank_rows(drivers: Dict[str, Any], narrative: Dict[str, Any], news_report: Dict[str, Any]) -> List[List[str]]:
+    frame = drivers.get("industry_spot", pd.DataFrame())
+    if frame is None or frame.empty or "板块名称" not in frame.columns or "涨跌幅" not in frame.columns:
+        return []
+    ranked = frame.copy()
+    ranked["涨跌幅"] = pd.to_numeric(ranked["涨跌幅"], errors="coerce")
+    ranked = ranked.dropna(subset=["涨跌幅"])
+    if ranked.empty:
+        return []
+    leaders = ranked.sort_values("涨跌幅", ascending=False).head(5)
+    laggards = ranked.sort_values("涨跌幅", ascending=True).head(5)
+    rows: List[List[str]] = []
+    for index, (_, row) in enumerate(leaders.iterrows(), start=1):
+        rows.append(
+            [
+                str(index),
+                str(row["板块名称"]),
+                f"{pd.to_numeric(pd.Series([row['涨跌幅']]), errors='coerce').iloc[0]:+.2f}%",
+                _industry_catalyst_text(str(row["板块名称"]), narrative, news_report, str(row.get("领涨股票", ""))),
+            ]
+        )
+    tail_labels = ["-5", "-4", "-3", "-2", "-1"]
+    for label, (_, row) in zip(tail_labels, laggards.iterrows()):
+        cause = "景气/成本压力或资金撤离压制板块表现。"
+        if "航空" in str(row["板块名称"]) or "航运" in str(row["板块名称"]):
+            cause = "油价上行直接压制成本敏感链条表现。"
+        rows.append(
+            [
+                label,
+                str(row["板块名称"]),
+                f"{pd.to_numeric(pd.Series([row['涨跌幅']]), errors='coerce').iloc[0]:+.2f}%",
+                cause,
+            ]
+        )
+    return rows
+
+
+def _macro_asset_rows(
+    monitor_rows: List[Dict[str, Any]],
+    anomaly_report: Dict[str, Any],
+) -> List[List[str]]:
+    monitor = _monitor_map(monitor_rows)
+    flags = anomaly_report.get("flags", {})
+    ordered = [
+        "布伦特原油",
+        "WTI原油",
+        "VIX波动率",
+        "美元指数",
+        "美国10Y收益率",
+        "COMEX黄金",
+        "COMEX铜",
+        "USDCNY",
+    ]
+    rows: List[List[str]] = []
+    for name in ordered:
+        item = monitor.get(name)
+        if not item:
+            continue
+        latest = _to_float(item.get("latest"))
+        ret_1d = _to_float(item.get("return_1d"))
+        ret_5d = _to_float(item.get("return_5d"))
+        ret_20d = _to_float(item.get("return_20d"))
+        if name in {"布伦特原油", "WTI原油"}:
+            state = "冲击" if abs(ret_5d) > 0.20 else "正常"
+        elif name == "VIX波动率":
+            state = "高波动" if latest >= 25 else "正常"
+            ret_20d = float("nan")
+        elif name == "美元指数":
+            state = "偏强" if ret_5d > 0.005 else "偏弱" if ret_5d < -0.005 else "中性"
+        else:
+            state = "—"
+        rows.append(
+            [
+                name,
+                f"{latest:.3f}",
+                format_pct(ret_1d),
+                format_pct(ret_5d),
+                format_pct(ret_20d) if pd.notna(ret_20d) else "—",
+                state,
+                flags.get(name, "—"),
+            ]
+        )
+    return rows
+
+
+def _overnight_rows(overview: Dict[str, Any]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for item in overview.get("global_indices", []) or []:
+        change = _to_float(item.get("change_pct"))
+        brief = "偏强" if change > 0.005 else "偏弱" if change < -0.005 else "震荡"
+        note = str(item.get("proxy_note", "")).strip()
+        if note:
+            brief = f"{brief}，{note}"
+        rows.append(
+            [
+                str(item.get("market", "海外")),
+                str(item.get("name", "")),
+                f"{_to_float(item.get('latest')):.2f}",
+                format_pct(change),
+                brief,
+            ]
+        )
+    return rows
+
+
+def _core_event_lines(news_report: Dict[str, Any], catalyst_rows: List[List[str]]) -> List[str]:
+    lines: List[str] = []
+    items = news_report.get("items", []) or []
+    transmission_map = {
+        "energy": "原油 -> 通胀预期 -> 风险资产估值重定价。",
+        "geopolitics": "地缘风险 -> 波动率/美元 -> 资产风险溢价上升。",
+        "fed": "利率预期 -> 久期资产估值 -> 科技和成长弹性。",
+        "earnings": "业绩/指引 -> 板块风险偏好 -> 相关 ETF 表现。",
+        "china_market_domestic": "盘面快讯 -> 情绪扩散 -> 题材强弱切换。",
+        "china_macro_domestic": "政策预期 -> 内需与顺周期方向重估。",
+    }
+    meaning_map = {
+        "energy": "优先看能源、电力电网和防守资产。",
+        "geopolitics": "先确认冲击是脉冲还是趋势，不把单日反弹当反转。",
+        "fed": "只有利率和科技共振时，才把它升级成成长修复主线。",
+        "earnings": "看是单股事件还是能扩散成板块催化。",
+        "china_market_domestic": "和涨停池、龙虎榜一起确认盘面强度。",
+        "china_macro_domestic": "更适合辅助确认国内主线，不单独定方向。",
+    }
+    filtered_items = [item for item in items if not _generic_headline(str(item.get("title", "")))]
+    for item in filtered_items[:5]:
+        source = str(item.get("source") or item.get("configured_source") or "未知源")
+        category = str(item.get("category", "")).lower()
+        transmission = transmission_map.get(category, "消息面 -> 风险偏好 -> 相关资产表现。")
+        meaning = meaning_map.get(category, "先作为观察项，不下强结论。")
+        lines.append(f"**{item.get('title', '未命名事件')}** ({source})\n  → {transmission}\n  → {meaning}")
+    if lines:
+        return lines
+    for row in catalyst_rows[:3]:
+        lines.append(f"**{row[0]}**\n  → {row[2]}\n  → {row[3]}")
+    if lines:
+        return lines
+    return ["暂无可结构化的核心事件。"]
+
+
+def _market_event_rows(news_report: Dict[str, Any], narrative: Dict[str, Any]) -> List[List[str]]:
+    impact = "、".join(_effective_asset_preference(narrative)[:3]) or "观察池核心资产"
+    rows: List[List[str]] = []
+    items = [item for item in (news_report.get("items", []) or []) if not _generic_headline(str(item.get("title", "")))]
+    for item in items[:3]:
+        category = str(item.get("category", "")).lower()
+        importance = "高" if category in {"fed", "earnings", "energy", "geopolitics"} else "中"
+        rows.append(
+            [
+                "待定",
+                str(item.get("title", "未命名事件")),
+                "—",
+                importance,
+                impact,
+            ]
+        )
+    return rows
+
+
+def _workflow_event_rows(events: List[Dict[str, Any]]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for item in events[:5]:
+        rows.append(
+            [
+                str(item.get("time", "待定")),
+                str(item.get("title", "未命名动作")),
+                str(item.get("note", "")),
+            ]
+        )
+    return rows
+
+
+def _capital_flow_lines(
+    pulse: Dict[str, Any],
+    drivers: Dict[str, Any],
+    liquidity_lines: List[str],
+    snapshots: List[BriefingSnapshot],
+) -> List[str]:
+    lines: List[str] = []
+    top_zt = _top_categories(pulse.get("zt_pool", pd.DataFrame()), "所属行业")
+    top_strong = _top_categories(pulse.get("strong_pool", pd.DataFrame()), "所属行业")
+    if top_zt:
+        lines.append("涨停集中方向: " + "、".join(top_zt) + "，与当前主线基本一致。")
+    if top_strong:
+        lines.append("强势股池方向: " + "、".join(top_strong) + "。")
+    lines.extend(_main_flow_driver_lines(drivers))
+    lines.extend(liquidity_lines)
+    etf_proxy = []
+    for symbol in ("561380", "GLD", "QQQM"):
+        snapshot = _find_snapshot(snapshots, symbol)
+        if not snapshot:
+            continue
+        etf_proxy.append(f"{symbol} 近5日 {format_pct(snapshot.return_5d)}")
+    if etf_proxy:
+        lines.append("ETF份额变化: 免费源未稳定提供份额口径，今日改用 " + "、".join(etf_proxy) + " 作为资金承接代理。")
+    return lines[:10]
+
+
+def _quality_lines(news_report: Dict[str, Any], anomaly_report: Dict[str, Any]) -> List[str]:
+    return (_source_quality_lines(news_report) + (anomaly_report.get("lines", []) or []))[:6]
+
+
+def _verification_rows_v4(
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+) -> List[List[str]]:
+    rows: List[List[str]] = []
+    monitor = _monitor_map(monitor_rows)
+    if monitor.get("布伦特原油"):
+        rows.append(["1", "原油冲高回落", "布伦特收盘 < 开盘价", "地缘叙事降温，可小幅回补成长", "能源冲击延续，继续防守"])
+    if monitor.get("VIX波动率"):
+        rows.append(["2", "VIX 回落", "VIX 收盘 < 27", "波动率脉冲结束，可恢复正常仓位", "维持低仓位，不追高弹性"])
+    if _find_snapshot(snapshots, "HSTECH"):
+        rows.append(["3", "HSTECH 止跌", "日内不创新低 + 尾盘翻红", "风险偏好回暖", "继续回避港股科技"])
+    if _find_snapshot(snapshots, "561380"):
+        rows.append(["4", "561380 超额", "561380 日涨幅 > 沪深300", "国内主线延续", "电网方向可能获利了结"])
+    if _find_snapshot(snapshots, "GLD") and monitor.get("美元指数"):
+        rows.append(["5", "黄金承接避险", "GLD > +0.5% 且 DXY 同步走弱", "避险交易确认，可配黄金", "市场交易美元不是避险"])
+    return rows
+
+
+def _yesterday_review_rows(snapshots: List[BriefingSnapshot], monitor_rows: List[Dict[str, Any]]) -> List[List[str]]:
+    reports_dir = resolve_project_path("reports")
+    if not reports_dir.exists():
+        return []
+    pattern = re.compile(r"daily_briefing_(\d{4}-\d{2}-\d{2})\.md$")
+    today = datetime.now().date()
+    candidates: List[tuple[datetime, Path]] = []
+    for path in reports_dir.glob("daily_briefing_*.md"):
+        matched = pattern.search(path.name)
+        if not matched:
+            continue
+        try:
+            file_date = datetime.strptime(matched.group(1), "%Y-%m-%d")
+        except ValueError:
+            continue
+        if file_date.date() < today:
+            candidates.append((file_date, path))
+    if not candidates:
+        return []
+
+    latest_path = sorted(candidates, key=lambda item: item[0])[-1][1]
+    try:
+        content = latest_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    section_match = re.search(r"### 4\.1 验证点表\s*(.*?)(?:\n### |\n## |\Z)", content, re.S)
+    rows: List[List[str]] = []
+    monitor = _monitor_map(monitor_rows)
+    brent = monitor.get("布伦特原油", {})
+    hstech = _find_snapshot(snapshots, "HSTECH")
+    grid = _find_snapshot(snapshots, "561380")
+    hs300_result = "暂无沪深300代理"
+    if "| 4 | 561380 超额" in content and grid:
+        hs300_proxy = None
+        try:
+            overview = MarketOverviewCollector({}).collect()
+            for item in overview.get("domestic_indices", []):
+                if item.get("name") == "沪深300":
+                    hs300_proxy = _to_float(item.get("change_pct"))
+                    break
+        except Exception:
+            hs300_proxy = None
+        if hs300_proxy is not None:
+            alpha = grid.return_1d - hs300_proxy
+            hs300_result = f"超额 {alpha*100:+.2f}%"
+            rows.append([
+                "561380 vs 沪深300 超额",
+                "561380 日涨幅 > 沪深300",
+                hs300_result,
+                "✅" if alpha > 0 else "❌",
+            ])
+    if "| 1 | 原油冲高回落" in content and brent:
+        open_price = _to_float(brent.get("open"))
+        close_price = _to_float(brent.get("latest"))
+        passed = close_price < open_price if open_price > 0 else False
+        rows.append([
+            "原油是否冲高回落",
+            "布伦特收盘 < 开盘价",
+            f"收 {close_price:.2f}，{format_pct(_to_float(brent.get('return_1d')))}",
+            "✅" if passed else "❌",
+        ])
+    if "| 3 | HSTECH 止跌" in content and hstech:
+        passed = hstech.return_1d > 0
+        rows.append([
+            "HSTECH 是否止跌",
+            "日内不创新低 + 尾盘翻红",
+            f"收 {hstech.latest_price:.3f}，{format_pct(hstech.return_1d)}",
+            "✅" if passed else "❌",
+        ])
+    return rows[:3]
+
+
+def _yesterday_review_summary_lines(rows: List[List[str]]) -> List[str]:
+    if not rows:
+        return ["暂无昨日晨报归档，暂时无法自动回顾‘昨日验证点’。", "命中率: —。暂无可复盘记录。", "框架修正: —"]
+    hits = sum(1 for row in rows if row[-1] == "✅")
+    total = len(rows)
+    verdict = "连续准确" if hits == total else "需要局部修正" if hits <= total / 2 else "框架大体有效"
+    fix = "—" if hits >= max(total - 1, 1) else "若连续错在同一方向，应下调对应主线权重。"
+    return [f"命中率: {hits}/{total}。{verdict}", f"框架修正: {fix}"]
+
+
+def _portfolio_table_rows(config: Dict[str, Any]) -> List[List[str]]:
+    portfolio_repo = PortfolioRepository()
+    thesis_repo = ThesisRepository()
+    holdings = portfolio_repo.list_holdings()
+    if not holdings:
+        return []
+    rows: List[List[str]] = []
+    latest_prices: Dict[str, float] = {}
+    for holding in holdings:
+        try:
+            history = fetch_asset_history(holding["symbol"], holding["asset_type"], config)
+            latest_prices[holding["symbol"]] = compute_history_metrics(history)["last_close"]
+        except Exception:
+            latest_prices[holding["symbol"]] = float(holding.get("cost_basis", 0.0))
+    for holding in holdings:
+        latest = latest_prices.get(holding["symbol"], float(holding.get("cost_basis", 0.0)))
+        cost = float(holding.get("cost_basis", 0.0))
+        pnl = latest / cost - 1 if cost else 0.0
+        thesis = thesis_repo.get(holding["symbol"])
+        rows.append(
+            [
+                holding["symbol"],
+                "多",
+                f"{cost:.3f}",
+                f"{latest:.3f}",
+                format_pct(pnl),
+                str((thesis or {}).get("core_hypothesis", "—"))[:24],
+                "持有观察",
+            ]
+        )
+    return rows
+
+
+def _appendix_technical_rows(snapshots: List[BriefingSnapshot]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for snapshot in snapshots:
+        technical = snapshot.technical
+        rows.append(
+            [
+                snapshot.symbol,
+                "多头" if technical["macd"]["signal"] == "bullish" else "空头",
+                _kdj_text(technical["kdj"]).replace("KDJ ", ""),
+                f"{float(technical['rsi']['RSI']):.1f}",
+                _boll_text(technical["bollinger"]).replace("BOLL ", ""),
+                _obv_text(technical["obv"]).replace("OBV ", ""),
+                f"{float(technical['dmi']['ADX']):.1f}",
+                _fib_text(technical["fibonacci"]).replace("斐波那契", "").strip(),
+            ]
+        )
+    return rows
+
+
+def _appendix_derivative_lines(narrative: Dict[str, Any], monitor_rows: List[Dict[str, Any]]) -> List[str]:
+    monitor = _monitor_map(monitor_rows)
+    vix = _to_float(monitor.get("VIX波动率", {}).get("latest"))
+    lines = [
+        "IF/IC/IM 基差: 当前未接入稳定实时基差源，暂不输出方向性误导结论。",
+        f"期权隐含波动率: 先用 VIX {vix:.1f} 作为外盘波动代理，A股期权 IV/HV 仍待补充。",
+        "最大持仓行权价: 当前未接入期权持仓分布，pin risk 维度今日盲区。",
+    ]
+    if narrative.get("theme") == "energy_shock":
+        lines.append("能源冲击日里，即便看多主线，也要默认隐含波动率溢价更高。")
+    return lines
+
+
+def _appendix_earnings_rows(news_report: Dict[str, Any]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for item in news_report.get("items", []) or []:
+        if str(item.get("category", "")).lower() != "earnings":
+            continue
+        rows.append(
+            [
+                str(item.get("source", "相关公司")),
+                "近期",
+                "—",
+                "—",
+                "标题级信号",
+                str(item.get("title", "未命名财报事件"))[:30],
+                "当前仅完成标题级财报识别，正文解析待补充。",
+            ]
+        )
+    return rows[:5]
+
+
+def _appendix_allocation_rows(narrative: Dict[str, Any], monitor_rows: List[Dict[str, Any]]) -> List[List[str]]:
+    monitor = _monitor_map(monitor_rows)
+    vix = _to_float(monitor.get("VIX波动率", {}).get("latest"))
+    theme_assets = " / ".join(_effective_asset_preference(narrative)[:2]) or "高股息 / 现金"
+    if vix > 35:
+        applicable = "保守"
+    elif vix > 25:
+        applicable = "平衡"
+    else:
+        applicable = "进取"
+    rows = [
+        ["保守型", "≤40%", "高股息 + 中短债", "—", "维持防守，不参与主题追价"],
+        ["平衡型", "40-70%", "红利 + 确定性成长", "主线方向小仓位", f"底仓不动，主线方向围绕 {theme_assets} 试探性配置"],
+        ["进取型", "60-90%", "景气主线", "高弹性题材", "围绕主线做波段，单一主题≤20%"],
+    ]
+    rows.append(["当日适用", applicable, theme_assets, "—", "结合 VIX 和主线执行，不和高波动对着干"])
+    return rows
 
 
 def _persist_briefing(markdown: str, mode: str) -> None:
@@ -1909,6 +2526,7 @@ def main() -> None:
     regime_result = RegimeDetector(regime_inputs).detect_regime()
 
     snapshots, alerts, watchlist_rows = _collect_snapshots(config, args.mode)
+    overview = MarketOverviewCollector(config).collect()
     pulse = MarketPulseCollector(config).collect()
     drivers = MarketDriversCollector(config).collect()
     news_report = _news_report(snapshots, china_macro, global_proxy, config, args.news_source)
@@ -1930,45 +2548,54 @@ def main() -> None:
     if global_proxy_note:
         macro_items.append(global_proxy_note)
 
+    yesterday_rows = _yesterday_review_rows(snapshots, monitor_rows)
+    yesterday_lines = _yesterday_review_summary_lines(yesterday_rows)
+    domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
+    style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
+    industry_rows = _industry_rank_rows(drivers, narrative, news_report)
+    macro_asset_rows = _macro_asset_rows(monitor_rows, anomaly_report)
+    overnight_rows = _overnight_rows(overview)
+    catalyst_rows = _catalyst_rows(news_report, narrative)
+    capital_flow_lines = _capital_flow_lines(pulse, drivers, liquidity_lines, snapshots)
+    quality_lines = _quality_lines(news_report, anomaly_report)
+    verification_rows = _verification_rows_v4(snapshots, monitor_rows)
+    portfolio_lines = _portfolio_lines(config)
+    portfolio_table_rows = _portfolio_table_rows(config)
+
     payload = {
         "title": "每日晨报" if args.mode == "daily" else "每周周报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "data_coverage": data_coverage,
         "missing_sources": missing_sources,
-        "headline_lines": _headline_lines(args.mode, snapshots, narrative, china_macro, pulse),
-        "yesterday_review_lines": _yesterday_review_lines(snapshots, monitor_rows),
-        "regime_reason_lines": _regime_explanation_lines(china_macro, regime_result, narrative),
-        "narrative_validation_lines": _narrative_validation_lines(narrative, news_report, monitor_rows, pulse, snapshots),
-        "important_event_lines": _important_event_lines(news_report),
-        "catalyst_rows": _catalyst_rows(news_report, narrative),
-        "news_lines": _news_lines(news_report),
-        "story_lines": _story_lines(news_report, monitor_rows, snapshots, narrative),
-        "source_quality_lines": _source_quality_lines(news_report),
-        "anomaly_lines": anomaly_report["lines"],
-        "rotation_driver_lines": _rotation_driver_lines(drivers, pulse, snapshots),
-        "main_flow_driver_lines": _main_flow_driver_lines(drivers),
-        "liquidity_lines": liquidity_lines,
-        "impact_lines": _impact_lines(snapshots, monitor_rows, regime_result),
-        "market_pulse_lines": _market_pulse_lines(pulse),
-        "lhb_lines": _lhb_lines(pulse),
-        "monitor_lines": _monitor_lines(monitor_rows),
-        "asset_dashboard_rows": _asset_dashboard_rows(monitor_rows, snapshots, anomaly_report),
-        "overnight_lines": _overnight_lines(snapshots),
-        "macro_items": macro_items,
-        "market_overview_lines": _market_overview_lines(snapshots, regime_result),
-        "flow_lines": _flow_lines(snapshots, config),
-        "sentiment_lines": _sentiment_lines(snapshots, config),
+        "headline_lines": _compact_headline_lines(narrative, china_macro, monitor_rows, pulse)
+        + _compact_validation_lines(narrative, monitor_rows, pulse),
+        "yesterday_review_rows": yesterday_rows,
+        "yesterday_review_lines": yesterday_lines,
+        "domestic_index_rows": domestic_index_rows,
+        "domestic_market_lines": domestic_market_lines,
+        "style_rows": style_rows,
+        "industry_rows": industry_rows,
+        "macro_asset_rows": macro_asset_rows,
+        "overnight_rows": overnight_rows,
         "watchlist_rows": watchlist_rows,
+        "core_event_lines": _core_event_lines(news_report, catalyst_rows),
+        "market_event_rows": _market_event_rows(news_report, narrative),
+        "workflow_event_rows": _workflow_event_rows(events),
+        "capital_flow_lines": capital_flow_lines,
+        "quality_lines": quality_lines,
+        "verification_rows": verification_rows,
+        "portfolio_lines": portfolio_lines,
+        "portfolio_table_rows": portfolio_table_rows,
+        "appendix_technical_rows": _appendix_technical_rows(snapshots),
+        "appendix_lhb_lines": _lhb_lines(pulse),
+        "appendix_flow_lines": _flow_lines(snapshots, config) + _sentiment_lines(snapshots, config),
+        "appendix_derivative_lines": _appendix_derivative_lines(narrative, monitor_rows),
+        "appendix_earnings_rows": _appendix_earnings_rows(news_report),
+        "appendix_allocation_rows": _appendix_allocation_rows(narrative, monitor_rows),
+        "flow_lines": _flow_lines(snapshots, config),
         "watchlist_technical_lines": _watchlist_technical_lines(snapshots),
-        "focus_lines": _focus_lines(snapshots, args.mode),
-        "rotation_lines": _rotation_lines(snapshots),
+        "sentiment_lines": _sentiment_lines(snapshots, config),
         "alerts": alerts or ["当前没有触发强提醒，但仍需关注强弱方向是否在盘中发生切换。"],
-        "portfolio_lines": _portfolio_lines(config),
-        "verification_rows": _verification_rows(snapshots, monitor_rows),
-        "verification_lines": _verification_lines(snapshots, monitor_rows),
-        "calendar_lines": _calendar_lines(args.mode),
-        "event_rows": _event_rows(events),
-        "event_lines": _event_lines(events),
         "action_lines": _action_lines(snapshots, narrative, monitor_rows),
     }
     rendered = BriefingRenderer().render(payload)

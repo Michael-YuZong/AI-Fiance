@@ -32,8 +32,8 @@ class MarketDriversCollector(BaseCollector):
             "market_flow": self._market_flow(as_of),
             "northbound_industry": self._northbound_rank("北向资金增持行业板块排行", as_of),
             "northbound_concept": self._northbound_rank("北向资金增持概念板块排行", as_of),
-            "industry_spot": self._board_spot("stock_board_industry_spot_em"),
-            "concept_spot": self._board_spot("stock_board_concept_spot_em"),
+            "industry_spot": self._board_spot("stock_board_industry_name_em"),
+            "concept_spot": self._board_spot("stock_board_concept_name_em"),
             "hot_rank": self._hot_rank(),
         }
 
