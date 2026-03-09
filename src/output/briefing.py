@@ -38,6 +38,8 @@ class BriefingRenderer:
         _append_section(lines, "隔夜与主要资产", payload.get("overnight_lines", []))
         _append_section(lines, "宏观与流动性", payload.get("macro_items", []))
         _append_section(lines, "市场概览", payload.get("market_overview_lines", []))
+        _append_section(lines, "全球资金流代理", payload.get("flow_lines", []))
+        _append_section(lines, "情绪代理", payload.get("sentiment_lines", []))
 
         lines.extend(["", "## Watchlist 雷达"])
         lines.extend(

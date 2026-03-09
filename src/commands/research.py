@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import io
+import warnings
+from contextlib import redirect_stderr
 from typing import Any, Dict, Iterable, List
 
+warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL 1.1.1+")
+
+from src.collectors import GlobalFlowCollector, SocialSentimentCollector
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot
 from src.processors.regime import RegimeDetector
 from src.processors.risk import RiskAnalyzer
@@ -13,6 +19,7 @@ from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.storage.portfolio import PortfolioRepository
 from src.utils.config import detect_asset_type, load_config
 from src.utils.data import load_watchlist
+from src.utils.logger import setup_logger
 from src.utils.market import compute_history_metrics, fetch_asset_history
 
 
@@ -58,11 +65,12 @@ def _top_correlation_lines(analyzer: RiskAnalyzer) -> List[str]:
 def _regime_lines(config: Dict[str, Any]) -> List[str]:
     china_macro = load_china_macro_snapshot(config)
     try:
-        global_proxy = load_global_proxy_snapshot()
+        with redirect_stderr(io.StringIO()):
+            global_proxy = load_global_proxy_snapshot()
         note = ""
-    except Exception as exc:
+    except Exception:
         global_proxy = {}
-        note = f"跨市场代理数据暂不可用，已回退到国内宏观视角。{exc}"
+        note = "跨市场代理数据暂不可用，已回退到国内宏观视角。"
     regime_inputs = derive_regime_inputs(china_macro, global_proxy)
     result = RegimeDetector(regime_inputs).detect_regime()
     lines = [
@@ -72,6 +80,46 @@ def _regime_lines(config: Dict[str, Any]) -> List[str]:
     if note:
         lines.append(note)
     return lines
+
+
+def _flow_and_sentiment_lines(symbols: List[str], config: Dict[str, Any]) -> List[str]:
+    snapshots = []
+    sentiment_lines: List[str] = []
+    collector = SocialSentimentCollector(config)
+    for symbol in symbols[:3]:
+        asset_type = detect_asset_type(symbol, config)
+        try:
+            history = normalize_ohlcv_frame(fetch_asset_history(symbol, asset_type, config))
+            metrics = compute_history_metrics(history)
+            technical = TechnicalAnalyzer(history).generate_scorecard(config.get("technical", {}))
+            trend = (
+                "多头"
+                if technical["ma_system"]["signal"] == "bullish"
+                else "空头" if technical["ma_system"]["signal"] == "bearish" else "震荡"
+            )
+            snapshot = {
+                "symbol": symbol,
+                "region": "CN" if asset_type in {"cn_etf", "futures"} else "HK" if asset_type in {"hk", "hk_index"} else "US",
+                "sector": next((item.get("sector", "") for item in load_watchlist() if item["symbol"] == symbol), ""),
+                "return_5d": metrics["return_5d"],
+                "return_20d": metrics["return_20d"],
+            }
+            snapshots.append(snapshot)
+            sentiment = collector.collect(
+                symbol,
+                {
+                    "return_1d": metrics["return_1d"],
+                    "return_5d": metrics["return_5d"],
+                    "return_20d": metrics["return_20d"],
+                    "volume_ratio": technical["volume"]["vol_ratio"],
+                    "trend": trend,
+                },
+            )
+            sentiment_lines.append(f"{symbol}: {sentiment['aggregate']['interpretation']}")
+        except Exception:
+            continue
+    flow_lines = GlobalFlowCollector(config).collect(snapshots).get("lines", [])
+    return flow_lines[:2] + sentiment_lines[:2]
 
 
 def _scenario_lines(question: str, context: Any, analyzer: RiskAnalyzer, config: Dict[str, Any]) -> List[str]:
@@ -103,6 +151,7 @@ def _scenario_lines(question: str, context: Any, analyzer: RiskAnalyzer, config:
 
 def main() -> None:
     args = build_parser().parse_args()
+    setup_logger("ERROR")
     config = load_config(args.config or None)
     question = " ".join(args.question).strip()
     repo = PortfolioRepository()
@@ -117,6 +166,7 @@ def main() -> None:
 
     needs_regime = any(keyword in question for keyword in ["降息", "宏观", "regime", "体制", "环境"])
     needs_risk = any(keyword in question for keyword in ["风险", "回撤", "相关", "beta", "压力", "stress", "组合"])
+    needs_flow = any(keyword in question for keyword in ["资金", "轮动", "情绪", "热度", "拥挤", "风格"])
 
     if needs_regime:
         observation_lines.extend(_regime_lines(config))
@@ -127,6 +177,9 @@ def main() -> None:
                 observation_lines.extend(_symbol_snapshot(symbol, config))
             except Exception as exc:
                 observation_lines.append(f"{symbol}: 数据拉取失败，暂时无法做研究快照。{exc}")
+
+    if needs_flow and symbols:
+        observation_lines.extend(_flow_and_sentiment_lines(symbols, config))
 
     if needs_risk and repo.list_holdings():
         context = build_portfolio_risk_context(config, repo=repo)
@@ -151,6 +204,8 @@ def main() -> None:
 
     if symbols:
         action_lines.append("若要继续深入，可先跑对应 `scan` 看完整六维打分卡。")
+    if needs_flow:
+        action_lines.append("如果想系统看风格轮动，可直接跑 `briefing daily` 或 `discover`。")
     if needs_risk and repo.list_holdings():
         action_lines.append("若想量化极端场景，再跑一次 `risk stress` 看具体持仓贡献。")
     if not action_lines:

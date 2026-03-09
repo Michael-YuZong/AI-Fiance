@@ -28,15 +28,17 @@
 6. 风险管理：相关性、VaR、压力测试、集中度预警
 7. 简易回测：验证规则有没有明显失效
 
-当前仓库已经实现到 Phase 4 基础版，重点是把“看标的、看组合、看风险、看规则”的主链路先跑通：
+当前仓库已经实现到 Phase 5 基础版，重点是把“看标的、看组合、看风险、看规则”和“直接说需求”这两条主链路先跑通：
 
 - 配置加载、日志、重试、缓存
 - A 股 ETF / 美股 / 港股 / 商品行情采集骨架
 - 技术指标引擎
 - 六维扫描基础版：宏观、产业链、资金情绪、跨市场、技术面、估值面
+- Phase 5 代理模块：社媒情绪代理、全球资金流代理、本地事件日历
 - SQLite 基础存储
 - `scan`、`briefing`、`snap`、`compare`、`portfolio`、`discover`、`regime`、`policy` 命令可运行
 - `risk`、`backtest`、`research` 命令已接通 Phase 4 基础版
+- `assistant` 自然语言入口已可用，不会命令的人可以直接说需求
 
 ## 当前支持什么
 
@@ -61,6 +63,7 @@ python -m src.commands.risk report
 python -m src.commands.risk stress "美股崩盘"
 python -m src.commands.backtest macd_golden_cross 561380 3y
 python -m src.commands.research 当前宏观环境对561380意味着什么
+python -m src.commands.assistant 帮我写今天的晨报
 ```
 
 例如：
@@ -289,7 +292,20 @@ python -m src.commands.research 我的持仓相关性高不高
 
 `research` 当前是 Phase 4 的本地启发式实现：会联动宏观、标的快照、组合风险和预设压力场景做结构化回答；如果部分外部数据源不可用，会自动降级，不会直接中断。
 
-### 9. 查看本地数据
+### 9. 不会命令也能用
+
+如果你不想记命令，可以直接用自然语言入口：
+
+```bash
+python -m src.commands.assistant 帮我写今天的晨报
+python -m src.commands.assistant 看看561380现在值不值得关注
+python -m src.commands.assistant 对比 QQQM 和 GLD
+python -m src.commands.assistant 如果美股跌20%我的组合会怎样
+```
+
+它会先自动判断你的意图，再路由到已有命令。判断不稳时，会回退到 `research`。
+
+### 10. 查看本地数据
 
 扫描后会写入：
 
@@ -315,13 +331,13 @@ python -m src.commands.research 我的持仓相关性高不高
 
 ## 当前实现进度
 
-- 已完成：Phase 1 + Phase 2 + Phase 3 基础能力
-- 已可运行：`scan`、`briefing`、`snap`、`compare`、`portfolio`、`discover`、`regime`、`policy`
-- 已有真实数据接入：A 股 ETF、港股代理行情、美股 ETF、商品期货、部分中国宏观数据、VIX / DXY / 铜金比代理
-- 已有启发式研究模块：事件驱动发现、历史 regime 类比、政策模板/URL 解读、thesis 健康检查、月度操作复盘
-- 仍是骨架：`risk`、`backtest`、`research`
+- 已完成：Phase 1 到 Phase 5 基础版
+- 已可运行：`scan`、`briefing`、`snap`、`compare`、`portfolio`、`discover`、`regime`、`policy`、`risk`、`backtest`、`research`
+- 已有代理增强：社媒情绪代理、全球资金流代理、本地事件日历、自然语言命令路由
+- 已有真实数据接入：A 股 ETF、港股代理行情、美股 ETF、商品期货、部分中国宏观数据
+- 已有启发式研究模块：事件驱动发现、历史 regime 类比、政策模板/URL 解读、thesis 健康检查、月度操作复盘、自然语言问答
 
-也就是说，仓库现在已经不是只有一个 `scan`，而是日常盯盘、主题研究和基础组合管理都可以开始用了；但更完整的风险、回测和自由研究模块还在后续 Phase。
+也就是说，仓库现在已经不是只有一个 `scan`，而是日常盯盘、主题研究、基础组合管理和自然语言入口都能开始用了。当前仍然诚实保留一个边界：社媒情绪和全球资金流还是代理版，不是假装有机构级原始数据。
 
 ## 测试
 
@@ -346,10 +362,11 @@ python -m pytest -q
 
 ## 后续计划
 
-接下来会按 Phase 继续补齐：
+接下来优先补这几块：
 
-- Phase 4：风险报告、压力测试、回测命令
-- Phase 5：社媒情绪、全球资金流、推送能力
+- 更完整的宏观 / 财报 / 政策事件日历
+- 更细的自然语言意图识别与自动参数补全
+- 如果接入外部渠道，再补通知 / 推送能力
 
 ## 免责声明
 

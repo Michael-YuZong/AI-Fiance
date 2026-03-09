@@ -13,6 +13,8 @@ def test_briefing_renderer_outputs_core_sections():
         "overnight_lines": ["科技方向偏弱。"],
         "macro_items": ["中国 PMI 49.0。"],
         "market_overview_lines": ["watchlist 整体偏中性。"],
+        "flow_lines": ["全球资金流偏防守。"],
+        "sentiment_lines": ["561380 情绪中性。"],
         "watchlist_rows": [["561380", "2.234", "+1.00%", "+2.00%", "+3.00%", "多头", "1.20"]],
         "focus_lines": ["561380 趋势偏强。"],
         "rotation_lines": ["电网强于科技。"],
@@ -26,6 +28,8 @@ def test_briefing_renderer_outputs_core_sections():
     assert "# 每日晨报" in rendered
     assert "## 今日主线" in rendered
     assert "## 隔夜与主要资产" in rendered
+    assert "## 全球资金流代理" in rendered
+    assert "## 情绪代理" in rendered
     assert "## Watchlist 雷达" in rendered
     assert "## 今日已知事件" in rendered
     assert "## 行动建议" in rendered

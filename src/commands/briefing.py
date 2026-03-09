@@ -8,11 +8,11 @@ import warnings
 from contextlib import redirect_stderr
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL 1.1.1+")
 
-from src.collectors import EventsCollector
+from src.collectors import EventsCollector, GlobalFlowCollector, SocialSentimentCollector
 from src.output.briefing import BriefingRenderer
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
 from src.processors.regime import RegimeDetector
@@ -32,6 +32,7 @@ class BriefingSnapshot:
     symbol: str
     name: str
     asset_type: str
+    region: str
     sector: str
     latest_price: float
     return_1d: float
@@ -130,6 +131,7 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
                 symbol=symbol,
                 name=item["name"],
                 asset_type=item["asset_type"],
+                region=item.get("region", ""),
                 sector=item.get("sector", ""),
                 latest_price=metrics["last_close"],
                 return_1d=metrics["return_1d"],
@@ -246,7 +248,7 @@ def _market_overview_lines(snapshots: List[BriefingSnapshot], regime_result: Dic
     ]
 
 
-def _find_snapshot(snapshots: List[BriefingSnapshot], symbol: str) -> BriefingSnapshot | None:
+def _find_snapshot(snapshots: List[BriefingSnapshot], symbol: str) -> Optional[BriefingSnapshot]:
     for item in snapshots:
         if item.symbol == symbol:
             return item
@@ -302,6 +304,40 @@ def _overnight_lines(snapshots: List[BriefingSnapshot]) -> List[str]:
     lines.append(
         f"单日最强是 {strongest_1d.symbol} {format_pct(strongest_1d.return_1d)}，最弱是 {weakest_1d.symbol} {format_pct(weakest_1d.return_1d)}。"
     )
+    return lines
+
+
+def _flow_lines(snapshots: List[BriefingSnapshot], config: Dict[str, Any]) -> List[str]:
+    report = GlobalFlowCollector(config).collect(snapshots)
+    lines = list(report.get("lines", []))
+    lines.append("说明：当前资金流为相对强弱代理，不是机构申购赎回原始数据。")
+    return lines
+
+
+def _sentiment_lines(snapshots: List[BriefingSnapshot], config: Dict[str, Any]) -> List[str]:
+    if not snapshots:
+        return ["当前没有可用于估算情绪代理的标的快照。"]
+    collector = SocialSentimentCollector(config)
+    strongest = max(snapshots, key=lambda item: item.signal_score + item.return_20d)
+    weakest = min(snapshots, key=lambda item: item.signal_score + item.return_20d)
+    targets: List[BriefingSnapshot] = [strongest]
+    if weakest.symbol != strongest.symbol:
+        targets.append(weakest)
+    lines: List[str] = []
+    for item in targets:
+        payload = collector.collect(
+            item.symbol,
+            {
+                "return_1d": item.return_1d,
+                "return_5d": item.return_5d,
+                "return_20d": item.return_20d,
+                "volume_ratio": item.volume_ratio,
+                "trend": item.trend,
+            },
+        )
+        aggregate = payload["aggregate"]
+        lines.append(f"{item.symbol}: {aggregate['interpretation']}")
+    lines.append("说明：当前情绪为价格和量能推断的讨论热度代理，不是抓取到的真实社媒帖子。")
     return lines
 
 
@@ -465,6 +501,8 @@ def main() -> None:
         "overnight_lines": _overnight_lines(snapshots),
         "macro_items": macro_items,
         "market_overview_lines": _market_overview_lines(snapshots, regime_result),
+        "flow_lines": _flow_lines(snapshots, config),
+        "sentiment_lines": _sentiment_lines(snapshots, config),
         "watchlist_rows": watchlist_rows,
         "focus_lines": _focus_lines(snapshots, args.mode),
         "rotation_lines": _rotation_lines(snapshots),
