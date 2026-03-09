@@ -54,11 +54,12 @@ class BriefingRenderer:
         lines.extend(["", "## Watchlist 雷达"])
         lines.extend(
             _table(
-                ["标的", "最新价", "1日", "5日", "20日", "趋势", "量比"],
+                ["标的", "最新价", "1日", "5日", "20日", "趋势", "量比", "技术"],
                 payload.get("watchlist_rows", []),
             )
         )
 
+        _append_section(lines, "Watchlist 技术指标", payload.get("watchlist_technical_lines", []))
         _append_section(lines, "重点观察", payload.get("focus_lines", []))
         _append_section(lines, "风格与轮动", payload.get("rotation_lines", []))
         _append_section(lines, "关注提醒", payload.get("alerts", []))

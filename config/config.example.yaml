@@ -32,9 +32,19 @@ technical:
   bollinger:
     period: 20
     std: 2
+  kdj:
+    period: 9
+    smooth_k: 3
+    smooth_d: 3
+    overbought: 80
+    oversold: 20
   dmi:
     period: 14
     adx_strong: 25
+  obv:
+    period: 20
+  fibonacci:
+    lookback: 60
   ma_periods: [5, 10, 20, 30, 60]
 
 # 数据存储

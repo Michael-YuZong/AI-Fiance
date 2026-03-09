@@ -7,7 +7,7 @@ import io
 import warnings
 from collections import Counter
 from contextlib import redirect_stderr
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -54,6 +54,8 @@ class BriefingSnapshot:
     signal_score: int
     summary: str
     note: str
+    technical: Dict[str, Any] = field(default_factory=dict)
+    technical_bias: str = "分歧"
 
 
 REGIME_LABELS = {
@@ -124,6 +126,119 @@ def _build_summary(metrics: Dict[str, float], technical: Dict[str, Any], trend: 
     return summary, note
 
 
+def _technical_bias_label(technical: Dict[str, Any]) -> str:
+    bull = 0
+    bear = 0
+    for key in ("ma_system", "macd", "kdj", "obv"):
+        signal = str(technical.get(key, {}).get("signal", ""))
+        if signal == "bullish":
+            bull += 1
+        elif signal == "bearish":
+            bear += 1
+
+    dmi_signal = str(technical.get("dmi", {}).get("signal", ""))
+    if dmi_signal == "bullish_trend":
+        bull += 1
+    elif dmi_signal == "bearish_trend":
+        bear += 1
+
+    rsi_signal = str(technical.get("rsi", {}).get("signal", ""))
+    if rsi_signal == "oversold":
+        bull += 1
+    elif rsi_signal == "overbought":
+        bear += 1
+
+    if bull - bear >= 2:
+        return "偏强"
+    if bear - bull >= 2:
+        return "偏弱"
+    return "分歧"
+
+
+def _kdj_text(kdj: Dict[str, Any]) -> str:
+    cross = str(kdj.get("cross", ""))
+    zone = str(kdj.get("zone", ""))
+    if cross == "golden_cross":
+        base = "KDJ 金叉"
+    elif cross == "death_cross":
+        base = "KDJ 死叉"
+    else:
+        base = "KDJ 纠缠"
+    if zone == "overbought":
+        return base + "，高位"
+    if zone == "oversold":
+        return base + "，低位"
+    return base
+
+
+def _rsi_text(rsi: Dict[str, Any]) -> str:
+    value = float(rsi.get("RSI", 50.0))
+    signal = str(rsi.get("signal", "neutral"))
+    if signal == "overbought":
+        return f"RSI {value:.1f} 过热"
+    if signal == "oversold":
+        return f"RSI {value:.1f} 超卖"
+    if value >= 60:
+        return f"RSI {value:.1f} 偏强"
+    if value <= 40:
+        return f"RSI {value:.1f} 偏弱"
+    return f"RSI {value:.1f} 中性"
+
+
+def _boll_text(boll: Dict[str, Any]) -> str:
+    signal = str(boll.get("signal", "neutral"))
+    if signal == "near_upper":
+        return "BOLL 上轨附近"
+    if signal == "near_lower":
+        return "BOLL 下轨附近"
+    return "BOLL 中轨附近"
+
+
+def _obv_text(obv: Dict[str, Any]) -> str:
+    signal = str(obv.get("signal", "neutral"))
+    if signal == "bullish":
+        return "OBV 在均线之上"
+    if signal == "bearish":
+        return "OBV 在均线之下"
+    return "OBV 方向不明"
+
+
+def _adx_text(dmi: Dict[str, Any]) -> str:
+    adx = float(dmi.get("ADX", 0.0))
+    signal = str(dmi.get("signal", "weak_trend"))
+    if signal == "bullish_trend":
+        return f"ADX {adx:.1f} 趋势增强"
+    if signal == "bearish_trend":
+        return f"ADX {adx:.1f} 空头趋势增强"
+    return f"ADX {adx:.1f} 趋势偏弱"
+
+
+def _fib_text(fib: Dict[str, Any]) -> str:
+    nearest = str(fib.get("nearest_level", "0.500"))
+    signal = str(fib.get("signal", "mid_zone"))
+    mapping = {
+        "upper_zone": "斐波那契高位区",
+        "strong_zone": "斐波那契强势区",
+        "mid_zone": "斐波那契中位区",
+        "lower_zone": "斐波那契低位区",
+    }
+    return f"{mapping.get(signal, '斐波那契中位区')} ({nearest})"
+
+
+def _technical_watchlist_line(snapshot: BriefingSnapshot) -> str:
+    technical = snapshot.technical
+    parts = [
+        f"MACD {'多头' if technical['macd']['signal'] == 'bullish' else '空头'}",
+        _kdj_text(technical["kdj"]),
+        _rsi_text(technical["rsi"]),
+        _boll_text(technical["bollinger"]),
+        _obv_text(technical["obv"]),
+        _adx_text(technical["dmi"]),
+        _fib_text(technical["fibonacci"]),
+    ]
+    return f"{snapshot.symbol} ({snapshot.name}): 技术共振 `{snapshot.technical_bias}`，" + "；".join(parts) + "。"
+
+
 def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[BriefingSnapshot], List[str], List[List[str]]]:
     snapshots: List[BriefingSnapshot] = []
     alerts: List[str] = []
@@ -138,6 +253,7 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
             trend = _trend_label(technical)
             score = _signal_score(metrics, technical)
             summary, note = _build_summary(metrics, technical, trend)
+            technical_bias = _technical_bias_label(technical)
 
             snapshot = BriefingSnapshot(
                 symbol=symbol,
@@ -154,6 +270,8 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
                 signal_score=score,
                 summary=summary,
                 note=note,
+                technical=technical,
+                technical_bias=technical_bias,
             )
             snapshots.append(snapshot)
             rows.append(
@@ -165,6 +283,7 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
                     format_pct(metrics["return_20d"]),
                     trend,
                     f"{technical['volume']['vol_ratio']:.2f}",
+                    technical_bias,
                 ]
             )
 
@@ -177,7 +296,7 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
                     f"{symbol} 近 5 日波动 {format_pct(metrics['return_5d'])}，周度需要重点复盘。"
                 )
         except Exception as exc:
-            rows.append([f"{symbol} ({item['name']})", "N/A", "N/A", "N/A", "N/A", "数据异常", "N/A"])
+            rows.append([f"{symbol} ({item['name']})", "N/A", "N/A", "N/A", "N/A", "数据异常", "N/A", "N/A"])
             alerts.append(f"{symbol} 行情拉取失败: {exc}")
 
     if mode == "weekly":
@@ -1146,6 +1265,13 @@ def _focus_lines(snapshots: List[BriefingSnapshot], mode: str) -> List[str]:
     return lines
 
 
+def _watchlist_technical_lines(snapshots: List[BriefingSnapshot]) -> List[str]:
+    if not snapshots:
+        return ["当前没有可用于输出技术指标的 watchlist 快照。"]
+    ordered = sorted(snapshots, key=lambda item: (item.technical_bias != "偏强", -(item.signal_score + item.return_20d)))
+    return [_technical_watchlist_line(item) for item in ordered]
+
+
 def _portfolio_lines(config: Dict[str, Any]) -> List[str]:
     portfolio_lines: List[str] = []
     portfolio_repo = PortfolioRepository()
@@ -1298,6 +1424,7 @@ def main() -> None:
         "flow_lines": _flow_lines(snapshots, config),
         "sentiment_lines": _sentiment_lines(snapshots, config),
         "watchlist_rows": watchlist_rows,
+        "watchlist_technical_lines": _watchlist_technical_lines(snapshots),
         "focus_lines": _focus_lines(snapshots, args.mode),
         "rotation_lines": _rotation_lines(snapshots),
         "alerts": alerts or ["当前没有触发强提醒，但仍需关注强弱方向是否在盘中发生切换。"],

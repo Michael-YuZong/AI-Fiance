@@ -44,4 +44,8 @@ def test_technical_analyzer_generates_bullish_ma_signal():
     scorecard = analyzer.generate_scorecard()
     assert scorecard["ma_system"]["signal"] == "bullish"
     assert scorecard["macd"]["signal"] in {"bullish", "bearish"}
+    assert scorecard["kdj"]["signal"] in {"bullish", "bearish", "neutral"}
+    assert scorecard["obv"]["signal"] in {"bullish", "bearish", "neutral"}
+    assert scorecard["fibonacci"]["nearest_level"] in {"0.236", "0.382", "0.500", "0.618", "0.786"}
+    assert 0 <= scorecard["fibonacci"]["position_pct"] <= 1.2
     assert "candlestick" in scorecard

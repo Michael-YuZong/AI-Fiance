@@ -114,6 +114,38 @@ class TechnicalAnalyzer:
             "signal": signal,
         }
 
+    def kdj(
+        self,
+        period: int = 9,
+        smooth_k: int = 3,
+        smooth_d: int = 3,
+        overbought: int = 80,
+        oversold: int = 20,
+    ) -> Dict[str, float]:
+        high_n = self.df["high"].rolling(period).max()
+        low_n = self.df["low"].rolling(period).min()
+        denominator = (high_n - low_n).replace(0, np.nan)
+        rsv = ((self.df["close"] - low_n) / denominator * 100).fillna(50)
+        k = rsv.ewm(alpha=1 / max(smooth_k, 1), adjust=False).mean()
+        d = k.ewm(alpha=1 / max(smooth_d, 1), adjust=False).mean()
+        j = 3 * k - 2 * d
+
+        k_latest = float(k.iloc[-1])
+        d_latest = float(d.iloc[-1])
+        j_latest = float(j.iloc[-1])
+        cross = "golden_cross" if k_latest > d_latest else "death_cross" if k_latest < d_latest else "neutral"
+        zone = "overbought" if max(k_latest, d_latest, j_latest) >= overbought else "oversold" if min(k_latest, d_latest, j_latest) <= oversold else "neutral"
+        signal = "bullish" if cross == "golden_cross" else "bearish" if cross == "death_cross" else "neutral"
+
+        return {
+            "K": k_latest,
+            "D": d_latest,
+            "J": j_latest,
+            "cross": cross,
+            "zone": zone,
+            "signal": signal,
+        }
+
     def dmi(self, period: int = 14, adx_strong: int = 25) -> Dict[str, float]:
         high = self.df["high"]
         low = self.df["low"]
@@ -146,6 +178,77 @@ class TechnicalAnalyzer:
             "DI+": float(plus_di.fillna(0).iloc[-1]),
             "DI-": float(minus_di.fillna(0).iloc[-1]),
             "ADX": float(adx.iloc[-1]),
+            "signal": signal,
+        }
+
+    def obv(self, period: int = 20) -> Dict[str, float]:
+        close = self.df["close"]
+        volume = self.df["volume"].fillna(0)
+        direction = np.sign(close.diff().fillna(0))
+        obv = (direction * volume).cumsum()
+        obv_ma = obv.rolling(period).mean()
+        slope_5d = obv.diff(5).fillna(0)
+
+        latest_obv = float(obv.iloc[-1])
+        latest_ma = float(obv_ma.fillna(obv).iloc[-1])
+        latest_slope = float(slope_5d.iloc[-1])
+
+        if latest_obv > latest_ma and latest_slope >= 0:
+            signal = "bullish"
+        elif latest_obv < latest_ma and latest_slope <= 0:
+            signal = "bearish"
+        else:
+            signal = "neutral"
+
+        return {
+            "OBV": latest_obv,
+            "MA": latest_ma,
+            "slope_5d": latest_slope,
+            "signal": signal,
+        }
+
+    def fibonacci(self, lookback: int = 60) -> Dict[str, Any]:
+        window = self.df.tail(max(lookback, 20)).copy()
+        high = float(window["high"].max())
+        low = float(window["low"].min())
+        price = float(window["close"].iloc[-1])
+        range_value = high - low
+        if range_value == 0:
+            levels = {key: price for key in ("0.236", "0.382", "0.500", "0.618", "0.786")}
+            return {
+                "swing_high": high,
+                "swing_low": low,
+                "levels": levels,
+                "position_pct": 0.5,
+                "nearest_level": "0.500",
+                "signal": "neutral",
+            }
+
+        levels = {
+            "0.236": low + range_value * 0.236,
+            "0.382": low + range_value * 0.382,
+            "0.500": low + range_value * 0.500,
+            "0.618": low + range_value * 0.618,
+            "0.786": low + range_value * 0.786,
+        }
+        position_pct = (price - low) / range_value
+        nearest_level = min(levels, key=lambda key: abs(levels[key] - price))
+
+        if position_pct >= 0.786:
+            signal = "upper_zone"
+        elif position_pct >= 0.618:
+            signal = "strong_zone"
+        elif position_pct <= 0.236:
+            signal = "lower_zone"
+        else:
+            signal = "mid_zone"
+
+        return {
+            "swing_high": high,
+            "swing_low": low,
+            "levels": {key: float(value) for key, value in levels.items()},
+            "position_pct": float(position_pct),
+            "nearest_level": nearest_level,
             "signal": signal,
         }
 
@@ -206,7 +309,10 @@ class TechnicalAnalyzer:
             "macd": self.macd(**technical_config.get("macd", {})),
             "rsi": self.rsi(**technical_config.get("rsi", {})),
             "bollinger": self.bollinger(**technical_config.get("bollinger", {})),
+            "kdj": self.kdj(**technical_config.get("kdj", {})),
             "dmi": self.dmi(**technical_config.get("dmi", {})),
+            "obv": self.obv(**technical_config.get("obv", {})),
+            "fibonacci": self.fibonacci(**technical_config.get("fibonacci", {})),
             "volume": self.volume_analysis(),
             "candlestick": self.candlestick_patterns(),
             "ma_system": self.ma_system(technical_config.get("ma_periods")),
