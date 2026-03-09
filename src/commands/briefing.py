@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import io
+import re
 import warnings
 from collections import Counter
 from contextlib import redirect_stderr
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
@@ -16,6 +18,7 @@ import pandas as pd
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL 1.1.1+")
 
 from src.collectors import (
+    ChinaMarketCollector,
     EventsCollector,
     GlobalFlowCollector,
     MarketDriversCollector,
@@ -30,7 +33,7 @@ from src.processors.regime import RegimeDetector
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.storage.portfolio import PortfolioRepository
 from src.storage.thesis import ThesisRepository
-from src.utils.config import load_config
+from src.utils.config import load_config, resolve_project_path
 from src.utils.data import load_watchlist
 from src.utils.logger import setup_logger
 from src.utils.market import compute_history_metrics, fetch_asset_history, format_pct
@@ -63,6 +66,14 @@ REGIME_LABELS = {
     "overheating": "过热",
     "stagflation": "滞涨",
     "deflation": "通缩/偏弱",
+}
+
+THEME_ASSET_PREFERENCES = {
+    "energy_shock": ["能源链", "电力电网", "黄金/防守", "现金"],
+    "defensive_riskoff": ["黄金", "现金", "公用事业", "高股息防守"],
+    "rate_growth": ["美股科技", "港股科技", "成长股", "长久期资产"],
+    "china_policy": ["电网基建", "央国企链", "内需顺周期", "高股息配套"],
+    "ai_semis": ["半导体", "算力硬件", "通信", "AI应用"],
 }
 
 
@@ -239,6 +250,18 @@ def _technical_watchlist_line(snapshot: BriefingSnapshot) -> str:
     return f"{snapshot.symbol} ({snapshot.name}): 技术共振 `{snapshot.technical_bias}`，" + "；".join(parts) + "。"
 
 
+def _price_context_label(asset_type: str) -> str:
+    mapping = {
+        "cn_etf": "场内价格",
+        "hk_etf": "场内价格",
+        "us": "现价",
+        "hk": "现价",
+        "hk_index": "指数点位",
+        "futures": "主力合约价",
+    }
+    return mapping.get(asset_type, "最新价")
+
+
 def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[BriefingSnapshot], List[str], List[List[str]]]:
     snapshots: List[BriefingSnapshot] = []
     alerts: List[str] = []
@@ -277,7 +300,7 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
             rows.append(
                 [
                     f"{symbol} ({item['name']})",
-                    f"{metrics['last_close']:.3f}",
+                    f"{_price_context_label(item['asset_type'])} {metrics['last_close']:.3f}",
                     format_pct(metrics["return_1d"]),
                     format_pct(metrics["return_5d"]),
                     format_pct(metrics["return_20d"]),
@@ -339,13 +362,18 @@ def _headline_lines(
     china_macro: Dict[str, Any],
     pulse: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
-    preferred_assets = ", ".join(narrative.get("preferred_assets", [])[:3]) if narrative.get("preferred_assets") else ""
+    preferred_assets = "、".join(_effective_asset_preference(narrative)[:4])
     background = narrative.get("background_regime", "未识别")
     lines = [narrative.get("summary", "今天没有单一主线。")]
-    lines.append(
-        f"背景宏观环境仍接近 `{background}`"
-        + (f"，资产偏好更偏 {preferred_assets}。" if preferred_assets else "。")
-    )
+    if narrative.get("overrides_background"):
+        lines.append(
+            f"背景宏观仍接近 `{background}`，但今天真正驱动价格的是 `{narrative['label']}`；背景资产偏好暂时降级为中期参考，日内优先跟随 {preferred_assets or '主线方向'}。"
+        )
+    else:
+        lines.append(
+            f"当前没有更强的事件主线覆盖背景框架，因此仍按 `{background}` 来组织资产偏好"
+            + (f"，优先看 {preferred_assets}。" if preferred_assets else "。")
+        )
 
     if pulse:
         zt_pool = pulse.get("zt_pool", pd.DataFrame())
@@ -369,9 +397,9 @@ def _headline_lines(
         lines.append("当前没有可用的全市场或 watchlist 行情数据。")
 
     if china_macro["pmi"] < 50:
-        lines.append("国内景气度仍在荣枯线下方，晨报解读会更偏重‘谁更抗跌、谁在逆势走强’。")
+        lines.append("国内景气度仍在荣枯线下方，今天应先看谁在逆势走强，而不是先预设全面风险偏好修复。")
     else:
-        lines.append("国内景气度在荣枯线附近或以上，晨报解读会更偏重‘哪些方向具备趋势延续性’。")
+        lines.append("国内景气度在荣枯线附近或以上，但是否能扩散成趋势，仍要服从今天的主线校验结果。")
     if mode == "weekly":
         lines.append("周报更看 5 日与 20 日结构，不只看单日波动。")
     return lines
@@ -677,6 +705,75 @@ def _source_summary(news_report: Dict[str, Any]) -> str:
     return "本次新闻覆盖源: " + " / ".join(sources[:4]) + "。"
 
 
+def _source_quality_lines(news_report: Dict[str, Any]) -> List[str]:
+    items = news_report.get("items", []) or []
+    if not items:
+        return ["新闻流当前主要依赖代理推导，源覆盖不足，不能把它当成完整实时新闻终版。"]
+
+    sources: List[str] = []
+    domestic_count = 0
+    for item in items:
+        source = str(item.get("source") or item.get("configured_source") or "").strip()
+        if source and source not in sources:
+            sources.append(source)
+        category = str(item.get("category", "")).lower()
+        if any(keyword in source for keyword in ["财联社", "证券时报", "上证报", "第一财经"]) or category in {
+            "china_macro_domestic",
+            "china_market_domestic",
+        }:
+            domestic_count += 1
+
+    lines = [_source_summary(news_report)]
+    if len(sources) < 2:
+        lines.append("⚠️ 当前新闻源不足 2 类，晨报应降级为‘主线草稿’，不要把单源新闻写成确定结论。")
+    else:
+        lines.append(f"本次共命中 {len(sources)} 类新闻源，源覆盖基本可用，但仍需优先参考一级信源。")
+    if domestic_count == 0:
+        lines.append("⚠️ 当前没有命中国内快讯源，A 股盘面与政策解读可能不完整。")
+    return lines[:3]
+
+
+def _anomaly_report(
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    monitor = _monitor_map(monitor_rows)
+    flags: Dict[str, str] = {}
+    lines: List[str] = []
+
+    for name, threshold in [("布伦特原油", 0.20), ("WTI原油", 0.25)]:
+        row = monitor.get(name)
+        if row and abs(_to_float(row.get("return_5d"))) >= threshold:
+            move = _to_float(row.get("return_5d"))
+            message = f"⚠️ {name} 5 日 {format_pct(move)}，属于极端波动，请人工复核数据源、基准日和事件真实性。"
+            lines.append(message)
+            flags[name] = "极端波动，需复核"
+
+    for snapshot in snapshots:
+        is_etf = "etf" in snapshot.asset_type.lower() or snapshot.symbol.endswith("ETF")
+        if is_etf and abs(snapshot.return_20d) >= 0.12:
+            lines.append(
+                f"⚠️ {snapshot.symbol} {snapshot.name} 近 20 日 {format_pct(snapshot.return_20d)}，对 ETF 属于偏大波动，请复核场内价格、复权口径和对应催化。"
+            )
+            flags[snapshot.symbol] = "ETF 波动偏大，需复核"
+        elif is_etf and abs(snapshot.return_1d) >= 0.04:
+            lines.append(
+                f"⚠️ {snapshot.symbol} {snapshot.name} 单日 {format_pct(snapshot.return_1d)}，对 ETF 偏大，请确认是否为主题事件驱动。"
+            )
+            flags[snapshot.symbol] = "单日波动偏大"
+
+    if not lines:
+        lines.append("当前没有触发显著异常值，但极端行情日仍应对跨源价格差异做人工复核。")
+    return {"lines": lines[:4], "flags": flags}
+
+
+def _effective_asset_preference(narrative: Dict[str, Any]) -> List[str]:
+    theme = str(narrative.get("theme", "macro_background"))
+    if theme in THEME_ASSET_PREFERENCES:
+        return THEME_ASSET_PREFERENCES[theme]
+    return list(narrative.get("preferred_assets", []))
+
+
 def _news_category_counter(news_report: Dict[str, Any]) -> Counter[str]:
     counter: Counter[str] = Counter()
     for item in news_report.get("items", []) or []:
@@ -834,6 +931,8 @@ def _primary_narrative(
         "scores": scores,
         "background_regime": REGIME_LABELS.get(str(regime_result["current_regime"]), str(regime_result["current_regime"])),
         "preferred_assets": list(regime_result.get("preferred_assets", [])),
+        "effective_assets": THEME_ASSET_PREFERENCES.get(theme, list(regime_result.get("preferred_assets", []))),
+        "overrides_background": theme != "macro_background",
     }
 
 
@@ -912,6 +1011,8 @@ def _narrative_validation_lines(
 
     if total:
         lines.append(f"结论: 当前主线校验通过 {passed}/{total} 项。")
+        if narrative.get("overrides_background") and passed >= max(total - 1, 1):
+            lines.append("裁决: 今日事件主线优先级高于背景 regime，资产偏好应先服从日内主线。")
         if passed < total:
             lines.append("如果后续校验项继续背离，晨报应把它降级成‘候选主线’，不要写成既定结论。")
     else:
@@ -1089,7 +1190,7 @@ def _story_lines(
     news_report: Dict[str, Any],
     monitor_rows: List[Dict[str, Any]],
     snapshots: List[BriefingSnapshot],
-    regime_result: Dict[str, Any],
+    narrative: Dict[str, Any],
 ) -> List[str]:
     monitor = _monitor_map(monitor_rows)
     items = news_report.get("items", []) or []
@@ -1132,9 +1233,9 @@ def _story_lines(
         elif copper["return_5d"] > gold["return_5d"] + 0.02:
             lines.append("铜强于金，市场更像在提前交易增长而不是单纯避险。")
 
-    preferred = regime_result.get("preferred_assets", [])
+    preferred = _effective_asset_preference(narrative)
     if preferred:
-        lines.append("从当前 regime 看，和今天环境更一致的方向是: " + "、".join(preferred[:4]) + "。")
+        lines.append("今天更值得优先跟踪的资产方向是: " + "、".join(preferred[:4]) + "。")
     lines.append(_source_summary(news_report))
     return lines[:6]
 
@@ -1210,6 +1311,182 @@ def _verification_lines(
     if grid:
         lines.append("看 561380 是否继续强于大盘；若相对强弱延续，国内确定性方向的逻辑就还没坏。")
     return lines[:6]
+
+
+def _yesterday_review_lines(
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+) -> List[str]:
+    reports_dir = resolve_project_path("reports")
+    if not reports_dir.exists():
+        return ["暂无晨报归档，无法自动回顾昨日验证点。"]
+
+    pattern = re.compile(r"daily_briefing_(\d{4}-\d{2}-\d{2})\.md$")
+    today = datetime.now().date()
+    candidates: List[tuple[datetime, Path]] = []
+    for path in reports_dir.glob("daily_briefing_*.md"):
+        matched = pattern.search(path.name)
+        if not matched:
+            continue
+        try:
+            file_date = datetime.strptime(matched.group(1), "%Y-%m-%d")
+        except ValueError:
+            continue
+        if file_date.date() < today:
+            candidates.append((file_date, path))
+    if not candidates:
+        return ["暂无昨日晨报归档，暂时无法自动回顾‘昨日验证点’。"]
+
+    latest_path = sorted(candidates, key=lambda item: item[0])[-1][1]
+    try:
+        content = latest_path.read_text(encoding="utf-8")
+    except OSError:
+        return [f"昨日晨报 `{latest_path.name}` 读取失败，暂时无法自动回顾。"]
+
+    section_match = re.search(r"### 今日验证点\s*(.*?)(?:\n### |\n## |\Z)", content, re.S)
+    if not section_match:
+        return [f"昨日晨报 `{latest_path.name}` 里没有结构化‘今日验证点’，暂时无法自动复盘。"]
+
+    raw_lines = [line.strip() for line in section_match.group(1).splitlines()]
+    checks = [line[2:].strip() for line in raw_lines if line.startswith("- ")]
+    if not checks:
+        return [f"昨日晨报 `{latest_path.name}` 没有可解析的验证点条目。"]
+
+    monitor = _monitor_map(monitor_rows)
+    brent = monitor.get("布伦特原油", {})
+    dxy = monitor.get("美元指数", {})
+    vix = monitor.get("VIX波动率", {})
+    hstech = _find_snapshot(snapshots, "HSTECH")
+    grid = _find_snapshot(snapshots, "561380")
+
+    lines: List[str] = []
+    for check in checks[:3]:
+        lower = check.lower()
+        if "原油" in check:
+            move = _to_float(brent.get("return_1d"))
+            state = "继续强化" if move > 0.03 else "明显降温" if move < -0.02 else "仍在高位拉锯"
+            lines.append(f"昨日原油验证点回看: 今天布油 1 日 {format_pct(move)}，结论是 `{state}`。")
+        elif "vix" in lower or "波动率" in check:
+            latest = _to_float(vix.get("latest"))
+            state = "仍处高波动区" if latest >= 25 else "已从高波动区回落"
+            lines.append(f"昨日波动率验证点回看: 当前 VIX {latest:.1f}，{state}。")
+        elif "美元" in check:
+            move = _to_float(dxy.get("return_5d"))
+            state = "继续偏强" if move > 0.005 else "边际回落"
+            lines.append(f"昨日美元验证点回看: DXY 5 日 {format_pct(move)}，{state}。")
+        elif "hstech" in lower and hstech:
+            state = "仍未止跌" if hstech.return_1d < 0 else "出现修复"
+            lines.append(f"昨日 HSTECH 验证点回看: 当日 {format_pct(hstech.return_1d)}，{state}。")
+        elif "561380" in check and grid:
+            state = "仍保持相对强势" if grid.signal_score >= 1 else "强势已弱化"
+            lines.append(f"昨日 561380 验证点回看: 近 1 日 {format_pct(grid.return_1d)}，{state}。")
+
+    return lines or [f"已找到昨日晨报 `{latest_path.name}`，但验证点无法和当前资产自动映射。"]
+
+
+def _liquidity_lines(config: Dict[str, Any]) -> List[str]:
+    collector = ChinaMarketCollector(config)
+    lines: List[str] = []
+
+    try:
+        flow = collector.get_north_south_flow()
+    except Exception:
+        flow = pd.DataFrame()
+
+    if not flow.empty and {"资金方向", "板块", "成交净买额"}.issubset(flow.columns):
+        frame = flow.copy()
+        frame["成交净买额"] = pd.to_numeric(frame["成交净买额"], errors="coerce").fillna(0.0)
+        north = frame[frame["资金方向"].astype(str) == "北向"]["成交净买额"].sum()
+        south = frame[frame["资金方向"].astype(str) == "南向"]["成交净买额"].sum()
+        if abs(north) > 1e-6:
+            direction = "净流入" if north >= 0 else "净流出"
+            lines.append(f"北向资金当日{direction}约 {_fmt_yi(north)}。")
+        else:
+            lines.append("北向资金当日读数接近 0 或未更新，先不据此做强结论。")
+        if abs(south) > 1e-6:
+            direction = "净流入" if south >= 0 else "净流出"
+            lines.append(f"南向资金当日{direction}约 {_fmt_yi(south)}，可作为 HSTECH 情绪承接的辅助观察。")
+
+    try:
+        margin = collector.get_margin_trading()
+    except Exception:
+        margin = pd.DataFrame()
+
+    if margin.empty:
+        lines.append("融资融券明细接口今日异常或为空，短线情绪判断暂不依赖该项。")
+    return lines[:4] or ["资金与流动性明细暂不可用。"]
+
+
+def _positioning_lines(
+    narrative: Dict[str, Any],
+    monitor_rows: List[Dict[str, Any]],
+) -> List[str]:
+    monitor = _monitor_map(monitor_rows)
+    vix = _to_float(monitor.get("VIX波动率", {}).get("latest"))
+    theme = str(narrative.get("theme", "macro_background"))
+
+    if vix >= 30 or theme == "energy_shock":
+        return [
+            "仓位框架: 当前按高波动日处理，总仓位宜控制在 50% 左右，单次新增仓位不超过 10%。",
+            "执行上更适合‘先活下来再进攻’，不适合在极端新闻日一次性打满。",
+        ]
+    if vix >= 25 or theme == "defensive_riskoff":
+        return [
+            "仓位框架: 当前按偏防守处理，总仓位宜控制在 60% 左右，单次新增仓位不超过 15%。",
+            "如果验证点继续恶化，应优先降弹性仓位，再讨论抄底。",
+        ]
+    return [
+        "仓位框架: 当前可以按常规节奏分批确认，总仓位上限可放在 70%-80%。",
+        "若主线与校验继续共振，再逐步提高弹性资产权重。",
+    ]
+
+
+def _asset_dashboard_rows(
+    monitor_rows: List[Dict[str, Any]],
+    snapshots: List[BriefingSnapshot],
+    anomaly_report: Dict[str, Any],
+) -> List[List[str]]:
+    monitor = _monitor_map(monitor_rows)
+    flags = anomaly_report.get("flags", {})
+    rows: List[List[str]] = []
+
+    def add_monitor(name: str, category: str, status: str = "") -> None:
+        item = monitor.get(name)
+        if not item:
+            return
+        note = flags.get(name, "")
+        rows.append(
+            [
+                name,
+                category,
+                f"{item['latest']:.3f}",
+                f"1日 {format_pct(item['return_1d'])} / 5日 {format_pct(item['return_5d'])}",
+                status or ("偏强" if _to_float(item.get("return_1d")) > 0 else "偏弱"),
+                note or "",
+            ]
+        )
+
+    add_monitor("布伦特原油", "宏观资产", "冲击")
+    add_monitor("VIX波动率", "波动率", "高波动" if _to_float(monitor.get("VIX波动率", {}).get("latest")) >= 25 else "常态")
+    add_monitor("美元指数", "宏观资产")
+    add_monitor("美国10Y收益率", "利率")
+    add_monitor("COMEX黄金", "商品")
+
+    symbol_order = ["561380", "HSTECH", "QQQM", "GLD", "AU0"]
+    selected_snapshots = [item for symbol in symbol_order if (item := _find_snapshot(snapshots, symbol))]
+    for snapshot in selected_snapshots:
+        note = flags.get(snapshot.symbol, snapshot.summary.replace("当前", "").replace("watchlist", "观察池"))
+        rows.append(
+            [
+                f"{snapshot.symbol} {snapshot.name}",
+                _price_context_label(snapshot.asset_type),
+                f"{snapshot.latest_price:.3f}",
+                f"1日 {format_pct(snapshot.return_1d)} / 20日 {format_pct(snapshot.return_20d)}",
+                f"{snapshot.trend}/{snapshot.technical_bias}",
+                note,
+            ]
+        )
+    return rows[:10]
 
 
 def _sentiment_lines(snapshots: List[BriefingSnapshot], config: Dict[str, Any]) -> List[str]:
@@ -1354,24 +1631,32 @@ def _event_lines(config: Dict[str, Any], mode: str) -> List[str]:
     return lines
 
 
-def _action_lines(snapshots: List[BriefingSnapshot], regime_result: Dict[str, Any]) -> List[str]:
+def _action_lines(
+    snapshots: List[BriefingSnapshot],
+    narrative: Dict[str, Any],
+    monitor_rows: List[Dict[str, Any]],
+) -> List[str]:
     if not snapshots:
         return ["先修复数据覆盖，再谈晨报动作。"]
 
     strongest = max(snapshots, key=lambda item: item.signal_score)
     weakest = min(snapshots, key=lambda item: item.signal_score)
     gold = next((item for item in snapshots if item.sector == "黄金"), None)
-    lines = [
-        f"优先跟踪 {strongest.symbol}：当前信号分最高，适合观察是否继续放量并维持趋势。",
-        f"谨慎对待 {weakest.symbol}：当前信号分最低，除非出现止跌确认，否则不宜过早抄底。",
-    ]
-    if gold:
+    theme = str(narrative.get("theme", "macro_background"))
+    lines: List[str] = []
+    if theme == "energy_shock":
+        lines.append("今天先按‘能源冲击日’处理，优先做验证和控回撤，不把背景复苏叙事当成日内主导。")
+    elif theme == "defensive_riskoff":
+        lines.append("今天先按‘防守优先’处理，动作顺序是减弹性、看验证、再考虑进攻。")
+    else:
+        lines.append(f"今天先围绕 `{narrative['label']}` 做跟踪，动作上先验证主线，再决定是否加大风险暴露。")
+
+    lines.extend(_positioning_lines(narrative, monitor_rows))
+    lines.append(f"优先跟踪 {strongest.symbol}：它当前是观察池里最能代表主线延续性的方向。")
+    lines.append(f"谨慎对待 {weakest.symbol}：它当前最弱，更适合等确认而不是抢反弹。")
+    if gold and theme in {"energy_shock", "defensive_riskoff"}:
         lines.append(f"把 {gold.symbol} 当作防守情绪验证器，观察避险需求是否继续抬头。")
-    if "黄金" in regime_result.get("preferred_assets", []):
-        lines.append("如果今天风险偏好继续回落，黄金相关方向的优先级可以适度上调。")
-    if "港股科技" in regime_result.get("preferred_assets", []):
-        lines.append("如果港股科技出现量价修复，可以把它当作风险偏好回暖的验证器。")
-    return lines
+    return lines[:5]
 
 
 def main() -> None:
@@ -1396,11 +1681,17 @@ def main() -> None:
     news_report = _news_report(snapshots, china_macro, global_proxy, config, args.news_source)
     monitor_rows = _collect_monitor_rows(config)
     narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime_result)
+    anomaly_report = _anomaly_report(snapshots, monitor_rows)
     macro_items = macro_lines(china_macro, global_proxy)
     regime_label = REGIME_LABELS.get(str(regime_result["current_regime"]), str(regime_result["current_regime"]))
     macro_items.append(f"当前宏观环境判断: {regime_label}。")
-    if regime_result.get("preferred_assets"):
-        macro_items.append("当前更匹配的资产偏好: " + "、".join(regime_result["preferred_assets"]) + "。")
+    effective_assets = _effective_asset_preference(narrative)
+    if narrative.get("overrides_background"):
+        macro_items.append(
+            "背景 regime 提供的是中期框架，但今天日内优先跟随主线，资产偏好先看: " + "、".join(effective_assets) + "。"
+        )
+    elif effective_assets:
+        macro_items.append("当前更匹配的资产偏好: " + "、".join(effective_assets) + "。")
     if global_proxy_note:
         macro_items.append(global_proxy_note)
 
@@ -1408,16 +1699,21 @@ def main() -> None:
         "title": "每日晨报" if args.mode == "daily" else "每周周报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "headline_lines": _headline_lines(args.mode, snapshots, narrative, china_macro, pulse),
+        "yesterday_review_lines": _yesterday_review_lines(snapshots, monitor_rows),
         "narrative_validation_lines": _narrative_validation_lines(narrative, news_report, monitor_rows, pulse, snapshots),
         "important_event_lines": _important_event_lines(news_report),
         "news_lines": _news_lines(news_report),
-        "story_lines": _story_lines(news_report, monitor_rows, snapshots, regime_result),
+        "story_lines": _story_lines(news_report, monitor_rows, snapshots, narrative),
+        "source_quality_lines": _source_quality_lines(news_report),
+        "anomaly_lines": anomaly_report["lines"],
         "rotation_driver_lines": _rotation_driver_lines(drivers, pulse, snapshots),
         "main_flow_driver_lines": _main_flow_driver_lines(drivers),
+        "liquidity_lines": _liquidity_lines(config),
         "impact_lines": _impact_lines(snapshots, monitor_rows, regime_result),
         "market_pulse_lines": _market_pulse_lines(pulse),
         "lhb_lines": _lhb_lines(pulse),
         "monitor_lines": _monitor_lines(monitor_rows),
+        "asset_dashboard_rows": _asset_dashboard_rows(monitor_rows, snapshots, anomaly_report),
         "overnight_lines": _overnight_lines(snapshots),
         "macro_items": macro_items,
         "market_overview_lines": _market_overview_lines(snapshots, regime_result),
@@ -1432,7 +1728,7 @@ def main() -> None:
         "portfolio_lines": _portfolio_lines(config),
         "verification_lines": _verification_lines(snapshots, monitor_rows),
         "calendar_lines": _calendar_lines(args.mode),
-        "action_lines": _action_lines(snapshots, regime_result),
+        "action_lines": _action_lines(snapshots, narrative, monitor_rows),
     }
     print(BriefingRenderer().render(payload))
 

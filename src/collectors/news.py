@@ -80,16 +80,18 @@ class NewsCollector(BaseCollector):
                     }
                 )
         live_items = self._rank_items(live_items, preferred_sources=preferred)
+        selected_items = self._diversify_items(live_items, limit)
 
-        if live_items:
-            required_present = self._present_sources(live_items)
+        if selected_items:
+            required_present = self._present_sources(selected_items)
             missing_required = [
                 item for item in configured_required if not any(item.lower() in source for source in required_present)
             ]
             return {
                 "mode": "live",
-                "items": live_items[:limit],
-                "lines": self._live_lines(live_items[:limit]),
+                "items": selected_items,
+                "lines": self._live_lines(selected_items),
+                "source_list": sorted(required_present),
                 "note": self._live_note(preferred, missing_required),
             }
 
@@ -154,6 +156,28 @@ class NewsCollector(BaseCollector):
             return (-score, len(item.get("title", "")), item.get("category", ""))
 
         return sorted(deduped, key=_score)
+
+    def _diversify_items(self, items: Sequence[Dict[str, str]], limit: int) -> List[Dict[str, str]]:
+        selected: List[Dict[str, str]] = []
+        used_sources: set[str] = set()
+
+        for item in items:
+            source = (item.get("source") or item.get("configured_source") or "").strip().lower()
+            if source and source in used_sources:
+                continue
+            selected.append(item)
+            if source:
+                used_sources.add(source)
+            if len(selected) >= limit:
+                return selected
+
+        for item in items:
+            if item in selected:
+                continue
+            selected.append(item)
+            if len(selected) >= limit:
+                break
+        return selected
 
     def _present_sources(self, items: Sequence[Dict[str, str]]) -> set[str]:
         result = set()

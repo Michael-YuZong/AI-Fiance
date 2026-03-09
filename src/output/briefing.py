@@ -48,63 +48,65 @@ class BriefingRenderer:
             f"- 生成时间: `{payload['generated_at']}`",
         ]
 
-        _append_block(lines, "执行摘要", _first_item(payload, "headline_lines"))
+        _append_block(lines, "主线判断", _first_item(payload, "headline_lines"))
         for item in (payload.get("headline_lines", []) or [])[1:]:
             lines.append(f"- {item}")
-
-        _append_block(
-            lines,
-            "市场驱动",
-            _first_item(payload, "narrative_validation_lines") or _first_item(payload, "story_lines"),
-        )
+        _append_subsection(lines, "今天怎么做", payload.get("action_lines", []))
+        _append_subsection(lines, "昨日验证点回顾", payload.get("yesterday_review_lines", []))
         _append_subsection(lines, "主线校验", payload.get("narrative_validation_lines", []))
         _append_subsection(lines, "重要催化", payload.get("important_event_lines", []))
-        _append_subsection(lines, "新闻主线", payload.get("news_lines", []))
-        _append_subsection(lines, "新闻推演", payload.get("story_lines", []))
+        _append_subsection(
+            lines,
+            "新闻覆盖与异常",
+            (payload.get("source_quality_lines", []) or []) + (payload.get("anomaly_lines", []) or []),
+        )
+
+        _append_block(
+            lines,
+            "资产仪表盘",
+            _first_item(payload, "story_lines") or _first_item(payload, "macro_items"),
+        )
+        lines.extend(["", "### 资产仪表盘", ""])
+        lines.extend(
+            _table(
+                ["对象", "类型", "最新", "区间表现", "状态", "备注"],
+                payload.get("asset_dashboard_rows", []),
+            )
+        )
+        _append_subsection(lines, "市场主线解读", payload.get("story_lines", []))
+        _append_subsection(
+            lines,
+            "盘面与资金",
+            (payload.get("rotation_driver_lines", []) or [])
+            + (payload.get("main_flow_driver_lines", []) or [])
+            + (payload.get("liquidity_lines", []) or []),
+        )
         _append_subsection(lines, "宏观与流动性", payload.get("macro_items", []))
+        _append_subsection(lines, "龙虎榜与活跃资金", payload.get("lhb_lines", []))
 
         _append_block(
             lines,
-            "盘面结构",
-            _first_item(payload, "rotation_driver_lines") or _first_item(payload, "market_pulse_lines"),
+            "验证与行动",
+            _first_item(payload, "verification_lines") or _first_item(payload, "event_lines"),
         )
-        _append_subsection(lines, "板块轮动", payload.get("rotation_driver_lines", []))
-        _append_subsection(lines, "主力资金流向", payload.get("main_flow_driver_lines", []))
-        _append_subsection(lines, "全市场脉搏", payload.get("market_pulse_lines", []))
-        _append_subsection(lines, "龙虎榜与涨停池", payload.get("lhb_lines", []))
-        _append_subsection(lines, "关键宏观资产", payload.get("monitor_lines", []))
-        _append_subsection(lines, "隔夜与主要资产", payload.get("overnight_lines", []))
-        _append_subsection(lines, "全球资金流代理", payload.get("flow_lines", []))
-        _append_subsection(lines, "情绪代理", payload.get("sentiment_lines", []))
+        _append_subsection(lines, "今日验证点", payload.get("verification_lines", []))
+        _append_subsection(lines, "今日已知事件", payload.get("event_lines", []))
+        _append_subsection(lines, "跟踪清单", payload.get("calendar_lines", []))
+        _append_subsection(lines, "关注提醒", payload.get("alerts", []))
 
         _append_block(
             lines,
-            "观察池与组合",
-            _first_item(payload, "market_overview_lines") or _first_item(payload, "focus_lines"),
+            "Watchlist 与组合",
+            _first_item(payload, "portfolio_lines") or _first_item(payload, "watchlist_technical_lines"),
         )
-        _append_subsection(lines, "市场概览", payload.get("market_overview_lines", []))
-
         lines.extend(["", "### Watchlist 雷达", ""])
         lines.extend(
             _table(
-                ["标的", "最新价", "1日", "5日", "20日", "趋势", "量比", "技术"],
+                ["标的", "价格", "1日", "5日", "20日", "趋势", "量比", "技术"],
                 payload.get("watchlist_rows", []),
             )
         )
         _append_subsection(lines, "Watchlist 技术指标", payload.get("watchlist_technical_lines", []))
-        _append_subsection(lines, "重点观察", payload.get("focus_lines", []))
-        _append_subsection(lines, "风格与轮动", payload.get("rotation_lines", []))
         _append_subsection(lines, "组合与 Thesis", payload.get("portfolio_lines", []))
-
-        _append_block(
-            lines,
-            "行动计划",
-            _first_item(payload, "action_lines") or _first_item(payload, "verification_lines"),
-        )
-        _append_subsection(lines, "关注提醒", payload.get("alerts", []))
-        _append_subsection(lines, "今日已知事件", payload.get("event_lines", []))
-        _append_subsection(lines, "今日验证点", payload.get("verification_lines", []))
-        _append_subsection(lines, "今日跟踪清单", payload.get("calendar_lines", []))
-        _append_subsection(lines, "行动建议", payload.get("action_lines", []))
 
         return "\n".join(lines)

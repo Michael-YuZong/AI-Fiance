@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import pandas as pd
+import src.commands.briefing as briefing_module
 
 from src.commands.briefing import (
     BriefingSnapshot,
+    _anomaly_report,
     _important_event_lines,
     _narrative_validation_lines,
     _primary_narrative,
+    _source_quality_lines,
+    _yesterday_review_lines,
 )
 
 
@@ -102,3 +106,39 @@ def test_narrative_validation_reports_energy_checks() -> None:
     assert any("价格校验通过" in line for line in lines)
     assert any("盘面校验通过" in line for line in lines)
     assert any("结论: 当前主线校验通过" in line for line in lines)
+
+
+def test_anomaly_report_flags_extreme_oil_and_etf_moves() -> None:
+    snapshots = [
+        BriefingSnapshot("561380", "电网ETF", "cn_etf", "CN", "电网", 2.234, -0.003, 0.023, 0.187, 0.74, "多头", 2, "", ""),
+    ]
+    monitor_rows = [
+        {"name": "布伦特原油", "return_1d": 0.16, "return_5d": 0.39, "latest": 108.0},
+        {"name": "WTI原油", "return_1d": 0.15, "return_5d": 0.48, "latest": 105.0},
+    ]
+
+    report = _anomaly_report(snapshots, monitor_rows)
+
+    assert any("布伦特原油" in line for line in report["lines"])
+    assert any("561380" in line for line in report["lines"])
+    assert "561380" in report["flags"]
+
+
+def test_source_quality_warns_on_single_source() -> None:
+    report = {
+        "items": [
+            {"category": "energy", "title": "Oil surges", "source": "Reuters"},
+            {"category": "fed", "title": "Fed waits", "source": "Reuters"},
+        ]
+    }
+
+    lines = _source_quality_lines(report)
+
+    assert any("当前新闻源不足 2 类" in line for line in lines)
+
+
+def test_yesterday_review_falls_back_without_archive(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(briefing_module, "resolve_project_path", lambda _: tmp_path)
+    lines = _yesterday_review_lines([], [])
+
+    assert any("暂无" in line for line in lines)
