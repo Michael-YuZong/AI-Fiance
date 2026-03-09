@@ -1,93 +1,265 @@
 # AI-Finance
 
+个人投资决策辅助 Agent。这个项目不做“替你买卖”的黑盒，而是把行情、宏观、规则、风险和研究流程整理成一套本地可运行的工具链，帮助你更快地看清楚：
 
+- 现在发生了什么
+- 这个标的强还是弱
+- 当前价格位置拥不拥挤
+- 组合风险是不是在失控
+- 你的买入逻辑还成不成立
 
-## Getting started
+核心原则：
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+- AI 负责信息整理、结构化输出和逻辑推演
+- 人负责最终判断和下单
+- 不做短线预测
+- 不输出“置信度”
+- 不构成投资建议
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## 这个项目在做什么
 
-## Add your files
+项目设计上覆盖 7 个模块：
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+1. 主动发现机会：扫描 watchlist、事件、异动和产业链传导
+2. 标的扫描：从宏观、资金、技术面、估值面等角度输出打分卡
+3. 组合管理：记录持仓、成本、仓位和 thesis
+4. 情报简报：生成晨报、周报和事件快报
+5. 交互式研究：自由提问，联动已有数据回答
+6. 风险管理：相关性、VaR、压力测试、集中度预警
+7. 简易回测：验证规则有没有明显失效
 
+当前仓库已经实现到 Phase 2 基础版，重点是把日常使用最常见的几条链路先跑通：
+
+- 配置加载、日志、重试、缓存
+- A 股 ETF / 美股 / 港股 / 商品行情采集骨架
+- 技术指标引擎
+- 六维扫描基础版：宏观、产业链、资金情绪、跨市场、技术面、估值面
+- SQLite 基础存储
+- `scan`、`briefing`、`snap`、`compare`、`portfolio` 命令可运行
+
+## 当前支持什么
+
+当前能直接使用的核心命令有：
+
+```bash
+python -m src.commands.scan <symbol>
+python -m src.commands.briefing daily
+python -m src.commands.briefing weekly
+python -m src.commands.snap <symbol>
+python -m src.commands.compare <symbol1> <symbol2> ...
+python -m src.commands.portfolio status
+python -m src.commands.portfolio log buy 561380 2.23 10000
+python -m src.commands.portfolio set-target 561380 0.30
+python -m src.commands.portfolio rebalance
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/yuzongnb-group/AI-Finance.git
-git branch -M main
-git push -uf origin main
+
+例如：
+
+```bash
+python -m src.commands.scan 561380
+python -m src.commands.scan QQQM
+python -m src.commands.scan HSTECH
+python -m src.commands.scan AU0
 ```
 
-## Integrate with your tools
+命令会自动识别标的类型，然后：
 
-* [Set up project integrations](https://gitlab.com/yuzongnb-group/AI-Finance/-/settings/integrations)
+1. 拉取历史行情
+2. 统一成 OHLCV 数据格式
+3. 计算技术指标
+4. 汇总宏观、产业链、资金情绪和跨市场代理信号
+5. 把行情写入本地 SQLite
+6. 输出 Markdown 报告或命令结果
 
-## Collaborate with your team
+当前支持的标的识别规则在 `config/config.yaml` 中配置：
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+- `^[0-9]{6}$` -> A 股 ETF
+- `^[0-9]{5}$` -> 港股
+- `^HSTECH$` -> 港股科技指数
+- `^[A-Z]{1,5}$` -> 美股 / ETF
+- `^[A-Z]{1,2}[0-9]$` -> 商品期货主力代码
 
-## Test and Deploy
+## 报告里会看到什么
 
-Use the built-in continuous integration in GitLab.
+`scan` 输出的是一份 Markdown 打分卡，目前会看到六块：
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+- 宏观环境
+- 板块与产业链
+- 资金与情绪
+- 跨市场联动
+- 技术面：MACD、均线系统、RSI、DMI/ADX、量能、K 线形态
+- 估值面：当前先用“价格位置代理”代替真实 PE/PB 估值
 
-***
+输出形式是：
 
-# Editing this README
+- `✅`：偏强 / 偏便宜 / 偏有利
+- `⚠️`：中性 / 信号不充分
+- `❌`：偏弱 / 偏拥挤 / 偏不利
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+注意：现在的“估值面”还不是真正基本面估值，只是 Phase 1 的占位实现。后面会接 PE/PB 分位、PEG、股息率等更完整的数据。
 
-## Suggestions for a good README
+## 怎么安装
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+推荐 Python 3.11+。
 
-## Name
-Choose a self-explaining name for your project.
+1. 创建虚拟环境
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+```
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+2. 安装依赖
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+```bash
+pip install -r requirements.txt
+```
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+3. 准备配置文件
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+```bash
+cp config/config.example.yaml config/config.yaml
+```
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+4. 按需填写 API key
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+目前配置里预留了：
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+- `fred`: FRED 宏观数据 API key
+- `tushare`: Tushare token
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+如果你先跑 `scan`、`snap`、`briefing` 这些基础命令，很多情况下即便没填完整 key 也能先跑通主要链路。
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+## 怎么用
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+### 1. 先改配置
 
-## License
-For open source projects, say how it is licensed.
+主配置文件：
+[config.yaml](/Users/bilibili/fiance/AI-Finance/config/config.yaml)
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+示例配置：
+[config.example.yaml](/Users/bilibili/fiance/AI-Finance/config/config.example.yaml)
+
+这里主要控制：
+
+- API keys
+- 缓存目录和数据库路径
+- 风险阈值
+- 技术指标参数
+- 标的类型识别规则
+
+### 2. 执行扫描
+
+```bash
+python -m src.commands.scan 561380
+```
+
+如果你想指定配置文件：
+
+```bash
+python -m src.commands.scan 561380 --config config/config.yaml
+```
+
+### 3. 生成简报
+
+```bash
+python -m src.commands.briefing daily
+python -m src.commands.briefing weekly
+```
+
+### 4. 查看盘中快照
+
+```bash
+python -m src.commands.snap 561380
+```
+
+### 5. 做横向对比
+
+```bash
+python -m src.commands.compare 518880 518800 159934
+python -m src.commands.compare 561380 GLD QQQM
+```
+
+### 6. 管理组合
+
+查看组合：
+
+```bash
+python -m src.commands.portfolio status
+```
+
+记录买入：
+
+```bash
+python -m src.commands.portfolio log buy 561380 2.23 10000
+```
+
+设置目标权重并查看再平衡建议：
+
+```bash
+python -m src.commands.portfolio set-target 561380 0.30
+python -m src.commands.portfolio rebalance
+```
+
+### 7. 查看本地数据
+
+扫描后会写入：
+
+- SQLite 数据库：`data/investment.db`
+- 缓存目录：`data/cache/`
+- 组合文件：`data/portfolio.json`
+- 交易日志：`data/trade_log.json`
+
+这样后续可以减少重复请求。
+
+## 项目结构
+
+- `config/`: 配置、watchlist、规则与压力测试场景
+- `data/`: 本地数据、产业链图谱、历史 regime、缓存和 SQLite
+- `docs/`: 架构文档
+- `skill/`: Claude Code Skill 定义
+- `src/collectors/`: 数据采集层
+- `src/processors/`: 技术指标、打分、风险、回测等处理层
+- `src/storage/`: SQLite 和持仓数据存储层
+- `src/output/`: Markdown 报告输出层
+- `src/commands/`: 命令入口层
+- `tests/`: 单元测试
+
+## 当前实现进度
+
+- 已完成：Phase 1 + Phase 2 基础能力
+- 已可运行：`scan`、`briefing`、`snap`、`compare`、`portfolio`
+- 已有真实数据接入：A 股 ETF、港股代理行情、美股 ETF、商品期货、部分中国宏观数据、VIX / DXY / 铜金比代理
+- 仍是骨架：`risk`、`backtest`、`discover`、`regime`、`policy`、`research`
+
+也就是说，仓库现在已经不是只有一个 `scan`，而是日常盯盘和基础组合管理可以开始用了；但更完整的风险、回测和研究模块还在后续 Phase。
+
+## 测试
+
+运行测试：
+
+```bash
+python -m pytest -q
+```
+
+当前仓库已经包含最小测试覆盖：
+
+- 技术指标
+- 风险分析
+- 回测引擎
+- SQLite 存储
+- 中国宏观采集器基础行为
+- 组合仓位与再平衡
+- 简报渲染
+
+## 后续计划
+
+接下来会按 Phase 继续补齐：
+
+- Phase 3：机会发现、Regime、政策解读、thesis 管理
+- Phase 4：风险报告、压力测试、回测命令
+- Phase 5：社媒情绪、全球资金流、推送能力
+
+## 免责声明
+
+本项目只做研究辅助和风险提示，不提供收益承诺，不构成任何投资建议。

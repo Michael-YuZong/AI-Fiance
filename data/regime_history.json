@@ -1,0 +1,22 @@
+[
+  {
+    "period": "2016Q1",
+    "regime": "recovery",
+    "summary": "供给侧改革初期，信用脉冲修复，周期品和成长风格轮番占优。"
+  },
+  {
+    "period": "2019Q1",
+    "regime": "recovery",
+    "summary": "社融修复、风险偏好提升，成长股和港股科技表现较强。"
+  },
+  {
+    "period": "2020Q2",
+    "regime": "deflation",
+    "summary": "疫情后宽松环境显著，黄金与成长股同步受益。"
+  },
+  {
+    "period": "2022Q3",
+    "regime": "stagflation",
+    "summary": "通胀高位和增长承压并存，黄金和防御资产相对占优。"
+  }
+]

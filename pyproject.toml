@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "investment-agent"
+version = "0.1.0"
+description = "Personal investment decision support agent"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "AI-Finance" }
+]
+dependencies = [
+  "akshare>=1.12.0",
+  "yfinance>=0.2.31",
+  "fredapi>=0.5.1",
+  "feedparser>=6.0.10",
+  "requests>=2.31.0",
+  "pandas>=2.1.0",
+  "numpy>=1.25.0",
+  "scipy>=1.11.0",
+  "pyyaml>=6.0",
+  "apscheduler>=3.10.4",
+  "pytest>=7.4.0",
+  "python-dotenv>=1.0.0",
+  "loguru>=0.7.0",
+]
+
+[tool.setuptools]
+packages = [
+  "src",
+  "src.collectors",
+  "src.commands",
+  "src.output",
+  "src.processors",
+  "src.storage",
+  "src.utils",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
