@@ -15,6 +15,15 @@ def _table(headers: List[str], rows: List[List[str]]) -> List[str]:
     return lines
 
 
+def _append_section(lines: List[str], title: str, items: List[str]) -> None:
+    lines.extend(["", f"## {title}"])
+    if items:
+        for item in items:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- 暂无。")
+
+
 class BriefingRenderer:
     """Render daily/weekly briefing payloads to markdown."""
 
@@ -23,34 +32,25 @@ class BriefingRenderer:
             f"# {payload['title']}",
             "",
             f"- 生成时间: `{payload['generated_at']}`",
-            "",
-            "## 宏观与跨市场快照",
         ]
-        for item in payload.get("macro_items", []):
-            lines.append(f"- {item}")
 
-        lines.extend(["", "## Watchlist 概览"])
+        _append_section(lines, "今日主线", payload.get("headline_lines", []))
+        _append_section(lines, "宏观与流动性", payload.get("macro_items", []))
+        _append_section(lines, "市场概览", payload.get("market_overview_lines", []))
+
+        lines.extend(["", "## Watchlist 雷达"])
         lines.extend(
             _table(
-                ["标的", "最新价", "1日", "5日", "20日", "趋势"],
+                ["标的", "最新价", "1日", "5日", "20日", "趋势", "量比"],
                 payload.get("watchlist_rows", []),
             )
         )
 
-        alerts = payload.get("alerts", [])
-        lines.extend(["", "## 关注提醒"])
-        if alerts:
-            for alert in alerts:
-                lines.append(f"- {alert}")
-        else:
-            lines.append("- 当前没有触发强提醒。")
-
-        portfolio_lines = payload.get("portfolio_lines", [])
-        lines.extend(["", "## 组合摘要"])
-        if portfolio_lines:
-            for line in portfolio_lines:
-                lines.append(f"- {line}")
-        else:
-            lines.append("- 当前没有持仓记录。")
+        _append_section(lines, "重点观察", payload.get("focus_lines", []))
+        _append_section(lines, "风格与轮动", payload.get("rotation_lines", []))
+        _append_section(lines, "关注提醒", payload.get("alerts", []))
+        _append_section(lines, "组合与 Thesis", payload.get("portfolio_lines", []))
+        _append_section(lines, "今日跟踪清单", payload.get("calendar_lines", []))
+        _append_section(lines, "行动建议", payload.get("action_lines", []))
 
         return "\n".join(lines)
