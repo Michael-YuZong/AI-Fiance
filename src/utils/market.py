@@ -11,7 +11,8 @@ import yfinance as yf
 
 from src.collectors import ChinaMarketCollector, CommodityCollector, HongKongMarketCollector, USMarketCollector
 from src.processors.technical import normalize_ohlcv_frame
-from src.utils.data import load_watchlist
+from src.utils.config import resolve_project_path
+from src.utils.data import load_asset_aliases, load_watchlist
 
 
 @dataclass
@@ -25,7 +26,10 @@ class AssetContext:
 
 def get_asset_context(symbol: str, asset_type: str, config: Dict[str, Any]) -> AssetContext:
     watchlist = {item["symbol"]: item for item in load_watchlist()}
-    metadata = dict(watchlist.get(symbol, {}))
+    alias_path = resolve_project_path(config.get("asset_aliases_file", "config/asset_aliases.yaml"))
+    aliases = {item["symbol"]: item for item in load_asset_aliases(alias_path)}
+    metadata = dict(aliases.get(symbol, {}))
+    metadata.update(dict(watchlist.get(symbol, {})))
     name = metadata.get("name", symbol)
     source_symbol = metadata.get("proxy_symbol", symbol)
     return AssetContext(
@@ -47,6 +51,10 @@ def fetch_asset_history(
     context = get_asset_context(symbol, asset_type, config)
     if asset_type == "cn_etf":
         return ChinaMarketCollector(config).get_etf_daily(context.source_symbol)
+    if asset_type == "cn_index":
+        return ChinaMarketCollector(config).get_index_daily(context.symbol, proxy_symbol=context.source_symbol)
+    if asset_type == "cn_fund":
+        return ChinaMarketCollector(config).get_open_fund_daily(context.symbol, proxy_symbol=context.source_symbol)
     if asset_type in {"hk", "hk_index"}:
         return HongKongMarketCollector(config).get_history(context.source_symbol, period=period, interval=interval)
     if asset_type == "us":

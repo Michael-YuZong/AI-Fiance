@@ -41,6 +41,12 @@ def test_router_maps_buy_question_to_scan():
     assert routed.args == ["561380"]
 
 
+def test_router_detects_numeric_code_inside_chinese_text():
+    routed = route_request("分析一下基金022365")
+    assert routed.module == "scan"
+    assert routed.args == ["022365"]
+
+
 def test_router_maps_vs_phrase_to_compare():
     routed = route_request("561380 vs QQQM", candidate_symbols=["561380", "QQQM"])
     assert routed.module == "compare"

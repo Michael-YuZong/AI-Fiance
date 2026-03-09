@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from urllib.parse import quote_plus
 
 import feedparser
 import requests
@@ -38,6 +39,15 @@ def _value(item: Any, key: str, default: Any = None) -> Any:
     if isinstance(item, Mapping):
         return item.get(key, default)
     return getattr(item, key, default)
+
+
+SOURCE_DOMAIN_HINTS = {
+    "Reuters": "site:reuters.com",
+    "Bloomberg": "site:bloomberg.com",
+    "Financial Times": "site:ft.com",
+    "财联社": "site:cls.cn",
+    "证券时报": "site:stcn.com",
+}
 
 
 class NewsCollector(BaseCollector):
@@ -118,6 +128,7 @@ class NewsCollector(BaseCollector):
             return {
                 "mode": "live",
                 "items": selected_items,
+                "all_items": live_items,
                 "lines": self._live_lines(selected_items),
                 "source_list": sorted(required_present),
                 "note": self._live_note(preferred, missing_required),
@@ -126,10 +137,68 @@ class NewsCollector(BaseCollector):
         return {
             "mode": "proxy",
             "items": [],
+            "all_items": [],
             "lines": self._fallback_lines(rows, dict(china_macro or {}), dict(global_proxy or {})),
             "note": "实时 RSS 暂不可用，已回退到本地宏观与市场代理主线。"
             + (f" 当前有 {len(errors)} 个新闻源未连通。" if errors else ""),
         }
+
+    def search_by_keywords(
+        self,
+        keywords: Sequence[str],
+        preferred_sources: Optional[Sequence[str]] = None,
+        limit: int = 6,
+        recent_days: int = 7,
+    ) -> List[Dict[str, str]]:
+        """Search live RSS by asset/topic keywords for sector-specific catalysts."""
+        cleaned = self._normalize_topic_keywords(keywords)
+        if not cleaned:
+            return []
+
+        feeds = load_yaml(self.feeds_path, default={"preferences": {}}) or {"preferences": {}}
+        preferences = feeds.get("preferences", {}) or {}
+        configured_preferred = [str(item) for item in preferences.get("preferred_sources", []) if str(item).strip()]
+        preferred = list(configured_preferred)
+        if preferred_sources:
+            for item in preferred_sources:
+                value = str(item).strip()
+                if value and value not in preferred:
+                    preferred.append(value)
+
+        items: List[Dict[str, str]] = []
+        for label, url in self._topic_queries(cleaned, preferred, recent_days):
+            try:
+                parsed = self.cached_call(
+                    f"news:topic:{url}",
+                    self._fetch_feed,
+                    url,
+                    ttl_hours=2,
+                )
+            except Exception:
+                continue
+            for entry in parsed.entries[:2]:
+                source = getattr(entry, "source", {})
+                source_name = (
+                    _clean_source_name(str(source.get("title", "")).strip())
+                    if isinstance(source, Mapping)
+                    else _clean_source_name(str(source or "").strip())
+                )
+                title = _clean_title(str(getattr(entry, "title", "")).strip(), source_name)
+                if not title:
+                    continue
+                items.append(
+                    {
+                        "category": label,
+                        "title": title,
+                        "source": source_name or label,
+                        "configured_source": source_name or label,
+                        "must_include": False,
+                        "link": str(getattr(entry, "link", "")).strip(),
+                    }
+                )
+
+        ranked = self._rank_items(items, preferred)
+        return self._diversify_items(ranked, limit)
 
     def _fetch_feed(self, url: str) -> feedparser.FeedParserDict:
         response = requests.get(
@@ -214,6 +283,43 @@ class NewsCollector(BaseCollector):
             if source:
                 result.add(source)
         return result
+
+    def _normalize_topic_keywords(self, keywords: Sequence[str]) -> List[str]:
+        cleaned: List[str] = []
+        for keyword in keywords:
+            value = str(keyword).strip()
+            if not value or value.lower() in {"etf", "index", "fund", "市场", "行情"}:
+                continue
+            if len(value) <= 1:
+                continue
+            if value not in cleaned:
+                cleaned.append(value)
+        return cleaned[:8]
+
+    def _topic_queries(
+        self,
+        keywords: Sequence[str],
+        preferred_sources: Sequence[str],
+        recent_days: int,
+    ) -> List[tuple[str, str]]:
+        base_terms = list(keywords[:4])
+        broad_query = " ".join(base_terms) + f" when:{recent_days}d"
+        queries = [("topic_search", self._google_news_search_url(broad_query))]
+
+        for source in preferred_sources[:3]:
+            domain = SOURCE_DOMAIN_HINTS.get(source)
+            if not domain:
+                continue
+            scoped_query = f"{domain} " + " ".join(base_terms[:3]) + f" when:{recent_days}d"
+            queries.append((source, self._google_news_search_url(scoped_query)))
+        return queries
+
+    def _google_news_search_url(self, query: str) -> str:
+        return (
+            "https://news.google.com/rss/search?q="
+            + quote_plus(query)
+            + "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+        )
 
     def _fallback_lines(
         self,

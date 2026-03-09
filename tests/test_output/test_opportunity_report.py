@@ -2,14 +2,47 @@
 
 from __future__ import annotations
 
+import pandas as pd
+
 from src.output.opportunity_report import OpportunityReportRenderer
 
 
 def _sample_analysis(symbol: str, name: str) -> dict:
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-10-01", periods=80, freq="B"),
+            "open": [1.0 + i * 0.005 for i in range(80)],
+            "high": [1.02 + i * 0.005 for i in range(80)],
+            "low": [0.98 + i * 0.005 for i in range(80)],
+            "close": [1.0 + i * 0.005 for i in range(80)],
+            "volume": [10_000_000 + i * 1_000 for i in range(80)],
+            "amount": [20_000_000 + i * 2_000 for i in range(80)],
+        }
+    )
+    benchmark_history = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-10-01", periods=80, freq="B"),
+            "open": [0.98 + i * 0.003 for i in range(80)],
+            "high": [1.0 + i * 0.003 for i in range(80)],
+            "low": [0.96 + i * 0.003 for i in range(80)],
+            "close": [0.98 + i * 0.003 for i in range(80)],
+            "volume": [9_000_000 + i * 800 for i in range(80)],
+            "amount": [18_000_000 + i * 1_500 for i in range(80)],
+        }
+    )
     return {
         "symbol": symbol,
         "name": name,
+        "asset_type": "cn_etf",
         "generated_at": "2026-03-09 08:00:00",
+        "regime": {"current_regime": "stagflation"},
+        "day_theme": {"label": "能源冲击 + 地缘风险"},
+        "metadata": {"sector": "电网"},
+        "history": history,
+        "benchmark_symbol": "000300",
+        "benchmark_name": "沪深300ETF",
+        "benchmark_history": benchmark_history,
+        "metrics": {"return_5d": 0.032, "return_20d": 0.081},
         "rating": {"stars": "⭐⭐⭐", "label": "较强机会", "meaning": "逻辑成立，但还需要一个维度继续确认。", "rank": 3, "warnings": ["⚠️ 已进入超买区，追高性价比下降"]},
         "conclusion": "技术到位 + 催化渐强，但估值代理偏中性。",
         "hard_checks": [
@@ -34,8 +67,54 @@ def _sample_analysis(symbol: str, name: str) -> dict:
             "target": "先看前高 2.35",
             "timeframe": "中线配置(1-3月)",
         },
+        "narrative": {
+            "headline": "这是一个**中期偏多，但短线略有拥挤**的标的。当前核心不是没逻辑，而是**逻辑仍在但当前位置赔率一般**。",
+            "judgment": {"direction": "中性偏多", "cycle": "中期(1-3月)", "odds": "中", "state": "持有优于追高"},
+            "drivers": {
+                "macro": "宏观和主线背景整体偏顺风。",
+                "flow": "资金面没有特别强，但也没有显著背离。",
+                "relative": "相对强弱仍占优。",
+                "technical": "技术结构仍完整，但需要继续确认。",
+            },
+            "contradiction": "中期逻辑偏正面，但短线位置已经不算低，因此更适合等节奏而不是直接追价。",
+            "positives": ["相对强弱仍占优。", "宏观环境对该方向没有明显逆风。", "中期趋势结构没有破坏。"],
+            "cautions": ["价格位置不低。", "催化需要继续验证。", "短线有一定拥挤风险。"],
+            "phase": {"label": "强势整理", "body": "说明大方向未坏，但短线已经不在最舒服的位置。"},
+            "risk_points": {
+                "fundamental": "行业景气如果低于预期，会先打掉估值支撑。",
+                "valuation": "当前价格已经反映一部分预期。",
+                "crowding": "一旦共识撤退，回撤会变快。",
+                "external": "利率和风险偏好变化会直接影响定价。",
+            },
+            "watch_points": ["观察动能是否重新修复。", "观察价格是否守住关键支撑。", "观察资金是否重新共振。", "观察主线变量是否继续强化。"],
+            "validation_points": [
+                {
+                    "watch": "动能重启",
+                    "judge": "MACD 金叉且收盘站回 MA20",
+                    "bull": "说明趋势确认增强。",
+                    "bear": "说明仍需继续观察。",
+                }
+            ],
+            "scenarios": {
+                "base": "更可能维持强势整理。",
+                "bull": "若催化与资金同步强化，有望转成趋势加速。",
+                "bear": "若支撑失守，先处理回撤风险。",
+            },
+            "playbook": {
+                "trend": "等动能重新转强后再跟随。",
+                "allocation": "可小仓分批，不宜追价。",
+                "defensive": "先观察，等更舒服的位置。",
+            },
+            "summary_lines": ["核心逻辑仍在。", "短期制约在于位置与节奏。", "更合理的动作是持有优于追高。"],
+        },
         "risks": ["⚠️ 已进入超买区，追高性价比下降"],
         "notes": ["该标的已在 watchlist 中，本次更偏复核。"],
+        "technical_raw": {
+            "rsi": {"RSI": 63.2},
+            "dmi": {"ADX": 28.4},
+            "ma_system": {"mas": {"MA20": 1.31, "MA60": 1.19}},
+            "fibonacci": {"levels": {"0.500": 1.24, "0.618": 1.28}},
+        },
     }
 
 
@@ -43,12 +122,41 @@ def test_opportunity_renderer_scan_sections():
     rendered = OpportunityReportRenderer().render_scan(_sample_analysis("561380", "电网ETF"))
     assert "# 电网ETF (561380) 全景分析 | 2026-03-09" in rendered
     assert "## 一句话结论" in rendered
+    assert "## 当前判断" in rendered
     assert "## 硬性检查" in rendered
-    assert "## 八维详细分析" in rendered
-    assert "### 技术面 82/100" in rendered
-    assert "## 综合评级" in rendered
+    assert "## 核心矛盾" in rendered
+    assert "## 八维评分" in rendered
+    assert "## 核心驱动" in rendered
+    assert "## 值得继续看的理由" in rendered
+    assert "## 现在不适合激进的理由" in rendered
+    assert "## 分维度详解" in rendered
+    assert "## 情景分析" in rendered
+    assert "## 后续验证点" in rendered
     assert "## 操作建议" in rendered
+    assert "## 分析元数据" in rendered
+    assert "### 技术面 82/100" in rendered
     assert "## 风险提示" in rendered
+    assert "| 维度 | 判断 | 说明 |" in rendered
+    assert "| 维度 | 得分 | 一句话判断 | 详情 |" in rendered
+    assert "| 因子 | 当前值/信号 | 说明 | 得分 |" in rendered
+
+
+def test_opportunity_renderer_scan_visual_section():
+    rendered = OpportunityReportRenderer().render_scan(
+        _sample_analysis("561380", "电网ETF"),
+        visuals={
+            "dashboard": "/tmp/demo_dashboard.png",
+            "windows": "/tmp/demo_windows.png",
+            "indicators": "/tmp/demo_indicators.png",
+        },
+    )
+    assert "## 图表速览" in rendered
+    assert "### 总览看板" in rendered
+    assert "### 阶段走势" in rendered
+    assert "### 技术指标总览" in rendered
+    assert "![分析看板](/tmp/demo_dashboard.png)" in rendered
+    assert "![阶段走势](/tmp/demo_windows.png)" in rendered
+    assert "![技术指标](/tmp/demo_indicators.png)" in rendered
 
 
 def test_opportunity_renderer_discovery_and_compare():

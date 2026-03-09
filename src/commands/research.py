@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import re
 import warnings
 from contextlib import redirect_stderr
 from typing import Any, Dict, Iterable, List
@@ -36,6 +37,10 @@ def _detect_symbols(question: str, candidates: Iterable[str]) -> List[str]:
     for symbol in candidates:
         if symbol.upper() in upper_question and symbol not in matched:
             matched.append(symbol)
+    for pattern in [r"(?<!\d)\d{5,6}(?!\d)", r"\b[A-Z]{1,5}\b", r"\b[A-Z]{1,2}\d\b"]:
+        for token in re.findall(pattern, upper_question):
+            if token not in matched:
+                matched.append(token)
     return matched
 
 

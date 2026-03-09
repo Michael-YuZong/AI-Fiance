@@ -15,6 +15,7 @@ from .market_pulse import MarketPulseCollector
 from .market_us import USMarketCollector
 from .news import NewsCollector
 from .social_sentiment import SocialSentimentCollector
+from .valuation import ValuationCollector
 
 __all__ = [
     "ChinaMacroCollector",
@@ -32,4 +33,5 @@ __all__ = [
     "NewsCollector",
     "SocialSentimentCollector",
     "GlobalFlowCollector",
+    "ValuationCollector",
 ]

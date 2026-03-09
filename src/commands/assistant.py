@@ -24,7 +24,7 @@ NEWS_SOURCE_ALIASES = {
 
 COMMAND_TIMEOUTS = {
     "discover": 45,
-    "scan": 30,
+    "scan": 45,
     "compare": 45,
     "briefing": 45,
     "backtest": 60,
@@ -157,7 +157,15 @@ def _should_resolve_assets(request: str) -> bool:
         "电网",
         "中概互联",
         "恒生科技",
+        "纳斯达克",
         "纳指",
+        "沪深300",
+        "中证a500",
+        "a500",
+        "商业航天",
+        "航天",
+        "卫星",
+        "军工",
     ]
     lowered = request.lower()
     return any(keyword.lower() in lowered for keyword in keywords)

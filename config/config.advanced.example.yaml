@@ -1,0 +1,55 @@
+# 高级可选配置。
+# 只有在你明确要调技术参数、风险阈值、扫描门槛或数据源路径时再改。
+# 使用方式：按需把需要的块复制到 `config/config.yaml`。
+
+risk_limits:
+  single_position_max: 0.30
+  single_sector_max: 0.40
+  single_region_max: 0.50
+  portfolio_beta_max: 1.5
+  correlation_alert: 0.80
+
+technical:
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+  rsi:
+    period: 14
+    overbought: 70
+    oversold: 30
+  bollinger:
+    period: 20
+    std: 2
+  kdj:
+    period: 9
+    smooth_k: 3
+    smooth_d: 3
+    overbought: 80
+    oversold: 20
+  dmi:
+    period: 14
+    adx_strong: 25
+  obv:
+    period: 20
+  fibonacci:
+    lookback: 60
+  ma_periods: [5, 10, 20, 30, 60]
+
+opportunity:
+  min_turnover: 50000000
+  min_listing_days: 60
+  max_scan_candidates: 30
+  top_n: 5
+
+schedule:
+  macro_update: "daily"
+  market_update: "daily"
+  intraday_interval_min: 5
+
+briefing_calendar_file: "config/event_calendar.yaml"
+asset_aliases_file: "config/asset_aliases.yaml"
+news_feeds_file: "config/news_feeds.yaml"
+market_monitors_file: "config/market_monitors.yaml"
+market_overview_file: "config/market_overview.yaml"
+catalyst_profiles_file: "config/catalyst_profiles.yaml"

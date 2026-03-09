@@ -1,3 +1,6 @@
+# 可选配置。
+# 大多数用户只在“中文名称识别不准”时才需要加新别名。
+
 aliases:
   - symbol: "512400"
     name: "有色金属ETF"
@@ -10,21 +13,76 @@ aliases:
   - symbol: "561380"
     name: "电网ETF"
     asset_type: "cn_etf"
+    sector: "电网"
+    chain_nodes: ["AI算力", "电力需求", "电网设备", "铜铝"]
     aliases:
       - "电网ETF"
       - "电网"
+  - symbol: "512480"
+    name: "国联安中证半导体ETF"
+    asset_type: "cn_etf"
+    sector: "科技"
+    chain_nodes: ["AI算力", "半导体", "国产替代"]
+    aliases:
+      - "半导体ETF"
+      - "半导体"
+      - "芯片ETF"
+      - "芯片"
   - symbol: "QQQM"
     name: "Invesco NASDAQ 100 ETF"
     asset_type: "us"
+    sector: "科技"
+    chain_nodes: ["成长股估值修复", "AI算力"]
     aliases:
       - "QQQM"
+      - "纳斯达克"
+      - "纳指"
+      - "纳指100"
+      - "纳斯达克ETF"
+      - "纳斯达克100"
       - "纳斯达克100ETF"
       - "美股纳指ETF"
   - symbol: "GLD"
     name: "SPDR Gold Shares"
     asset_type: "us"
+    sector: "黄金"
+    chain_nodes: ["黄金", "通胀预期"]
     aliases:
       - "GLD"
       - "SPDR Gold Shares"
       - "SPDR黄金ETF"
       - "美股黄金ETF"
+  - symbol: "159218"
+    name: "招商中证卫星产业ETF"
+    asset_type: "cn_etf"
+    sector: "军工"
+    chain_nodes: ["商业航天", "卫星", "军工", "地缘风险"]
+    aliases:
+      - "商业航天"
+      - "商业航天ETF"
+      - "卫星ETF"
+      - "卫星产业ETF"
+      - "商用卫星"
+      - "航天ETF"
+  - symbol: "000300"
+    name: "沪深300指数"
+    asset_type: "cn_index"
+    proxy_symbol: "510330"
+    sector: "宽基"
+    chain_nodes: ["宽基", "大盘蓝筹", "内需"]
+    aliases:
+      - "000300"
+      - "沪深300"
+      - "沪深300指数"
+      - "HS300"
+  - symbol: "000510"
+    name: "中证A500指数"
+    asset_type: "cn_index"
+    proxy_symbol: "159351"
+    sector: "宽基"
+    chain_nodes: ["宽基", "A股核心资产", "内需"]
+    aliases:
+      - "000510"
+      - "中证A500"
+      - "中证A500指数"
+      - "A500"

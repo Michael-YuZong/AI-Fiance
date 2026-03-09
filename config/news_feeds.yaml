@@ -1,3 +1,6 @@
+# 高级配置。
+# 只有在你想加新闻源、改源优先级或扩行业专属 feed 时再改。
+
 preferences:
   preferred_sources:
     - "Reuters"
@@ -66,6 +69,14 @@ feeds:
     name: "Financial Times Semiconductors"
     source: "Financial Times"
     url: "https://news.google.com/rss/search?q=site:ft.com+semiconductor+capacity+foundry+when:3d&hl=en-US&gl=US&ceid=US:en"
+  - category: "semiconductor"
+    name: "财联社 半导体"
+    source: "财联社"
+    url: "https://news.google.com/rss/search?q=site:cls.cn+半导体+芯片+存储+when:3d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+  - category: "semiconductor"
+    name: "证券时报 半导体"
+    source: "证券时报"
+    url: "https://news.google.com/rss/search?q=site:stcn.com+半导体+芯片+存储+when:3d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
   - category: "china_market_domestic"
     name: "财联社 A股快讯"
     source: "财联社"

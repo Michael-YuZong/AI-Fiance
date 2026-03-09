@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 
 from .base import BaseCollector
@@ -77,6 +78,66 @@ class ChinaMarketCollector(BaseCollector):
             except Exception:
                 raise primary_exc
 
+    def get_index_daily(
+        self,
+        symbol: str,
+        period: str = "daily",
+        start_date: str = "",
+        end_date: str = "",
+        proxy_symbol: str = "",
+    ) -> pd.DataFrame:
+        """A 股指数历史行情；必要时可回退到代表性 ETF 代理。"""
+        start = start_date or self._date_str(-365 * 3)
+        end = end_date or self._date_str()
+        if proxy_symbol and proxy_symbol != symbol:
+            try:
+                return self.get_etf_daily(proxy_symbol, period="daily", adjust="qfq", start_date=start, end_date=end)
+            except Exception:
+                pass
+        try:
+            fetcher = self._ak_function("index_zh_a_hist")
+            return self.cached_call(
+                f"cn_market:index_daily:{symbol}:{period}:{start}:{end}",
+                fetcher,
+                symbol=symbol,
+                period=period,
+                start_date=start,
+                end_date=end,
+            )
+        except Exception as primary_exc:
+            if proxy_symbol and proxy_symbol != symbol:
+                try:
+                    return self.get_etf_daily(proxy_symbol, period="daily", adjust="qfq", start_date=start, end_date=end)
+                except Exception:
+                    pass
+            raise primary_exc
+
+    def get_open_fund_daily(
+        self,
+        symbol: str,
+        indicator: str = "单位净值走势",
+        period: str = "3年",
+        proxy_symbol: str = "",
+    ) -> pd.DataFrame:
+        """开放式基金净值走势，转换为可复用的 OHLCV 结构。"""
+        try:
+            fetcher = self._ak_function("fund_open_fund_info_em")
+            frame = self.cached_call(
+                f"cn_market:open_fund:{symbol}:{indicator}:{period}",
+                fetcher,
+                symbol=symbol,
+                indicator=indicator,
+                period=period,
+            )
+            return self._normalize_open_fund_nav(frame)
+        except Exception as primary_exc:
+            if proxy_symbol and proxy_symbol != symbol:
+                try:
+                    return self.get_etf_daily(proxy_symbol)
+                except Exception:
+                    pass
+            raise primary_exc
+
     def get_etf_realtime(self) -> pd.DataFrame:
         """ETF 实时行情。"""
         fetcher = self._ak_function("fund_etf_spot_em")
@@ -125,3 +186,26 @@ class ChinaMarketCollector(BaseCollector):
             period="日k",
             adjust="qfq",
         )
+
+    def _normalize_open_fund_nav(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            raise ValueError("Open fund nav frame is empty")
+
+        date_col = next((col for col in frame.columns if col in {"净值日期", "日期", "date"}), None)
+        value_col = next((col for col in frame.columns if col in {"单位净值", "累计净值", "净值", "close"}), None)
+        if not date_col or not value_col:
+            raise ValueError("Open fund nav frame missing required columns")
+
+        nav = frame[[date_col, value_col]].copy()
+        nav.columns = ["date", "close"]
+        nav["date"] = pd.to_datetime(nav["date"], errors="coerce")
+        nav["close"] = pd.to_numeric(nav["close"], errors="coerce")
+        nav = nav.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+        if nav.empty:
+            raise ValueError("Open fund nav frame has no valid rows")
+
+        for column in ("open", "high", "low"):
+            nav[column] = nav["close"]
+        nav["volume"] = 0.0
+        nav["amount"] = np.nan
+        return nav[["date", "open", "high", "low", "close", "volume", "amount"]]

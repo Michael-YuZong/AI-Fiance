@@ -96,7 +96,7 @@ def _extract_symbols(text: str, candidates: Sequence[str]) -> List[str]:
 
     generic_patterns = [
         r"\b[A-Z]{1,5}\b",
-        r"\b\d{5,6}\b",
+        r"(?<!\d)\d{5,6}(?!\d)",
         r"\b[A-Z]{1,2}\d\b",
     ]
     for pattern in generic_patterns:

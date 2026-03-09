@@ -34,3 +34,8 @@ def load_yaml(path: Path, default: Optional[Any] = None) -> Any:
 def load_watchlist(path: Path = PROJECT_ROOT / "config" / "watchlist.yaml") -> List[Dict[str, Any]]:
     payload = load_yaml(path, default={"watchlist": []}) or {"watchlist": []}
     return list(payload.get("watchlist", []))
+
+
+def load_asset_aliases(path: Path = PROJECT_ROOT / "config" / "asset_aliases.yaml") -> List[Dict[str, Any]]:
+    payload = load_yaml(path, default={"aliases": []}) or {"aliases": []}
+    return list(payload.get("aliases", []))

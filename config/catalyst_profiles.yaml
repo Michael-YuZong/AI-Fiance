@@ -1,0 +1,205 @@
+# 高级配置。
+# 程序内已经有一层“通用催化画像”兜底，这个文件只负责覆盖和增强。
+# 也就是说：没写在这里的方向，仍然会按资产类型 / 名称 / 地区 / 行业自动生成催化画像。
+
+profiles:
+  半导体:
+    themes:
+      - "半导体"
+      - "芯片"
+      - "AI算力"
+      - "存储"
+      - "服务器"
+    keywords:
+      - "半导体"
+      - "芯片"
+      - "semiconductor"
+      - "chip"
+      - "foundry"
+      - "fab"
+      - "存储"
+      - "DRAM"
+      - "NAND"
+      - "HBM"
+      - "GPU"
+      - "capex"
+      - "资本开支"
+      - "扩产"
+      - "量产"
+      - "涨价"
+    policy_keywords:
+      - "集成电路"
+      - "半导体"
+      - "智能经济"
+      - "算力"
+      - "自主可控"
+      - "国产替代"
+      - "大基金"
+      - "先进封装"
+    domestic_leaders:
+      - "中芯国际"
+      - "华虹"
+      - "华虹半导体"
+      - "中微公司"
+      - "北方华创"
+      - "兆易创新"
+      - "寒武纪"
+      - "澜起科技"
+      - "通富微电"
+      - "长电科技"
+    overseas_leaders:
+      - "TSMC"
+      - "台积电"
+      - "NVIDIA"
+      - "英伟达"
+      - "Micron"
+      - "美光"
+      - "SK Hynix"
+      - "海力士"
+      - "ASML"
+      - "Intel"
+      - "Samsung"
+      - "三星"
+      - "Broadcom"
+      - "AMD"
+    earnings_keywords:
+      - "earnings"
+      - "results"
+      - "guidance"
+      - "财报"
+      - "业绩"
+      - "指引"
+      - "营收"
+      - "利润"
+      - "毛利率"
+      - "资本开支"
+      - "capex"
+      - "ASP"
+    event_keywords:
+      - "财报"
+      - "业绩会"
+      - "指引"
+      - "资本开支"
+      - "capex"
+      - "涨价"
+      - "扩产"
+      - "投产"
+      - "量产"
+      - "并购"
+      - "重组"
+
+  电网:
+    themes:
+      - "电网"
+      - "电力"
+      - "储能"
+    keywords:
+      - "电网"
+      - "电力"
+      - "特高压"
+      - "配电网"
+      - "储能"
+      - "智能电网"
+      - "变压器"
+      - "grid"
+      - "utility"
+    policy_keywords:
+      - "电网投资"
+      - "特高压"
+      - "配电网"
+      - "电改"
+      - "新型电力系统"
+    domestic_leaders:
+      - "国电南瑞"
+      - "许继电气"
+      - "平高电气"
+      - "思源电气"
+      - "中国西电"
+    overseas_leaders:
+      - "GE Vernova"
+      - "Siemens Energy"
+      - "Hitachi Energy"
+    earnings_keywords:
+      - "订单"
+      - "中标"
+      - "回购"
+      - "业绩"
+      - "指引"
+    event_keywords:
+      - "招标"
+      - "中标"
+      - "订单"
+      - "电网投资"
+      - "配电网"
+
+  黄金:
+    themes:
+      - "黄金"
+      - "贵金属"
+    keywords:
+      - "黄金"
+      - "gold"
+      - "bullion"
+      - "贵金属"
+      - "央行购金"
+    policy_keywords:
+      - "央行"
+      - "储备"
+      - "购金"
+    domestic_leaders:
+      - "山东黄金"
+      - "中金黄金"
+      - "赤峰黄金"
+    overseas_leaders:
+      - "Barrick"
+      - "Newmont"
+      - "SPDR Gold"
+      - "GLD"
+    earnings_keywords:
+      - "央行"
+      - "购金"
+      - "ETF inflows"
+      - "flow"
+    event_keywords:
+      - "非农"
+      - "CPI"
+      - "FOMC"
+      - "利率决议"
+
+  有色:
+    themes:
+      - "有色"
+      - "铜"
+      - "铝"
+    keywords:
+      - "有色"
+      - "铜"
+      - "铝"
+      - "copper"
+      - "aluminum"
+      - "metal"
+      - "mining"
+    policy_keywords:
+      - "稳增长"
+      - "基建"
+      - "需求"
+    domestic_leaders:
+      - "紫金矿业"
+      - "江西铜业"
+      - "云南铜业"
+      - "中国铝业"
+    overseas_leaders:
+      - "Freeport"
+      - "Rio Tinto"
+      - "BHP"
+      - "Glencore"
+    earnings_keywords:
+      - "产量"
+      - "产能"
+      - "库存"
+      - "价格"
+    event_keywords:
+      - "LME"
+      - "库存"
+      - "减产"
+      - "扩产"

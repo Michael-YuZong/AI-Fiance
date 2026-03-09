@@ -1,70 +1,23 @@
+# 最低可用配置。
+# 大多数用户只需要改这个文件。
+# 更细的技术参数、风险阈值和扫描门槛，请按需从
+# `config/config.advanced.example.yaml` 复制到 `config/config.yaml`。
+
 # API Keys
 api_keys:
   fred: "YOUR_FRED_API_KEY"
   tushare: "YOUR_TUSHARE_TOKEN"
 
-# 数据采集频率
+# 常用调度
 schedule:
   daily_briefing: "07:30"
   weekly_briefing: "saturday"
-  macro_update: "daily"
-  market_update: "daily"
-  intraday_interval_min: 5
 
-# 风险管理阈值
-risk_limits:
-  single_position_max: 0.30
-  single_sector_max: 0.40
-  single_region_max: 0.50
-  portfolio_beta_max: 1.5
-  correlation_alert: 0.80
-
-# 技术指标参数
-technical:
-  macd:
-    fast: 12
-    slow: 26
-    signal: 9
-  rsi:
-    period: 14
-    overbought: 70
-    oversold: 30
-  bollinger:
-    period: 20
-    std: 2
-  kdj:
-    period: 9
-    smooth_k: 3
-    smooth_d: 3
-    overbought: 80
-    oversold: 20
-  dmi:
-    period: 14
-    adx_strong: 25
-  obv:
-    period: 20
-  fibonacci:
-    lookback: 60
-  ma_periods: [5, 10, 20, 30, 60]
-
-# 数据存储
+# 本地存储
 storage:
   db_path: "data/investment.db"
   cache_dir: "data/cache"
   cache_ttl_hours: 4
-
-# 晨报事件日历
-briefing_calendar_file: "config/event_calendar.yaml"
-asset_aliases_file: "config/asset_aliases.yaml"
-news_feeds_file: "config/news_feeds.yaml"
-market_monitors_file: "config/market_monitors.yaml"
-
-# 机会发现与标的分析
-opportunity:
-  min_turnover: 50000000
-  min_listing_days: 60
-  max_scan_candidates: 30
-  top_n: 5
 
 # 标的类型映射
 asset_type_mapping:

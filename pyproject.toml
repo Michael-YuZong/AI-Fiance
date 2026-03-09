@@ -21,6 +21,7 @@ dependencies = [
   "pandas>=2.1.0",
   "numpy>=1.25.0",
   "scipy>=1.11.0",
+  "matplotlib>=3.9.0",
   "pyyaml>=6.0",
   "apscheduler>=3.10.4",
   "pytest>=7.4.0",

@@ -30,6 +30,8 @@ class MarketDriversCollector(BaseCollector):
         as_of = reference_date or datetime.now()
         return {
             "market_flow": self._market_flow(as_of),
+            "industry_fund_flow": self._sector_fund_flow("行业资金流"),
+            "concept_fund_flow": self._sector_fund_flow("概念资金流"),
             "northbound_industry": self._northbound_rank("北向资金增持行业板块排行", as_of),
             "northbound_concept": self._northbound_rank("北向资金增持概念板块排行", as_of),
             "industry_spot": self._board_spot("stock_board_industry_name_em"),
@@ -104,6 +106,22 @@ class MarketDriversCollector(BaseCollector):
                 self._quiet_fetch,
                 fetcher,
                 ttl_hours=1,
+            ).reset_index(drop=True)
+        except Exception:
+            return pd.DataFrame()
+
+    def _sector_fund_flow(self, sector_type: str) -> pd.DataFrame:
+        fetcher = getattr(ak, "stock_sector_fund_flow_rank", None)
+        if not callable(fetcher):
+            return pd.DataFrame()
+        try:
+            return self.cached_call(
+                f"market_drivers:sector_fund_flow:{sector_type}",
+                self._quiet_fetch,
+                fetcher,
+                ttl_hours=1,
+                indicator="今日",
+                sector_type=sector_type,
             ).reset_index(drop=True)
         except Exception:
             return pd.DataFrame()

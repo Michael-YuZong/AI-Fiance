@@ -15,6 +15,16 @@ except ImportError:  # pragma: no cover
     ak = None
 
 
+THEME_QUERY_EXPANSIONS = {
+    "商业航天": ["商业航天", "卫星", "卫星产业", "航天", "商用卫星"],
+    "航天": ["航天", "航空航天", "卫星"],
+    "卫星": ["卫星", "卫星产业", "商用卫星"],
+    "低空经济": ["低空经济", "通用航空", "无人机"],
+    "沪深300": ["沪深300", "沪深300ETF", "300ETF"],
+    "中证A500": ["中证A500", "中证A500ETF", "A500", "A500ETF"],
+}
+
+
 class AssetLookupCollector(BaseCollector):
     """Resolve natural-language ETF keywords into symbols."""
 
@@ -76,7 +86,7 @@ class AssetLookupCollector(BaseCollector):
         fuzzy: List[tuple[int, Dict[str, Any]]] = []
 
         for item in records:
-            aliases = [str(item.get("name", ""))] + [str(alias) for alias in item.get("aliases", [])]
+            aliases = [str(item.get("symbol", "")), str(item.get("name", ""))] + [str(alias) for alias in item.get("aliases", [])]
             aliases = [alias for alias in aliases if alias]
             exact_match = next((alias for alias in aliases if lowered == alias.lower()), "")
             if exact_match:
@@ -87,6 +97,10 @@ class AssetLookupCollector(BaseCollector):
                             "symbol": item["symbol"],
                             "name": item.get("name", item["symbol"]),
                             "asset_type": item.get("asset_type", ""),
+                            "sector": item.get("sector", ""),
+                            "chain_nodes": item.get("chain_nodes", []),
+                            "region": item.get("region", ""),
+                            "proxy_symbol": item.get("proxy_symbol", ""),
                             "source": "alias",
                             "match_type": "exact_alias",
                             "matched_alias": exact_match,
@@ -113,6 +127,10 @@ class AssetLookupCollector(BaseCollector):
                             "symbol": item["symbol"],
                             "name": item.get("name", item["symbol"]),
                             "asset_type": item.get("asset_type", ""),
+                            "sector": item.get("sector", ""),
+                            "chain_nodes": item.get("chain_nodes", []),
+                            "region": item.get("region", ""),
+                            "proxy_symbol": item.get("proxy_symbol", ""),
                             "source": "alias",
                             "match_type": "fuzzy_alias",
                             "matched_alias": fuzzy_match,
@@ -137,6 +155,10 @@ class AssetLookupCollector(BaseCollector):
                     "symbol": item["symbol"],
                     "name": item.get("name", item["symbol"]),
                     "asset_type": item.get("asset_type", ""),
+                    "sector": item.get("sector", ""),
+                    "chain_nodes": item.get("chain_nodes", []),
+                    "region": item.get("region", ""),
+                    "proxy_symbol": item.get("proxy_symbol", ""),
                     "aliases": [item["symbol"], item.get("name", item["symbol"])],
                 }
             )
@@ -182,7 +204,7 @@ class AssetLookupCollector(BaseCollector):
         if not name_col or not code_col:
             return []
 
-        mask = frame[name_col].astype(str).str.contains(keyword, case=False, na=False)
+        mask = frame[name_col].astype(str).str.contains(keyword, case=False, na=False) | frame[code_col].astype(str).str.contains(keyword, case=False, na=False)
         subset = frame[mask].copy()
         if subset.empty:
             return []
@@ -226,6 +248,13 @@ class AssetLookupCollector(BaseCollector):
 
     def _candidate_terms(self, keyword: str) -> Sequence[str]:
         terms = [keyword]
+        expanded = []
+        for theme, mapped_terms in THEME_QUERY_EXPANSIONS.items():
+            if theme.lower() in keyword.lower():
+                expanded.extend(mapped_terms)
+        for token in expanded:
+            if token not in terms:
+                terms.append(token)
         chunks = [token.strip() for token in re.split(r"\s+", keyword) if token.strip()]
         ordered = sorted(chunks, key=len, reverse=True)
         for token in ordered:

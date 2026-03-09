@@ -69,6 +69,10 @@ cp config/config.example.yaml config/config.yaml
 
 即使 key 没填全，很多基础命令也能先跑通。
 
+如果你要调技术参数、风险阈值或扫描门槛，不要直接把基础配置堆满，按需从下面这个文件复制对应片段即可：
+
+- `config/config.advanced.example.yaml`
+
 ### 3. 跑一个最小例子
 
 ```bash
@@ -159,20 +163,31 @@ python -m src.commands.assistant 如果美股跌20%我的组合会怎样
 
 ## 配置文件
 
-最重要的几个配置：
+推荐按“常改”和“低频调参”两层理解：
 
-- `config/config.example.yaml`
-  运行时配置模板
+### 大多数用户只需要改这几个
+
+- `config/config.yaml`
+  最低可用运行配置
 - `config/watchlist.yaml`
   观察池
 - `config/asset_aliases.yaml`
   中文别名和常用映射
+
+### 低频调参或高级源配置
+
+- `config/config.advanced.example.yaml`
+  技术参数、风险阈值、扫描门槛、数据源路径
 - `config/news_feeds.yaml`
   新闻源、源偏好、必带源
 - `config/market_monitors.yaml`
   原油、美元、VIX、10Y、铜、黄金等固定监控
+- `config/market_overview.yaml`
+  晨报里的国内指数和隔夜外盘面板
 - `config/event_calendar.yaml`
   本地事件日历
+- `config/catalyst_profiles.yaml`
+  行业/主题的催化映射
 - `config/stress_scenarios.yaml`
   压力测试场景
 - `config/rules.yaml`
@@ -182,16 +197,20 @@ python -m src.commands.assistant 如果美股跌20%我的组合会怎样
 
 ### `scan`
 
-目前会输出六块：
+现在默认是“先结论，再展开”的分析结构，而不是先扔一大堆打分：
 
-- 宏观环境
-- 板块与产业链
-- 资金与情绪
-- 跨市场联动
-- 技术面
-- 估值面
+- 一句话结论
+- 当前判断
+- 核心驱动
+- 当前最重要的矛盾
+- 风险点
+- 观察指标
+- 情景分析
+- 操作框架
 
-标记规则：
+需要更机械的维度细节时，再下钻到八维分数和附录。
+
+标记规则仍保留：
 
 - `✅` 偏强 / 偏有利
 - `⚠️` 中性 / 信号不充分
@@ -199,22 +218,15 @@ python -m src.commands.assistant 如果美股跌20%我的组合会怎样
 
 ### `briefing daily`
 
-现在通常包含：
+现在按“倒金字塔”结构生成，先写主线和行动，再展开细节：
 
-- 今日主线
-- 新闻主线
-- 关键宏观资产
-- 隔夜与主要资产
-- 宏观与流动性
-- 市场概览
-- 全球资金流代理
-- 情绪代理
-- Watchlist 雷达
-- 重点观察
-- 关注提醒
-- 今日已知事件
-- 组合与 Thesis
-- 行动建议
+- 昨日验证回顾
+- 主线判断与行动
+- 市场全景
+- 驱动与催化
+- 今日验证点
+- 组合与持仓
+- 附录
 
 ## 边界和诚实说明
 

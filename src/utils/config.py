@@ -33,6 +33,12 @@ def _deep_merge(base: MutableMapping[str, Any], override: Mapping[str, Any]) -> 
     return merged
 
 
+def _load_record_list(path: Path, root_key: str) -> list[dict[str, Any]]:
+    payload = _read_yaml(path)
+    rows = payload.get(root_key, [])
+    return list(rows) if isinstance(rows, list) else []
+
+
 def resolve_project_path(path_value: Union[str, Path]) -> Path:
     candidate = Path(path_value)
     return candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
@@ -61,6 +67,20 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str, Any
 
 def detect_asset_type(symbol: str, config: Mapping[str, Any]) -> str:
     """Infer asset type from configured regex mapping."""
+    symbol = str(symbol).strip()
+    alias_path = resolve_project_path(config.get("asset_aliases_file", "config/asset_aliases.yaml"))
+    watchlist_path = resolve_project_path(config.get("watchlist_file", "config/watchlist.yaml"))
+    for item in _load_record_list(alias_path, "aliases"):
+        if str(item.get("symbol", "")).strip() == symbol:
+            return str(item.get("asset_type", "unknown"))
+    for item in _load_record_list(watchlist_path, "watchlist"):
+        if str(item.get("symbol", "")).strip() == symbol:
+            return str(item.get("asset_type", "unknown"))
+
+    if re.fullmatch(r"\d{6}", symbol):
+        etf_prefixes = ("15", "16", "50", "51", "52", "53", "56", "58", "59")
+        return "cn_etf" if symbol.startswith(etf_prefixes) else "cn_fund"
+
     mapping = config.get("asset_type_mapping", {})
     for pattern, asset_type in mapping.items():
         if re.match(pattern, symbol):
