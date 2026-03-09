@@ -33,6 +33,14 @@ def _append_subsection(lines: List[str], title: str, items: List[str]) -> None:
         lines.append(f"- {item}")
 
 
+def _append_table_subsection(lines: List[str], title: str, headers: List[str], rows: List[List[str]]) -> None:
+    lines.extend(["", f"### {title}", ""])
+    if not rows:
+        lines.append("暂无。")
+        return
+    lines.extend(_table(headers, rows))
+
+
 def _first_item(payload: Dict[str, Any], key: str) -> str:
     items = payload.get(key, []) or []
     return str(items[0]) if items else ""
@@ -58,6 +66,12 @@ class BriefingRenderer:
         _append_subsection(lines, "背景 Regime 依据", payload.get("regime_reason_lines", []))
         _append_subsection(lines, "今天怎么做", payload.get("action_lines", []))
         _append_subsection(lines, "主线校验", payload.get("narrative_validation_lines", []))
+        _append_table_subsection(
+            lines,
+            "驱动与催化",
+            ["驱动", "证据", "传导", "交易含义"],
+            payload.get("catalyst_rows", []),
+        )
         _append_subsection(lines, "重要催化", payload.get("important_event_lines", []))
         _append_subsection(
             lines,
@@ -93,7 +107,19 @@ class BriefingRenderer:
             "验证与行动",
             _first_item(payload, "verification_lines") or _first_item(payload, "event_lines"),
         )
+        _append_table_subsection(
+            lines,
+            "今日验证点表",
+            ["观察点", "看什么", "成立意味着", "失效意味着"],
+            payload.get("verification_rows", []),
+        )
         _append_subsection(lines, "今日验证点", payload.get("verification_lines", []))
+        _append_table_subsection(
+            lines,
+            "今日日历",
+            ["时间", "级别", "事件", "含义"],
+            payload.get("event_rows", []),
+        )
         _append_subsection(lines, "今日已知事件", payload.get("event_lines", []))
         _append_subsection(lines, "跟踪清单", payload.get("calendar_lines", []))
         _append_subsection(lines, "关注提醒", payload.get("alerts", []))

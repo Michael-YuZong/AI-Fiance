@@ -56,6 +56,7 @@ class MarketMonitorCollector(BaseCollector):
                     "latest": float(close.iloc[-1]),
                     "return_1d": self._period_return(close, 1),
                     "return_5d": self._period_return(close, 5),
+                    "return_20d": self._period_return(close, 20),
                 }
             )
         return rows

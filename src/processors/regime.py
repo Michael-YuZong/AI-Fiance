@@ -14,6 +14,16 @@ class RegimeDetector:
         self.data = macro_data
 
     def detect_regime(self) -> Dict[str, object]:
+        explicit = self._explicit_regime()
+        if explicit is not None:
+            regime, reasons = explicit
+            return {
+                "current_regime": regime,
+                "scores": {key: 1 if key == regime else 0 for key in ("recovery", "overheating", "stagflation", "deflation")},
+                "reasoning": reasons,
+                "preferred_assets": self._get_preferred_assets(regime),
+            }
+
         scores = {
             "recovery": 0,
             "overheating": 0,
@@ -64,6 +74,58 @@ class RegimeDetector:
             "reasoning": reasoning.get(best, []),
             "preferred_assets": self._get_preferred_assets(best),
         }
+
+    def _explicit_regime(self) -> tuple[str, List[str]] | None:
+        pmi = float(self.data.get("pmi", 50.0))
+        cpi = float(self.data.get("cpi", 0.0))
+        pmi_trend = str(self.data.get("pmi_trend", "stable"))
+        cpi_trend = str(self.data.get("cpi_trend", "stable"))
+        policy_stance = str(self.data.get("policy_stance", "neutral"))
+        credit_impulse = str(self.data.get("credit_impulse", "stable"))
+        oil_5d = float(self.data.get("oil_5d_change", 0.0))
+        oil_20d = float(self.data.get("oil_20d_change", 0.0))
+
+        if pmi < 50 and (cpi >= 2.0 or oil_20d >= 0.20 or oil_5d >= 0.15):
+            return (
+                "stagflation",
+                [
+                    f"PMI {pmi:.1f} 低于 50，增长端偏弱。",
+                    f"CPI {cpi:.1f}% 与油价冲击并存（油价 5 日 {oil_5d * 100:+.1f}% / 20 日 {oil_20d * 100:+.1f}%）。",
+                    "增长承压但价格/能源冲击仍强，优先按滞涨背景处理。",
+                ],
+            )
+
+        if pmi < 50 and cpi < 2.0 and policy_stance == "easing":
+            return (
+                "deflation",
+                [
+                    f"PMI {pmi:.1f} 低于 50，需求端仍偏弱。",
+                    f"CPI {cpi:.1f}% 处在低位，价格压力不强。",
+                    "政策偏宽松，更接近通缩/偏弱环境而不是过热。",
+                ],
+            )
+
+        if pmi >= 50 and pmi_trend == "rising" and credit_impulse == "expanding":
+            return (
+                "recovery",
+                [
+                    f"PMI {pmi:.1f} 站上 50 且延续回升。",
+                    "信用脉冲扩张，说明内需和融资环境在改善。",
+                    "当前更接近温和复苏，而不是滞涨或通缩。",
+                ],
+            )
+
+        if pmi >= 52 and cpi_trend == "rising":
+            return (
+                "overheating",
+                [
+                    f"PMI {pmi:.1f} 处在高位。",
+                    "CPI 趋势继续上行，价格压力开始抬头。",
+                    "景气与通胀共振，更接近过热环境。",
+                ],
+            )
+
+        return None
 
     def _get_preferred_assets(self, regime: str) -> List[str]:
         mapping = {

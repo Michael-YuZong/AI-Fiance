@@ -445,7 +445,8 @@ def _regime_explanation_lines(
     reasoning = [str(item) for item in regime_result.get("reasoning", []) if str(item).strip()]
     lines: List[str] = []
     if reasoning:
-        lines.append(f"背景 regime 当前判为 `{label}`，触发依据: " + "；".join(reasoning[:3]))
+        cleaned = [item.rstrip("。；; ") for item in reasoning[:3]]
+        lines.append(f"背景 regime 当前判为 `{label}`，触发依据: " + "；".join(cleaned) + "。")
     else:
         pmi = float(china_macro.get("pmi", 50.0))
         cpi = float(china_macro.get("cpi_monthly", 0.0))
@@ -1101,6 +1102,71 @@ def _important_event_lines(news_report: Dict[str, Any]) -> List[str]:
     return lines[:4]
 
 
+def _catalyst_rows(news_report: Dict[str, Any], narrative: Dict[str, Any]) -> List[List[str]]:
+    items = news_report.get("items", []) or []
+    category_rows: Dict[str, List[str]] = {}
+    theme = str(narrative.get("theme", "macro_background"))
+    theme_map = {
+        "energy_shock": [
+            "油价/地缘",
+            "能源与地缘新闻集中，且原油、VIX、美元同步共振。",
+            "原油 -> 通胀预期 -> 波动率/美元 -> 科技和高估值资产承压。",
+            "先看能源、电力电网和防守资产，不把今天当成普通成长修复日。",
+        ],
+        "defensive_riskoff": [
+            "防守避险",
+            "波动率抬升、黄金或防守资产相对更稳。",
+            "避险偏好 -> 资金收缩高弹性仓位 -> 防守资产相对占优。",
+            "优先控回撤，确认波动降温后再谈进攻。",
+        ],
+        "rate_growth": [
+            "利率预期",
+            "Fed/通胀新闻进入头条，长端利率与美元成为关键变量。",
+            "利率预期 -> 估值修复 -> 科技/成长弹性扩散。",
+            "重点看科技是否跟随利率预期同步走强。",
+        ],
+        "china_policy": [
+            "政策/内需",
+            "国内政策与稳增长信号成为主线。",
+            "政策 -> 基建/电网/内需链 -> A股相对收益。",
+            "重点看政策是否转成板块持续性和资金承接。",
+        ],
+        "ai_semis": [
+            "AI/半导体",
+            "AI 模型、产品或半导体资本开支新闻成为催化。",
+            "产品/产能 -> 板块热度 -> 硬件链和成长风格扩散。",
+            "重点看半导体、通信、算力链是否接力。",
+        ],
+    }
+    if theme in theme_map:
+        category_rows[theme] = theme_map[theme]
+
+    category_definitions = {
+        "energy": ("油价/地缘", "能源价格变化进入头条。", "原油 -> 通胀预期 -> 风险资产定价。", "优先看能源链和防守资产。"),
+        "geopolitics": ("地缘事件", "地缘消息直接影响供给或风险偏好。", "地缘扰动 -> 波动率/美元 -> 资产风险溢价上升。", "先确认冲击是脉冲还是趋势。"),
+        "fed": ("美联储/利率", "利率预期新闻驱动盘面。", "利率 -> 估值折现 -> 科技成长弹性。", "重点看美债和科技代理是否共振。"),
+        "earnings": ("财报/指引", "重要公司财报或指引改变板块预期。", "业绩/指引 -> 板块风险偏好 -> 相关 ETF 表现。", "看是单股事件还是可扩散成板块主线。"),
+        "china_macro": ("中国宏观/政策", "国内政策或宏观表态影响风险偏好。", "政策 -> 内需/电网/基建链。", "重点看政策是否带来持续资金承接。"),
+        "china_market_domestic": ("A股盘面快讯", "国内快讯补充盘面细节。", "快讯 -> 情绪扩散 -> 题材强弱切换。", "和龙虎榜、涨停池一起判断强度。"),
+        "china_macro_domestic": ("国内政策快讯", "国内政策快讯提供更细的落地节奏。", "快讯 -> 政策预期 -> 内需相关板块。", "更适合辅助确认，而不是单独定主线。"),
+        "ai": ("AI 产品", "模型/产品发布或传闻带来催化。", "产品 -> 情绪/估值 -> AI 应用与算力链。", "先看新闻是否真的扩散到板块。"),
+        "semiconductor": ("半导体产能", "产能与资本开支新闻改变供需预期。", "资本开支 -> 设备/材料/代工链。", "更适合中期跟踪，不一定立刻成日内主线。"),
+    }
+
+    for item in items:
+        category = str(item.get("category", "")).lower()
+        if category in category_rows or category not in category_definitions:
+            continue
+        title = str(item.get("title", "无标题")).strip()
+        label, _, transmission, implication = category_definitions[category]
+        source = str(item.get("source") or item.get("configured_source") or "未知源")
+        category_rows[category] = [label, f"{title} ({source})", transmission, implication]
+        if len(category_rows) >= 4:
+            break
+
+    return list(category_rows.values())[:4]
+
+
 def _rotation_driver_lines(
     drivers: Dict[str, Any],
     pulse: Dict[str, Any],
@@ -1349,6 +1415,60 @@ def _verification_lines(
     return lines[:6]
 
 
+def _verification_rows(
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+) -> List[List[str]]:
+    rows: List[List[str]] = []
+    monitor = _monitor_map(monitor_rows)
+    if monitor.get("布伦特原油"):
+        rows.append(
+            [
+                "原油",
+                "布油是否继续上冲，还是冲高回落",
+                "能源/通胀主线继续强化，防守和电力链优先级维持",
+                "主线降温，风险偏好可能获得喘息",
+            ]
+        )
+    if monitor.get("VIX波动率"):
+        rows.append(
+            [
+                "VIX",
+                "是否继续站在 25 以上",
+                "高波动延续，仓位继续收敛",
+                "情绪缓和，成长线才有修复空间",
+            ]
+        )
+    if monitor.get("美元指数"):
+        rows.append(
+            [
+                "美元",
+                "DXY 是否继续走强",
+                "港股科技和高估值资产继续受压",
+                "成长估值端压力缓解",
+            ]
+        )
+    if _find_snapshot(snapshots, "HSTECH"):
+        rows.append(
+            [
+                "HSTECH",
+                "是否止跌并形成量价修复",
+                "风险偏好回暖，港股科技有望跟进",
+                "成长线仍弱，不能轻易把它当反转",
+            ]
+        )
+    if _find_snapshot(snapshots, "561380"):
+        rows.append(
+            [
+                "561380",
+                "是否继续强于大盘并维持相对强势",
+                "国内确定性方向仍有效",
+                "主线切换或板块承接减弱",
+            ]
+        )
+    return rows[:5]
+
+
 def _yesterday_review_lines(
     snapshots: List[BriefingSnapshot],
     monitor_rows: List[Dict[str, Any]],
@@ -1384,7 +1504,16 @@ def _yesterday_review_lines(
         return [f"昨日晨报 `{latest_path.name}` 里没有结构化‘今日验证点’，暂时无法自动复盘。"]
 
     raw_lines = [line.strip() for line in section_match.group(1).splitlines()]
-    checks = [line[2:].strip() for line in raw_lines if line.startswith("- ")]
+    checks: List[str] = []
+    for line in raw_lines:
+        if not line:
+            continue
+        if line.startswith("|") or line.startswith("###") or line.startswith("##"):
+            continue
+        if line.startswith("- "):
+            checks.append(line[2:].strip())
+        elif not checks:
+            checks.append(line)
     if not checks:
         return [f"昨日晨报 `{latest_path.name}` 没有可解析的验证点条目。"]
 
@@ -1448,6 +1577,8 @@ def _liquidity_lines(config: Dict[str, Any]) -> List[str]:
         if abs(south) > 1e-6:
             direction = "净流入" if south >= 0 else "净流出"
             lines.append(f"南向资金当日{direction}约 {_fmt_hsgt_amount(south)}，可作为 HSTECH 情绪承接的辅助观察。")
+            if abs(south) >= 250:
+                lines.append("⚠️ 南向资金读数偏大，请复核是否为单日口径、分市场合计口径或极端风险偏好切换。")
 
     try:
         margin = collector.get_margin_trading()
@@ -1660,8 +1791,22 @@ def _calendar_lines(mode: str) -> List[str]:
     return lines
 
 
-def _event_lines(config: Dict[str, Any], mode: str) -> List[str]:
-    events = EventsCollector(config).collect(mode=mode)
+def _event_rows(events: List[Dict[str, Any]]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for item in events[:5]:
+        importance = {"high": "高", "medium": "中", "low": "低"}.get(str(item.get("importance", "")).lower(), "中")
+        rows.append(
+            [
+                str(item.get("time", "待定")),
+                importance,
+                str(item.get("title", "未命名事件")),
+                str(item.get("note", "")),
+            ]
+        )
+    return rows
+
+
+def _event_lines(events: List[Dict[str, Any]]) -> List[str]:
     if not events:
         return ["当前没有配置显式事件日历，今日以例行盘前、盘中和收盘跟踪为主。"]
 
@@ -1723,16 +1868,17 @@ def main() -> None:
     except Exception:
         global_proxy_note = "跨市场代理数据暂不可用，已回退到国内宏观与本地缓存。"
 
-    regime_inputs = derive_regime_inputs(china_macro, global_proxy)
+    monitor_rows = _collect_monitor_rows(config)
+    regime_inputs = derive_regime_inputs(china_macro, global_proxy, monitor_rows)
     regime_result = RegimeDetector(regime_inputs).detect_regime()
 
     snapshots, alerts, watchlist_rows = _collect_snapshots(config, args.mode)
     pulse = MarketPulseCollector(config).collect()
     drivers = MarketDriversCollector(config).collect()
     news_report = _news_report(snapshots, china_macro, global_proxy, config, args.news_source)
-    monitor_rows = _collect_monitor_rows(config)
     narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime_result)
     anomaly_report = _anomaly_report(snapshots, monitor_rows)
+    events = EventsCollector(config).collect(mode=args.mode)
     macro_items = macro_lines(china_macro, global_proxy)
     regime_label = REGIME_LABELS.get(str(regime_result["current_regime"]), str(regime_result["current_regime"]))
     macro_items.append(f"当前宏观环境判断: {regime_label}。")
@@ -1754,6 +1900,7 @@ def main() -> None:
         "regime_reason_lines": _regime_explanation_lines(china_macro, regime_result, narrative),
         "narrative_validation_lines": _narrative_validation_lines(narrative, news_report, monitor_rows, pulse, snapshots),
         "important_event_lines": _important_event_lines(news_report),
+        "catalyst_rows": _catalyst_rows(news_report, narrative),
         "news_lines": _news_lines(news_report),
         "story_lines": _story_lines(news_report, monitor_rows, snapshots, narrative),
         "source_quality_lines": _source_quality_lines(news_report),
@@ -1776,10 +1923,12 @@ def main() -> None:
         "focus_lines": _focus_lines(snapshots, args.mode),
         "rotation_lines": _rotation_lines(snapshots),
         "alerts": alerts or ["当前没有触发强提醒，但仍需关注强弱方向是否在盘中发生切换。"],
-        "event_lines": _event_lines(config, args.mode),
         "portfolio_lines": _portfolio_lines(config),
+        "verification_rows": _verification_rows(snapshots, monitor_rows),
         "verification_lines": _verification_lines(snapshots, monitor_rows),
         "calendar_lines": _calendar_lines(args.mode),
+        "event_rows": _event_rows(events),
+        "event_lines": _event_lines(events),
         "action_lines": _action_lines(snapshots, narrative, monitor_rows),
     }
     rendered = BriefingRenderer().render(payload)

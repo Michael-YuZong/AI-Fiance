@@ -8,12 +8,16 @@ import src.commands.briefing as briefing_module
 from src.commands.briefing import (
     BriefingSnapshot,
     _anomaly_report,
+    _catalyst_rows,
     _important_event_lines,
     _narrative_validation_lines,
     _primary_narrative,
     _source_quality_lines,
+    _verification_rows,
     _yesterday_review_lines,
 )
+from src.processors.context import derive_regime_inputs
+from src.processors.regime import RegimeDetector
 
 
 def test_important_event_lines_extracts_specific_drivers() -> None:
@@ -30,6 +34,20 @@ def test_important_event_lines_extracts_specific_drivers() -> None:
     assert any("美联储与利率预期" in line for line in lines)
     assert any("AI 产品与模型" in line for line in lines)
     assert any("半导体产能与资本开支" in line for line in lines)
+
+
+def test_catalyst_rows_builds_transmission_chain() -> None:
+    report = {
+        "items": [
+            {"category": "energy", "title": "Oil surges on Strait risk", "source": "Reuters"},
+            {"category": "china_market_domestic", "title": "财联社：电力板块持续走强", "source": "财联社"},
+        ]
+    }
+
+    rows = _catalyst_rows(report, {"theme": "energy_shock"})
+
+    assert rows
+    assert any("原油" in row[2] or "通胀" in row[2] for row in rows)
 
 
 def test_important_event_lines_does_not_misclassify_generic_macro_as_ai() -> None:
@@ -106,6 +124,36 @@ def test_narrative_validation_reports_energy_checks() -> None:
     assert any("价格校验通过" in line for line in lines)
     assert any("盘面校验通过" in line for line in lines)
     assert any("结论: 当前主线校验通过" in line for line in lines)
+
+
+def test_verification_rows_include_core_checks() -> None:
+    snapshots = [
+        BriefingSnapshot("HSTECH", "恒生科技", "hk_index", "HK", "科技", 4.7, -0.02, -0.03, -0.1, 1.0, "空头", -2, "", ""),
+        BriefingSnapshot("561380", "电网ETF", "cn_etf", "CN", "电网", 2.2, 0.0, 0.02, 0.18, 1.0, "多头", 2, "", ""),
+    ]
+    monitor_rows = [
+        {"name": "布伦特原油", "latest": 108.0, "return_1d": 0.1, "return_5d": 0.2},
+        {"name": "VIX波动率", "latest": 29.0, "return_1d": 0.1, "return_5d": 0.2},
+        {"name": "美元指数", "latest": 99.0, "return_1d": 0.0, "return_5d": 0.01},
+    ]
+
+    rows = _verification_rows(snapshots, monitor_rows)
+
+    assert any(row[0] == "原油" for row in rows)
+    assert any(row[0] == "HSTECH" for row in rows)
+
+
+def test_regime_detector_is_stable_with_oil_shock() -> None:
+    inputs = derive_regime_inputs(
+        {"pmi": 49.0, "pmi_trend": "falling", "cpi_monthly": 0.4, "cpi_trend": "rising", "lpr_1y": 3.0, "lpr_prev": 3.0},
+        {"dxy_20d_change": 0.01},
+        [{"name": "布伦特原油", "return_5d": 0.39, "return_20d": 0.25}],
+    )
+
+    result = RegimeDetector(inputs).detect_regime()
+
+    assert result["current_regime"] == "stagflation"
+    assert any("油价" in line for line in result["reasoning"])
 
 
 def test_anomaly_report_flags_extreme_oil_and_etf_moves() -> None:

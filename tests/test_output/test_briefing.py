@@ -13,6 +13,7 @@ def test_briefing_renderer_outputs_core_sections():
         "yesterday_review_lines": ["昨日原油验证点回看: 今天继续强化。"],
         "regime_reason_lines": ["背景 regime 当前判为 `滞涨`，触发依据: PMI 低于 50。"],
         "narrative_validation_lines": ["结论: 当前主线校验通过 3/3 项。"],
+        "catalyst_rows": [["油价/地缘", "油价跳升", "原油 -> 通胀预期", "先看防守资产"]],
         "important_event_lines": ["美联储与利率预期: 市场等待 CPI。"],
         "story_lines": ["今天市场更像在交易油价冲击。"],
         "source_quality_lines": ["本次新闻覆盖源: Reuters / 财联社。"],
@@ -28,7 +29,9 @@ def test_briefing_renderer_outputs_core_sections():
         "alerts": ["561380 放量。"],
         "event_lines": ["09:00 [高] A股盘前检查。"],
         "portfolio_lines": ["组合市值 100000。"],
+        "verification_rows": [["原油", "是否继续上冲", "主线强化", "主线降温"]],
         "verification_lines": ["先看原油是否继续扩张涨幅。"],
+        "event_rows": [["09:00", "高", "A股盘前检查", "检查最强最弱方向"]],
         "calendar_lines": ["盘前看强弱延续。"],
         "action_lines": ["今天先按防守优先处理。"],
     }
@@ -42,6 +45,7 @@ def test_briefing_renderer_outputs_core_sections():
     assert "### 背景 Regime 依据" in rendered
     assert "### 今天怎么做" in rendered
     assert "### 主线校验" in rendered
+    assert "### 驱动与催化" in rendered
     assert "### 重要催化" in rendered
     assert "### 新闻覆盖与异常" in rendered
     assert "### 资产仪表盘" in rendered
@@ -50,6 +54,8 @@ def test_briefing_renderer_outputs_core_sections():
     assert "### 龙虎榜与活跃资金" in rendered
     assert "### Watchlist 雷达" in rendered
     assert "### Watchlist 技术指标" in rendered
+    assert "### 今日验证点表" in rendered
+    assert "### 今日日历" in rendered
     assert "### 今日已知事件" in rendered
     assert "### 今日验证点" in rendered
     assert "### 跟踪清单" in rendered

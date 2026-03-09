@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
 
@@ -70,11 +70,19 @@ def macro_lines(china_macro: Dict[str, Any], global_proxy: Dict[str, Any]) -> Li
     return lines
 
 
-def derive_regime_inputs(china_macro: Dict[str, Any], global_proxy: Dict[str, Any]) -> Dict[str, Any]:
+def derive_regime_inputs(
+    china_macro: Dict[str, Any],
+    global_proxy: Dict[str, Any],
+    monitor_rows: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     dxy_change = float(global_proxy.get("dxy_20d_change", 0.0))
     pmi = float(china_macro.get("pmi", 50.0))
     lpr = float(china_macro.get("lpr_1y", 0.0))
     lpr_prev = float(china_macro.get("lpr_prev", lpr))
+    monitor_map = {str(item.get("name", "")): item for item in monitor_rows or []}
+    brent = monitor_map.get("布伦特原油", {})
+    oil_5d_change = float(brent.get("return_5d", 0.0))
+    oil_20d_change = float(brent.get("return_20d", 0.0))
 
     if lpr < lpr_prev:
         policy_stance = "easing"
@@ -99,6 +107,8 @@ def derive_regime_inputs(china_macro: Dict[str, Any], global_proxy: Dict[str, An
         "credit_impulse": credit_impulse,
         "policy_stance": policy_stance,
         "dxy_state": "strengthening" if dxy_change > 0.015 else "weakening" if dxy_change < -0.015 else "stable",
+        "oil_5d_change": oil_5d_change,
+        "oil_20d_change": oil_20d_change,
     }
 
 
