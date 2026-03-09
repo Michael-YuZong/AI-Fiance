@@ -28,14 +28,14 @@
 6. 风险管理：相关性、VaR、压力测试、集中度预警
 7. 简易回测：验证规则有没有明显失效
 
-当前仓库已经实现到 Phase 2 基础版，重点是把日常使用最常见的几条链路先跑通：
+当前仓库已经实现到 Phase 3 基础版，重点是把日常使用和研究辅助最常见的几条链路先跑通：
 
 - 配置加载、日志、重试、缓存
 - A 股 ETF / 美股 / 港股 / 商品行情采集骨架
 - 技术指标引擎
 - 六维扫描基础版：宏观、产业链、资金情绪、跨市场、技术面、估值面
 - SQLite 基础存储
-- `scan`、`briefing`、`snap`、`compare`、`portfolio` 命令可运行
+- `scan`、`briefing`、`snap`、`compare`、`portfolio`、`discover`、`regime`、`policy` 命令可运行
 
 ## 当前支持什么
 
@@ -51,6 +51,11 @@ python -m src.commands.portfolio status
 python -m src.commands.portfolio log buy 561380 2.23 10000
 python -m src.commands.portfolio set-target 561380 0.30
 python -m src.commands.portfolio rebalance
+python -m src.commands.portfolio thesis set 561380 --core "..." --validation "..." --stop "..." --period "6-12个月"
+python -m src.commands.portfolio review 2026-03
+python -m src.commands.discover 电网
+python -m src.commands.regime
+python -m src.commands.policy 电网
 ```
 
 例如：
@@ -128,7 +133,7 @@ cp config/config.example.yaml config/config.yaml
 - `fred`: FRED 宏观数据 API key
 - `tushare`: Tushare token
 
-如果你先跑 `scan`、`snap`、`briefing` 这些基础命令，很多情况下即便没填完整 key 也能先跑通主要链路。
+如果你先跑 `scan`、`briefing`、`discover`、`regime`、`policy` 这些基础命令，很多情况下即便没填完整 key 也能先跑通主要链路。
 
 ## 怎么用
 
@@ -201,7 +206,47 @@ python -m src.commands.portfolio set-target 561380 0.30
 python -m src.commands.portfolio rebalance
 ```
 
-### 7. 查看本地数据
+设置 thesis 并做检查：
+
+```bash
+python -m src.commands.portfolio thesis set 561380 \
+  --core "AI 驱动电力需求上行，电网投资提速" \
+  --validation "电网投资完成额同比 > 10%" \
+  --stop "趋势转弱且景气下修" \
+  --period "6-12个月"
+
+python -m src.commands.portfolio thesis check
+```
+
+做月度复盘：
+
+```bash
+python -m src.commands.portfolio review 2026-03
+```
+
+### 7. 做 Phase 3 研究辅助
+
+主动发现：
+
+```bash
+python -m src.commands.discover
+python -m src.commands.discover 电网
+```
+
+宏观体制识别：
+
+```bash
+python -m src.commands.regime
+```
+
+政策解读：
+
+```bash
+python -m src.commands.policy 电网
+python -m src.commands.policy https://example.com/policy-page
+```
+
+### 8. 查看本地数据
 
 扫描后会写入：
 
@@ -227,12 +272,13 @@ python -m src.commands.portfolio rebalance
 
 ## 当前实现进度
 
-- 已完成：Phase 1 + Phase 2 基础能力
-- 已可运行：`scan`、`briefing`、`snap`、`compare`、`portfolio`
+- 已完成：Phase 1 + Phase 2 + Phase 3 基础能力
+- 已可运行：`scan`、`briefing`、`snap`、`compare`、`portfolio`、`discover`、`regime`、`policy`
 - 已有真实数据接入：A 股 ETF、港股代理行情、美股 ETF、商品期货、部分中国宏观数据、VIX / DXY / 铜金比代理
-- 仍是骨架：`risk`、`backtest`、`discover`、`regime`、`policy`、`research`
+- 已有启发式研究模块：事件驱动发现、历史 regime 类比、政策模板/URL 解读、thesis 健康检查、月度操作复盘
+- 仍是骨架：`risk`、`backtest`、`research`
 
-也就是说，仓库现在已经不是只有一个 `scan`，而是日常盯盘和基础组合管理可以开始用了；但更完整的风险、回测和研究模块还在后续 Phase。
+也就是说，仓库现在已经不是只有一个 `scan`，而是日常盯盘、主题研究和基础组合管理都可以开始用了；但更完整的风险、回测和自由研究模块还在后续 Phase。
 
 ## 测试
 
@@ -251,12 +297,14 @@ python -m pytest -q
 - 中国宏观采集器基础行为
 - 组合仓位与再平衡
 - 简报渲染
+- Regime 识别
+- Policy 关键词解析
+- Thesis 存储
 
 ## 后续计划
 
 接下来会按 Phase 继续补齐：
 
-- Phase 3：机会发现、Regime、政策解读、thesis 管理
 - Phase 4：风险报告、压力测试、回测命令
 - Phase 5：社媒情绪、全球资金流、推送能力
 

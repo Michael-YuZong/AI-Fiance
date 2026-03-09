@@ -1,0 +1,62 @@
+[
+  {
+    "id": "power-grid",
+    "name": "电网投资与新型电力系统",
+    "aliases": ["电网", "特高压", "配电网", "新型电力系统"],
+    "policy_goal": "提升电网承载能力，支撑新能源并网和算力基础设施扩容。",
+    "timeline": "通常按五年规划和年度投资节奏推进，落地偏中期。",
+    "support_points": ["特高压", "配电网改造", "储能并网", "电力数字化"],
+    "beneficiary_nodes": ["电力需求", "电网设备", "铜铝"],
+    "risk_nodes": ["高估值追涨", "落地节奏低于预期"],
+    "mapped_assets": ["561380"],
+    "headline_numbers": ["电网投资强度提升", "关注年度投资完成额和项目开工节奏"]
+  },
+  {
+    "id": "semiconductor",
+    "name": "半导体自主可控",
+    "aliases": ["半导体", "芯片", "国产替代", "EDA", "设备材料"],
+    "policy_goal": "强化半导体设备、材料和设计工具的国产替代能力。",
+    "timeline": "通常是中长期产业政策，短期催化来自专项基金和项目招标。",
+    "support_points": ["设备", "材料", "EDA/IP", "先进封装"],
+    "beneficiary_nodes": ["半导体自主可控", "半导体设备", "半导体材料", "EDA/IP"],
+    "risk_nodes": ["海外限制升级", "景气下行阶段估值压缩"],
+    "mapped_assets": ["芯片ETF"],
+    "headline_numbers": ["产线扩产节奏", "专项资金投向", "国产化率提升目标"]
+  },
+  {
+    "id": "data-elements",
+    "name": "数据要素与信创",
+    "aliases": ["数据要素", "数据安全", "信创", "国产算力"],
+    "policy_goal": "推动数据资产化、流通机制建设和底层 IT 国产化。",
+    "timeline": "先规则建设，后订单兑现，落地偏渐进。",
+    "support_points": ["数据确权", "流通平台", "数据安全", "信创", "国产算力"],
+    "beneficiary_nodes": ["数据要素", "数据安全", "信创", "国产算力"],
+    "risk_nodes": ["订单兑现慢", "主题过热"],
+    "mapped_assets": ["中概互联", "HSTECH"],
+    "headline_numbers": ["地方试点范围", "预算安排", "订单转化速度"]
+  },
+  {
+    "id": "ai-compute",
+    "name": "AI 算力与基础设施",
+    "aliases": ["算力", "AI基础设施", "数据中心", "人工智能"],
+    "policy_goal": "提高算力供给与资源调度效率，带动电力和基础设施升级。",
+    "timeline": "短期看项目立项和 CapEx，中期看需求兑现。",
+    "support_points": ["算力租赁", "液冷", "数据中心", "电力配套"],
+    "beneficiary_nodes": ["AI算力", "电力需求", "电网设备"],
+    "risk_nodes": ["资本开支放缓", "需求兑现低于预期"],
+    "mapped_assets": ["561380", "HSTECH"],
+    "headline_numbers": ["算力中心建设节奏", "服务器与电力配套投资"]
+  },
+  {
+    "id": "medical-aging",
+    "name": "老龄化与医疗服务",
+    "aliases": ["医疗", "医药", "器械", "老龄化"],
+    "policy_goal": "改善老龄化背景下的医疗服务供给和设备升级。",
+    "timeline": "偏长期，催化来自医保、采购和行业规范调整。",
+    "support_points": ["医疗器械", "医疗服务", "康复养老"],
+    "beneficiary_nodes": ["老龄化", "医疗器械", "医疗服务"],
+    "risk_nodes": ["集采压价", "需求恢复不及预期"],
+    "mapped_assets": ["医药ETF"],
+    "headline_numbers": ["设备更新节奏", "医保支付政策", "服务扩容节奏"]
+  }
+]

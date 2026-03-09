@@ -74,6 +74,9 @@ class PortfolioRepository:
         amount: float,
         region: str = "",
         sector: str = "",
+        basis: str = "rule",
+        note: str = "",
+        signal_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         payload = self.load()
         holdings = {item["symbol"]: item for item in payload.get("holdings", [])}
@@ -126,10 +129,40 @@ class PortfolioRepository:
                 "price": price,
                 "amount": amount,
                 "quantity": quantity_delta,
+                "basis": basis,
+                "note": note,
+                "signal_snapshot": signal_snapshot or {},
             }
         )
         save_json(self.trade_log_path, trades)
         return holding
+
+    def list_trades(self) -> List[Dict[str, Any]]:
+        return list(load_json(self.trade_log_path, default=[]) or [])
+
+    def monthly_review(self, month: str, latest_prices: Dict[str, float]) -> Dict[str, Any]:
+        trades = [trade for trade in self.list_trades() if str(trade.get("timestamp", "")).startswith(month)]
+        by_basis: Dict[str, Dict[str, float]] = {}
+        detailed: List[Dict[str, Any]] = []
+        for trade in trades:
+            symbol = trade["symbol"]
+            latest_price = latest_prices.get(symbol, trade["price"])
+            action = trade["action"]
+            trade_return = (latest_price / trade["price"] - 1) if trade["price"] else 0.0
+            outcome = trade_return if action == "buy" else -trade_return
+            basis = trade.get("basis", "unknown")
+            stats = by_basis.setdefault(basis, {"count": 0, "avg_outcome": 0.0, "wins": 0})
+            stats["count"] += 1
+            stats["avg_outcome"] += outcome
+            stats["wins"] += 1 if outcome > 0 else 0
+            detailed.append({**trade, "latest_price": latest_price, "outcome": outcome})
+
+        for basis, stats in by_basis.items():
+            count = stats["count"] or 1
+            stats["avg_outcome"] /= count
+            stats["win_rate"] = stats["wins"] / count
+
+        return {"month": month, "trades": detailed, "basis_stats": by_basis}
 
     def build_status(self, latest_prices: Dict[str, float]) -> Dict[str, Any]:
         holdings = self.list_holdings()
