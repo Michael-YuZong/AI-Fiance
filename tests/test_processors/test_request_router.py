@@ -35,6 +35,18 @@ def test_router_maps_compare_request_with_resolved_symbols():
     assert routed.args == ["512400", "GLD"]
 
 
+def test_router_maps_buy_question_to_scan():
+    routed = route_request("561380 能不能买", candidate_symbols=["561380", "QQQM"])
+    assert routed.module == "scan"
+    assert routed.args == ["561380"]
+
+
+def test_router_maps_vs_phrase_to_compare():
+    routed = route_request("561380 vs QQQM", candidate_symbols=["561380", "QQQM"])
+    assert routed.module == "compare"
+    assert routed.args == ["561380", "QQQM"]
+
+
 def test_router_falls_back_to_research_for_open_question():
     routed = route_request("为什么最近市场有点别扭", candidate_symbols=["561380", "QQQM"])
     assert routed.module == "research"

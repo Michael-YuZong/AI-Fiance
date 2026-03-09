@@ -78,6 +78,7 @@ def compute_history_metrics(frame: pd.DataFrame) -> Dict[str, float]:
     normalized = normalize_ohlcv_frame(frame)
     close = normalized["close"].astype(float)
     volume = normalized["volume"].fillna(0.0).astype(float)
+    amount = normalized["amount"].fillna(np.nan).astype(float)
 
     def _period_return(days: int) -> float:
         if len(close) <= days:
@@ -87,7 +88,11 @@ def compute_history_metrics(frame: pd.DataFrame) -> Dict[str, float]:
     returns = close.pct_change().dropna()
     rolling_max = close.cummax()
     drawdown = close / rolling_max - 1
-    avg_amount = float((close * volume).tail(20).mean())
+    amount_tail = amount.tail(20).dropna()
+    if not amount_tail.empty and float(amount_tail.abs().sum()) > 0:
+        avg_amount = float(amount_tail.mean())
+    else:
+        avg_amount = float((close * volume).tail(20).mean())
     return {
         "last_close": float(close.iloc[-1]),
         "return_1d": _period_return(1),

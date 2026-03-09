@@ -18,6 +18,8 @@ SCENARIO_ALIASES = {
     "原油飙升": ["原油飙升", "油价大涨", "布伦特", "油价冲击"],
 }
 
+SYMBOL_STOPWORDS = {"VS"}
+
 
 @dataclass
 class RoutedCommand:
@@ -48,7 +50,7 @@ def route_request(
         return RoutedCommand("briefing", ["daily"], "识别为晨报/日度简报需求。")
     if any(keyword in text for keyword in ["周报", "周度简报"]):
         return RoutedCommand("briefing", ["weekly"], "识别为周报需求。")
-    if any(keyword in text for keyword in ["机会", "发现", "关注什么", "值得看什么", "主动发现"]):
+    if any(keyword in text for keyword in ["机会", "发现", "关注什么", "值得看什么", "主动发现", "今日扫描", "扫一下", "有什么值得看的"]):
         event = _extract_event_keyword(text)
         return RoutedCommand("discover", [event] if event else [], "识别为机会发现或关注方向筛选。")
     if any(keyword in text for keyword in ["体制", "regime", "宏观环境"]) and not symbols:
@@ -68,7 +70,7 @@ def route_request(
     if any(keyword in text for keyword in ["复盘"]) and re.search(r"20\d{2}-\d{2}", text):
         month = re.search(r"(20\d{2}-\d{2})", text).group(1)
         return RoutedCommand("portfolio", ["review", month], "识别为月度复盘。")
-    if any(keyword in text for keyword in ["比较", "对比"]) and len(symbols) >= 2:
+    if any(keyword in text for keyword in ["比较", "对比", "怎么选", "哪个更好", "vs", "VS"]) and len(symbols) >= 2:
         return RoutedCommand("compare", symbols[:4], "识别为同类标的比较。")
     if any(keyword in text for keyword in ["盘中", "快照", "分时"]) and symbols:
         return RoutedCommand("snap", [symbols[0]], "识别为盘中快照。")
@@ -77,7 +79,7 @@ def route_request(
         period = _detect_period(text)
         if symbols:
             return RoutedCommand("backtest", [rule, symbols[0], period], "识别为规则回测。")
-    if symbols and any(keyword in text for keyword in ["扫描", "看看", "分析", "打分卡", "标的"]):
+    if symbols and any(keyword in text for keyword in ["扫描", "看看", "分析", "打分卡", "标的", "怎么样", "能不能买", "深度分析"]):
         return RoutedCommand("scan", [symbols[0]], "识别为单标的扫描。")
     if symbols and len(symbols) == 1 and len(text) <= 24:
         return RoutedCommand("scan", [symbols[0]], "检测到单个标的，默认执行扫描。")
@@ -103,6 +105,8 @@ def _extract_symbols(text: str, candidates: Sequence[str]) -> List[str]:
 
     ordered: List[str] = []
     for _, symbol in sorted(matched_positions, key=lambda item: item[0]):
+        if symbol in SYMBOL_STOPWORDS:
+            continue
         if symbol not in ordered:
             ordered.append(symbol)
     return ordered

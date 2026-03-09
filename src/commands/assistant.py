@@ -22,6 +22,15 @@ NEWS_SOURCE_ALIASES = {
     "财联社": ["财联社"],
 }
 
+COMMAND_TIMEOUTS = {
+    "discover": 45,
+    "scan": 30,
+    "compare": 45,
+    "briefing": 45,
+    "backtest": 60,
+    "risk": 30,
+}
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Route natural-language requests to the right command.")
@@ -58,16 +67,18 @@ def main() -> None:
             cwd=str(PROJECT_ROOT),
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=COMMAND_TIMEOUTS.get(routed.module, 15),
         )
         timed_out = False
     except subprocess.TimeoutExpired as exc:
         timed_out = True
+        stdout = exc.stdout.decode("utf-8", errors="ignore") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", errors="ignore") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
         result = subprocess.CompletedProcess(
             cmd,
             returncode=124,
-            stdout=exc.stdout or "",
-            stderr=(exc.stderr or "") + "\nCommand timed out.",
+            stdout=stdout,
+            stderr=stderr + "\nCommand timed out.",
         )
 
     lines = [
