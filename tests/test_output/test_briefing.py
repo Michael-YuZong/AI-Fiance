@@ -22,6 +22,8 @@ def test_briefing_renderer_outputs_core_sections():
         "overnight_rows": [["美股", "标普500", "5000.00", "-1.20%", "偏弱"]],
         "watchlist_rows": [["561380", "场内价格 2.234", "+1.00%", "+2.00%", "+3.00%", "多头", "66.0 / 30.0", "偏强"]],
         "core_event_lines": ["**油价跳升**\n  → 原油 -> 通胀预期\n  → 先看防守资产"],
+        "theme_tracking_rows": [["电力/电网", "能源冲击", "防守与政策承接共振", "短线交易 / 中线配置", "油价回落则催化降温"]],
+        "theme_tracking_lines": ["与主线一致性: 电力/电网 与 1.1 主线吻合。", "与前日对比: 暂无前一日行业跟踪归档，对比项从本次开始记录。"],
         "market_event_rows": [["20:30", "美国 CPI", "预期 0.3% / 前值 0.2%", "高", "QQQM"]],
         "workflow_event_rows": [["09:00", "盘前检查", "检查最强最弱方向"]],
         "capital_flow_lines": ["主力资金净流出 12.30 亿。"],
@@ -54,10 +56,12 @@ def test_briefing_renderer_outputs_core_sections():
     assert "### 2.4 隔夜外盘" in rendered
     assert "### 2.5 Watchlist" in rendered
     assert "### 3.1 核心事件（限3-5条）" in rendered
-    assert "### 3.2 今日日历 - 市场事件" in rendered
-    assert "### 3.2 今日日历 - 操作提醒" in rendered
-    assert "### 3.3 盘面与资金" in rendered
-    assert "### 3.4 新闻覆盖与数据质量" in rendered
+    assert "### 3.2 行业与主题跟踪（限2-4个方向）" in rendered
+    assert "### 3.3 今日日历" in rendered
+    assert "**市场事件**" in rendered
+    assert "**操作提醒**" in rendered
+    assert "### 3.4 盘面与资金" in rendered
+    assert "### 3.5 新闻覆盖与数据质量" in rendered
     assert "### 4.1 验证点表" in rendered
     assert "## 附录（折叠，按需展开）" in rendered
     assert "<details>" in rendered

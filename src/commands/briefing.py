@@ -848,6 +848,17 @@ def _industry_text(*frames: pd.DataFrame) -> str:
     return " ".join(parts)
 
 
+def _board_name(frame: pd.DataFrame, keywords: Sequence[str], fallback: str) -> str:
+    if frame is None or frame.empty or "板块名称" not in frame.columns:
+        return fallback
+    names = frame["板块名称"].astype(str)
+    for keyword in keywords:
+        matched = frame[names.str.contains(keyword, na=False)]
+        if not matched.empty:
+            return str(matched.iloc[0]["板块名称"])
+    return fallback
+
+
 def _primary_narrative(
     news_report: Dict[str, Any],
     monitor_rows: List[Dict[str, Any]],
@@ -2254,6 +2265,328 @@ def _market_event_rows(news_report: Dict[str, Any], narrative: Dict[str, Any]) -
     return rows
 
 
+def _theme_tracking_rows(
+    narrative: Dict[str, Any],
+    drivers: Dict[str, Any],
+) -> List[List[str]]:
+    frame = drivers.get("industry_spot", pd.DataFrame())
+    power = _board_name(frame, ["电网", "电力", "公用事业"], "电力/电网")
+    energy = _board_name(frame, ["石油", "油气", "煤炭", "能源"], "能源/油气")
+    dividend = _board_name(frame, ["银行", "公用事业", "煤炭", "红利"], "高股息/红利")
+    tech = _board_name(frame, ["半导体", "通信", "IT服务", "消费电子", "软件"], "AI算力链")
+    domestic = _board_name(frame, ["建筑", "工程", "建材", "基建", "电网"], "基建/央国企")
+    gold = _board_name(frame, ["贵金属", "黄金"], "黄金/防守")
+    theme = str(narrative.get("theme", "macro_background"))
+
+    plans: Dict[str, List[tuple[str, str, str, str, str, bool]]] = {
+        "energy_shock": [
+            (
+                power,
+                "能源冲击 + 国内电网投资确定性",
+                "油价和地缘扰动抬升防守偏好，电力电网兼具逆周期属性和国内政策承接。",
+                "短线交易 / 中线配置",
+                "若原油冲高回落且电力链失去资金承接，催化会明显降温。",
+                True,
+            ),
+            (
+                energy,
+                "油价跳升 + 地缘风险",
+                "供给扰动先传导到原油，再传导到通胀预期和资源链定价。",
+                "短线交易",
+                "若事件只是一日脉冲，能源链容易高开低走。",
+                True,
+            ),
+            (
+                dividend,
+                "VIX 抬升 + 防守需求",
+                "高波动日里资金更愿意回到高股息和现金流稳定资产。",
+                "防守底仓",
+                "若波动率快速回落，红利风格可能跑输成长修复。",
+                True,
+            ),
+            (
+                tech,
+                "中期景气未破坏，但受美元和波动率压制",
+                "AI/科技中期逻辑仍在，但今天更容易被风险偏好压制。",
+                "背景储备",
+                "需要等 VIX 回落、美元转弱后才适合重新上调优先级。",
+                False,
+            ),
+        ],
+        "defensive_riskoff": [
+            (
+                gold,
+                "避险需求抬升",
+                "波动率上行时，黄金和贵金属更容易成为风险对冲工具。",
+                "防守底仓",
+                "若美元单边走强，黄金未必能同步受益。",
+                True,
+            ),
+            (
+                dividend,
+                "回撤控制优先",
+                "防守阶段先看现金流稳定和波动更低的方向。",
+                "防守底仓",
+                "若风险偏好快速修复，会明显跑输高弹性方向。",
+                True,
+            ),
+            (
+                power,
+                "公用事业属性",
+                "电力/公用事业在风险规避日更容易获得相对收益。",
+                "短线交易 / 防守底仓",
+                "若资金改追成长，公用事业的相对强度会回落。",
+                True,
+            ),
+            (
+                tech,
+                "超跌修复预期",
+                "科技方向暂时只适合放在观察名单，不应抢先定性为反转。",
+                "背景储备",
+                "若 VIX 继续上行，科技反弹大概率难以持续。",
+                False,
+            ),
+        ],
+        "rate_growth": [
+            (
+                "港股科技/美股科技",
+                "利率预期改善 + 科技估值弹性",
+                "利率回落先作用于久期资产，再扩散到成长风格。",
+                "短线交易 / 中线配置",
+                "若美元不弱反强，成长修复会被明显压制。",
+                True,
+            ),
+            (
+                tech,
+                "AI 资本开支与产品催化",
+                "算力和半导体链条对利率下行更敏感，弹性通常更大。",
+                "中线配置",
+                "若财报或指引没有继续验证，主题热度可能迅速降温。",
+                True,
+            ),
+            (
+                "半导体",
+                "风险偏好回暖",
+                "半导体通常在成长修复阶段承接更高风险偏好。",
+                "短线交易 / 中线配置",
+                "若外盘科技不配合，半导体容易只有脉冲没有持续。",
+                True,
+            ),
+            (
+                dividend,
+                "防守底仓需求下降",
+                "红利仍可持有，但在成长主线下不是日内优先方向。",
+                "背景储备",
+                "若市场再度切回风险规避，红利会重新获得相对优势。",
+                False,
+            ),
+        ],
+        "china_policy": [
+            (
+                power,
+                "稳增长 + 电网投资",
+                "政策和投资主线更容易先在电网、基建和央国企链上体现。",
+                "短线交易 / 中线配置",
+                "若政策只停留在表态层，持续性会弱于预期。",
+                True,
+            ),
+            (
+                domestic,
+                "财政与项目落地预期",
+                "基建和央国企链更容易获得资金的确定性偏好。",
+                "中线配置",
+                "若增量政策迟迟不落地，行情容易回到存量博弈。",
+                True,
+            ),
+            (
+                dividend,
+                "央国企现金流属性",
+                "高股息和央国企可以作为政策主线的防守配套。",
+                "防守底仓 / 中线配置",
+                "若市场切向高弹性题材，红利方向会相对滞后。",
+                True,
+            ),
+            (
+                tech,
+                "成长修复仍需外部环境配合",
+                "科技方向可以保留观察，但不是今天政策主线下的第一优先级。",
+                "背景储备",
+                "若美元继续偏强，科技估值修复会被压制。",
+                False,
+            ),
+        ],
+        "ai_semis": [
+            (
+                tech,
+                "模型/产品发布 + 资本开支验证",
+                "AI 产品、算力需求和资本开支共同强化景气主线。",
+                "中线配置",
+                "若产品催化停留在标题级，板块容易冲高回落。",
+                True,
+            ),
+            (
+                "半导体",
+                "产能与设备链景气验证",
+                "产能扩张和景气改善会先映射到设备、材料和代工链。",
+                "中线配置",
+                "若外盘风险偏好走弱，半导体估值端会先承压。",
+                True,
+            ),
+            (
+                "通信/光模块",
+                "算力链订单外溢",
+                "通信和光模块通常承接 AI 基建扩张的中游需求。",
+                "短线交易 / 中线配置",
+                "若上游资本开支不及预期，中游弹性会先被压缩。",
+                True,
+            ),
+            (
+                dividend,
+                "高波动日的对冲底仓",
+                "即便主线在成长，也需要保留一定防守底仓避免风格切换。",
+                "背景储备",
+                "若风险偏好持续上修，红利方向会相对落后。",
+                False,
+            ),
+        ],
+        "macro_background": [
+            (
+                power,
+                "国内确定性方向",
+                "在没有单一主线压过一切时，电力电网更像稳态观察方向。",
+                "中线配置",
+                "若主线切向纯成长，确定性方向的相对收益会下降。",
+                True,
+            ),
+            (
+                dividend,
+                "防守与现金流",
+                "宏观不够清晰时，高股息适合作为底仓而非进攻方向。",
+                "防守底仓",
+                "若风险偏好显著回暖，防守底仓会跑输弹性资产。",
+                True,
+            ),
+            (
+                tech,
+                "成长弹性候选",
+                "科技方向保留观察，但需要等待利率和波动率配合。",
+                "背景储备",
+                "若外部利率和美元继续偏强，成长修复会延后。",
+                False,
+            ),
+        ],
+    }
+
+    rows: List[List[str]] = []
+    seen: set[str] = set()
+    for direction, catalyst, logic, horizon, risk, _aligned in plans.get(theme, plans["macro_background"]):
+        if direction in seen:
+            continue
+        seen.add(direction)
+        rows.append([direction, catalyst, logic, horizon, risk])
+        if len(rows) >= 4:
+            break
+    return rows
+
+
+def _latest_prior_briefing_path(mode: str = "daily") -> Optional[Path]:
+    reports_dir = resolve_project_path("reports")
+    if not reports_dir.exists():
+        return None
+    pattern = re.compile(rf"{re.escape(mode)}_briefing_(\d{{4}}-\d{{2}}-\d{{2}})\.md$")
+    today = datetime.now().date()
+    candidates: List[tuple[datetime, Path]] = []
+    for path in reports_dir.glob(f"{mode}_briefing_*.md"):
+        matched = pattern.search(path.name)
+        if not matched:
+            continue
+        try:
+            file_date = datetime.strptime(matched.group(1), "%Y-%m-%d")
+        except ValueError:
+            continue
+        if file_date.date() < today:
+            candidates.append((file_date, path))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: item[0])[-1][1]
+
+
+def _previous_theme_directions(path: Optional[Path]) -> List[str]:
+    if path is None:
+        return []
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    section_match = re.search(r"### .*行业与主题跟踪（限2-4个方向）\s*(.*?)(?:\n### |\n## |\Z)", content, re.S)
+    if not section_match:
+        return []
+    directions: List[str] = []
+    for line in section_match.group(1).splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if not cells or cells[0] in {"方向", "---"} or all(set(cell) <= {"-"} for cell in cells):
+            continue
+        directions.append(cells[0])
+    return directions
+
+
+def _theme_tracking_lines(
+    narrative: Dict[str, Any],
+    rows: List[List[str]],
+    mode: str = "daily",
+) -> List[str]:
+    theme = str(narrative.get("theme", "macro_background"))
+    aligned_counts = {
+        "energy_shock": 3,
+        "defensive_riskoff": 3,
+        "rate_growth": 3,
+        "china_policy": 3,
+        "ai_semis": 3,
+        "macro_background": 2,
+    }
+    aligned = [row[0] for row in rows[: aligned_counts.get(theme, len(rows))]]
+    reserve = [row[0] for row in rows[aligned_counts.get(theme, len(rows)) :]]
+    lines: List[str] = []
+    if aligned:
+        summary = "与主线一致性: " + "、".join(aligned) + " 与 1.1 主线吻合。"
+        if reserve:
+            summary += " " + "、".join(reserve) + " 标注为背景储备，非当日优先。"
+        lines.append(summary)
+    else:
+        lines.append("与主线一致性: 当前未提炼出稳定方向，先按宏观背景和盘面轮动观察。")
+
+    previous = _previous_theme_directions(_latest_prior_briefing_path(mode))
+    if not previous:
+        lines.append("与前日对比: 暂无前一日行业跟踪归档，对比项从本次开始记录。")
+        return lines
+
+    current = [row[0] for row in rows]
+    added = [item for item in current if item not in previous]
+    removed = [item for item in previous if item not in current]
+    reason_map = {
+        "energy_shock": "因为原油、波动率和电力/能源链共振，日内主线切到能源冲击。",
+        "defensive_riskoff": "因为防守和避险资产相对收益抬升，盘面优先级回到回撤控制。",
+        "rate_growth": "因为利率与成长风格开始共振，科技与久期资产优先级上升。",
+        "china_policy": "因为国内政策和稳增长方向的确定性提升，电网/基建链权重上调。",
+        "ai_semis": "因为 AI/半导体催化强化，成长主线重新获得景气验证。",
+        "macro_background": "因为当前没有单一事件主线完全压制其他方向，先回到背景配置。",
+    }
+    if not added and not removed:
+        lines.append("与前日对比: 跟踪方向整体稳定，暂未新增或移出重点主题。")
+        return lines
+
+    compare_parts: List[str] = []
+    if added:
+        compare_parts.append("新增 " + "、".join(added))
+    if removed:
+        compare_parts.append("移出 " + "、".join(removed))
+    lines.append("与前日对比: " + "；".join(compare_parts) + "。原因: " + reason_map.get(theme, "主线与盘面结构发生变化。"))
+    return lines
+
+
 def _workflow_event_rows(events: List[Dict[str, Any]]) -> List[List[str]]:
     rows: List[List[str]] = []
     for item in events[:5]:
@@ -2317,26 +2650,9 @@ def _verification_rows_v4(
 
 
 def _yesterday_review_rows(snapshots: List[BriefingSnapshot], monitor_rows: List[Dict[str, Any]]) -> List[List[str]]:
-    reports_dir = resolve_project_path("reports")
-    if not reports_dir.exists():
+    latest_path = _latest_prior_briefing_path("daily")
+    if latest_path is None:
         return []
-    pattern = re.compile(r"daily_briefing_(\d{4}-\d{2}-\d{2})\.md$")
-    today = datetime.now().date()
-    candidates: List[tuple[datetime, Path]] = []
-    for path in reports_dir.glob("daily_briefing_*.md"):
-        matched = pattern.search(path.name)
-        if not matched:
-            continue
-        try:
-            file_date = datetime.strptime(matched.group(1), "%Y-%m-%d")
-        except ValueError:
-            continue
-        if file_date.date() < today:
-            candidates.append((file_date, path))
-    if not candidates:
-        return []
-
-    latest_path = sorted(candidates, key=lambda item: item[0])[-1][1]
     try:
         content = latest_path.read_text(encoding="utf-8")
     except OSError:
@@ -2556,6 +2872,8 @@ def main() -> None:
     macro_asset_rows = _macro_asset_rows(monitor_rows, anomaly_report)
     overnight_rows = _overnight_rows(overview)
     catalyst_rows = _catalyst_rows(news_report, narrative)
+    theme_tracking_rows = _theme_tracking_rows(narrative, drivers)
+    theme_tracking_lines = _theme_tracking_lines(narrative, theme_tracking_rows, args.mode)
     capital_flow_lines = _capital_flow_lines(pulse, drivers, liquidity_lines, snapshots)
     quality_lines = _quality_lines(news_report, anomaly_report)
     verification_rows = _verification_rows_v4(snapshots, monitor_rows)
@@ -2579,6 +2897,8 @@ def main() -> None:
         "overnight_rows": overnight_rows,
         "watchlist_rows": watchlist_rows,
         "core_event_lines": _core_event_lines(news_report, catalyst_rows),
+        "theme_tracking_rows": theme_tracking_rows,
+        "theme_tracking_lines": theme_tracking_lines,
         "market_event_rows": _market_event_rows(news_report, narrative),
         "workflow_event_rows": _workflow_event_rows(events),
         "capital_flow_lines": capital_flow_lines,

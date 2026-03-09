@@ -145,18 +145,34 @@ class BriefingRenderer:
         _append_subsection(lines, "3.1 核心事件（限3-5条）", payload.get("core_event_lines", []))
         _append_table_subsection(
             lines,
-            "3.2 今日日历 - 市场事件",
-            ["时间", "事件", "预期/前值", "重要性", "影响标的"],
-            payload.get("market_event_rows", []),
+            "3.2 行业与主题跟踪（限2-4个方向）",
+            ["方向", "催化剂", "逻辑", "时间维度", "风险点"],
+            payload.get("theme_tracking_rows", []),
         )
-        _append_table_subsection(
-            lines,
-            "3.2 今日日历 - 操作提醒",
-            ["时间", "动作", "说明"],
-            payload.get("workflow_event_rows", []),
-        )
-        _append_subsection(lines, "3.3 盘面与资金", payload.get("capital_flow_lines", []))
-        _append_subsection(lines, "3.4 新闻覆盖与数据质量", payload.get("quality_lines", []))
+        for item in payload.get("theme_tracking_lines", []) or []:
+            lines.append(f"- {item}")
+        lines.extend(["", "### 3.3 今日日历", "", "**市场事件**", ""])
+        if payload.get("market_event_rows"):
+            lines.extend(
+                _table(
+                    ["时间", "事件", "预期/前值", "重要性", "影响标的"],
+                    payload.get("market_event_rows", []),
+                )
+            )
+        else:
+            lines.append("暂无。")
+        lines.extend(["", "**操作提醒**", ""])
+        if payload.get("workflow_event_rows"):
+            lines.extend(
+                _table(
+                    ["时间", "动作", "说明"],
+                    payload.get("workflow_event_rows", []),
+                )
+            )
+        else:
+            lines.append("暂无。")
+        _append_subsection(lines, "3.4 盘面与资金", payload.get("capital_flow_lines", []))
+        _append_subsection(lines, "3.5 新闻覆盖与数据质量", payload.get("quality_lines", []))
 
         _append_block(lines, "4. 今日验证点")
         _append_table_subsection(
