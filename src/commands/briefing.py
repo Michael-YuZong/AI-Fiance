@@ -10,9 +10,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
+import pandas as pd
+
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL 1.1.1+")
 
-from src.collectors import EventsCollector, GlobalFlowCollector, MarketMonitorCollector, NewsCollector, SocialSentimentCollector
+from src.collectors import (
+    EventsCollector,
+    GlobalFlowCollector,
+    MarketMonitorCollector,
+    MarketPulseCollector,
+    NewsCollector,
+    SocialSentimentCollector,
+)
 from src.output.briefing import BriefingRenderer
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
 from src.processors.regime import RegimeDetector
@@ -207,20 +216,35 @@ def _headline_lines(
     snapshots: List[BriefingSnapshot],
     regime_result: Dict[str, Any],
     china_macro: Dict[str, Any],
+    pulse: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
-    if not snapshots:
-        return ["当前没有可用的 watchlist 行情数据。"]
-
-    strongest = max(snapshots, key=lambda item: item.signal_score + item.return_20d)
-    weakest = min(snapshots, key=lambda item: item.signal_score + item.return_20d)
-    bull_count = sum(1 for item in snapshots if item.trend == "多头")
-    bear_count = sum(1 for item in snapshots if item.trend == "空头")
     regime_label = REGIME_LABELS.get(str(regime_result["current_regime"]), str(regime_result["current_regime"]))
 
     lines = [
         f"当前宏观环境更接近 `{regime_label}`，优先关注 {', '.join(regime_result.get('preferred_assets', [])[:3]) or '防守与等待确认'}。",
-        f"watchlist 里最强的是 {strongest.symbol}，最弱的是 {weakest.symbol}，当前多头 {bull_count} 个、空头 {bear_count} 个，市场并非一致单边。",
     ]
+
+    if pulse:
+        zt_pool = pulse.get("zt_pool", pd.DataFrame())
+        dt_pool = pulse.get("dt_pool", pd.DataFrame())
+        detail = pulse.get("lhb_detail", pd.DataFrame())
+        top_zt = _top_categories(zt_pool, "所属行业", limit=2)
+        market_line = (
+            f"{_latest_trade_date_label(pulse)} A股涨停 {len(zt_pool.index) if not zt_pool.empty else 0} 家、"
+            f"跌停 {len(dt_pool.index) if not dt_pool.empty else 0} 家。"
+        )
+        if top_zt:
+            market_line += " 当前强势方向主要集中在 " + "、".join(top_zt) + "。"
+        lines.append(market_line)
+        if not detail.empty:
+            lines.append(f"龙虎榜最近一个交易日上榜 {len(detail.index)} 条记录，活跃资金仍在高波动板块中反复博弈。")
+    elif snapshots:
+        bull_count = sum(1 for item in snapshots if item.trend == "多头")
+        bear_count = sum(1 for item in snapshots if item.trend == "空头")
+        lines.append(f"当前观察池里多头 {bull_count} 个、空头 {bear_count} 个，市场并非一致单边。")
+    else:
+        lines.append("当前没有可用的全市场或 watchlist 行情数据。")
+
     if china_macro["pmi"] < 50:
         lines.append("国内景气度仍在荣枯线下方，晨报解读会更偏重‘谁更抗跌、谁在逆势走强’。")
     else:
@@ -375,6 +399,126 @@ def _monitor_lines(rows: List[Dict[str, Any]]) -> List[str]:
 
 def _monitor_map(rows: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     return {str(item["name"]): item for item in rows}
+
+
+def _top_categories(frame: pd.DataFrame, column: str, limit: int = 3) -> List[str]:
+    if frame is None or frame.empty or column not in frame.columns:
+        return []
+    series = frame[column].astype(str).replace({"": pd.NA, "nan": pd.NA}).dropna()
+    if series.empty:
+        return []
+    counts = series.value_counts().head(limit)
+    return [f"{name}({count})" for name, count in counts.items()]
+
+
+def _latest_trade_date_label(pulse: Dict[str, Any]) -> str:
+    return str(pulse.get("market_date", "") or "最近交易日")
+
+
+def _market_pulse_lines(pulse: Dict[str, Any]) -> List[str]:
+    if not pulse:
+        return ["全市场脉搏暂不可用。"]
+
+    zt_pool = pulse.get("zt_pool", pd.DataFrame())
+    dt_pool = pulse.get("dt_pool", pd.DataFrame())
+    strong_pool = pulse.get("strong_pool", pd.DataFrame())
+    prev_zt_pool = pulse.get("prev_zt_pool", pd.DataFrame())
+    trade_date = _latest_trade_date_label(pulse)
+
+    zt_count = len(zt_pool.index) if not zt_pool.empty else 0
+    dt_count = len(dt_pool.index) if not dt_pool.empty else 0
+    strong_count = len(strong_pool.index) if not strong_pool.empty else 0
+    prev_zt_count = len(prev_zt_pool.index) if not prev_zt_pool.empty else 0
+
+    lines = [
+        f"{trade_date} A股全市场热度: 涨停 {zt_count} 家，跌停 {dt_count} 家，强势股池 {strong_count} 家，昨日涨停表现池 {prev_zt_count} 家。"
+    ]
+
+    if zt_count and dt_count:
+        if zt_count >= dt_count * 5:
+            lines.append("涨停明显多于跌停，短线情绪仍有局部赚钱效应，不是全面退潮。")
+        elif dt_count >= max(zt_count, 1):
+            lines.append("跌停数量对涨停形成明显压制，今天要更警惕高位股和题材股分歧扩散。")
+        else:
+            lines.append("涨停与跌停同时存在，市场更像结构行情，不像统一主线普涨。")
+
+    top_zt = _top_categories(zt_pool, "所属行业")
+    if top_zt:
+        lines.append("涨停主要集中在: " + "、".join(top_zt) + "。")
+
+    top_strong = _top_categories(strong_pool, "所属行业")
+    if top_strong:
+        lines.append("强势股池主要集中在: " + "、".join(top_strong) + "。")
+
+    if not prev_zt_pool.empty and "涨跌幅" in prev_zt_pool.columns:
+        avg_prev = pd.to_numeric(prev_zt_pool["涨跌幅"], errors="coerce").dropna()
+        if not avg_prev.empty:
+            avg_val = float(avg_prev.mean())
+            lines.append(
+                f"昨日涨停股平均今日表现 {avg_val:+.2f}% ，可用来判断短线接力环境是否还在。"
+            )
+    return lines
+
+
+def _lhb_lines(pulse: Dict[str, Any]) -> List[str]:
+    if not pulse:
+        return ["龙虎榜暂不可用。"]
+
+    lines: List[str] = []
+    trade_date = _latest_trade_date_label(pulse)
+    detail = pulse.get("lhb_detail", pd.DataFrame())
+    institution = pulse.get("lhb_institution", pd.DataFrame())
+    stats = pulse.get("lhb_stats", pd.DataFrame())
+    desks = pulse.get("lhb_desks", pd.DataFrame())
+
+    if not detail.empty and "上榜日" in detail.columns:
+        trade_date = str(detail["上榜日"].astype(str).max())
+    elif not institution.empty and "上榜日期" in institution.columns:
+        trade_date = str(institution["上榜日期"].astype(str).max())
+    elif not desks.empty and "上榜日" in desks.columns:
+        trade_date = str(desks["上榜日"].astype(str).max())
+
+    if not detail.empty:
+        lines.append(f"{trade_date} 龙虎榜上榜 {len(detail.index)} 条记录，说明高波动个股活跃度仍然较高。")
+
+    if not institution.empty:
+        buy_col = "机构买入净额" if "机构买入净额" in institution.columns else ""
+        if buy_col:
+            top_buy = institution.copy()
+            top_buy[buy_col] = pd.to_numeric(top_buy[buy_col], errors="coerce")
+            top_buy = top_buy.dropna(subset=[buy_col]).sort_values(buy_col, ascending=False).head(3)
+            if not top_buy.empty:
+                summary = "、".join(
+                    f"{row['名称']}({row[buy_col] / 1e8:.2f}亿)"
+                    for _, row in top_buy.iterrows()
+                )
+                lines.append("机构净买额靠前: " + summary + "。")
+
+    if not stats.empty:
+        top_stats = stats.head(3)
+        summary = "、".join(
+            f"{row['名称']}(上榜{int(row['上榜次数'])}次)"
+            for _, row in top_stats.iterrows()
+            if "名称" in row and "上榜次数" in row
+        )
+        if summary:
+            lines.append("近一月反复上榜的活跃标的: " + summary + "。")
+
+    if not desks.empty:
+        net_col = "总买卖净额" if "总买卖净额" in desks.columns else ""
+        if net_col:
+            desks = desks.copy()
+            desks[net_col] = pd.to_numeric(desks[net_col], errors="coerce")
+            top_desks = desks.dropna(subset=[net_col]).sort_values(net_col, ascending=False).head(2)
+            if not top_desks.empty:
+                summary = "、".join(
+                    f"{row['营业部名称']}({row[net_col] / 1e8:.2f}亿)"
+                    for _, row in top_desks.iterrows()
+                )
+                lines.append("活跃营业部净买额靠前: " + summary + "。")
+    if not lines:
+        return ["龙虎榜数据暂不可用。"]
+    return lines
 
 
 def _source_summary(news_report: Dict[str, Any]) -> str:
@@ -688,6 +832,7 @@ def main() -> None:
     regime_result = RegimeDetector(regime_inputs).detect_regime()
 
     snapshots, alerts, watchlist_rows = _collect_snapshots(config, args.mode)
+    pulse = MarketPulseCollector(config).collect()
     news_report = _news_report(snapshots, china_macro, global_proxy, config, args.news_source)
     monitor_rows = _collect_monitor_rows(config)
     macro_items = macro_lines(china_macro, global_proxy)
@@ -701,10 +846,12 @@ def main() -> None:
     payload = {
         "title": "每日晨报" if args.mode == "daily" else "每周周报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "headline_lines": _headline_lines(args.mode, snapshots, regime_result, china_macro),
+        "headline_lines": _headline_lines(args.mode, snapshots, regime_result, china_macro, pulse),
         "news_lines": _news_lines(news_report),
         "story_lines": _story_lines(news_report, monitor_rows, snapshots, regime_result),
         "impact_lines": _impact_lines(snapshots, monitor_rows, regime_result),
+        "market_pulse_lines": _market_pulse_lines(pulse),
+        "lhb_lines": _lhb_lines(pulse),
         "monitor_lines": _monitor_lines(monitor_rows),
         "overnight_lines": _overnight_lines(snapshots),
         "macro_items": macro_items,

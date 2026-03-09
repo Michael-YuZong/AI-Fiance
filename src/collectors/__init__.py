@@ -9,6 +9,7 @@ from .macro_us import USMacroCollector
 from .market_cn import ChinaMarketCollector
 from .market_hk import HongKongMarketCollector
 from .market_monitor import MarketMonitorCollector
+from .market_pulse import MarketPulseCollector
 from .market_us import USMarketCollector
 from .news import NewsCollector
 from .social_sentiment import SocialSentimentCollector
@@ -19,6 +20,7 @@ __all__ = [
     "ChinaMarketCollector",
     "HongKongMarketCollector",
     "MarketMonitorCollector",
+    "MarketPulseCollector",
     "USMarketCollector",
     "CommodityCollector",
     "EventsCollector",

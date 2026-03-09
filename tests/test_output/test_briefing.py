@@ -12,6 +12,8 @@ def test_briefing_renderer_outputs_core_sections():
         "headline_lines": ["主线偏防守。"],
         "news_lines": ["[能源与地缘] 今日重点看原油与黄金。"],
         "story_lines": ["今天市场更像在交易油价冲击。"],
+        "market_pulse_lines": ["A股全市场热度: 涨停 40 家，跌停 3 家。"],
+        "lhb_lines": ["机构净买额靠前: 兖矿能源(6.53亿)。"],
         "impact_lines": ["港股科技更容易承压。"],
         "monitor_lines": ["布伦特原油 108.860，1日 +1.00%，5日 +5.00%。"],
         "overnight_lines": ["科技方向偏弱。"],
@@ -34,6 +36,8 @@ def test_briefing_renderer_outputs_core_sections():
     assert "## 今日主线" in rendered
     assert "## 新闻主线" in rendered
     assert "## 新闻推演" in rendered
+    assert "## 全市场脉搏" in rendered
+    assert "## 龙虎榜与涨停池" in rendered
     assert "## 资产影响" in rendered
     assert "## 关键宏观资产" in rendered
     assert "## 隔夜与主要资产" in rendered
