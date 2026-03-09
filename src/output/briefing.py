@@ -35,6 +35,7 @@ class BriefingRenderer:
         ]
 
         _append_section(lines, "今日主线", payload.get("headline_lines", []))
+        _append_section(lines, "主线校验", payload.get("narrative_validation_lines", []))
         _append_section(lines, "重要催化", payload.get("important_event_lines", []))
         _append_section(lines, "新闻主线", payload.get("news_lines", []))
         _append_section(lines, "新闻推演", payload.get("story_lines", []))

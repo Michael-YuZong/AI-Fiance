@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import io
 import warnings
+from collections import Counter
 from contextlib import redirect_stderr
 from dataclasses import dataclass
 from datetime import datetime
@@ -215,15 +216,17 @@ def _rotation_lines(snapshots: List[BriefingSnapshot]) -> List[str]:
 def _headline_lines(
     mode: str,
     snapshots: List[BriefingSnapshot],
-    regime_result: Dict[str, Any],
+    narrative: Dict[str, Any],
     china_macro: Dict[str, Any],
     pulse: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
-    regime_label = REGIME_LABELS.get(str(regime_result["current_regime"]), str(regime_result["current_regime"]))
-
-    lines = [
-        f"当前宏观环境更接近 `{regime_label}`，优先关注 {', '.join(regime_result.get('preferred_assets', [])[:3]) or '防守与等待确认'}。",
-    ]
+    preferred_assets = ", ".join(narrative.get("preferred_assets", [])[:3]) if narrative.get("preferred_assets") else ""
+    background = narrative.get("background_regime", "未识别")
+    lines = [narrative.get("summary", "今天没有单一主线。")]
+    lines.append(
+        f"背景宏观环境仍接近 `{background}`"
+        + (f"，资产偏好更偏 {preferred_assets}。" if preferred_assets else "。")
+    )
 
     if pulse:
         zt_pool = pulse.get("zt_pool", pd.DataFrame())
@@ -402,18 +405,25 @@ def _monitor_map(rows: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     return {str(item["name"]): item for item in rows}
 
 
+def _to_float(value: Any, default: float = 0.0) -> float:
+    result = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(result):
+        return default
+    return float(result)
+
+
 def _fmt_yi(value: Any) -> str:
-    amount = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    amount = _to_float(value, default=float("nan"))
     if pd.isna(amount):
         return "N/A"
-    return f"{float(amount) / 1e8:.2f}亿"
+    return f"{amount / 1e8:.2f}亿"
 
 
 def _fmt_pct_number(value: Any) -> str:
-    amount = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    amount = _to_float(value, default=float("nan"))
     if pd.isna(amount):
         return "N/A"
-    return f"{float(amount):+.2f}%"
+    return f"{amount:+.2f}%"
 
 
 def _top_categories(frame: pd.DataFrame, column: str, limit: int = 3) -> List[str]:
@@ -548,6 +558,15 @@ def _source_summary(news_report: Dict[str, Any]) -> str:
     return "本次新闻覆盖源: " + " / ".join(sources[:4]) + "。"
 
 
+def _news_category_counter(news_report: Dict[str, Any]) -> Counter[str]:
+    counter: Counter[str] = Counter()
+    for item in news_report.get("items", []) or []:
+        category = str(item.get("category", "")).strip().lower()
+        if category:
+            counter[category] += 1
+    return counter
+
+
 def _keyword_match(text: str, keywords: Sequence[str]) -> bool:
     haystack = f" {text.lower()} "
     for keyword in keywords:
@@ -562,6 +581,223 @@ def _keyword_match(text: str, keywords: Sequence[str]) -> bool:
         if needle in haystack:
             return True
     return False
+
+
+def _industry_text(*frames: pd.DataFrame) -> str:
+    parts: List[str] = []
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+        for column in ("所属行业", "名称"):
+            if column in frame.columns:
+                parts.extend(str(item) for item in frame[column].head(10).tolist())
+    return " ".join(parts)
+
+
+def _primary_narrative(
+    news_report: Dict[str, Any],
+    monitor_rows: List[Dict[str, Any]],
+    pulse: Dict[str, Any],
+    snapshots: List[BriefingSnapshot],
+    drivers: Dict[str, Any],
+    regime_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    counter = _news_category_counter(news_report)
+    monitor = _monitor_map(monitor_rows)
+    brent = monitor.get("布伦特原油", {})
+    dxy = monitor.get("美元指数", {})
+    vix = monitor.get("VIX波动率", {})
+    us10y = monitor.get("美国10Y收益率", {})
+
+    brent_1d = _to_float(brent.get("return_1d"))
+    brent_5d = _to_float(brent.get("return_5d"))
+    dxy_5d = _to_float(dxy.get("return_5d"))
+    vix_latest = _to_float(vix.get("latest"))
+    us10y_1d = _to_float(us10y.get("return_1d"))
+
+    top_industry_text = _industry_text(
+        pulse.get("zt_pool", pd.DataFrame()),
+        pulse.get("strong_pool", pd.DataFrame()),
+        drivers.get("industry_spot", pd.DataFrame()),
+        drivers.get("concept_spot", pd.DataFrame()),
+    )
+
+    qqqm = _find_snapshot(snapshots, "QQQM")
+    hstech = _find_snapshot(snapshots, "HSTECH")
+    gld = _find_snapshot(snapshots, "GLD")
+    grid = _find_snapshot(snapshots, "561380")
+
+    tech_1d = 0.0
+    if qqqm:
+        tech_1d += qqqm.return_1d
+    if hstech:
+        tech_1d += hstech.return_1d
+    gold_1d = gld.return_1d if gld else 0.0
+    grid_1d = grid.return_1d if grid else 0.0
+
+    scores = {
+        "energy_shock": 0,
+        "defensive_riskoff": 0,
+        "rate_growth": 0,
+        "china_policy": 0,
+        "ai_semis": 0,
+    }
+
+    energy_news = counter["energy"] + counter["geopolitics"]
+    scores["energy_shock"] += energy_news * 2
+    if brent_1d >= 0.05:
+        scores["energy_shock"] += 4
+    if brent_5d >= 0.12:
+        scores["energy_shock"] += 3
+    if vix_latest >= 25:
+        scores["energy_shock"] += 2
+    if any(keyword in top_industry_text for keyword in ["电力", "电网", "石油", "油气", "煤炭", "航运"]):
+        scores["energy_shock"] += 2
+    if dxy_5d > 0.005:
+        scores["energy_shock"] += 1
+
+    scores["defensive_riskoff"] += counter["geopolitics"] * 2
+    if vix_latest >= 25:
+        scores["defensive_riskoff"] += 3
+    if gold_1d > tech_1d:
+        scores["defensive_riskoff"] += 2
+    if dxy_5d > 0.005:
+        scores["defensive_riskoff"] += 1
+
+    scores["rate_growth"] += counter["fed"] * 2
+    scores["rate_growth"] += counter["earnings"]
+    if us10y_1d < 0:
+        scores["rate_growth"] += 2
+    if dxy_5d <= 0:
+        scores["rate_growth"] += 1
+    if tech_1d > 0 and vix_latest < 22:
+        scores["rate_growth"] += 2
+
+    scores["china_policy"] += counter["china_macro"] * 2
+    if grid_1d >= 0:
+        scores["china_policy"] += 1
+    if any(keyword in top_industry_text for keyword in ["电网", "电力", "基建", "工程", "建材"]):
+        scores["china_policy"] += 2
+
+    scores["ai_semis"] += counter["ai"] * 2 + counter["semiconductor"] * 2
+    if any(keyword in top_industry_text for keyword in ["半导体", "消费电子", "通信", "IT服务", "算力"]):
+        scores["ai_semis"] += 2
+    if tech_1d > 0:
+        scores["ai_semis"] += 1
+
+    theme = max(scores, key=scores.get)
+    score = scores[theme]
+    if score < 4:
+        theme = "macro_background"
+
+    theme_labels = {
+        "energy_shock": "能源冲击",
+        "defensive_riskoff": "防守避险",
+        "rate_growth": "利率驱动成长修复",
+        "china_policy": "中国政策/内需确定性",
+        "ai_semis": "AI/半导体催化",
+        "macro_background": "背景宏观",
+    }
+
+    theme_summaries = {
+        "energy_shock": "今天市场主线更像 `能源冲击 + 地缘风险`，应优先放在晨报最前面，而不是被背景 regime 覆盖。",
+        "defensive_riskoff": "今天市场主线更像 `防守避险`，核心是先谈波动和回撤控制，再谈进攻。",
+        "rate_growth": "今天市场主线更像 `利率预期驱动的成长修复`，重点看科技和估值弹性方向。",
+        "china_policy": "今天市场主线更像 `中国政策 / 内需确定性`，重点看基建、电网和稳增长传导。",
+        "ai_semis": "今天市场主线更像 `AI / 半导体催化`，重点看算力、芯片和相关硬件链。",
+        "macro_background": "今天没有单一事件完全压过其他变量，更适合先以宏观背景和盘面结构来组织晨报。",
+    }
+
+    return {
+        "theme": theme,
+        "label": theme_labels[theme],
+        "summary": theme_summaries[theme],
+        "scores": scores,
+        "background_regime": REGIME_LABELS.get(str(regime_result["current_regime"]), str(regime_result["current_regime"])),
+        "preferred_assets": list(regime_result.get("preferred_assets", [])),
+    }
+
+
+def _narrative_validation_lines(
+    narrative: Dict[str, Any],
+    news_report: Dict[str, Any],
+    monitor_rows: List[Dict[str, Any]],
+    pulse: Dict[str, Any],
+    snapshots: List[BriefingSnapshot],
+) -> List[str]:
+    monitor = _monitor_map(monitor_rows)
+    brent = monitor.get("布伦特原油", {})
+    dxy = monitor.get("美元指数", {})
+    vix = monitor.get("VIX波动率", {})
+    qqqm = _find_snapshot(snapshots, "QQQM")
+    hstech = _find_snapshot(snapshots, "HSTECH")
+    gld = _find_snapshot(snapshots, "GLD")
+
+    top_zt = " ".join(_top_categories(pulse.get("zt_pool", pd.DataFrame()), "所属行业"))
+    top_strong = " ".join(_top_categories(pulse.get("strong_pool", pd.DataFrame()), "所属行业"))
+    lines = [f"当前主线候选: `{narrative['label']}`；背景宏观仍是 `{narrative['background_regime']}`。"]
+
+    passed = 0
+    total = 0
+
+    if narrative["theme"] == "energy_shock":
+        total += 1
+        if _to_float(brent.get("return_1d")) >= 0.05 or _to_float(brent.get("return_5d")) >= 0.12:
+            passed += 1
+            lines.append(f"价格校验通过: 布伦特 1日 {format_pct(_to_float(brent.get('return_1d')))}，5日 {format_pct(_to_float(brent.get('return_5d')))}。")
+        else:
+            lines.append("价格校验未通过: 原油没有出现足够大的涨幅，不应把能源冲击写成绝对主线。")
+
+        total += 1
+        if any(keyword in f"{top_zt} {top_strong}" for keyword in ["电力", "电网", "石油", "油气", "煤炭"]):
+            passed += 1
+            lines.append(f"盘面校验通过: 涨停/强势股池集中在 {top_zt or top_strong}。")
+        else:
+            lines.append("盘面校验未通过: 涨停和强势股池没有明显跟能源链共振。")
+
+        total += 1
+        if _to_float(vix.get("latest")) >= 25 or _to_float(dxy.get("return_5d")) > 0.005:
+            passed += 1
+            lines.append(f"跨市场校验通过: VIX {_to_float(vix.get('latest')):.1f}，DXY 5日 {format_pct(_to_float(dxy.get('return_5d')))}。")
+        else:
+            lines.append("跨市场校验未通过: 波动率和美元没有明显同步强化。")
+
+    elif narrative["theme"] == "rate_growth":
+        total += 1
+        if any(item.get("category") == "fed" for item in news_report.get("items", [])):
+            passed += 1
+            lines.append("新闻校验通过: 存在 Fed / 利率预期相关头条。")
+        else:
+            lines.append("新闻校验未通过: 没有足够明确的利率预期头条。")
+        total += 1
+        tech_ok = (qqqm and qqqm.return_1d > 0) or (hstech and hstech.return_1d > 0)
+        if tech_ok:
+            passed += 1
+            lines.append("资产校验通过: 科技方向至少有一个核心代理转强。")
+        else:
+            lines.append("资产校验未通过: 科技代理没有同步走强。")
+
+    elif narrative["theme"] == "defensive_riskoff":
+        total += 1
+        if _to_float(vix.get("latest")) >= 25:
+            passed += 1
+            lines.append(f"波动校验通过: VIX { _to_float(vix.get('latest')):.1f }。")
+        else:
+            lines.append("波动校验未通过: VIX 没有到高波动区。")
+        total += 1
+        if gld and qqqm and gld.return_1d > qqqm.return_1d:
+            passed += 1
+            lines.append("防守资产校验通过: 黄金相对科技更强。")
+        else:
+            lines.append("防守资产校验未通过: 黄金没有明显跑赢科技。")
+
+    if total:
+        lines.append(f"结论: 当前主线校验通过 {passed}/{total} 项。")
+        if passed < total:
+            lines.append("如果后续校验项继续背离，晨报应把它降级成‘候选主线’，不要写成既定结论。")
+    else:
+        lines.append("当前没有为该主线配置专门校验器，先按新闻和盘面结构做保守解读。")
+    return lines
 
 
 def _important_event_lines(news_report: Dict[str, Any]) -> List[str]:
@@ -1033,6 +1269,7 @@ def main() -> None:
     drivers = MarketDriversCollector(config).collect()
     news_report = _news_report(snapshots, china_macro, global_proxy, config, args.news_source)
     monitor_rows = _collect_monitor_rows(config)
+    narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime_result)
     macro_items = macro_lines(china_macro, global_proxy)
     regime_label = REGIME_LABELS.get(str(regime_result["current_regime"]), str(regime_result["current_regime"]))
     macro_items.append(f"当前宏观环境判断: {regime_label}。")
@@ -1044,7 +1281,8 @@ def main() -> None:
     payload = {
         "title": "每日晨报" if args.mode == "daily" else "每周周报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "headline_lines": _headline_lines(args.mode, snapshots, regime_result, china_macro, pulse),
+        "headline_lines": _headline_lines(args.mode, snapshots, narrative, china_macro, pulse),
+        "narrative_validation_lines": _narrative_validation_lines(narrative, news_report, monitor_rows, pulse, snapshots),
         "important_event_lines": _important_event_lines(news_report),
         "news_lines": _news_lines(news_report),
         "story_lines": _story_lines(news_report, monitor_rows, snapshots, regime_result),

@@ -10,6 +10,7 @@ def test_briefing_renderer_outputs_core_sections():
         "title": "每日晨报",
         "generated_at": "2026-03-09 07:30:00",
         "headline_lines": ["主线偏防守。"],
+        "narrative_validation_lines": ["结论: 当前主线校验通过 3/3 项。"],
         "important_event_lines": ["美联储与利率预期: 市场等待 CPI。"],
         "news_lines": ["[能源与地缘] 今日重点看原油与黄金。"],
         "story_lines": ["今天市场更像在交易油价冲击。"],
@@ -37,6 +38,7 @@ def test_briefing_renderer_outputs_core_sections():
     rendered = BriefingRenderer().render(payload)
     assert "# 每日晨报" in rendered
     assert "## 今日主线" in rendered
+    assert "## 主线校验" in rendered
     assert "## 重要催化" in rendered
     assert "## 新闻主线" in rendered
     assert "## 新闻推演" in rendered

@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from src.commands.briefing import _important_event_lines
+import pandas as pd
+
+from src.commands.briefing import (
+    BriefingSnapshot,
+    _important_event_lines,
+    _narrative_validation_lines,
+    _primary_narrative,
+)
 
 
 def test_important_event_lines_extracts_specific_drivers() -> None:
@@ -31,3 +38,67 @@ def test_important_event_lines_does_not_misclassify_generic_macro_as_ai() -> Non
     lines = _important_event_lines(report)
 
     assert not any("AI 产品与模型" in line for line in lines)
+
+
+def test_primary_narrative_prefers_energy_shock_over_background_regime() -> None:
+    report = {
+        "items": [
+            {"category": "geopolitics", "title": "Oil surges as war disrupts supply fears", "source": "Reuters"},
+            {"category": "energy", "title": "Crude jumps again on Strait shipping risk", "source": "Reuters"},
+        ]
+    }
+    monitor_rows = [
+        {"name": "布伦特原油", "return_1d": 0.12, "return_5d": 0.28, "latest": 118.0},
+        {"name": "美元指数", "return_5d": 0.01, "latest": 100.0},
+        {"name": "VIX波动率", "latest": 30.0},
+    ]
+    pulse = {
+        "zt_pool": pd.DataFrame({"所属行业": ["电力", "电网设备", "石油"]}),
+        "strong_pool": pd.DataFrame({"所属行业": ["电力", "电网设备"]}),
+    }
+    snapshots = [
+        BriefingSnapshot("QQQM", "QQQM", "us", "US", "科技", 1, -0.02, -0.01, 0.01, 1.0, "空头", -1, "", ""),
+        BriefingSnapshot("HSTECH", "HSTECH", "hk", "HK", "科技", 1, -0.03, -0.02, -0.05, 1.0, "空头", -2, "", ""),
+        BriefingSnapshot("GLD", "GLD", "us", "US", "黄金", 1, 0.01, 0.02, 0.05, 1.0, "震荡", 0, "", ""),
+        BriefingSnapshot("561380", "电网ETF", "cn_etf", "CN", "电网", 1, 0.02, 0.03, 0.10, 1.0, "多头", 2, "", ""),
+    ]
+
+    narrative = _primary_narrative(
+        news_report=report,
+        monitor_rows=monitor_rows,
+        pulse=pulse,
+        snapshots=snapshots,
+        drivers={},
+        regime_result={"current_regime": "recovery", "preferred_assets": ["成长股", "顺周期"]},
+    )
+
+    assert narrative["theme"] == "energy_shock"
+    assert "能源冲击" in narrative["summary"]
+
+
+def test_narrative_validation_reports_energy_checks() -> None:
+    narrative = {
+        "theme": "energy_shock",
+        "label": "能源冲击",
+        "background_regime": "滞涨",
+    }
+    report = {"items": [{"category": "energy", "title": "Crude jumps", "source": "Reuters"}]}
+    monitor_rows = [
+        {"name": "布伦特原油", "return_1d": 0.09, "return_5d": 0.20, "latest": 115.0},
+        {"name": "美元指数", "return_5d": 0.01, "latest": 100.0},
+        {"name": "VIX波动率", "latest": 29.0},
+    ]
+    pulse = {
+        "zt_pool": pd.DataFrame({"所属行业": ["电力", "电网设备"]}),
+        "strong_pool": pd.DataFrame({"所属行业": ["电力"]}),
+    }
+    snapshots = [
+        BriefingSnapshot("QQQM", "QQQM", "us", "US", "科技", 1, -0.02, -0.01, 0.01, 1.0, "空头", -1, "", ""),
+        BriefingSnapshot("GLD", "GLD", "us", "US", "黄金", 1, 0.01, 0.02, 0.05, 1.0, "震荡", 0, "", ""),
+    ]
+
+    lines = _narrative_validation_lines(narrative, report, monitor_rows, pulse, snapshots)
+
+    assert any("价格校验通过" in line for line in lines)
+    assert any("盘面校验通过" in line for line in lines)
+    assert any("结论: 当前主线校验通过" in line for line in lines)
