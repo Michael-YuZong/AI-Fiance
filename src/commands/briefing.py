@@ -27,7 +27,12 @@ def main() -> None:
     config = load_config(args.config or None)
     watchlist = load_watchlist()
     china_macro = load_china_macro_snapshot(config)
-    global_proxy = load_global_proxy_snapshot()
+    global_proxy = {}
+    global_proxy_note = ""
+    try:
+        global_proxy = load_global_proxy_snapshot()
+    except Exception as exc:
+        global_proxy_note = f"跨市场代理数据暂不可用，已回退到国内宏观与本地缓存。{type(exc).__name__}"
 
     watchlist_rows = []
     alerts: List[str] = []
@@ -72,8 +77,11 @@ def main() -> None:
     if holdings:
         latest_prices = {}
         for holding in holdings:
-            history = fetch_asset_history(holding["symbol"], holding["asset_type"], config)
-            latest_prices[holding["symbol"]] = compute_history_metrics(history)["last_close"]
+            try:
+                history = fetch_asset_history(holding["symbol"], holding["asset_type"], config)
+                latest_prices[holding["symbol"]] = compute_history_metrics(history)["last_close"]
+            except Exception:
+                latest_prices[holding["symbol"]] = float(holding.get("cost_basis", 0.0))
         status = portfolio_repo.build_status(latest_prices)
         portfolio_lines.append(f"组合市值约 {status['total_value']:.2f} {status['base_currency']}。")
         if status["holdings"]:
@@ -83,10 +91,14 @@ def main() -> None:
         if top_region:
             portfolio_lines.append(f"地区暴露最高为 {top_region[0]}，占比 {top_region[1] * 100:.1f}%。")
 
+    macro_items = macro_lines(china_macro, global_proxy)
+    if global_proxy_note:
+        macro_items.append(global_proxy_note)
+
     payload = {
         "title": "每日晨报" if args.mode == "daily" else "每周周报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "macro_items": macro_lines(china_macro, global_proxy),
+        "macro_items": macro_items,
         "watchlist_rows": watchlist_rows,
         "alerts": alerts,
         "portfolio_lines": portfolio_lines,
