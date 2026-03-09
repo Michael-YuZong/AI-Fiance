@@ -36,6 +36,8 @@ class BriefingRenderer:
 
         _append_section(lines, "今日主线", payload.get("headline_lines", []))
         _append_section(lines, "新闻主线", payload.get("news_lines", []))
+        _append_section(lines, "新闻推演", payload.get("story_lines", []))
+        _append_section(lines, "资产影响", payload.get("impact_lines", []))
         _append_section(lines, "关键宏观资产", payload.get("monitor_lines", []))
         _append_section(lines, "隔夜与主要资产", payload.get("overnight_lines", []))
         _append_section(lines, "宏观与流动性", payload.get("macro_items", []))
@@ -56,6 +58,7 @@ class BriefingRenderer:
         _append_section(lines, "关注提醒", payload.get("alerts", []))
         _append_section(lines, "今日已知事件", payload.get("event_lines", []))
         _append_section(lines, "组合与 Thesis", payload.get("portfolio_lines", []))
+        _append_section(lines, "今日验证点", payload.get("verification_lines", []))
         _append_section(lines, "今日跟踪清单", payload.get("calendar_lines", []))
         _append_section(lines, "行动建议", payload.get("action_lines", []))
 

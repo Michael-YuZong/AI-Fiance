@@ -8,7 +8,7 @@ import warnings
 from contextlib import redirect_stderr
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL 1.1.1+")
 
@@ -316,18 +316,8 @@ def _flow_lines(snapshots: List[BriefingSnapshot], config: Dict[str, Any]) -> Li
 
 
 def _news_lines(
-    snapshots: List[BriefingSnapshot],
-    china_macro: Dict[str, Any],
-    global_proxy: Dict[str, Any],
-    config: Dict[str, Any],
-    preferred_sources: Optional[List[str]] = None,
+    report: Dict[str, Any],
 ) -> List[str]:
-    report = NewsCollector(config).collect(
-        snapshots=snapshots,
-        china_macro=china_macro,
-        global_proxy=global_proxy,
-        preferred_sources=preferred_sources,
-    )
     lines = list(report.get("lines", []))
     note = report.get("note")
     if note:
@@ -335,8 +325,26 @@ def _news_lines(
     return lines
 
 
-def _monitor_lines(config: Dict[str, Any]) -> List[str]:
-    rows = MarketMonitorCollector(config).collect()
+def _news_report(
+    snapshots: List[BriefingSnapshot],
+    china_macro: Dict[str, Any],
+    global_proxy: Dict[str, Any],
+    config: Dict[str, Any],
+    preferred_sources: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    return NewsCollector(config).collect(
+        snapshots=snapshots,
+        china_macro=china_macro,
+        global_proxy=global_proxy,
+        preferred_sources=preferred_sources,
+    )
+
+
+def _collect_monitor_rows(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return MarketMonitorCollector(config).collect()
+
+
+def _monitor_lines(rows: List[Dict[str, Any]]) -> List[str]:
     if not rows:
         return ["关键宏观资产暂不可用，晨报已回退到已有新闻主线和宏观代理。"]
 
@@ -363,6 +371,149 @@ def _monitor_lines(config: Dict[str, Any]) -> List[str]:
     elif copper and gold and gold["return_5d"] > copper["return_5d"] + 0.02:
         lines.append("金强于铜，说明市场更偏向防守和避险。")
     return lines
+
+
+def _monitor_map(rows: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    return {str(item["name"]): item for item in rows}
+
+
+def _source_summary(news_report: Dict[str, Any]) -> str:
+    items = news_report.get("items", []) or []
+    if not items:
+        return "当前新闻主线主要依赖代理推导，不是实时头条聚合。"
+    sources: List[str] = []
+    for item in items:
+        source = str(item.get("source") or item.get("configured_source") or "").strip()
+        if source and source not in sources:
+            sources.append(source)
+    return "本次新闻覆盖源: " + " / ".join(sources[:4]) + "。"
+
+
+def _story_lines(
+    news_report: Dict[str, Any],
+    monitor_rows: List[Dict[str, Any]],
+    snapshots: List[BriefingSnapshot],
+    regime_result: Dict[str, Any],
+) -> List[str]:
+    monitor = _monitor_map(monitor_rows)
+    items = news_report.get("items", []) or []
+    text_blob = " ".join(str(item.get("title", "")) for item in items).lower()
+    brent = monitor.get("布伦特原油")
+    dxy = monitor.get("美元指数")
+    vix = monitor.get("VIX波动率")
+    gold = monitor.get("COMEX黄金")
+    copper = monitor.get("COMEX铜")
+    hstech = _find_snapshot(snapshots, "HSTECH")
+    qqqm = _find_snapshot(snapshots, "QQQM")
+
+    energy_theme = any(keyword in text_blob for keyword in ["oil", "opec", "energy", "crude"])
+    conflict_theme = any(keyword in text_blob for keyword in ["war", "iran", "conflict", "geopolitic", "strait"])
+    china_theme = any(keyword in text_blob for keyword in ["china", "pboc", "beijing"])
+
+    lines: List[str] = []
+    if energy_theme or conflict_theme:
+        lines.append("今天市场更像在交易 `油价冲击 + 地缘风险`，不是普通的成长修复日。")
+    elif china_theme:
+        lines.append("今天市场更像在交易 `中国稳增长与政策托底`，风险偏好取决于政策能否转成实际需求。")
+    else:
+        lines.append("今天没有单一头条完全主导盘面，更像多条线索同时定价。")
+
+    if brent and brent["return_5d"] > 0.20:
+        lines.append(
+            f"布伦特 5 日 {format_pct(brent['return_5d'])}，已经不只是新闻噪音，而是会传导到通胀预期和资产定价。"
+        )
+    if vix and vix["latest"] >= 25:
+        lines.append(
+            f"VIX 已到 {vix['latest']:.1f}，说明今天更需要先判断波动是否继续扩散，再决定是否追高高弹性方向。"
+        )
+    if dxy and dxy["return_5d"] > 0.005 and hstech and qqqm:
+        lines.append(
+            f"美元偏强叠加科技承压（HSTECH {format_pct(hstech.return_1d)} / QQQM {format_pct(qqqm.return_1d)}），成长估值修复会比较吃力。"
+        )
+    if gold and copper:
+        if gold["return_5d"] > copper["return_5d"] + 0.02:
+            lines.append("金强于铜，市场更偏防守和避险，不适合把今天理解成全面 risk-on。")
+        elif copper["return_5d"] > gold["return_5d"] + 0.02:
+            lines.append("铜强于金，市场更像在提前交易增长而不是单纯避险。")
+
+    preferred = regime_result.get("preferred_assets", [])
+    if preferred:
+        lines.append("从当前 regime 看，和今天环境更一致的方向是: " + "、".join(preferred[:4]) + "。")
+    lines.append(_source_summary(news_report))
+    return lines[:6]
+
+
+def _impact_lines(
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+    regime_result: Dict[str, Any],
+) -> List[str]:
+    monitor = _monitor_map(monitor_rows)
+    lines: List[str] = []
+    brent = monitor.get("布伦特原油")
+    dxy = monitor.get("美元指数")
+    vix = monitor.get("VIX波动率")
+    gold = monitor.get("COMEX黄金")
+    copper = monitor.get("COMEX铜")
+
+    grid = _find_snapshot(snapshots, "561380")
+    hstech = _find_snapshot(snapshots, "HSTECH")
+    qqqm = _find_snapshot(snapshots, "QQQM")
+    gld = _find_snapshot(snapshots, "GLD")
+
+    if grid:
+        lines.append(
+            f"A股确定性方向: {grid.symbol} 近 20 日 {format_pct(grid.return_20d)}，当前仍是观察池里的相对强者，适合作为国内防守进攻平衡点。"
+        )
+    if hstech:
+        lines.append(
+            f"港股科技: {hstech.symbol} 近 20 日 {format_pct(hstech.return_20d)}，在美元和外盘波动不回落前，更像修复观察而不是趋势反转。"
+        )
+    if qqqm:
+        lines.append(
+            f"美股科技: {qqqm.symbol} 近 5 日 {format_pct(qqqm.return_5d)}，今晚要看美股能否先稳住高波动环境。"
+        )
+    if gld and gold:
+        lines.append(
+            f"黄金: GLD 近 20 日 {format_pct(gld.return_20d)}，但如果美元继续走强，黄金未必会线性受益于地缘消息。"
+        )
+    if brent and copper:
+        lines.append(
+            f"商品/有色: 原油 {format_pct(brent['return_5d'])}、铜 {format_pct(copper['return_5d'])}，今天更值得跟踪资源链是否承接风险偏好切换。"
+        )
+    if dxy and dxy["return_5d"] > 0.005:
+        lines.append("汇率与美元: 美元走强通常会压制港股和高估值成长，今天不能只看A股自身强弱。")
+    if vix and vix["latest"] >= 25:
+        lines.append("仓位节奏: 高波动环境下，更适合分批确认，不适合在单日新闻冲击里追涨。")
+    return lines[:7]
+
+
+def _verification_lines(
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+) -> List[str]:
+    monitor = _monitor_map(monitor_rows)
+    lines: List[str] = []
+    brent = monitor.get("布伦特原油")
+    dxy = monitor.get("美元指数")
+    vix = monitor.get("VIX波动率")
+    gold = _find_snapshot(snapshots, "GLD")
+    hstech = _find_snapshot(snapshots, "HSTECH")
+    grid = _find_snapshot(snapshots, "561380")
+
+    if brent:
+        lines.append("先看原油是否继续扩张涨幅；如果原油冲高回落，今天的通胀和地缘叙事可能会降温。")
+    if vix:
+        lines.append("再看 VIX 是否能从高位回落；如果波动率继续抬升，高弹性方向会更难做。")
+    if dxy:
+        lines.append("盯美元是否继续走强；如果美元回落，港股科技和成长估值会先得到喘息。")
+    if gold:
+        lines.append("看黄金是否真的承接避险；如果地缘升级但黄金不强，说明市场更在交易美元而不是纯避险。")
+    if hstech:
+        lines.append("看 HSTECH 是否止跌；它是风险偏好回暖最直观的验证器。")
+    if grid:
+        lines.append("看 561380 是否继续强于大盘；若相对强弱延续，国内确定性方向的逻辑就还没坏。")
+    return lines[:6]
 
 
 def _sentiment_lines(snapshots: List[BriefingSnapshot], config: Dict[str, Any]) -> List[str]:
@@ -537,6 +688,8 @@ def main() -> None:
     regime_result = RegimeDetector(regime_inputs).detect_regime()
 
     snapshots, alerts, watchlist_rows = _collect_snapshots(config, args.mode)
+    news_report = _news_report(snapshots, china_macro, global_proxy, config, args.news_source)
+    monitor_rows = _collect_monitor_rows(config)
     macro_items = macro_lines(china_macro, global_proxy)
     regime_label = REGIME_LABELS.get(str(regime_result["current_regime"]), str(regime_result["current_regime"]))
     macro_items.append(f"当前宏观环境判断: {regime_label}。")
@@ -549,8 +702,10 @@ def main() -> None:
         "title": "每日晨报" if args.mode == "daily" else "每周周报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "headline_lines": _headline_lines(args.mode, snapshots, regime_result, china_macro),
-        "news_lines": _news_lines(snapshots, china_macro, global_proxy, config, args.news_source),
-        "monitor_lines": _monitor_lines(config),
+        "news_lines": _news_lines(news_report),
+        "story_lines": _story_lines(news_report, monitor_rows, snapshots, regime_result),
+        "impact_lines": _impact_lines(snapshots, monitor_rows, regime_result),
+        "monitor_lines": _monitor_lines(monitor_rows),
         "overnight_lines": _overnight_lines(snapshots),
         "macro_items": macro_items,
         "market_overview_lines": _market_overview_lines(snapshots, regime_result),
@@ -562,6 +717,7 @@ def main() -> None:
         "alerts": alerts or ["当前没有触发强提醒，但仍需关注强弱方向是否在盘中发生切换。"],
         "event_lines": _event_lines(config, args.mode),
         "portfolio_lines": _portfolio_lines(config),
+        "verification_lines": _verification_lines(snapshots, monitor_rows),
         "calendar_lines": _calendar_lines(args.mode),
         "action_lines": _action_lines(snapshots, regime_result),
     }

@@ -11,6 +11,8 @@ def test_briefing_renderer_outputs_core_sections():
         "generated_at": "2026-03-09 07:30:00",
         "headline_lines": ["主线偏防守。"],
         "news_lines": ["[能源与地缘] 今日重点看原油与黄金。"],
+        "story_lines": ["今天市场更像在交易油价冲击。"],
+        "impact_lines": ["港股科技更容易承压。"],
         "monitor_lines": ["布伦特原油 108.860，1日 +1.00%，5日 +5.00%。"],
         "overnight_lines": ["科技方向偏弱。"],
         "macro_items": ["中国 PMI 49.0。"],
@@ -23,6 +25,7 @@ def test_briefing_renderer_outputs_core_sections():
         "alerts": ["561380 放量。"],
         "event_lines": ["09:00 [高] A股盘前检查。"],
         "portfolio_lines": ["组合市值 100000。"],
+        "verification_lines": ["先看原油是否继续扩张涨幅。"],
         "calendar_lines": ["盘前看强弱延续。"],
         "action_lines": ["优先跟踪 561380。"],
     }
@@ -30,12 +33,15 @@ def test_briefing_renderer_outputs_core_sections():
     assert "# 每日晨报" in rendered
     assert "## 今日主线" in rendered
     assert "## 新闻主线" in rendered
+    assert "## 新闻推演" in rendered
+    assert "## 资产影响" in rendered
     assert "## 关键宏观资产" in rendered
     assert "## 隔夜与主要资产" in rendered
     assert "## 全球资金流代理" in rendered
     assert "## 情绪代理" in rendered
     assert "## Watchlist 雷达" in rendered
     assert "## 今日已知事件" in rendered
+    assert "## 今日验证点" in rendered
     assert "## 行动建议" in rendered
     assert "561380" in rendered
     assert "组合市值 100000。" in rendered
