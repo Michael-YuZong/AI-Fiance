@@ -1,0 +1,29 @@
+aliases:
+  - symbol: "512400"
+    name: "有色金属ETF"
+    asset_type: "cn_etf"
+    aliases:
+      - "有色金属ETF"
+      - "有色ETF"
+      - "有色金属"
+      - "有色"
+  - symbol: "561380"
+    name: "电网ETF"
+    asset_type: "cn_etf"
+    aliases:
+      - "电网ETF"
+      - "电网"
+  - symbol: "QQQM"
+    name: "Invesco NASDAQ 100 ETF"
+    asset_type: "us"
+    aliases:
+      - "QQQM"
+      - "纳指ETF"
+      - "纳斯达克100ETF"
+  - symbol: "GLD"
+    name: "SPDR Gold Shares"
+    asset_type: "us"
+    aliases:
+      - "GLD"
+      - "黄金ETF"
+      - "黄金"

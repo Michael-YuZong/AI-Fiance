@@ -1,0 +1,13 @@
+feeds:
+  - category: "global_macro"
+    name: "Global Markets"
+    url: "https://news.google.com/rss/search?q=global+markets+when:1d&hl=en-US&gl=US&ceid=US:en"
+  - category: "energy"
+    name: "Energy Market"
+    url: "https://news.google.com/rss/search?q=oil+energy+market+when:1d&hl=en-US&gl=US&ceid=US:en"
+  - category: "geopolitics"
+    name: "Geopolitics"
+    url: "https://news.google.com/rss/search?q=geopolitics+market+when:1d&hl=en-US&gl=US&ceid=US:en"
+  - category: "china_macro"
+    name: "China Macro"
+    url: "https://news.google.com/rss/search?q=China+economy+PBOC+when:3d&hl=en-US&gl=US&ceid=US:en"

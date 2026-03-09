@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List
 
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL 1.1.1+")
 
-from src.collectors import GlobalFlowCollector, SocialSentimentCollector
+from src.collectors import AssetLookupCollector, GlobalFlowCollector, SocialSentimentCollector
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot
 from src.processors.regime import RegimeDetector
 from src.processors.risk import RiskAnalyzer
@@ -37,6 +37,16 @@ def _detect_symbols(question: str, candidates: Iterable[str]) -> List[str]:
         if symbol.upper() in upper_question and symbol not in matched:
             matched.append(symbol)
     return matched
+
+
+def _resolve_symbols(question: str, config: Dict[str, Any], candidates: Iterable[str]) -> List[str]:
+    symbols = _detect_symbols(question, candidates)
+    resolved = AssetLookupCollector(config).search(question, limit=6)
+    for item in resolved:
+        symbol = item["symbol"]
+        if symbol not in symbols:
+            symbols.append(symbol)
+    return symbols
 
 
 def _symbol_snapshot(symbol: str, config: Dict[str, Any]) -> List[str]:
@@ -157,7 +167,7 @@ def main() -> None:
     repo = PortfolioRepository()
     watchlist = load_watchlist()
     candidate_symbols = [item["symbol"] for item in watchlist] + [item["symbol"] for item in repo.list_holdings()]
-    symbols = _detect_symbols(question, candidate_symbols)
+    symbols = _resolve_symbols(question, config, candidate_symbols)
 
     lines = ["# 研究回答", "", f"- 问题: {question}", ""]
     observation_lines: List[str] = []

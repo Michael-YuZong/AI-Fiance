@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL 1.1.1+")
 
-from src.collectors import EventsCollector, GlobalFlowCollector, SocialSentimentCollector
+from src.collectors import EventsCollector, GlobalFlowCollector, NewsCollector, SocialSentimentCollector
 from src.output.briefing import BriefingRenderer
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
 from src.processors.regime import RegimeDetector
@@ -314,6 +314,24 @@ def _flow_lines(snapshots: List[BriefingSnapshot], config: Dict[str, Any]) -> Li
     return lines
 
 
+def _news_lines(
+    snapshots: List[BriefingSnapshot],
+    china_macro: Dict[str, Any],
+    global_proxy: Dict[str, Any],
+    config: Dict[str, Any],
+) -> List[str]:
+    report = NewsCollector(config).collect(
+        snapshots=snapshots,
+        china_macro=china_macro,
+        global_proxy=global_proxy,
+    )
+    lines = list(report.get("lines", []))
+    note = report.get("note")
+    if note:
+        lines.append(note)
+    return lines
+
+
 def _sentiment_lines(snapshots: List[BriefingSnapshot], config: Dict[str, Any]) -> List[str]:
     if not snapshots:
         return ["当前没有可用于估算情绪代理的标的快照。"]
@@ -498,6 +516,7 @@ def main() -> None:
         "title": "每日晨报" if args.mode == "daily" else "每周周报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "headline_lines": _headline_lines(args.mode, snapshots, regime_result, china_macro),
+        "news_lines": _news_lines(snapshots, china_macro, global_proxy, config),
         "overnight_lines": _overnight_lines(snapshots),
         "macro_items": macro_items,
         "market_overview_lines": _market_overview_lines(snapshots, regime_result),

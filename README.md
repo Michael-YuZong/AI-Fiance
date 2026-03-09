@@ -39,6 +39,8 @@
 - `scan`、`briefing`、`snap`、`compare`、`portfolio`、`discover`、`regime`、`policy` 命令可运行
 - `risk`、`backtest`、`research` 命令已接通 Phase 4 基础版
 - `assistant` 自然语言入口已可用，不会命令的人可以直接说需求
+- `lookup` 编号查询已可用，中文 ETF 名称或主题名可先解析成代码
+- `briefing daily` 已加入“新闻主线”区块，断网时会降级成能源 / 地缘 / 宏观 / 资金风格代理解读
 
 ## 当前支持什么
 
@@ -63,6 +65,7 @@ python -m src.commands.risk report
 python -m src.commands.risk stress "美股崩盘"
 python -m src.commands.backtest macd_golden_cross 561380 3y
 python -m src.commands.research 当前宏观环境对561380意味着什么
+python -m src.commands.lookup 有色金属ETF代码是多少
 python -m src.commands.assistant 帮我写今天的晨报
 ```
 
@@ -301,9 +304,11 @@ python -m src.commands.assistant 帮我写今天的晨报
 python -m src.commands.assistant 看看561380现在值不值得关注
 python -m src.commands.assistant 对比 QQQM 和 GLD
 python -m src.commands.assistant 如果美股跌20%我的组合会怎样
+python -m src.commands.assistant 分析一下有色金属ETF
+python -m src.commands.assistant 有色金属ETF代码是多少
 ```
 
-它会先自动判断你的意图，再路由到已有命令。判断不稳时，会回退到 `research`。
+它会先自动判断你的意图，再路由到已有命令。现在如果你说的是中文 ETF 名称或主题名，它会先尝试从 `config/asset_aliases.yaml` 里解析成代码；判断不稳时，会回退到 `research`。
 
 ### 10. 查看本地数据
 

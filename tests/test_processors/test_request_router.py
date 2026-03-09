@@ -17,6 +17,24 @@ def test_router_maps_compare_request():
     assert routed.args == ["561380", "QQQM"]
 
 
+def test_router_uses_resolved_symbol_for_scan():
+    routed = route_request("分析一下有色金属ETF", resolved_symbols=["512400"])
+    assert routed.module == "scan"
+    assert routed.args == ["512400"]
+
+
+def test_router_maps_code_lookup_request():
+    routed = route_request("有色金属ETF代码是多少", resolved_symbols=["512400"])
+    assert routed.module == "lookup"
+    assert routed.args == ["有色金属ETF代码是多少"]
+
+
+def test_router_maps_compare_request_with_resolved_symbols():
+    routed = route_request("对比有色金属ETF和黄金ETF", resolved_symbols=["512400", "GLD"])
+    assert routed.module == "compare"
+    assert routed.args == ["512400", "GLD"]
+
+
 def test_router_falls_back_to_research_for_open_question():
     routed = route_request("为什么最近市场有点别扭", candidate_symbols=["561380", "QQQM"])
     assert routed.module == "research"

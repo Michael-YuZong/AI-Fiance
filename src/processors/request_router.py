@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence
+from typing import List, Sequence
 
 
 RULE_ALIASES = {
@@ -32,10 +32,17 @@ class RoutedCommand:
         return "python -m src.commands." + self.module + (" " + " ".join(self.args) if self.args else "")
 
 
-def route_request(request: str, candidate_symbols: Sequence[str] = ()) -> RoutedCommand:
+def route_request(
+    request: str,
+    candidate_symbols: Sequence[str] = (),
+    resolved_symbols: Sequence[str] = (),
+) -> RoutedCommand:
     text = request.strip()
     lowered = text.lower()
-    symbols = _extract_symbols(text, candidate_symbols)
+    symbols = _merge_symbols(_extract_symbols(text, candidate_symbols), resolved_symbols)
+
+    if any(keyword in text for keyword in ["代码", "编号", "哪只ETF", "对应ETF", "对应代码", "是什么ETF"]) and symbols:
+        return RoutedCommand("lookup", [text], "识别为标的代码/编号查询。")
 
     if any(keyword in text for keyword in ["晨报", "早报", "今天的财经", "今日财经", "日报"]):
         return RoutedCommand("briefing", ["daily"], "识别为晨报/日度简报需求。")
@@ -96,6 +103,14 @@ def _extract_symbols(text: str, candidates: Sequence[str]) -> List[str]:
 
     ordered: List[str] = []
     for _, symbol in sorted(matched_positions, key=lambda item: item[0]):
+        if symbol not in ordered:
+            ordered.append(symbol)
+    return ordered
+
+
+def _merge_symbols(detected: Sequence[str], resolved: Sequence[str]) -> List[str]:
+    ordered: List[str] = []
+    for symbol in list(detected) + list(resolved):
         if symbol not in ordered:
             ordered.append(symbol)
     return ordered

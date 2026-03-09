@@ -27,6 +27,7 @@
 | `regime` | 当前宏观体制 | `regime` |
 | `policy <关键词>` | 政策解读 | `policy 电网十四五规划` |
 | `research <问题>` | 自由研究 | `research 如果降息我的组合会怎样` |
+| `lookup <关键词>` | 中文名称 / 主题名转 ETF 代码 | `lookup 有色金属ETF代码是多少` |
 | `assistant <请求>` | 自然语言路由入口 | `assistant 帮我写今天的晨报` |
 
 ## 工作目录
