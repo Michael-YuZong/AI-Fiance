@@ -20,3 +20,4 @@ def test_risk_report_contains_core_sections():
     assert "var_95" in report
     assert "beta" in report
     assert "correlation" in report
+    assert "rolling_volatility" in report

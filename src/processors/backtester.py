@@ -47,6 +47,20 @@ class SimpleBacktester:
                 position = 0.0
             equity_curve.append(capital if position == 0 else position * price)
 
+        if position > 0 and len(self.prices) > 0:
+            final_price = float(self.prices["close"].iloc[-1])
+            capital = position * final_price
+            trades.append(
+                {
+                    "entry_date": entry_date,
+                    "exit_date": self.prices.index[-1],
+                    "entry_price": entry_price,
+                    "exit_price": final_price,
+                    "return": (final_price - entry_price) / entry_price,
+                }
+            )
+            equity_curve[-1] = capital
+
         return self._analyze(trades, equity_curve, initial_capital)
 
     def _analyze(

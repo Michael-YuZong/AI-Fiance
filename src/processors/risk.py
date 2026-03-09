@@ -77,6 +77,14 @@ class RiskAnalyzer:
             "interpretation": f"历史最大回撤为 {max_dd * 100:.2f}%。",
         }
 
+    def rolling_volatility(self, windows: tuple[int, ...] = (20, 60)) -> Dict[str, object]:
+        result: Dict[str, object] = {}
+        for window in windows:
+            series = self.portfolio_returns.tail(window)
+            annualized = float(series.std() * np.sqrt(252)) if len(series) >= 2 else 0.0
+            result[f"vol_{window}d"] = annualized
+        return result
+
     def beta(self, benchmark_returns: pd.Series) -> Dict[str, object]:
         aligned = pd.concat([self.portfolio_returns, benchmark_returns], axis=1).dropna()
         if aligned.empty or aligned.iloc[:, 1].var() == 0:
@@ -113,6 +121,7 @@ class RiskAnalyzer:
             "var_99": self.var(0.99),
             "cvar_95": self.cvar(0.95),
             "max_drawdown": self.max_drawdown(),
+            "rolling_volatility": self.rolling_volatility(),
             "beta": self.beta(benchmark_returns),
             "sharpe": self._sharpe_ratio(),
         }

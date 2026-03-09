@@ -28,7 +28,7 @@
 6. 风险管理：相关性、VaR、压力测试、集中度预警
 7. 简易回测：验证规则有没有明显失效
 
-当前仓库已经实现到 Phase 3 基础版，重点是把日常使用和研究辅助最常见的几条链路先跑通：
+当前仓库已经实现到 Phase 4 基础版，重点是把“看标的、看组合、看风险、看规则”的主链路先跑通：
 
 - 配置加载、日志、重试、缓存
 - A 股 ETF / 美股 / 港股 / 商品行情采集骨架
@@ -36,6 +36,7 @@
 - 六维扫描基础版：宏观、产业链、资金情绪、跨市场、技术面、估值面
 - SQLite 基础存储
 - `scan`、`briefing`、`snap`、`compare`、`portfolio`、`discover`、`regime`、`policy` 命令可运行
+- `risk`、`backtest`、`research` 命令已接通 Phase 4 基础版
 
 ## 当前支持什么
 
@@ -56,6 +57,10 @@ python -m src.commands.portfolio review 2026-03
 python -m src.commands.discover 电网
 python -m src.commands.regime
 python -m src.commands.policy 电网
+python -m src.commands.risk report
+python -m src.commands.risk stress "美股崩盘"
+python -m src.commands.backtest macd_golden_cross 561380 3y
+python -m src.commands.research 当前宏观环境对561380意味着什么
 ```
 
 例如：
@@ -105,7 +110,7 @@ python -m src.commands.scan AU0
 
 ## 怎么安装
 
-推荐 Python 3.11+。
+推荐 Python 3.11+。当前仓库在本机 Python 3.9 也已做过兼容性验证，但目标环境仍建议用 3.11+。
 
 1. 创建虚拟环境
 
@@ -246,7 +251,45 @@ python -m src.commands.policy 电网
 python -m src.commands.policy https://example.com/policy-page
 ```
 
-### 8. 查看本地数据
+### 8. 做 Phase 4 风险与回测
+
+组合风险报告：
+
+```bash
+python -m src.commands.risk report
+```
+
+查看相关性：
+
+```bash
+python -m src.commands.risk correlation
+```
+
+跑压力测试：
+
+```bash
+python -m src.commands.risk stress "美股崩盘"
+python -m src.commands.risk stress "人民币急贬"
+```
+
+做规则回测：
+
+```bash
+python -m src.commands.backtest macd_golden_cross 561380 3y
+python -m src.commands.backtest oversold_rebound HSTECH 3y
+```
+
+研究问答：
+
+```bash
+python -m src.commands.research 当前宏观环境对561380意味着什么
+python -m src.commands.research 如果美股跌20%我的组合会怎样
+python -m src.commands.research 我的持仓相关性高不高
+```
+
+`research` 当前是 Phase 4 的本地启发式实现：会联动宏观、标的快照、组合风险和预设压力场景做结构化回答；如果部分外部数据源不可用，会自动降级，不会直接中断。
+
+### 9. 查看本地数据
 
 扫描后会写入：
 
