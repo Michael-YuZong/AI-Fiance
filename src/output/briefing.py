@@ -36,6 +36,7 @@ class BriefingRenderer:
 
         _append_section(lines, "今日主线", payload.get("headline_lines", []))
         _append_section(lines, "新闻主线", payload.get("news_lines", []))
+        _append_section(lines, "关键宏观资产", payload.get("monitor_lines", []))
         _append_section(lines, "隔夜与主要资产", payload.get("overnight_lines", []))
         _append_section(lines, "宏观与流动性", payload.get("macro_items", []))
         _append_section(lines, "市场概览", payload.get("market_overview_lines", []))

@@ -11,6 +11,7 @@ def test_briefing_renderer_outputs_core_sections():
         "generated_at": "2026-03-09 07:30:00",
         "headline_lines": ["主线偏防守。"],
         "news_lines": ["[能源与地缘] 今日重点看原油与黄金。"],
+        "monitor_lines": ["布伦特原油 108.860，1日 +1.00%，5日 +5.00%。"],
         "overnight_lines": ["科技方向偏弱。"],
         "macro_items": ["中国 PMI 49.0。"],
         "market_overview_lines": ["watchlist 整体偏中性。"],
@@ -29,6 +30,7 @@ def test_briefing_renderer_outputs_core_sections():
     assert "# 每日晨报" in rendered
     assert "## 今日主线" in rendered
     assert "## 新闻主线" in rendered
+    assert "## 关键宏观资产" in rendered
     assert "## 隔夜与主要资产" in rendered
     assert "## 全球资金流代理" in rendered
     assert "## 情绪代理" in rendered

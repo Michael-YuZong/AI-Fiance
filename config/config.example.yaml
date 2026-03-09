@@ -47,6 +47,7 @@ storage:
 briefing_calendar_file: "config/event_calendar.yaml"
 asset_aliases_file: "config/asset_aliases.yaml"
 news_feeds_file: "config/news_feeds.yaml"
+market_monitors_file: "config/market_monitors.yaml"
 
 # 标的类型映射
 asset_type_mapping:

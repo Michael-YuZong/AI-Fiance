@@ -14,9 +14,20 @@ try:
 except ImportError:  # pragma: no cover - optional dependency during bootstrap
     ak = None
 
+try:
+    import yfinance as yf
+except ImportError:  # pragma: no cover
+    yf = None
+
 
 class ChinaMarketCollector(BaseCollector):
     """A 股 ETF 行情与技术数据采集。"""
+
+    def _yahoo_symbol(self, symbol: str) -> str:
+        if len(symbol) == 6 and symbol.isdigit():
+            suffix = ".SS" if symbol[0] in {"5", "6", "9"} else ".SZ"
+            return f"{symbol}{suffix}"
+        return symbol
 
     def _ak_function(self, name: str) -> Callable[..., Any]:
         if ak is None:
@@ -38,18 +49,33 @@ class ChinaMarketCollector(BaseCollector):
         end_date: str = "",
     ) -> pd.DataFrame:
         """ETF 日 K 线。"""
-        fetcher = self._ak_function("fund_etf_hist_em")
         start = start_date or self._date_str(-365 * 3)
         end = end_date or self._date_str()
-        return self.cached_call(
-            f"cn_market:etf_daily:{symbol}:{period}:{adjust}:{start}:{end}",
-            fetcher,
-            symbol=symbol,
-            period=period,
-            start_date=start,
-            end_date=end,
-            adjust=adjust,
-        )
+        try:
+            fetcher = self._ak_function("fund_etf_hist_em")
+            return self.cached_call(
+                f"cn_market:etf_daily:{symbol}:{period}:{adjust}:{start}:{end}",
+                fetcher,
+                symbol=symbol,
+                period=period,
+                start_date=start,
+                end_date=end,
+                adjust=adjust,
+            )
+        except Exception as primary_exc:
+            if yf is None:
+                raise primary_exc
+            ticker = self._yahoo_symbol(symbol)
+            try:
+                return self.cached_call(
+                    f"cn_market:yahoo_etf_daily:{ticker}:{period}",
+                    yf.Ticker(ticker).history,
+                    period="3y" if period == "daily" else period,
+                    interval="1d",
+                    auto_adjust=False,
+                )
+            except Exception:
+                raise primary_exc
 
     def get_etf_realtime(self) -> pd.DataFrame:
         """ETF 实时行情。"""

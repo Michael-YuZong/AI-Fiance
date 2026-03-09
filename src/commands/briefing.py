@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL 1.1.1+")
 
-from src.collectors import EventsCollector, GlobalFlowCollector, NewsCollector, SocialSentimentCollector
+from src.collectors import EventsCollector, GlobalFlowCollector, MarketMonitorCollector, NewsCollector, SocialSentimentCollector
 from src.output.briefing import BriefingRenderer
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
 from src.processors.regime import RegimeDetector
@@ -332,6 +332,36 @@ def _news_lines(
     return lines
 
 
+def _monitor_lines(config: Dict[str, Any]) -> List[str]:
+    rows = MarketMonitorCollector(config).collect()
+    if not rows:
+        return ["关键宏观资产暂不可用，晨报已回退到已有新闻主线和宏观代理。"]
+
+    lines = [
+        f"{item['name']} {item['latest']:.3f}，1日 {format_pct(item['return_1d'])}，5日 {format_pct(item['return_5d'])}。"
+        for item in rows[:8]
+    ]
+
+    by_name = {item["name"]: item for item in rows}
+    brent = by_name.get("布伦特原油")
+    dxy = by_name.get("美元指数")
+    vix = by_name.get("VIX波动率")
+    copper = by_name.get("COMEX铜")
+    gold = by_name.get("COMEX黄金")
+
+    if brent and brent["return_5d"] > 0.04:
+        lines.append("原油 5 日涨幅偏大，今天需要更留意能源链、通胀预期和风险资产承压。")
+    if dxy and dxy["return_5d"] > 0.01:
+        lines.append("美元阶段性走强时，港股科技和成长估值通常更容易承压。")
+    if vix and vix["latest"] >= 22:
+        lines.append("VIX 处在高波动区，今天更适合把回撤控制和仓位节奏放在前面。")
+    if copper and gold and copper["return_5d"] > gold["return_5d"] + 0.02:
+        lines.append("铜强于金，说明市场更偏向交易增长和顺周期。")
+    elif copper and gold and gold["return_5d"] > copper["return_5d"] + 0.02:
+        lines.append("金强于铜，说明市场更偏向防守和避险。")
+    return lines
+
+
 def _sentiment_lines(snapshots: List[BriefingSnapshot], config: Dict[str, Any]) -> List[str]:
     if not snapshots:
         return ["当前没有可用于估算情绪代理的标的快照。"]
@@ -517,6 +547,7 @@ def main() -> None:
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "headline_lines": _headline_lines(args.mode, snapshots, regime_result, china_macro),
         "news_lines": _news_lines(snapshots, china_macro, global_proxy, config),
+        "monitor_lines": _monitor_lines(config),
         "overnight_lines": _overnight_lines(snapshots),
         "macro_items": macro_items,
         "market_overview_lines": _market_overview_lines(snapshots, regime_result),
