@@ -57,6 +57,8 @@ class BriefingSnapshot:
     signal_score: int
     summary: str
     note: str
+    proxy_symbol: str = ""
+    notes: str = ""
     technical: Dict[str, Any] = field(default_factory=dict)
     technical_bias: str = "分歧"
 
@@ -250,7 +252,7 @@ def _technical_watchlist_line(snapshot: BriefingSnapshot) -> str:
     return f"{snapshot.symbol} ({snapshot.name}): 技术共振 `{snapshot.technical_bias}`，" + "；".join(parts) + "。"
 
 
-def _price_context_label(asset_type: str) -> str:
+def _price_context_label(asset_type: str, proxy_symbol: str = "") -> str:
     mapping = {
         "cn_etf": "场内价格",
         "hk_etf": "场内价格",
@@ -259,7 +261,15 @@ def _price_context_label(asset_type: str) -> str:
         "hk_index": "指数点位",
         "futures": "主力合约价",
     }
+    if asset_type == "hk_index" and proxy_symbol:
+        return "代理ETF价格"
     return mapping.get(asset_type, "最新价")
+
+
+def _watchlist_tech_basis(technical: Dict[str, Any]) -> str:
+    rsi = float(technical.get("rsi", {}).get("RSI", 0.0))
+    adx = float(technical.get("dmi", {}).get("ADX", 0.0))
+    return f"RSI {rsi:.1f} / ADX {adx:.1f}"
 
 
 def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[BriefingSnapshot], List[str], List[List[str]]]:
@@ -293,6 +303,8 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
                 signal_score=score,
                 summary=summary,
                 note=note,
+                proxy_symbol=item.get("proxy_symbol", ""),
+                notes=item.get("notes", ""),
                 technical=technical,
                 technical_bias=technical_bias,
             )
@@ -300,13 +312,13 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
             rows.append(
                 [
                     f"{symbol} ({item['name']})",
-                    f"{_price_context_label(item['asset_type'])} {metrics['last_close']:.3f}",
+                    f"{_price_context_label(item['asset_type'], item.get('proxy_symbol', ''))} {metrics['last_close']:.3f}",
                     format_pct(metrics["return_1d"]),
                     format_pct(metrics["return_5d"]),
                     format_pct(metrics["return_20d"]),
                     trend,
                     f"{technical['volume']['vol_ratio']:.2f}",
-                    technical_bias,
+                    f"{technical_bias} ({_watchlist_tech_basis(technical)})",
                 ]
             )
 
@@ -422,6 +434,25 @@ def _market_overview_lines(snapshots: List[BriefingSnapshot], regime_result: Dic
         f"近 5 日最强的是 {strongest_5d.symbol} {format_pct(strongest_5d.return_5d)}，最弱的是 {weakest_5d.symbol} {format_pct(weakest_5d.return_5d)}。",
         f"从当前宏观环境 `{regime_label}` 看，更符合偏好的方向是：{', '.join(regime_result.get('preferred_assets', [])) or '暂无'}。",
     ]
+
+
+def _regime_explanation_lines(
+    china_macro: Dict[str, Any],
+    regime_result: Dict[str, Any],
+    narrative: Dict[str, Any],
+) -> List[str]:
+    label = REGIME_LABELS.get(str(regime_result.get("current_regime", "")), str(regime_result.get("current_regime", "")))
+    reasoning = [str(item) for item in regime_result.get("reasoning", []) if str(item).strip()]
+    lines: List[str] = []
+    if reasoning:
+        lines.append(f"背景 regime 当前判为 `{label}`，触发依据: " + "；".join(reasoning[:3]))
+    else:
+        pmi = float(china_macro.get("pmi", 50.0))
+        cpi = float(china_macro.get("cpi_monthly", 0.0))
+        lines.append(f"背景 regime 当前判为 `{label}`，主要参考 PMI {pmi:.1f}、CPI {cpi:.1f}% 和美元/流动性状态。")
+    if narrative.get("overrides_background"):
+        lines.append("但这只是中期背景，不是今天盘口的第一驱动；日内仍以事件主线裁决为准。")
+    return lines
 
 
 def _find_snapshot(snapshots: List[BriefingSnapshot], symbol: str) -> Optional[BriefingSnapshot]:
@@ -751,6 +782,11 @@ def _anomaly_report(
 
     for snapshot in snapshots:
         is_etf = "etf" in snapshot.asset_type.lower() or snapshot.symbol.endswith("ETF")
+        if snapshot.asset_type == "hk_index" and snapshot.proxy_symbol:
+            lines.append(
+                f"ℹ️ {snapshot.symbol} 当前使用 `{snapshot.proxy_symbol}` 作为行情代理，显示的是代理 ETF 价格，不是指数点位。"
+            )
+            flags[snapshot.symbol] = "代理ETF价格，不是指数点位"
         if is_etf and abs(snapshot.return_20d) >= 0.12:
             lines.append(
                 f"⚠️ {snapshot.symbol} {snapshot.name} 近 20 日 {format_pct(snapshot.return_20d)}，对 ETF 属于偏大波动，请复核场内价格、复权口径和对应催化。"
@@ -1335,7 +1371,7 @@ def _yesterday_review_lines(
         if file_date.date() < today:
             candidates.append((file_date, path))
     if not candidates:
-        return ["暂无昨日晨报归档，暂时无法自动回顾‘昨日验证点’。"]
+        return ["暂无昨日晨报归档，暂时无法自动回顾‘昨日验证点’。", "从本次运行起，晨报会自动归档到 `reports/`，供下一交易日闭环复盘。"]
 
     latest_path = sorted(candidates, key=lambda item: item[0])[-1][1]
     try:
@@ -1398,14 +1434,20 @@ def _liquidity_lines(config: Dict[str, Any]) -> List[str]:
         frame["成交净买额"] = pd.to_numeric(frame["成交净买额"], errors="coerce").fillna(0.0)
         north = frame[frame["资金方向"].astype(str) == "北向"]["成交净买额"].sum()
         south = frame[frame["资金方向"].astype(str) == "南向"]["成交净买额"].sum()
+
+        def _fmt_hsgt_amount(amount: float) -> str:
+            if abs(amount) >= 1_000_000:
+                return _fmt_yi(amount)
+            return f"{amount:.2f}亿"
+
         if abs(north) > 1e-6:
             direction = "净流入" if north >= 0 else "净流出"
-            lines.append(f"北向资金当日{direction}约 {_fmt_yi(north)}。")
+            lines.append(f"北向资金当日{direction}约 {_fmt_hsgt_amount(north)}。")
         else:
-            lines.append("北向资金当日读数接近 0 或未更新，先不据此做强结论。")
+            lines.append("北向资金当日读数接近 0 或未更新，今日改用南向资金、全市场主力流向和龙虎榜活跃度做代理。")
         if abs(south) > 1e-6:
             direction = "净流入" if south >= 0 else "净流出"
-            lines.append(f"南向资金当日{direction}约 {_fmt_yi(south)}，可作为 HSTECH 情绪承接的辅助观察。")
+            lines.append(f"南向资金当日{direction}约 {_fmt_hsgt_amount(south)}，可作为 HSTECH 情绪承接的辅助观察。")
 
     try:
         margin = collector.get_margin_trading()
@@ -1413,7 +1455,7 @@ def _liquidity_lines(config: Dict[str, Any]) -> List[str]:
         margin = pd.DataFrame()
 
     if margin.empty:
-        lines.append("融资融券明细接口今日异常或为空，短线情绪判断暂不依赖该项。")
+        lines.append("融资融券明细接口今日异常或为空，短线情绪改看昨日涨停承接、龙虎榜净买额和主力资金方向。")
     return lines[:4] or ["资金与流动性明细暂不可用。"]
 
 
@@ -1476,10 +1518,12 @@ def _asset_dashboard_rows(
     selected_snapshots = [item for symbol in symbol_order if (item := _find_snapshot(snapshots, symbol))]
     for snapshot in selected_snapshots:
         note = flags.get(snapshot.symbol, snapshot.summary.replace("当前", "").replace("watchlist", "观察池"))
+        if snapshot.notes:
+            note = f"{snapshot.notes}；{note}" if note else snapshot.notes
         rows.append(
             [
                 f"{snapshot.symbol} {snapshot.name}",
-                _price_context_label(snapshot.asset_type),
+                _price_context_label(snapshot.asset_type, snapshot.proxy_symbol),
                 f"{snapshot.latest_price:.3f}",
                 f"1日 {format_pct(snapshot.return_1d)} / 20日 {format_pct(snapshot.return_20d)}",
                 f"{snapshot.trend}/{snapshot.technical_bias}",
@@ -1659,6 +1703,13 @@ def _action_lines(
     return lines[:5]
 
 
+def _persist_briefing(markdown: str, mode: str) -> None:
+    reports_dir = resolve_project_path("reports")
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{mode}_briefing_{datetime.now().strftime('%Y-%m-%d')}.md"
+    (reports_dir / filename).write_text(markdown, encoding="utf-8")
+
+
 def main() -> None:
     args = build_parser().parse_args()
     setup_logger("ERROR")
@@ -1700,6 +1751,7 @@ def main() -> None:
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "headline_lines": _headline_lines(args.mode, snapshots, narrative, china_macro, pulse),
         "yesterday_review_lines": _yesterday_review_lines(snapshots, monitor_rows),
+        "regime_reason_lines": _regime_explanation_lines(china_macro, regime_result, narrative),
         "narrative_validation_lines": _narrative_validation_lines(narrative, news_report, monitor_rows, pulse, snapshots),
         "important_event_lines": _important_event_lines(news_report),
         "news_lines": _news_lines(news_report),
@@ -1730,7 +1782,9 @@ def main() -> None:
         "calendar_lines": _calendar_lines(args.mode),
         "action_lines": _action_lines(snapshots, narrative, monitor_rows),
     }
-    print(BriefingRenderer().render(payload))
+    rendered = BriefingRenderer().render(payload)
+    _persist_briefing(rendered, args.mode)
+    print(rendered)
 
 
 if __name__ == "__main__":

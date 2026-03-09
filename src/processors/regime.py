@@ -41,6 +41,12 @@ class RegimeDetector:
         if self.data.get("pmi", 0) < 50 and self.data.get("cpi", 0) > 2.5:
             scores["stagflation"] += 2
             reasoning["stagflation"].append("增长偏弱但价格压力仍高。")
+        if self.data.get("pmi", 0) < 50 and self.data.get("dxy_state") == "strengthening":
+            scores["stagflation"] += 1
+            reasoning["stagflation"].append("PMI 低于 50 且美元偏强，说明增长承压、外部流动性偏紧。")
+        if self.data.get("policy_stance") == "dilemma":
+            scores["stagflation"] += 1
+            reasoning["stagflation"].append("政策处在两难区间，宽松和稳汇率约束并存。")
         if self.data.get("pmi", 0) < 50 and self.data.get("cpi_trend") == "falling":
             scores["deflation"] += 2
             reasoning["deflation"].append("PMI 低于 50 且 CPI 走弱。")

@@ -10,7 +10,26 @@ import requests
 from src.collectors.base import BaseCollector
 from src.utils.config import resolve_project_path
 from src.utils.data import load_yaml
-from src.utils.market import format_pct
+
+
+def _format_pct(value: float) -> str:
+    return f"{value * 100:+.2f}%"
+
+
+def _clean_source_name(value: str) -> str:
+    source = value.strip()
+    replacements = {
+        "Bloomberg Link": "Bloomberg",
+        "Reuters.com": "Reuters",
+    }
+    return replacements.get(source, source)
+
+
+def _clean_title(title: str, source: str) -> str:
+    cleaned = title.strip()
+    if source == "Bloomberg" and cleaned.lower().startswith("bloomberg link"):
+        cleaned = cleaned[len("Bloomberg Link") :].strip(" -:")
+    return cleaned
 
 
 def _value(item: Any, key: str, default: Any = None) -> Any:
@@ -66,15 +85,20 @@ class NewsCollector(BaseCollector):
             for entry in parsed.entries[:max_items_per_feed]:
                 source = getattr(entry, "source", {})
                 if isinstance(source, Mapping):
-                    source_name = str(source.get("title", "")).strip()
+                    source_name = _clean_source_name(str(source.get("title", "")).strip())
                 else:
-                    source_name = str(source or "").strip()
+                    source_name = _clean_source_name(str(source or "").strip())
+                configured_source = _clean_source_name(str(feed.get("source", "")).strip())
+                title = _clean_title(str(getattr(entry, "title", "")).strip(), source_name or configured_source)
                 live_items.append(
                     {
                         "category": str(feed.get("category", "market")),
-                        "title": str(getattr(entry, "title", "")).strip(),
-                        "source": source_name or str(getattr(entry, "publisher", "") or feed.get("source", "") or feed.get("name", "")).strip(),
-                        "configured_source": str(feed.get("source", "")).strip(),
+                        "title": title,
+                        "source": source_name
+                        or _clean_source_name(
+                            str(getattr(entry, "publisher", "") or configured_source or feed.get("name", "")).strip()
+                        ),
+                        "configured_source": configured_source,
                         "must_include": bool(feed.get("must_include", False)),
                         "link": str(getattr(entry, "link", "")).strip(),
                     }
@@ -251,11 +275,11 @@ class NewsCollector(BaseCollector):
 
         if domestic_1d > offshore_1d + 0.01:
             lines.append(
-                f"[资金风格] 国内方向相对更稳（国内 {format_pct(domestic_1d)} vs 海外 {format_pct(offshore_1d)}），本土确定性资产更容易获得关注。"
+                f"[资金风格] 国内方向相对更稳（国内 {_format_pct(domestic_1d)} vs 海外 {_format_pct(offshore_1d)}），本土确定性资产更容易获得关注。"
             )
         elif offshore_1d > domestic_1d + 0.01:
             lines.append(
-                f"[资金风格] 海外弹性方向相对更强（国内 {format_pct(domestic_1d)} vs 海外 {format_pct(offshore_1d)}），说明资金更愿意博弈外盘成长或离岸修复。"
+                f"[资金风格] 海外弹性方向相对更强（国内 {_format_pct(domestic_1d)} vs 海外 {_format_pct(offshore_1d)}），说明资金更愿意博弈外盘成长或离岸修复。"
             )
         else:
             lines.append("[资金风格] 国内和海外强弱差不大，今天更可能是结构轮动，而不是单边总攻。")

@@ -48,11 +48,15 @@ class BriefingRenderer:
             f"- 生成时间: `{payload['generated_at']}`",
         ]
 
+        _append_block(lines, "昨日验证回顾", _first_item(payload, "yesterday_review_lines"))
+        for item in (payload.get("yesterday_review_lines", []) or [])[1:]:
+            lines.append(f"- {item}")
+
         _append_block(lines, "主线判断", _first_item(payload, "headline_lines"))
         for item in (payload.get("headline_lines", []) or [])[1:]:
             lines.append(f"- {item}")
+        _append_subsection(lines, "背景 Regime 依据", payload.get("regime_reason_lines", []))
         _append_subsection(lines, "今天怎么做", payload.get("action_lines", []))
-        _append_subsection(lines, "昨日验证点回顾", payload.get("yesterday_review_lines", []))
         _append_subsection(lines, "主线校验", payload.get("narrative_validation_lines", []))
         _append_subsection(lines, "重要催化", payload.get("important_event_lines", []))
         _append_subsection(

@@ -11,6 +11,7 @@ def test_briefing_renderer_outputs_core_sections():
         "generated_at": "2026-03-09 07:30:00",
         "headline_lines": ["主线偏防守。"],
         "yesterday_review_lines": ["昨日原油验证点回看: 今天继续强化。"],
+        "regime_reason_lines": ["背景 regime 当前判为 `滞涨`，触发依据: PMI 低于 50。"],
         "narrative_validation_lines": ["结论: 当前主线校验通过 3/3 项。"],
         "important_event_lines": ["美联储与利率预期: 市场等待 CPI。"],
         "story_lines": ["今天市场更像在交易油价冲击。"],
@@ -33,12 +34,13 @@ def test_briefing_renderer_outputs_core_sections():
     }
     rendered = BriefingRenderer().render(payload)
     assert "# 每日晨报" in rendered
+    assert "## 昨日验证回顾" in rendered
     assert "## 主线判断" in rendered
     assert "## 资产仪表盘" in rendered
     assert "## 验证与行动" in rendered
     assert "## Watchlist 与组合" in rendered
+    assert "### 背景 Regime 依据" in rendered
     assert "### 今天怎么做" in rendered
-    assert "### 昨日验证点回顾" in rendered
     assert "### 主线校验" in rendered
     assert "### 重要催化" in rendered
     assert "### 新闻覆盖与异常" in rendered
