@@ -1,0 +1,31 @@
+# 手动维护的晨报事件日历
+# one_off: 指定日期的特殊事件
+# recurring: 按星期重复出现的跟踪事项，0=周一 ... 6=周日
+
+one_off: []
+
+recurring:
+  - title: "A股盘前检查"
+    time: "09:00"
+    importance: "high"
+    mode: "daily"
+    weekdays: [0, 1, 2, 3, 4]
+    note: "检查 watchlist 最强/最弱方向、盘前风险点和 thesis 是否需要上调优先级。"
+  - title: "A股收盘复核"
+    time: "15:00"
+    importance: "high"
+    mode: "daily"
+    weekdays: [0, 1, 2, 3, 4]
+    note: "复核日内强弱是否延续，确认次日晨报需要上调的方向。"
+  - title: "美股开盘前观察"
+    time: "21:30"
+    importance: "medium"
+    mode: "daily"
+    weekdays: [0, 1, 2, 3, 4]
+    note: "重点观察 QQQM、GLD 和风险偏好代理是否与白天判断一致。"
+  - title: "周度组合复盘"
+    time: "10:00"
+    importance: "high"
+    mode: "weekly"
+    weekdays: [5, 6]
+    note: "检查再平衡建议、thesis 覆盖和高相关暴露。"

@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL 1.1.1+")
 
+from src.collectors import EventsCollector
 from src.output.briefing import BriefingRenderer
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
 from src.processors.regime import RegimeDetector
@@ -245,16 +246,85 @@ def _market_overview_lines(snapshots: List[BriefingSnapshot], regime_result: Dic
     ]
 
 
+def _find_snapshot(snapshots: List[BriefingSnapshot], symbol: str) -> BriefingSnapshot | None:
+    for item in snapshots:
+        if item.symbol == symbol:
+            return item
+    return None
+
+
+def _overnight_lines(snapshots: List[BriefingSnapshot]) -> List[str]:
+    if not snapshots:
+        return ["当前没有可用的最近交易日资产快照。"]
+
+    lines: List[str] = []
+    hstech = _find_snapshot(snapshots, "HSTECH")
+    qqqm = _find_snapshot(snapshots, "QQQM")
+    grid = _find_snapshot(snapshots, "561380")
+    gld = _find_snapshot(snapshots, "GLD")
+    au0 = _find_snapshot(snapshots, "AU0")
+
+    if hstech and qqqm:
+        if hstech.return_1d < 0 and qqqm.return_1d < 0:
+            lines.append(
+                f"科技风险偏好偏弱：HSTECH {format_pct(hstech.return_1d)}，QQQM {format_pct(qqqm.return_1d)}，成长风格仍在消化压力。"
+            )
+        elif hstech.return_1d > 0 and qqqm.return_1d > 0:
+            lines.append(
+                f"科技风险偏好回暖：HSTECH {format_pct(hstech.return_1d)}，QQQM {format_pct(qqqm.return_1d)}，成长方向出现同步修复。"
+            )
+        else:
+            lines.append(
+                f"科技方向内外盘分化：HSTECH {format_pct(hstech.return_1d)}，QQQM {format_pct(qqqm.return_1d)}，风险偏好并不统一。"
+            )
+
+    if grid:
+        lines.append(
+            f"国内确定性方向看 561380：近 5 日 {format_pct(grid.return_5d)}，近 20 日 {format_pct(grid.return_20d)}，当前仍是观察池里的相对强者。"
+        )
+
+    if gld and au0:
+        if gld.return_1d > 0 and au0.return_1d > 0:
+            lines.append(
+                f"黄金内外盘同向偏强：GLD {format_pct(gld.return_1d)}，AU0 {format_pct(au0.return_1d)}，避险需求更一致。"
+            )
+        elif gld.return_1d < 0 and au0.return_1d < 0:
+            lines.append(
+                f"黄金内外盘同步走弱：GLD {format_pct(gld.return_1d)}，AU0 {format_pct(au0.return_1d)}，短线避险并未形成主线。"
+            )
+        else:
+            lines.append(
+                f"黄金内外盘分化：GLD {format_pct(gld.return_1d)}，AU0 {format_pct(au0.return_1d)}，短线更多受各自市场节奏影响。"
+            )
+
+    strongest_1d = max(snapshots, key=lambda item: item.return_1d)
+    weakest_1d = min(snapshots, key=lambda item: item.return_1d)
+    lines.append(
+        f"单日最强是 {strongest_1d.symbol} {format_pct(strongest_1d.return_1d)}，最弱是 {weakest_1d.symbol} {format_pct(weakest_1d.return_1d)}。"
+    )
+    return lines
+
+
 def _focus_lines(snapshots: List[BriefingSnapshot], mode: str) -> List[str]:
     if not snapshots:
         return []
-    ranked = sorted(
+    strongest = max(snapshots, key=lambda item: item.signal_score + item.return_20d)
+    weakest = min(snapshots, key=lambda item: item.signal_score + item.return_20d)
+    selected: List[BriefingSnapshot] = [strongest, weakest]
+
+    gold = next((item for item in snapshots if item.sector == "黄金"), None)
+    if gold and gold not in selected:
+        selected.append(gold)
+
+    largest_move = max(
         snapshots,
-        key=lambda item: (abs(item.return_1d) if mode == "daily" else abs(item.return_5d), abs(item.signal_score)),
-        reverse=True,
+        key=lambda item: abs(item.return_1d) if mode == "daily" else abs(item.return_5d),
     )
+    if largest_move not in selected:
+        selected.append(largest_move)
+
     lines: List[str] = []
-    for item in ranked[:4]:
+    for item in selected[:4]:
         lines.append(
             f"{item.symbol} ({item.name}): {item.summary} 近1日={format_pct(item.return_1d)}，近5日={format_pct(item.return_5d)}，近20日={format_pct(item.return_20d)}。{item.note}"
         )
@@ -328,16 +398,34 @@ def _calendar_lines(mode: str) -> List[str]:
     return lines
 
 
+def _event_lines(config: Dict[str, Any], mode: str) -> List[str]:
+    events = EventsCollector(config).collect(mode=mode)
+    if not events:
+        return ["当前没有配置显式事件日历，今日以例行盘前、盘中和收盘跟踪为主。"]
+
+    lines: List[str] = []
+    for item in events[:5]:
+        importance = {"high": "高", "medium": "中", "low": "低"}.get(str(item.get("importance", "")).lower(), "中")
+        title = str(item.get("title", "未命名事件"))
+        time = str(item.get("time", "待定"))
+        note = str(item.get("note", ""))
+        lines.append(f"{time} [{importance}] {title}：{note}")
+    return lines
+
+
 def _action_lines(snapshots: List[BriefingSnapshot], regime_result: Dict[str, Any]) -> List[str]:
     if not snapshots:
         return ["先修复数据覆盖，再谈晨报动作。"]
 
     strongest = max(snapshots, key=lambda item: item.signal_score)
     weakest = min(snapshots, key=lambda item: item.signal_score)
+    gold = next((item for item in snapshots if item.sector == "黄金"), None)
     lines = [
         f"优先跟踪 {strongest.symbol}：当前信号分最高，适合观察是否继续放量并维持趋势。",
         f"谨慎对待 {weakest.symbol}：当前信号分最低，除非出现止跌确认，否则不宜过早抄底。",
     ]
+    if gold:
+        lines.append(f"把 {gold.symbol} 当作防守情绪验证器，观察避险需求是否继续抬头。")
     if "黄金" in regime_result.get("preferred_assets", []):
         lines.append("如果今天风险偏好继续回落，黄金相关方向的优先级可以适度上调。")
     if "港股科技" in regime_result.get("preferred_assets", []):
@@ -374,12 +462,14 @@ def main() -> None:
         "title": "每日晨报" if args.mode == "daily" else "每周周报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "headline_lines": _headline_lines(args.mode, snapshots, regime_result, china_macro),
+        "overnight_lines": _overnight_lines(snapshots),
         "macro_items": macro_items,
         "market_overview_lines": _market_overview_lines(snapshots, regime_result),
         "watchlist_rows": watchlist_rows,
         "focus_lines": _focus_lines(snapshots, args.mode),
         "rotation_lines": _rotation_lines(snapshots),
         "alerts": alerts or ["当前没有触发强提醒，但仍需关注强弱方向是否在盘中发生切换。"],
+        "event_lines": _event_lines(config, args.mode),
         "portfolio_lines": _portfolio_lines(config),
         "calendar_lines": _calendar_lines(args.mode),
         "action_lines": _action_lines(snapshots, regime_result),

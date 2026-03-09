@@ -43,6 +43,9 @@ storage:
   cache_dir: "data/cache"
   cache_ttl_hours: 4
 
+# 晨报事件日历
+briefing_calendar_file: "config/event_calendar.yaml"
+
 # 标的类型映射
 asset_type_mapping:
   "^[0-9]{6}$": "cn_etf"

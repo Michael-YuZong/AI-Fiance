@@ -1,8 +1,41 @@
-"""Economic calendar collector placeholders for future phases."""
+"""Local event calendar collector for briefing generation."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Dict, List, Mapping
+
+from src.utils.config import resolve_project_path
+from src.utils.data import load_yaml
 
 
 class EventsCollector:
-    """Placeholder for event calendar collection."""
+    """Load manually maintained event calendars from local YAML."""
 
-    def collect(self):
-        raise NotImplementedError("Event calendar collection is planned for Phase 2.")
+    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+        self.config = dict(config or {})
+        self.calendar_path = resolve_project_path(
+            self.config.get("briefing_calendar_file", "config/event_calendar.yaml")
+        )
+
+    def collect(self, mode: str = "daily", as_of: datetime | None = None) -> List[Dict[str, Any]]:
+        """Return one-off and recurring event items for the target day."""
+        now = as_of or datetime.now()
+        payload = load_yaml(self.calendar_path, default={}) or {}
+        events: List[Dict[str, Any]] = []
+
+        for item in payload.get("one_off", []) or []:
+            if str(item.get("date", "")) == now.strftime("%Y-%m-%d"):
+                events.append(dict(item))
+
+        for item in payload.get("recurring", []) or []:
+            weekdays = [int(day) for day in item.get("weekdays", [])]
+            if weekdays and now.weekday() not in weekdays:
+                continue
+            if item.get("mode") not in {"", None, mode, "both"}:
+                continue
+            record = dict(item)
+            record.setdefault("date", now.strftime("%Y-%m-%d"))
+            events.append(record)
+
+        return sorted(events, key=lambda row: (str(row.get("importance", "")), str(row.get("time", ""))), reverse=True)

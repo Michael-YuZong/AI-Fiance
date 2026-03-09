@@ -1,6 +1,7 @@
 """Data collectors."""
 
 from .commodity import CommodityCollector
+from .events import EventsCollector
 from .macro_cn import ChinaMacroCollector
 from .macro_us import USMacroCollector
 from .market_cn import ChinaMarketCollector
@@ -14,4 +15,5 @@ __all__ = [
     "HongKongMarketCollector",
     "USMarketCollector",
     "CommodityCollector",
+    "EventsCollector",
 ]
