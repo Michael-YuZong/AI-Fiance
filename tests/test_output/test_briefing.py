@@ -10,8 +10,11 @@ def test_briefing_renderer_outputs_core_sections():
         "title": "每日晨报",
         "generated_at": "2026-03-09 07:30:00",
         "headline_lines": ["主线偏防守。"],
+        "important_event_lines": ["美联储与利率预期: 市场等待 CPI。"],
         "news_lines": ["[能源与地缘] 今日重点看原油与黄金。"],
         "story_lines": ["今天市场更像在交易油价冲击。"],
+        "rotation_driver_lines": ["行业轮动靠前: 电力(+3.20%)。"],
+        "main_flow_driver_lines": ["全市场主力资金最新为 `净流出` 12.30亿。"],
         "market_pulse_lines": ["A股全市场热度: 涨停 40 家，跌停 3 家。"],
         "lhb_lines": ["机构净买额靠前: 兖矿能源(6.53亿)。"],
         "impact_lines": ["港股科技更容易承压。"],
@@ -34,8 +37,11 @@ def test_briefing_renderer_outputs_core_sections():
     rendered = BriefingRenderer().render(payload)
     assert "# 每日晨报" in rendered
     assert "## 今日主线" in rendered
+    assert "## 重要催化" in rendered
     assert "## 新闻主线" in rendered
     assert "## 新闻推演" in rendered
+    assert "## 板块轮动" in rendered
+    assert "## 主力资金流向" in rendered
     assert "## 全市场脉搏" in rendered
     assert "## 龙虎榜与涨停池" in rendered
     assert "## 资产影响" in rendered

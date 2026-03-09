@@ -17,6 +17,7 @@ warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL 1.1.
 from src.collectors import (
     EventsCollector,
     GlobalFlowCollector,
+    MarketDriversCollector,
     MarketMonitorCollector,
     MarketPulseCollector,
     NewsCollector,
@@ -401,6 +402,20 @@ def _monitor_map(rows: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     return {str(item["name"]): item for item in rows}
 
 
+def _fmt_yi(value: Any) -> str:
+    amount = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(amount):
+        return "N/A"
+    return f"{float(amount) / 1e8:.2f}亿"
+
+
+def _fmt_pct_number(value: Any) -> str:
+    amount = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(amount):
+        return "N/A"
+    return f"{float(amount):+.2f}%"
+
+
 def _top_categories(frame: pd.DataFrame, column: str, limit: int = 3) -> List[str]:
     if frame is None or frame.empty or column not in frame.columns:
         return []
@@ -531,6 +546,188 @@ def _source_summary(news_report: Dict[str, Any]) -> str:
         if source and source not in sources:
             sources.append(source)
     return "本次新闻覆盖源: " + " / ".join(sources[:4]) + "。"
+
+
+def _keyword_match(text: str, keywords: Sequence[str]) -> bool:
+    haystack = f" {text.lower()} "
+    for keyword in keywords:
+        needle = keyword.lower().strip()
+        if not needle:
+            continue
+        if len(needle) <= 3 and needle.isalpha():
+            variants = [f" {needle} ", f"-{needle} ", f" {needle}-"]
+            if any(variant in haystack for variant in variants):
+                return True
+            continue
+        if needle in haystack:
+            return True
+    return False
+
+
+def _important_event_lines(news_report: Dict[str, Any]) -> List[str]:
+    items = news_report.get("items", []) or []
+    if not items:
+        return ["实时新闻事件流暂不可用，当前只能靠宏观、价格和盘面结构做代理推断。"]
+
+    buckets: List[tuple[str, tuple[str, ...], str]] = [
+        ("财报与业绩", ("earnings", "results", "guidance", "profit", "revenue"), "财报/指引"),
+        ("美联储与利率预期", ("federal reserve", "fed", "powell", "rate", "cut", "hike", "cpi", "inflation"), "利率预期"),
+        ("AI 产品与模型", ("openai", "anthropic", "deepseek", "gpt", "chatgpt", "claude", "llm"), "AI催化"),
+        ("半导体产能与资本开支", ("chip", "chips", "semiconductor", "fab", "foundry", "capacity", "tsmc", "intel", "samsung"), "半导体"),
+    ]
+
+    lines: List[str] = []
+    used_titles = set()
+    for title, keywords, label in buckets:
+        matched = None
+        for item in items:
+            text = (
+                f"{item.get('category', '')} {item.get('title', '')} {item.get('source', '')} {item.get('configured_source', '')}"
+            ).lower()
+            if _keyword_match(text, keywords):
+                matched = item
+                break
+        if matched:
+            used_titles.add(matched.get("title", ""))
+            source = matched.get("source") or matched.get("configured_source") or "未知源"
+            lines.append(f"{title}: {matched.get('title', '无标题')} ({source})。归类为 `{label}`。")
+
+    if not lines:
+        top = items[0]
+        source = top.get("source") or top.get("configured_source") or "未知源"
+        lines.append(f"当前实时新闻更偏宏观与市场主线，没有明显单一财报或产业催化占据中心。头条是: {top.get('title', '无标题')} ({source})。")
+
+    if len(lines) < 3:
+        generic_candidates = []
+        for item in items:
+            if item.get("title", "") in used_titles:
+                continue
+            generic_candidates.append(item)
+        for item in generic_candidates[: 3 - len(lines)]:
+            source = item.get("source") or item.get("configured_source") or "未知源"
+            lines.append(f"补充关注: {item.get('title', '无标题')} ({source})。")
+    return lines[:4]
+
+
+def _rotation_driver_lines(
+    drivers: Dict[str, Any],
+    pulse: Dict[str, Any],
+    snapshots: List[BriefingSnapshot],
+) -> List[str]:
+    lines: List[str] = []
+    industry_spot = drivers.get("industry_spot", pd.DataFrame()) if drivers else pd.DataFrame()
+    concept_spot = drivers.get("concept_spot", pd.DataFrame()) if drivers else pd.DataFrame()
+    hot_rank = drivers.get("hot_rank", pd.DataFrame()) if drivers else pd.DataFrame()
+
+    if not industry_spot.empty and "名称" in industry_spot.columns and "涨跌幅" in industry_spot.columns:
+        frame = industry_spot.copy()
+        frame["涨跌幅"] = pd.to_numeric(frame["涨跌幅"], errors="coerce")
+        frame = frame.dropna(subset=["涨跌幅"])
+        leaders = frame.sort_values("涨跌幅", ascending=False).head(3)
+        laggards = frame.sort_values("涨跌幅", ascending=True).head(2)
+        if not leaders.empty:
+            lines.append(
+                "行业轮动靠前: "
+                + "、".join(f"{row['名称']}({row['涨跌幅']:+.2f}%)" for _, row in leaders.iterrows())
+                + "。"
+            )
+        if not laggards.empty:
+            lines.append(
+                "行业轮动靠后: "
+                + "、".join(f"{row['名称']}({row['涨跌幅']:+.2f}%)" for _, row in laggards.iterrows())
+                + "。"
+            )
+    else:
+        top_zt = _top_categories(pulse.get("zt_pool", pd.DataFrame()), "所属行业")
+        top_strong = _top_categories(pulse.get("strong_pool", pd.DataFrame()), "所属行业")
+        if top_zt:
+            lines.append("盘面扩散更明显的方向在: " + "、".join(top_zt) + "。")
+        if top_strong:
+            lines.append("强势股池集中在: " + "、".join(top_strong) + "，说明主线仍偏这些方向。")
+
+    if not concept_spot.empty and "名称" in concept_spot.columns and "涨跌幅" in concept_spot.columns:
+        frame = concept_spot.copy()
+        frame["涨跌幅"] = pd.to_numeric(frame["涨跌幅"], errors="coerce")
+        frame = frame.dropna(subset=["涨跌幅"])
+        leaders = frame.sort_values("涨跌幅", ascending=False).head(3)
+        if not leaders.empty:
+            lines.append(
+                "概念轮动靠前: "
+                + "、".join(f"{row['名称']}({row['涨跌幅']:+.2f}%)" for _, row in leaders.iterrows())
+                + "。"
+            )
+
+    if not hot_rank.empty and {"股票名称", "涨跌幅"}.issubset(hot_rank.columns):
+        rows = hot_rank.head(3)
+        lines.append(
+            "市场热度前排个股: "
+            + "、".join(
+                f"{row['股票名称']}({pd.to_numeric(row['涨跌幅'], errors='coerce'):+.2f}%)"
+                for _, row in rows.iterrows()
+            )
+            + "。"
+        )
+
+    if snapshots:
+        tech_items = [item for item in snapshots if item.sector == "科技"]
+        gold_items = [item for item in snapshots if item.sector == "黄金"]
+        grid_items = [item for item in snapshots if item.sector == "电网"]
+        tech_avg = sum(item.return_5d for item in tech_items) / len(tech_items) if tech_items else 0.0
+        gold_avg = sum(item.return_5d for item in gold_items) / len(gold_items) if gold_items else 0.0
+        grid_avg = sum(item.return_5d for item in grid_items) / len(grid_items) if grid_items else 0.0
+        if grid_avg > tech_avg and grid_avg > gold_avg:
+            lines.append("跨资产看，电网/内需链仍强于科技和黄金，当前轮动核心更偏国内确定性。")
+        elif gold_avg > tech_avg and gold_avg > grid_avg:
+            lines.append("跨资产看，黄金相对更稳，当前更像防守轮动而不是总攻行情。")
+        elif tech_avg > gold_avg and tech_avg > grid_avg:
+            lines.append("跨资产看，科技修复弹性更大，说明风险偏好有回暖迹象。")
+
+    return lines[:5] or ["板块轮动线索暂不可用。"]
+
+
+def _main_flow_driver_lines(drivers: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    if not drivers:
+        return ["主力资金流向暂不可用。"]
+
+    market_flow = drivers.get("market_flow", {})
+    flow_frame = market_flow.get("frame", pd.DataFrame())
+    if market_flow.get("is_fresh") and not flow_frame.empty:
+        latest = flow_frame.iloc[-1]
+        main_amt = latest.get("主力净流入-净额")
+        main_ratio = latest.get("主力净流入-净占比")
+        super_amt = latest.get("超大单净流入-净额")
+        big_amt = latest.get("大单净流入-净额")
+        direction = "净流入" if pd.to_numeric(pd.Series([main_amt]), errors="coerce").iloc[0] >= 0 else "净流出"
+        lines.append(
+            f"全市场主力资金最新为 `{direction}` {_fmt_yi(main_amt)}，净占比 {_fmt_pct_number(main_ratio)}。"
+        )
+        lines.append(f"其中超大单 {direction} {_fmt_yi(super_amt)}，大单 {direction} {_fmt_yi(big_amt)}。")
+    elif market_flow.get("latest_date"):
+        lines.append(f"主力资金流接口最近可用日期停在 {market_flow['latest_date']}，已视为失效，不拿旧数据误导晨报。")
+
+    for key, label in [("northbound_industry", "北向增持行业"), ("northbound_concept", "北向增持概念")]:
+        report = drivers.get(key, {})
+        frame = report.get("frame", pd.DataFrame())
+        if not report.get("is_fresh") or frame.empty:
+            continue
+        value_col = "北向资金今日增持估计-市值"
+        if "名称" not in frame.columns or value_col not in frame.columns:
+            continue
+        ranked = frame.copy()
+        ranked[value_col] = pd.to_numeric(ranked[value_col], errors="coerce")
+        ranked = ranked.dropna(subset=[value_col]).sort_values(value_col, ascending=False).head(3)
+        if ranked.empty:
+            continue
+        lines.append(
+            f"{label}靠前: "
+            + "、".join(f"{row['名称']}({_fmt_yi(row[value_col])})" for _, row in ranked.iterrows())
+            + "。"
+        )
+
+    if not lines:
+        lines.append("主力/北向明细暂不可用，当前先参考涨停池、龙虎榜和市场热度判断资金偏好。")
+    return lines[:4]
 
 
 def _story_lines(
@@ -833,6 +1030,7 @@ def main() -> None:
 
     snapshots, alerts, watchlist_rows = _collect_snapshots(config, args.mode)
     pulse = MarketPulseCollector(config).collect()
+    drivers = MarketDriversCollector(config).collect()
     news_report = _news_report(snapshots, china_macro, global_proxy, config, args.news_source)
     monitor_rows = _collect_monitor_rows(config)
     macro_items = macro_lines(china_macro, global_proxy)
@@ -847,8 +1045,11 @@ def main() -> None:
         "title": "每日晨报" if args.mode == "daily" else "每周周报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "headline_lines": _headline_lines(args.mode, snapshots, regime_result, china_macro, pulse),
+        "important_event_lines": _important_event_lines(news_report),
         "news_lines": _news_lines(news_report),
         "story_lines": _story_lines(news_report, monitor_rows, snapshots, regime_result),
+        "rotation_driver_lines": _rotation_driver_lines(drivers, pulse, snapshots),
+        "main_flow_driver_lines": _main_flow_driver_lines(drivers),
         "impact_lines": _impact_lines(snapshots, monitor_rows, regime_result),
         "market_pulse_lines": _market_pulse_lines(pulse),
         "lhb_lines": _lhb_lines(pulse),

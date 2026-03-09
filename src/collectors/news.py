@@ -104,7 +104,7 @@ class NewsCollector(BaseCollector):
     def _fetch_feed(self, url: str) -> feedparser.FeedParserDict:
         response = requests.get(
             url,
-            timeout=6,
+            timeout=4,
             headers={"User-Agent": "investment-agent/0.6"},
         )
         response.raise_for_status()

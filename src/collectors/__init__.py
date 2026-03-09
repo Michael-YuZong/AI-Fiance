@@ -7,6 +7,7 @@ from .global_flow import GlobalFlowCollector
 from .macro_cn import ChinaMacroCollector
 from .macro_us import USMacroCollector
 from .market_cn import ChinaMarketCollector
+from .market_drivers import MarketDriversCollector
 from .market_hk import HongKongMarketCollector
 from .market_monitor import MarketMonitorCollector
 from .market_pulse import MarketPulseCollector
@@ -18,6 +19,7 @@ __all__ = [
     "ChinaMacroCollector",
     "USMacroCollector",
     "ChinaMarketCollector",
+    "MarketDriversCollector",
     "HongKongMarketCollector",
     "MarketMonitorCollector",
     "MarketPulseCollector",
