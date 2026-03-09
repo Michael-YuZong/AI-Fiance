@@ -29,6 +29,8 @@ def _clean_title(title: str, source: str) -> str:
     cleaned = title.strip()
     if source == "Bloomberg" and cleaned.lower().startswith("bloomberg link"):
         cleaned = cleaned[len("Bloomberg Link") :].strip(" -:")
+    if cleaned.lower() in {"bloomberg link", "bloomberg", "reuters"}:
+        return ""
     return cleaned
 
 
@@ -90,6 +92,8 @@ class NewsCollector(BaseCollector):
                     source_name = _clean_source_name(str(source or "").strip())
                 configured_source = _clean_source_name(str(feed.get("source", "")).strip())
                 title = _clean_title(str(getattr(entry, "title", "")).strip(), source_name or configured_source)
+                if not title:
+                    continue
                 live_items.append(
                     {
                         "category": str(feed.get("category", "market")),

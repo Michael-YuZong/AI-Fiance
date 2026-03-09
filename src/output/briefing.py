@@ -22,12 +22,10 @@ def _append_block(lines: List[str], title: str, summary: str = "") -> None:
 
 
 def _append_subsection(lines: List[str], title: str, items: List[str]) -> None:
-    lines.extend(["", f"### {title}"])
+    lines.extend(["", f"### {title}", ""])
     if not items:
-        lines.append("")
         lines.append("暂无。")
         return
-    lines.append("")
     lines.append(items[0])
     for item in items[1:]:
         lines.append(f"- {item}")
@@ -39,6 +37,16 @@ def _append_table_subsection(lines: List[str], title: str, headers: List[str], r
         lines.append("暂无。")
         return
     lines.extend(_table(headers, rows))
+
+
+def _append_details(lines: List[str], title: str, items: List[str]) -> None:
+    if not items:
+        return
+    lines.extend(["", f"<details>", f"<summary>{title}</summary>", ""])
+    for index, item in enumerate(items):
+        prefix = "- " if index else ""
+        lines.append(prefix + item)
+    lines.extend(["", "</details>"])
 
 
 def _first_item(payload: Dict[str, Any], key: str) -> str:
@@ -53,90 +61,92 @@ class BriefingRenderer:
         lines = [
             f"# {payload['title']}",
             "",
-            f"- 生成时间: `{payload['generated_at']}`",
+            f"> **生成时间**: `{payload['generated_at']}`",
+            f"> **数据覆盖**: {payload.get('data_coverage', '未标注')} | 缺失项: {payload.get('missing_sources', '无')}",
         ]
 
-        _append_block(lines, "昨日验证回顾", _first_item(payload, "yesterday_review_lines"))
+        _append_block(lines, "0. 昨日验证回顾", _first_item(payload, "yesterday_review_lines"))
         for item in (payload.get("yesterday_review_lines", []) or [])[1:]:
             lines.append(f"- {item}")
 
-        _append_block(lines, "主线判断", _first_item(payload, "headline_lines"))
-        for item in (payload.get("headline_lines", []) or [])[1:]:
-            lines.append(f"- {item}")
-        _append_subsection(lines, "背景 Regime 依据", payload.get("regime_reason_lines", []))
-        _append_subsection(lines, "今天怎么做", payload.get("action_lines", []))
-        _append_subsection(lines, "主线校验", payload.get("narrative_validation_lines", []))
+        _append_block(lines, "1. 主线判断与行动")
+        _append_subsection(
+            lines,
+            "1.1 今日主线",
+            (payload.get("headline_lines", []) or [])
+            + (payload.get("regime_reason_lines", []) or [])
+            + (payload.get("narrative_validation_lines", []) or []),
+        )
+        _append_subsection(lines, "1.2 今天怎么做", payload.get("action_lines", []))
+
+        _append_block(lines, "2. 资产仪表盘")
         _append_table_subsection(
             lines,
-            "驱动与催化",
+            "2.1 宏观资产",
+            ["资产", "最新价", "1日", "5日", "20日", "状态", "异常"],
+            payload.get("asset_dashboard_rows", []),
+        )
+        _append_table_subsection(
+            lines,
+            "2.2 Watchlist",
+            ["标的", "最新价", "1日", "5日", "20日", "趋势", "关键指标", "信号"],
+            payload.get("watchlist_rows", []),
+        )
+        lines.extend(
+            [
+                "",
+                "> **关键指标说明**: 只保留 RSI（强弱）+ ADX（趋势强度）两个指标。RSI>70 超买，<30 超卖；ADX>25 趋势确立，<20 无趋势。",
+            ]
+        )
+
+        _append_block(lines, "3. 驱动与催化")
+        _append_table_subsection(
+            lines,
+            "3.1 核心事件",
             ["驱动", "证据", "传导", "交易含义"],
             payload.get("catalyst_rows", []),
         )
-        _append_subsection(lines, "重要催化", payload.get("important_event_lines", []))
-        _append_subsection(
-            lines,
-            "新闻覆盖与异常",
-            (payload.get("source_quality_lines", []) or []) + (payload.get("anomaly_lines", []) or []),
-        )
-
-        _append_block(
-            lines,
-            "资产仪表盘",
-            _first_item(payload, "story_lines") or _first_item(payload, "macro_items"),
-        )
-        lines.extend(["", "### 资产仪表盘", ""])
-        lines.extend(
-            _table(
-                ["对象", "类型", "最新", "区间表现", "状态", "备注"],
-                payload.get("asset_dashboard_rows", []),
-            )
-        )
-        _append_subsection(lines, "市场主线解读", payload.get("story_lines", []))
-        _append_subsection(
-            lines,
-            "盘面与资金",
-            (payload.get("rotation_driver_lines", []) or [])
-            + (payload.get("main_flow_driver_lines", []) or [])
-            + (payload.get("liquidity_lines", []) or []),
-        )
-        _append_subsection(lines, "宏观与流动性", payload.get("macro_items", []))
-        _append_subsection(lines, "龙虎榜与活跃资金", payload.get("lhb_lines", []))
-
-        _append_block(
-            lines,
-            "验证与行动",
-            _first_item(payload, "verification_lines") or _first_item(payload, "event_lines"),
-        )
         _append_table_subsection(
             lines,
-            "今日验证点表",
-            ["观察点", "看什么", "成立意味着", "失效意味着"],
-            payload.get("verification_rows", []),
-        )
-        _append_subsection(lines, "今日验证点", payload.get("verification_lines", []))
-        _append_table_subsection(
-            lines,
-            "今日日历",
+            "3.2 今日日历",
             ["时间", "级别", "事件", "含义"],
             payload.get("event_rows", []),
         )
-        _append_subsection(lines, "今日已知事件", payload.get("event_lines", []))
-        _append_subsection(lines, "跟踪清单", payload.get("calendar_lines", []))
-        _append_subsection(lines, "关注提醒", payload.get("alerts", []))
-
-        _append_block(
+        _append_subsection(
             lines,
-            "Watchlist 与组合",
-            _first_item(payload, "portfolio_lines") or _first_item(payload, "watchlist_technical_lines"),
+            "3.3 盘面与资金",
+            (payload.get("market_pulse_lines", []) or [])[:4]
+            + (payload.get("main_flow_driver_lines", []) or [])
+            + (payload.get("liquidity_lines", []) or [])
+            + (payload.get("rotation_driver_lines", []) or [])[:2],
         )
-        lines.extend(["", "### Watchlist 雷达", ""])
-        lines.extend(
-            _table(
-                ["标的", "价格", "1日", "5日", "20日", "趋势", "量比", "技术"],
-                payload.get("watchlist_rows", []),
-            )
+        _append_subsection(
+            lines,
+            "3.4 新闻覆盖与异常",
+            (payload.get("source_quality_lines", []) or []) + (payload.get("anomaly_lines", []) or []),
         )
-        _append_subsection(lines, "Watchlist 技术指标", payload.get("watchlist_technical_lines", []))
-        _append_subsection(lines, "组合与 Thesis", payload.get("portfolio_lines", []))
+
+        _append_block(lines, "4. 今日验证点")
+        _append_table_subsection(
+            lines,
+            "4.1 验证点表",
+            ["观察什么", "怎么判断", "如果成立→", "如果不成立→"],
+            payload.get("verification_rows", []),
+        )
+        if payload.get("alerts"):
+            _append_subsection(lines, "4.2 关注提醒", payload.get("alerts", []))
+
+        _append_block(lines, "5. 组合与持仓", _first_item(payload, "portfolio_lines"))
+        for item in (payload.get("portfolio_lines", []) or [])[1:]:
+            lines.append(f"- {item}")
+
+        lines.extend(["", "## 附录"])
+        _append_details(lines, "A. 完整技术指标", payload.get("watchlist_technical_lines", []))
+        _append_details(lines, "B. 龙虎榜明细", payload.get("lhb_lines", []))
+        _append_details(
+            lines,
+            "C. 全球资金流代理与情绪",
+            (payload.get("flow_lines", []) or []) + (payload.get("sentiment_lines", []) or []),
+        )
 
         return "\n".join(lines)

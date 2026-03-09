@@ -36,9 +36,9 @@ class MarketMonitorCollector(BaseCollector):
                 continue
             try:
                 frame = self.cached_call(
-                    f"market_monitor:{symbol}",
+                    f"market_monitor:v2:{symbol}",
                     yf.Ticker(symbol).history,
-                    period="1mo",
+                    period="3mo",
                     interval="1d",
                     auto_adjust=False,
                     ttl_hours=2,

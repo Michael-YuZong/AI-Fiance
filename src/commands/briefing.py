@@ -317,8 +317,8 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
                     format_pct(metrics["return_5d"]),
                     format_pct(metrics["return_20d"]),
                     trend,
-                    f"{technical['volume']['vol_ratio']:.2f}",
-                    f"{technical_bias} ({_watchlist_tech_basis(technical)})",
+                    _watchlist_tech_basis(technical),
+                    technical_bias,
                 ]
             )
 
@@ -1623,45 +1623,45 @@ def _asset_dashboard_rows(
     flags = anomaly_report.get("flags", {})
     rows: List[List[str]] = []
 
-    def add_monitor(name: str, category: str, status: str = "") -> None:
+    def add_monitor(name: str, status: str = "") -> None:
         item = monitor.get(name)
         if not item:
             return
-        note = flags.get(name, "")
+        note = flags.get(name, "—")
+        move_5d = _to_float(item.get("return_5d"))
+        latest = _to_float(item.get("latest"))
+        if not status:
+            if name in {"布伦特原油", "WTI原油"}:
+                status = "冲击" if abs(move_5d) >= 0.20 else "正常"
+            elif name == "VIX波动率":
+                status = "高波动" if latest >= 25 else "正常"
+            elif name in {"美元指数", "USDCNY"}:
+                status = "偏强" if move_5d > 0.005 else "偏弱" if move_5d < -0.005 else "中性"
+            elif name == "美国10Y收益率":
+                status = "上行" if move_5d > 0.02 else "回落" if move_5d < -0.02 else "中性"
+            else:
+                status = "偏强" if move_5d > 0.02 else "偏弱" if move_5d < -0.02 else "中性"
         rows.append(
             [
                 name,
-                category,
                 f"{item['latest']:.3f}",
-                f"1日 {format_pct(item['return_1d'])} / 5日 {format_pct(item['return_5d'])}",
-                status or ("偏强" if _to_float(item.get("return_1d")) > 0 else "偏弱"),
-                note or "",
-            ]
-        )
-
-    add_monitor("布伦特原油", "宏观资产", "冲击")
-    add_monitor("VIX波动率", "波动率", "高波动" if _to_float(monitor.get("VIX波动率", {}).get("latest")) >= 25 else "常态")
-    add_monitor("美元指数", "宏观资产")
-    add_monitor("美国10Y收益率", "利率")
-    add_monitor("COMEX黄金", "商品")
-
-    symbol_order = ["561380", "HSTECH", "QQQM", "GLD", "AU0"]
-    selected_snapshots = [item for symbol in symbol_order if (item := _find_snapshot(snapshots, symbol))]
-    for snapshot in selected_snapshots:
-        note = flags.get(snapshot.symbol, snapshot.summary.replace("当前", "").replace("watchlist", "观察池"))
-        if snapshot.notes:
-            note = f"{snapshot.notes}；{note}" if note else snapshot.notes
-        rows.append(
-            [
-                f"{snapshot.symbol} {snapshot.name}",
-                _price_context_label(snapshot.asset_type, snapshot.proxy_symbol),
-                f"{snapshot.latest_price:.3f}",
-                f"1日 {format_pct(snapshot.return_1d)} / 20日 {format_pct(snapshot.return_20d)}",
-                f"{snapshot.trend}/{snapshot.technical_bias}",
+                format_pct(item["return_1d"]),
+                format_pct(item["return_5d"]),
+                format_pct(item.get("return_20d", 0.0)) if item.get("return_20d") is not None else "—",
+                status,
                 note,
             ]
         )
-    return rows[:10]
+
+    add_monitor("布伦特原油", "冲击")
+    add_monitor("WTI原油", "冲击")
+    add_monitor("VIX波动率", "高波动" if _to_float(monitor.get("VIX波动率", {}).get("latest")) >= 25 else "正常")
+    add_monitor("美元指数")
+    add_monitor("美国10Y收益率")
+    add_monitor("COMEX黄金")
+    add_monitor("COMEX铜")
+    add_monitor("USDCNY")
+    return rows[:8]
 
 
 def _sentiment_lines(snapshots: List[BriefingSnapshot], config: Dict[str, Any]) -> List[str]:
@@ -1820,6 +1820,42 @@ def _event_lines(events: List[Dict[str, Any]]) -> List[str]:
     return lines
 
 
+def _coverage_metadata(
+    news_report: Dict[str, Any],
+    liquidity_lines: List[str],
+    events: List[Dict[str, Any]],
+    global_proxy_note: str,
+) -> tuple[str, str]:
+    coverage_parts = ["中国宏观", "Watchlist 行情", "宏观资产监控", "A股盘面/龙虎榜"]
+    missing_parts: List[str] = []
+
+    items = news_report.get("items", []) or []
+    if items:
+        sources: List[str] = []
+        for item in items:
+            source = str(item.get("source") or item.get("configured_source") or "").strip()
+            if source and source not in sources:
+                sources.append(source)
+        if sources:
+            coverage_parts.append("RSS新闻(" + "/".join(sources[:4]) + ")")
+    else:
+        missing_parts.append("实时RSS新闻")
+
+    if events:
+        coverage_parts.append("事件日历")
+    else:
+        missing_parts.append("显式事件日历")
+
+    if global_proxy_note:
+        missing_parts.append("跨市场代理")
+    if any("北向资金当日读数接近 0 或未更新" in line for line in liquidity_lines):
+        missing_parts.append("北向资金")
+    if any("融资融券明细接口今日异常或为空" in line for line in liquidity_lines):
+        missing_parts.append("融资融券")
+
+    return " | ".join(coverage_parts), " / ".join(missing_parts) if missing_parts else "无"
+
+
 def _action_lines(
     snapshots: List[BriefingSnapshot],
     narrative: Dict[str, Any],
@@ -1879,6 +1915,8 @@ def main() -> None:
     narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime_result)
     anomaly_report = _anomaly_report(snapshots, monitor_rows)
     events = EventsCollector(config).collect(mode=args.mode)
+    liquidity_lines = _liquidity_lines(config)
+    data_coverage, missing_sources = _coverage_metadata(news_report, liquidity_lines, events, global_proxy_note)
     macro_items = macro_lines(china_macro, global_proxy)
     regime_label = REGIME_LABELS.get(str(regime_result["current_regime"]), str(regime_result["current_regime"]))
     macro_items.append(f"当前宏观环境判断: {regime_label}。")
@@ -1895,6 +1933,8 @@ def main() -> None:
     payload = {
         "title": "每日晨报" if args.mode == "daily" else "每周周报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "data_coverage": data_coverage,
+        "missing_sources": missing_sources,
         "headline_lines": _headline_lines(args.mode, snapshots, narrative, china_macro, pulse),
         "yesterday_review_lines": _yesterday_review_lines(snapshots, monitor_rows),
         "regime_reason_lines": _regime_explanation_lines(china_macro, regime_result, narrative),
@@ -1907,7 +1947,7 @@ def main() -> None:
         "anomaly_lines": anomaly_report["lines"],
         "rotation_driver_lines": _rotation_driver_lines(drivers, pulse, snapshots),
         "main_flow_driver_lines": _main_flow_driver_lines(drivers),
-        "liquidity_lines": _liquidity_lines(config),
+        "liquidity_lines": liquidity_lines,
         "impact_lines": _impact_lines(snapshots, monitor_rows, regime_result),
         "market_pulse_lines": _market_pulse_lines(pulse),
         "lhb_lines": _lhb_lines(pulse),
