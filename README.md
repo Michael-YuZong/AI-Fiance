@@ -42,6 +42,7 @@
 - `lookup` 编号查询已可用，中文 ETF 名称或主题名可先解析成代码
 - `briefing daily` 已加入“新闻主线”区块，断网时会降级成能源 / 地缘 / 宏观 / 资金风格代理解读
 - `briefing daily` 已加入“关键宏观资产”区块，固定跟踪原油、美元、VIX、10Y、铜、黄金等非 watchlist 资产
+- `briefing daily --news-source <源>` 已支持临时指定新闻源偏好，例如 Reuters / Bloomberg / Financial Times
 
 ## 当前支持什么
 
@@ -51,6 +52,7 @@
 python -m src.commands.scan <symbol>
 python -m src.commands.briefing daily
 python -m src.commands.briefing weekly
+python -m src.commands.briefing daily --news-source Reuters --news-source Bloomberg
 python -m src.commands.snap <symbol>
 python -m src.commands.compare <symbol1> <symbol2> ...
 python -m src.commands.portfolio status
@@ -68,6 +70,7 @@ python -m src.commands.backtest macd_golden_cross 561380 3y
 python -m src.commands.research 当前宏观环境对561380意味着什么
 python -m src.commands.lookup 有色金属ETF代码是多少
 python -m src.commands.assistant 帮我写今天的晨报
+python -m src.commands.assistant 帮我写今天的晨报 要有路透和彭博的消息
 ```
 
 例如：
@@ -307,6 +310,7 @@ python -m src.commands.assistant 对比 QQQM 和 GLD
 python -m src.commands.assistant 如果美股跌20%我的组合会怎样
 python -m src.commands.assistant 分析一下有色金属ETF
 python -m src.commands.assistant 有色金属ETF代码是多少
+python -m src.commands.assistant 帮我写今天的晨报 要有路透和彭博的消息
 ```
 
 它会先自动判断你的意图，再路由到已有命令。现在如果你说的是中文 ETF 名称或主题名，它会先尝试从 `config/asset_aliases.yaml` 里解析成代码；判断不稳时，会回退到 `research`。

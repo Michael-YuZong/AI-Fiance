@@ -1,13 +1,38 @@
+preferences:
+  preferred_sources:
+    - "Reuters"
+    - "Bloomberg"
+    - "Financial Times"
+  required_sources:
+    - "Reuters"
+  max_items_per_feed: 2
+
 feeds:
   - category: "global_macro"
-    name: "Global Markets"
+    name: "Reuters Global Markets"
+    source: "Reuters"
+    must_include: true
     url: "https://news.google.com/rss/search?q=site:reuters.com+global+markets+economy+when:1d&hl=en-US&gl=US&ceid=US:en"
   - category: "energy"
-    name: "Energy Market"
+    name: "Reuters Energy"
+    source: "Reuters"
+    must_include: true
     url: "https://news.google.com/rss/search?q=site:reuters.com+oil+opec+energy+market+when:1d&hl=en-US&gl=US&ceid=US:en"
   - category: "geopolitics"
-    name: "Geopolitics"
+    name: "Reuters Geopolitics"
+    source: "Reuters"
+    must_include: true
     url: "https://news.google.com/rss/search?q=site:reuters.com+geopolitics+market+when:1d&hl=en-US&gl=US&ceid=US:en"
   - category: "china_macro"
-    name: "China Macro"
+    name: "Reuters China Macro"
+    source: "Reuters"
+    must_include: true
     url: "https://news.google.com/rss/search?q=site:reuters.com+China+economy+PBOC+when:3d&hl=en-US&gl=US&ceid=US:en"
+  - category: "global_macro"
+    name: "Bloomberg Markets"
+    source: "Bloomberg"
+    url: "https://news.google.com/rss/search?q=site:bloomberg.com+markets+economy+when:1d&hl=en-US&gl=US&ceid=US:en"
+  - category: "geopolitics"
+    name: "Financial Times World"
+    source: "Financial Times"
+    url: "https://news.google.com/rss/search?q=site:ft.com+geopolitics+markets+when:1d&hl=en-US&gl=US&ceid=US:en"

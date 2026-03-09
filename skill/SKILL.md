@@ -20,7 +20,7 @@
 | `scan <代码>` | 六维度标的扫描 | `scan 561380` |
 | `snap <代码>` | 盘中实时快照 | `snap 561380` |
 | `compare <代码...>` | 同类标的横向对比 | `compare 518880 518800 159934` |
-| `briefing daily` | 每日晨报 | `briefing daily` |
+| `briefing daily` | 每日晨报，可附带新闻源偏好 | `briefing daily --news-source Reuters` |
 | `briefing weekly` | 每周周报 | `briefing weekly` |
 | `portfolio status` | 查看持仓状态 | `portfolio status` |
 | `portfolio thesis` | 查看 / 管理论点 | `portfolio thesis HSTECH` |
@@ -35,7 +35,7 @@
 | `policy <关键词>` | 政策解读 | `policy 电网十四五规划` |
 | `research <问题>` | 自由研究 | `research 如果降息我的组合会怎样` |
 | `lookup <关键词>` | 中文名称 / 主题名转 ETF 代码 | `lookup 有色金属ETF代码是多少` |
-| `assistant <请求>` | 自然语言路由入口 | `assistant 帮我写今天的晨报` |
+| `assistant <请求>` | 自然语言路由入口 | `assistant 帮我写今天的晨报 要有路透和彭博的消息` |
 
 ## 工作目录
 

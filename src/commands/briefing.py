@@ -56,6 +56,7 @@ REGIME_LABELS = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate daily or weekly market briefing.")
     parser.add_argument("mode", choices=["daily", "weekly"], help="Briefing mode")
+    parser.add_argument("--news-source", action="append", default=[], help="Preferred news source, e.g. Reuters")
     parser.add_argument("--config", default="", help="Optional path to config YAML")
     return parser
 
@@ -319,11 +320,13 @@ def _news_lines(
     china_macro: Dict[str, Any],
     global_proxy: Dict[str, Any],
     config: Dict[str, Any],
+    preferred_sources: Optional[List[str]] = None,
 ) -> List[str]:
     report = NewsCollector(config).collect(
         snapshots=snapshots,
         china_macro=china_macro,
         global_proxy=global_proxy,
+        preferred_sources=preferred_sources,
     )
     lines = list(report.get("lines", []))
     note = report.get("note")
@@ -546,7 +549,7 @@ def main() -> None:
         "title": "每日晨报" if args.mode == "daily" else "每周周报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "headline_lines": _headline_lines(args.mode, snapshots, regime_result, china_macro),
-        "news_lines": _news_lines(snapshots, china_macro, global_proxy, config),
+        "news_lines": _news_lines(snapshots, china_macro, global_proxy, config, args.news_source),
         "monitor_lines": _monitor_lines(config),
         "overnight_lines": _overnight_lines(snapshots),
         "macro_items": macro_items,

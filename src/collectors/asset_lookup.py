@@ -33,11 +33,17 @@ class AssetLookupCollector(BaseCollector):
         live_matches: List[Dict[str, Any]] = []
         if not alias_matches:
             for term in self._candidate_terms(cleaned):
-                for item in self._search_live_etf(term):
+                for item in self._search_live_fund_names(term):
                     if item not in live_matches:
                         live_matches.append(item)
                 if len(live_matches) >= limit:
                     break
+                if self._looks_like_symbol(term):
+                    for item in self._search_live_etf(term):
+                        if item not in live_matches:
+                            live_matches.append(item)
+                    if len(live_matches) >= limit:
+                        break
 
         combined: List[Dict[str, Any]] = []
         seen = set()
@@ -163,6 +169,50 @@ class AssetLookupCollector(BaseCollector):
             )
         return result
 
+    def _search_live_fund_names(self, keyword: str) -> List[Dict[str, Any]]:
+        if ak is None:
+            return []
+        try:
+            frame = self.cached_call("asset_lookup:fund_name_em", ak.fund_name_em, ttl_hours=12)
+        except Exception:
+            return []
+
+        name_col = "基金简称" if "基金简称" in frame.columns else None
+        code_col = "基金代码" if "基金代码" in frame.columns else None
+        if not name_col or not code_col:
+            return []
+
+        mask = frame[name_col].astype(str).str.contains(keyword, case=False, na=False)
+        subset = frame[mask].copy()
+        if subset.empty:
+            return []
+
+        def _rank(row: Any) -> tuple[int, int]:
+            name = str(row[name_col])
+            score = 0
+            if keyword.lower() == name.lower():
+                score += 4
+            if "ETF" in name.upper():
+                score += 3
+            if "LOF" in name.upper() or "联接" in name:
+                score -= 1
+            if len(str(row[code_col])) == 6:
+                score += 1
+            return (-score, len(name))
+
+        subset = subset.sort_values(by=name_col, key=lambda series: series.astype(str).str.len())
+        ranked_rows = sorted(subset.to_dict("records"), key=_rank)[:8]
+        return [
+            {
+                "symbol": str(row[code_col]),
+                "name": str(row[name_col]),
+                "asset_type": "cn_etf",
+                "source": "fund_name_em",
+                "match_type": "live_name_search",
+            }
+            for row in ranked_rows
+        ]
+
     def _normalize_query(self, keyword: str) -> str:
         cleaned = keyword.strip()
         cleaned = re.sub(r"[，。,.；;:：!?？()（）]", " ", cleaned)
@@ -182,3 +232,6 @@ class AssetLookupCollector(BaseCollector):
             if len(token) >= 2 and token not in terms:
                 terms.append(token)
         return terms[:4]
+
+    def _looks_like_symbol(self, term: str) -> bool:
+        return bool(re.fullmatch(r"[A-Z0-9.\-]{2,10}", term.upper()))

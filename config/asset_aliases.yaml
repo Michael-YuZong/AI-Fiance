@@ -18,12 +18,13 @@ aliases:
     asset_type: "us"
     aliases:
       - "QQQM"
-      - "纳指ETF"
       - "纳斯达克100ETF"
+      - "美股纳指ETF"
   - symbol: "GLD"
     name: "SPDR Gold Shares"
     asset_type: "us"
     aliases:
       - "GLD"
-      - "黄金ETF"
-      - "黄金"
+      - "SPDR Gold Shares"
+      - "SPDR黄金ETF"
+      - "美股黄金ETF"

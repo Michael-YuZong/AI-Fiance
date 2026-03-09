@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 
@@ -11,6 +12,15 @@ from src.processors.request_router import route_request
 from src.storage.portfolio import PortfolioRepository
 from src.utils.config import PROJECT_ROOT, load_config
 from src.utils.data import load_watchlist
+
+
+NEWS_SOURCE_ALIASES = {
+    "Reuters": ["reuters", "路透"],
+    "Bloomberg": ["bloomberg", "彭博"],
+    "Financial Times": ["financial times", "ft", "金融时报"],
+    "华尔街见闻": ["华尔街见闻"],
+    "财联社": ["财联社"],
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,7 +37,7 @@ def main() -> None:
 
     watchlist_symbols = [item["symbol"] for item in load_watchlist()]
     portfolio_symbols = [item["symbol"] for item in PortfolioRepository().list_holdings()]
-    resolved_assets = AssetLookupCollector(config).search(request, limit=6)
+    resolved_assets = AssetLookupCollector(config).search(request, limit=6) if _should_resolve_assets(request) else []
     resolved_symbols = [item["symbol"] for item in resolved_assets]
     routed = route_request(
         request,
@@ -36,6 +46,9 @@ def main() -> None:
     )
 
     cmd = [sys.executable, "-m", f"src.commands.{routed.module}", *routed.args]
+    if routed.module == "briefing":
+        for source in _detect_news_sources(request):
+            cmd.extend(["--news-source", source])
     if args.config:
         cmd.extend(["--config", args.config])
 
@@ -104,6 +117,39 @@ def main() -> None:
                 lines.extend(["", "## 回退研究回答", fallback.stdout.strip()])
 
     print("\n".join(lines))
+
+
+def _detect_news_sources(request: str) -> list[str]:
+    lowered = request.lower()
+    matched: list[str] = []
+    for canonical, aliases in NEWS_SOURCE_ALIASES.items():
+        if any(alias.lower() in lowered for alias in aliases):
+            matched.append(canonical)
+    return matched
+
+
+def _should_resolve_assets(request: str) -> bool:
+    if re.search(r"\b[A-Z]{1,5}\b|\b\d{5,6}\b|\b[A-Z]{1,2}\d\b", request.upper()):
+        return True
+    keywords = [
+        "etf",
+        "基金",
+        "指数",
+        "标的",
+        "代码",
+        "编号",
+        "黄金",
+        "芯片",
+        "光伏",
+        "医药",
+        "有色",
+        "电网",
+        "中概互联",
+        "恒生科技",
+        "纳指",
+    ]
+    lowered = request.lower()
+    return any(keyword.lower() in lowered for keyword in keywords)
 
 
 if __name__ == "__main__":

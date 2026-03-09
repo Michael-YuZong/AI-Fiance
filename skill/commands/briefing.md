@@ -3,6 +3,7 @@
 ## 输入
 
 - `daily` 或 `weekly`
+- 可选 `--news-source <来源>`，例如 `Reuters`、`Bloomberg`
 
 ## 执行流程
 
