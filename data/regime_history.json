@@ -1,0 +1,62 @@
+[
+  {
+    "period": "2016Q1",
+    "regime": "recovery",
+    "pmi": 50.2,
+    "cpi_monthly": 0.4,
+    "policy_stance": "easing",
+    "credit_impulse": "expanding",
+    "dxy_state": "stable",
+    "summary": "供给侧改革初期，信用脉冲修复，周期品和成长风格轮番占优。",
+    "market_path": "风险偏好先修复，随后顺周期和科技共振上行。",
+    "favored_assets": ["成长股", "顺周期", "铜", "港股科技"]
+  },
+  {
+    "period": "2019Q1",
+    "regime": "recovery",
+    "pmi": 50.5,
+    "cpi_monthly": 0.2,
+    "policy_stance": "easing",
+    "credit_impulse": "expanding",
+    "dxy_state": "weakening",
+    "summary": "社融修复、风险偏好提升，成长股和港股科技表现较强。",
+    "market_path": "先是流动性驱动估值修复，后续转向景气主线扩散。",
+    "favored_assets": ["成长股", "港股科技", "半导体", "铜"]
+  },
+  {
+    "period": "2020Q2",
+    "regime": "deflation",
+    "pmi": 49.1,
+    "cpi_monthly": -0.3,
+    "policy_stance": "easing",
+    "credit_impulse": "stable",
+    "dxy_state": "weakening",
+    "summary": "疫情后宽松环境显著，黄金与成长股同步受益。",
+    "market_path": "宽松驱动估值扩张，黄金和成长持续受追捧。",
+    "favored_assets": ["黄金", "成长股", "长债"]
+  },
+  {
+    "period": "2021Q4",
+    "regime": "overheating",
+    "pmi": 52.8,
+    "cpi_monthly": 1.3,
+    "policy_stance": "neutral",
+    "credit_impulse": "peak",
+    "dxy_state": "stable",
+    "summary": "增长和通胀预期同步抬升，资源和通胀受益资产更占优。",
+    "market_path": "商品和资源股领先，成长风格阶段性承压。",
+    "favored_assets": ["商品", "资源股", "能源"]
+  },
+  {
+    "period": "2022Q3",
+    "regime": "stagflation",
+    "pmi": 48.7,
+    "cpi_monthly": 0.7,
+    "policy_stance": "neutral",
+    "credit_impulse": "contracting",
+    "dxy_state": "strengthening",
+    "summary": "通胀高位和增长承压并存，黄金和防御资产相对占优。",
+    "market_path": "风险资产波动加大，资金回到防御和现金流资产。",
+    "favored_assets": ["黄金", "防御板块", "公用事业", "现金"]
+  }
+]

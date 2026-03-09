@@ -1,0 +1,33 @@
+watchlist:
+  - symbol: "HSTECH"
+    name: "恒生科技指数"
+    asset_type: "hk_index"
+    proxy_symbol: "3033.HK"
+    region: "HK"
+    sector: "科技"
+    chain_nodes: ["成长股估值修复", "港股科技"]
+    notes: "使用 3033.HK 作为行情代理"
+  - symbol: "QQQM"
+    name: "Invesco NASDAQ 100 ETF"
+    asset_type: "us"
+    region: "US"
+    sector: "科技"
+    chain_nodes: ["成长股估值修复"]
+  - symbol: "561380"
+    name: "电网 ETF"
+    asset_type: "cn_etf"
+    region: "CN"
+    sector: "电网"
+    chain_nodes: ["AI算力", "电力需求", "电网设备", "铜铝"]
+  - symbol: "GLD"
+    name: "SPDR Gold Shares"
+    asset_type: "us"
+    region: "US"
+    sector: "黄金"
+    chain_nodes: ["黄金", "通胀预期"]
+  - symbol: "AU0"
+    name: "沪金主力连续"
+    asset_type: "futures"
+    region: "CN"
+    sector: "黄金"
+    chain_nodes: ["黄金", "通胀预期"]

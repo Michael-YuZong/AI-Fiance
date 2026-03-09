@@ -1,0 +1,52 @@
+# API Keys
+api_keys:
+  fred: "YOUR_FRED_API_KEY"
+  tushare: "YOUR_TUSHARE_TOKEN"
+
+# 数据采集频率
+schedule:
+  daily_briefing: "07:30"
+  weekly_briefing: "saturday"
+  macro_update: "daily"
+  market_update: "daily"
+  intraday_interval_min: 5
+
+# 风险管理阈值
+risk_limits:
+  single_position_max: 0.30
+  single_sector_max: 0.40
+  single_region_max: 0.50
+  portfolio_beta_max: 1.5
+  correlation_alert: 0.80
+
+# 技术指标参数
+technical:
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+  rsi:
+    period: 14
+    overbought: 70
+    oversold: 30
+  bollinger:
+    period: 20
+    std: 2
+  dmi:
+    period: 14
+    adx_strong: 25
+  ma_periods: [5, 10, 20, 30, 60]
+
+# 数据存储
+storage:
+  db_path: "data/investment.db"
+  cache_dir: "data/cache"
+  cache_ttl_hours: 4
+
+# 标的类型映射
+asset_type_mapping:
+  "^[0-9]{6}$": "cn_etf"
+  "^[0-9]{5}$": "hk"
+  "^HSTECH$": "hk_index"
+  "^[A-Z]{1,5}$": "us"
+  "^[A-Z]{1,2}[0-9]$": "futures"

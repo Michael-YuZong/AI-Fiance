@@ -1,0 +1,20 @@
+scenarios:
+  - name: "美股崩盘"
+    description: "标普下跌 20%，纳指跌幅更大，黄金小幅走强。"
+    shocks:
+      SPY: -0.20
+      QQQM: -0.25
+      HSTECH: -0.15
+      GLD: 0.05
+  - name: "人民币急贬"
+    description: "人民币对美元快速贬值 10%，北向资金承压。"
+    shocks:
+      USDCNY: 0.10
+      CN_ETF: -0.08
+      GLD: 0.06
+  - name: "原油飙升"
+    description: "布伦特快速升至 120 美元上方，通胀预期抬升。"
+    shocks:
+      OIL: 0.18
+      GLD: 0.04
+      TECH: -0.08
