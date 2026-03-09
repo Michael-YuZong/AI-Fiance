@@ -1,0 +1,17 @@
+rules:
+  macd_golden_cross:
+    description: "DIF 上穿 DEA 且收盘价站上 20 日均线"
+    entry:
+      - "macd.cross == bullish"
+      - "close > ma20"
+    exit:
+      - "macd.cross == bearish"
+      - "close < ma20"
+  oversold_rebound:
+    description: "RSI 进入超卖区后回升，成交量放大"
+    entry:
+      - "rsi < 30"
+      - "volume_ratio > 1.2"
+    exit:
+      - "rsi > 60"
+      - "close < ma10"
