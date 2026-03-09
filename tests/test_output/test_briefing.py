@@ -38,24 +38,27 @@ def test_briefing_renderer_outputs_core_sections():
     }
     rendered = BriefingRenderer().render(payload)
     assert "# 每日晨报" in rendered
-    assert "## 今日主线" in rendered
-    assert "## 主线校验" in rendered
-    assert "## 重要催化" in rendered
-    assert "## 新闻主线" in rendered
-    assert "## 新闻推演" in rendered
-    assert "## 板块轮动" in rendered
-    assert "## 主力资金流向" in rendered
-    assert "## 全市场脉搏" in rendered
-    assert "## 龙虎榜与涨停池" in rendered
-    assert "## 资产影响" in rendered
-    assert "## 关键宏观资产" in rendered
-    assert "## 隔夜与主要资产" in rendered
-    assert "## 全球资金流代理" in rendered
-    assert "## 情绪代理" in rendered
-    assert "## Watchlist 雷达" in rendered
-    assert "## Watchlist 技术指标" in rendered
-    assert "## 今日已知事件" in rendered
-    assert "## 今日验证点" in rendered
-    assert "## 行动建议" in rendered
+    assert "## 执行摘要" in rendered
+    assert "## 市场驱动" in rendered
+    assert "## 盘面结构" in rendered
+    assert "## 观察池与组合" in rendered
+    assert "## 行动计划" in rendered
+    assert "### 主线校验" in rendered
+    assert "### 重要催化" in rendered
+    assert "### 新闻主线" in rendered
+    assert "### 新闻推演" in rendered
+    assert "### 板块轮动" in rendered
+    assert "### 主力资金流向" in rendered
+    assert "### 全市场脉搏" in rendered
+    assert "### 龙虎榜与涨停池" in rendered
+    assert "### 关键宏观资产" in rendered
+    assert "### 隔夜与主要资产" in rendered
+    assert "### 全球资金流代理" in rendered
+    assert "### 情绪代理" in rendered
+    assert "### Watchlist 雷达" in rendered
+    assert "### Watchlist 技术指标" in rendered
+    assert "### 今日已知事件" in rendered
+    assert "### 今日验证点" in rendered
+    assert "### 行动建议" in rendered
     assert "561380" in rendered
     assert "组合市值 100000。" in rendered
