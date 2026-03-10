@@ -243,6 +243,8 @@ class BriefingRenderer:
             "",
             f"> **生成时间**: `{payload['generated_at']}`",
         ]
+        for item in payload.get("watchlist_change_lines", []) or []:
+            lines.append(f"> {item}")
 
         _append_block(lines, "0. 晨报策略验证")
         if payload.get("morning_eval_rows"):
@@ -322,6 +324,8 @@ class BriefingRenderer:
             "",
             f"> **生成时间**: `{payload['generated_at']}`",
         ]
+        for item in payload.get("watchlist_change_lines", []) or []:
+            lines.append(f"> {item}")
 
         _append_block(lines, "0. 全日验证回顾")
         if payload.get("full_day_eval_rows"):

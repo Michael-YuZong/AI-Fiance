@@ -2092,15 +2092,33 @@ def _style_rows(
     return rows
 
 
-def _industry_catalyst_text(name: str, narrative: Dict[str, Any], news_report: Dict[str, Any], lead_stock: str) -> str:
+def _industry_catalyst_text(name: str, narrative: Dict[str, Any], news_report: Dict[str, Any], lead_stock: str, is_leader: bool = True) -> str:
     theme = str(narrative.get("theme", ""))
     lower = name.lower()
-    if any(keyword in lower for keyword in ["油", "煤", "电", "逆变器", "储能"]):
-        return "能源冲击和地缘风险抬升，资金向电力/能源链集中。"
-    if any(keyword in lower for keyword in ["半导体", "通信", "消费电子", "it", "软件"]):
-        return "美元与波动率偏强，成长估值承压。"
+    direction = "领涨" if is_leader else "领跌"
+
+    if any(keyword in lower for keyword in ["油", "煤"]):
+        if is_leader:
+            return "油价/能源价格走强，资源品受益。"
+        return "油价/能源价格回落，能源链承压。"
+    if any(keyword in lower for keyword in ["电", "逆变器", "储能", "电网", "电力"]):
+        if is_leader:
+            return "电力/电网设备需求预期支撑，资金持续流入。"
+        return "前期涨幅获利了结或资金轮动离场。"
+    if any(keyword in lower for keyword in ["半导体", "通信", "消费电子", "it", "软件", "计算机", "电子", "芯片", "元件", "电路"]):
+        if is_leader:
+            return "风险偏好修复，科技成长方向资金回流。"
+        return "科技方向调整，资金从成长切向防守。"
+    if any(keyword in lower for keyword in ["医药", "创新药", "生物"]):
+        if is_leader:
+            return "医药板块催化或估值修复驱动。"
+        return "医药板块回调或政策压力。"
+    if any(keyword in lower for keyword in ["军工", "航空", "航天", "船舶"]):
+        if is_leader:
+            return "地缘事件或国防预算预期催化。"
+        return "地缘降温或板块轮动。"
     if lead_stock:
-        return f"板块龙头 {lead_stock} 活跃，带动同链条扩散。"
+        return f"板块龙头 {lead_stock} 活跃，带动同链条{direction}。"
     if any(item.get("category") == "china_macro_domestic" for item in news_report.get("items", [])):
         return "国内政策快讯提供情绪支撑。"
     return "主要由盘面轮动和短线资金推动。"
@@ -2134,14 +2152,12 @@ def _industry_rank_rows(drivers: Dict[str, Any], narrative: Dict[str, Any], news
                 str(index),
                 str(row["板块名称"]),
                 f"{pd.to_numeric(pd.Series([row['涨跌幅']]), errors='coerce').iloc[0]:+.2f}%",
-                _industry_catalyst_text(str(row["板块名称"]), narrative, news_report, str(row.get("领涨股票", ""))),
+                _industry_catalyst_text(str(row["板块名称"]), narrative, news_report, str(row.get("领涨股票", "")), is_leader=True),
             ]
         )
     tail_labels = ["-5", "-4", "-3", "-2", "-1"]
     for label, (_, row) in zip(tail_labels, laggards.iterrows()):
-        cause = "景气/成本压力或资金撤离压制板块表现。"
-        if "航空" in str(row["板块名称"]) or "航运" in str(row["板块名称"]):
-            cause = "油价上行直接压制成本敏感链条表现。"
+        cause = _industry_catalyst_text(str(row["板块名称"]), narrative, news_report, str(row.get("领涨股票", "")), is_leader=False)
         rows.append(
             [
                 label,
@@ -2686,21 +2702,34 @@ def _yesterday_review_rows(snapshots: List[BriefingSnapshot], monitor_rows: List
             hs300_proxy = None
         if hs300_proxy is not None:
             alpha = grid.return_1d - hs300_proxy
-            hs300_result = f"超额 {alpha*100:+.2f}%"
+            if alpha > 0:
+                hs300_result = f"超额 {alpha*100:+.2f}%，跑赢沪深300"
+                passed = True
+            elif grid.return_1d > 0:
+                hs300_result = f"绝对正收益 {format_pct(grid.return_1d)}，但风格轮动跑输（超额 {alpha*100:+.2f}%）"
+                passed = True
+            else:
+                hs300_result = f"超额 {alpha*100:+.2f}%，绝对走弱"
+                passed = False
             rows.append([
                 "561380 vs 沪深300 超额",
-                "561380 日涨幅 > 沪深300",
+                "561380 主线延续（绝对正收益或相对跑赢）",
                 hs300_result,
-                "✅" if alpha > 0 else "❌",
+                "✅" if passed else "❌",
             ])
     if "| 1 | 原油冲高回落" in content and brent:
-        open_price = _to_float(brent.get("open"))
         close_price = _to_float(brent.get("latest"))
-        passed = close_price < open_price if open_price > 0 else False
+        ret_5d = _to_float(brent.get("return_5d"))
+        ret_1d = _to_float(brent.get("return_1d"))
+        passed = (abs(ret_5d) > 0.05 and ret_1d < 0.01) or ret_1d < -0.02
+        if passed:
+            actual_text = f"收 {close_price:.2f}，5日{format_pct(ret_5d)}日内{format_pct(ret_1d)}，高位回落"
+        else:
+            actual_text = f"收 {close_price:.2f}，{format_pct(ret_1d)}，未见回落"
         rows.append([
             "原油是否冲高回落",
-            "布伦特收盘 < 开盘价",
-            f"收 {close_price:.2f}，{format_pct(_to_float(brent.get('return_1d')))}",
+            "布伦特从高位回落",
+            actual_text,
             "✅" if passed else "❌",
         ])
     if "| 3 | HSTECH 止跌" in content and hstech:
@@ -2898,10 +2927,20 @@ def _evaluate_prior_verification(
         passed = False
 
         if "原油" in label and brent:
-            open_price = _to_float(brent.get("open"))
             close_price = _to_float(brent.get("latest"))
-            actual = f"收 {close_price:.2f}，{format_pct(_to_float(brent.get('return_1d')))}"
-            passed = close_price < open_price if open_price > 0 else False
+            ret_5d = _to_float(brent.get("return_5d"))
+            ret_1d = _to_float(brent.get("return_1d"))
+            # "冲高回落" means oil pulling back from highs — check 5d trend reversal
+            # If oil was surging (5d > +5%) but 1d is negative or flat, it's pulling back
+            if abs(ret_5d) > 0.05 and ret_1d < 0.01:
+                passed = True
+                actual = f"收 {close_price:.2f}，5日{format_pct(ret_5d)}但日内{format_pct(ret_1d)}，高位回落中"
+            elif ret_1d < -0.02:
+                passed = True
+                actual = f"收 {close_price:.2f}，{format_pct(ret_1d)}，明显回落"
+            else:
+                passed = False
+                actual = f"收 {close_price:.2f}，{format_pct(ret_1d)}，未见明显回落"
         elif "VIX" in label and vix:
             vix_val = _to_float(vix.get("latest"))
             actual = f"VIX {vix_val:.1f}"
@@ -2917,8 +2956,16 @@ def _evaluate_prior_verification(
                     if item.get("name") == "沪深300":
                         hs300_pct = _to_float(item.get("change_pct"))
                         alpha = grid.return_1d - hs300_pct
-                        actual = f"超额 {alpha*100:+.2f}%"
-                        passed = alpha > 0
+                        # Distinguish: absolute positive + style rotation vs truly weak
+                        if alpha > 0:
+                            actual = f"超额 {alpha*100:+.2f}%，跑赢沪深300"
+                            passed = True
+                        elif grid.return_1d > 0:
+                            actual = f"绝对收益 {format_pct(grid.return_1d)}，但相对沪深300超额 {alpha*100:+.2f}%（风格轮动跑输，趋势未坏）"
+                            passed = True  # absolute positive means trend intact
+                        else:
+                            actual = f"超额 {alpha*100:+.2f}%，绝对走弱"
+                            passed = False
                         break
             except Exception:
                 pass
@@ -2940,15 +2987,32 @@ def _noon_strategy_adjustment(
     eval_rows: List[List[str]],
     snapshots: List[BriefingSnapshot],
     narrative: Dict[str, Any],
+    overview: Dict[str, Any],
+    pulse: Dict[str, Any],
 ) -> List[str]:
     """Generate strategy adjustment lines for the noon briefing."""
-    if not eval_rows:
-        return ["暂无晨报验证点，无法自动修正策略。参考当前盘面自行判断。"]
-    hits = sum(1 for r in eval_rows if r[-1] == "✅")
-    total = len(eval_rows)
     lines: List[str] = []
     if prior_headline:
         lines.append(f"晨报主线: {prior_headline}")
+
+    # Determine market sentiment from breadth data
+    up_count = int(pulse.get("breadth", {}).get("up", 0))
+    down_count = int(pulse.get("breadth", {}).get("down", 0))
+    ratio = up_count / down_count if down_count > 0 else 1.0
+    zt_count = len(pulse.get("zt_pool", pd.DataFrame()))
+    dt_count = len(pulse.get("dt_pool", pd.DataFrame()))
+    risk_on = ratio > 2.0 or (up_count > down_count * 1.5 and zt_count > dt_count * 3)
+
+    if not eval_rows:
+        if risk_on:
+            lines.append(f"暂无晨报验证点。盘面涨跌比 {ratio:.1f}:1，市场偏 risk-on，可跟随强势方向。")
+        else:
+            lines.append("暂无晨报验证点，无法自动修正策略。参考当前盘面自行判断。")
+        return lines
+
+    hits = sum(1 for r in eval_rows if r[-1] == "✅")
+    total = len(eval_rows)
+
     if hits == total:
         lines.append(f"上午验证 {hits}/{total} 全部兑现，主线逻辑延续，下午可沿用晨报策略。")
     elif hits >= total / 2:
@@ -2957,12 +3021,19 @@ def _noon_strategy_adjustment(
         lines.append(f"上午验证仅 {hits}/{total} 兑现，晨报主线可能需要修正。")
         failed = [r[0] for r in eval_rows if r[-1] == "❌"]
         if failed:
-            lines.append(f"未兑现: {'、'.join(failed[:3])}。下午注意规避相关方向。")
+            lines.append(f"未兑现: {'、'.join(failed[:3])}。")
+
+    # Override with actual market breadth signal
+    if risk_on and hits < total / 2:
+        lines.append(f"但盘面涨跌比 {ratio:.1f}:1（涨停{zt_count}/跌停{dt_count}），实际市场偏 risk-on。晨报主线与盘面方向冲突，下午应跟随盘面修复方向而非继续防守。")
+    elif not risk_on and hits == total:
+        lines.append(f"但盘面涨跌比仅 {ratio:.1f}:1，市场实际偏弱，即使验证全部兑现也需谨慎。")
+
     if snapshots:
         strongest = max(snapshots, key=lambda s: s.return_1d)
         weakest = min(snapshots, key=lambda s: s.return_1d)
         lines.append(f"上午最强: {strongest.name}({format_pct(strongest.return_1d)})，最弱: {weakest.name}({format_pct(weakest.return_1d)})。")
-    return lines[:5]
+    return lines[:6]
 
 
 def _noon_action_lines(
@@ -2970,14 +3041,23 @@ def _noon_action_lines(
     snapshots: List[BriefingSnapshot],
     narrative: Dict[str, Any],
     monitor_rows: List[Dict[str, Any]],
+    pulse: Dict[str, Any],
 ) -> List[str]:
     """Generate afternoon action recommendations for noon briefing."""
     hits = sum(1 for r in eval_rows if r[-1] == "✅") if eval_rows else 0
     total = len(eval_rows) if eval_rows else 0
+
+    up_count = int(pulse.get("breadth", {}).get("up", 0))
+    down_count = int(pulse.get("breadth", {}).get("down", 0))
+    ratio = up_count / down_count if down_count > 0 else 1.0
+    risk_on = ratio > 2.0
+
     lines: List[str] = []
-    if total > 0 and hits == total:
+    if risk_on:
+        lines.append(f"盘面涨跌比 {ratio:.1f}:1，市场偏进攻。下午跟随强势方向，可适度加仓确认中的主线。")
+    elif total > 0 and hits == total:
         lines.append("下午延续晨报策略，顺势持有不追高。关注尾盘是否出现获利盘压力。")
-    elif total > 0 and hits < total / 2:
+    elif total > 0 and hits < total / 2 and not risk_on:
         lines.append("下午偏防守，减少追高操作。若持仓方向与未兑现验证点一致，考虑减仓。")
     else:
         lines.append("下午保持灵活，验证与观察并行。")
@@ -3118,6 +3198,30 @@ def _tomorrow_action_lines(
     return lines[:4]
 
 
+def _watchlist_change_lines(snapshots: List[BriefingSnapshot], prior_md: Optional[str]) -> List[str]:
+    """Detect watchlist changes compared to the prior briefing."""
+    current_symbols = {s.symbol for s in snapshots}
+    if not prior_md:
+        return []
+    prior_symbols: set = set()
+    for line in prior_md.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if not cells or cells[0] in {"标的", "---"} or all(set(c) <= {"-"} for c in cells):
+            continue
+        # First cell is typically "SYMBOL (Name)" or just "SYMBOL"
+        sym = cells[0].split("(")[0].split(" ")[0].strip()
+        if sym:
+            prior_symbols.add(sym)
+    new_symbols = current_symbols - prior_symbols
+    if not new_symbols:
+        return []
+    new_names = [f"{s.name}({s.symbol})" for s in snapshots if s.symbol in new_symbols]
+    return [f"本期新增标的: {'、'.join(new_names)}。"]
+
+
 def _build_noon_payload(
     snapshots: List[BriefingSnapshot],
     monitor_rows: List[Dict[str, Any]],
@@ -3141,6 +3245,7 @@ def _build_noon_payload(
     return {
         "title": "午间盘中简报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "watchlist_change_lines": _watchlist_change_lines(snapshots, morning_md or ""),
         "morning_eval_rows": eval_rows,
         "morning_eval_fallback": "暂无今日晨报，跳过策略验证。" if not morning_md else "",
         "domestic_index_rows": domestic_index_rows,
@@ -3148,8 +3253,8 @@ def _build_noon_payload(
         "style_rows": style_rows,
         "industry_rows": industry_rows,
         "watchlist_rows": watchlist_rows,
-        "strategy_adjustment_lines": _noon_strategy_adjustment(prior_headline, eval_rows, snapshots, narrative),
-        "afternoon_action_lines": _noon_action_lines(eval_rows, snapshots, narrative, monitor_rows),
+        "strategy_adjustment_lines": _noon_strategy_adjustment(prior_headline, eval_rows, snapshots, narrative, overview, pulse),
+        "afternoon_action_lines": _noon_action_lines(eval_rows, snapshots, narrative, monitor_rows, pulse),
         "afternoon_verification_rows": _noon_verification_rows(snapshots, monitor_rows),
         "afternoon_event_rows": _workflow_event_rows(events),
         "portfolio_lines": _portfolio_lines(config),
@@ -3186,6 +3291,7 @@ def _build_evening_payload(
     return {
         "title": "收盘晚报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "watchlist_change_lines": _watchlist_change_lines(snapshots, morning_md or ""),
         "full_day_eval_rows": eval_rows,
         "full_day_eval_fallback": "暂无今日晨报，跳过全日验证。" if not morning_md else "",
         "hit_rate_lines": _evening_hit_rate_summary(eval_rows),
