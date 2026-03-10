@@ -3128,14 +3128,13 @@ def discover_stock_opportunities(
         if analysis["excluded"]:
             continue
         passed += 1
-        if analysis["rating"]["rank"] > 0:
-            analyses.append(analysis)
+        analyses.append(analysis)
     analyses.sort(
         key=lambda a: (
             a["rating"]["rank"],
+            sum((d.get("score") or 0) for d in a["dimensions"].values()),
             a["dimensions"]["technical"]["score"] or 0,
             a["dimensions"]["fundamental"]["score"] or 0,
-            a["dimensions"]["relative_strength"]["score"] or 0,
         ),
         reverse=True,
     )
