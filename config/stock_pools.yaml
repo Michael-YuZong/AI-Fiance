@@ -1,0 +1,48 @@
+# 港股 / 美股候选池 —— 用于 stock_pick 命令的跨市场个股推荐
+# A 股无需配置，引擎会自动从全市场实时行情中按流动性筛选
+
+hk_stocks:
+  # 恒生科技 & 蓝筹
+  - {symbol: "00700.HK", name: "腾讯控股", sector: "科技"}
+  - {symbol: "09988.HK", name: "阿里巴巴-W", sector: "科技"}
+  - {symbol: "03690.HK", name: "美团-W", sector: "消费"}
+  - {symbol: "09999.HK", name: "网易-S", sector: "科技"}
+  - {symbol: "01024.HK", name: "快手-W", sector: "科技"}
+  - {symbol: "09618.HK", name: "京东集团-SW", sector: "消费"}
+  - {symbol: "09888.HK", name: "百度集团-SW", sector: "科技"}
+  - {symbol: "01810.HK", name: "小米集团-W", sector: "科技"}
+  - {symbol: "09626.HK", name: "哔哩哔哩-SW", sector: "科技"}
+  - {symbol: "02015.HK", name: "理想汽车-W", sector: "消费"}
+  - {symbol: "09866.HK", name: "蔚来-SW", sector: "消费"}
+  - {symbol: "09868.HK", name: "小鹏汽车-W", sector: "消费"}
+  - {symbol: "00388.HK", name: "香港交易所", sector: "高股息"}
+  - {symbol: "02318.HK", name: "中国平安", sector: "高股息"}
+  - {symbol: "00941.HK", name: "中国移动", sector: "高股息"}
+  - {symbol: "01211.HK", name: "比亚迪股份", sector: "消费"}
+  - {symbol: "02382.HK", name: "舜宇光学科技", sector: "科技"}
+  - {symbol: "00981.HK", name: "中芯国际", sector: "科技"}
+  - {symbol: "06060.HK", name: "众安在线", sector: "科技"}
+  - {symbol: "02269.HK", name: "药明生物", sector: "医药"}
+
+us_stocks:
+  # 美股科技 & 成长
+  - {symbol: "AAPL", name: "苹果", sector: "科技"}
+  - {symbol: "MSFT", name: "微软", sector: "科技"}
+  - {symbol: "NVDA", name: "英伟达", sector: "科技"}
+  - {symbol: "GOOGL", name: "谷歌", sector: "科技"}
+  - {symbol: "AMZN", name: "亚马逊", sector: "消费"}
+  - {symbol: "META", name: "Meta", sector: "科技"}
+  - {symbol: "TSLA", name: "特斯拉", sector: "消费"}
+  - {symbol: "AMD", name: "AMD", sector: "科技"}
+  - {symbol: "AVGO", name: "博通", sector: "科技"}
+  - {symbol: "TSM", name: "台积电", sector: "科技"}
+  - {symbol: "BABA", name: "阿里巴巴ADR", sector: "科技"}
+  - {symbol: "PDD", name: "拼多多", sector: "消费"}
+  - {symbol: "JD", name: "京东ADR", sector: "消费"}
+  - {symbol: "BIDU", name: "百度ADR", sector: "科技"}
+  - {symbol: "NIO", name: "蔚来ADR", sector: "消费"}
+  - {symbol: "LI", name: "理想汽车ADR", sector: "消费"}
+  - {symbol: "XPEV", name: "小鹏汽车ADR", sector: "消费"}
+  - {symbol: "COIN", name: "Coinbase", sector: "科技"}
+  - {symbol: "PLTR", name: "Palantir", sector: "科技"}
+  - {symbol: "SNOW", name: "Snowflake", sector: "科技"}

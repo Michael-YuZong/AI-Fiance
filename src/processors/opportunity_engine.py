@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import math
+import re
 from collections import Counter
 from contextlib import redirect_stderr
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from src.collectors import (
     AssetLookupCollector,
     ChinaMarketCollector,
     EventsCollector,
+    FundProfileCollector,
     MarketDriversCollector,
     MarketMonitorCollector,
     MarketPulseCollector,
@@ -50,6 +52,7 @@ BENCHMARKS = {
     "cn_etf": ("510300", "cn_etf", "沪深300ETF"),
     "cn_index": ("510300", "cn_etf", "沪深300ETF"),
     "cn_fund": ("510300", "cn_etf", "沪深300ETF"),
+    "cn_stock": ("510300", "cn_etf", "沪深300ETF"),
     "us": ("SPY", "us", "标普500"),
     "hk": ("2800.HK", "hk", "恒生指数ETF"),
     "hk_index": ("2800.HK", "hk", "恒生指数ETF"),
@@ -214,6 +217,7 @@ class PoolItem:
     source: str
     turnover: float = 0.0
     in_watchlist: bool = False
+    metadata: Optional[Dict[str, Any]] = None
 
 
 def _normalize_sector(name: str, fallback: str = "综合") -> tuple[str, List[str]]:
@@ -251,8 +255,138 @@ def _merge_metadata(
     sector, chain_nodes = _normalize_sector(str(merged.get("name", symbol)), str(merged.get("sector", "综合")))
     merged.setdefault("sector", sector)
     merged.setdefault("chain_nodes", chain_nodes)
-    merged.setdefault("region", {"cn_etf": "CN", "hk": "HK", "hk_index": "HK", "us": "US", "futures": "CN"}.get(asset_type, "CN"))
+    merged.setdefault("region", {"cn_etf": "CN", "cn_stock": "CN", "hk": "HK", "hk_index": "HK", "us": "US", "futures": "CN"}.get(asset_type, "CN"))
     return merged
+
+
+def _collect_fund_profile(symbol: str, config: Mapping[str, Any]) -> Dict[str, Any]:
+    if not symbol:
+        return {}
+    try:
+        return FundProfileCollector(config).collect_profile(symbol)
+    except Exception:
+        return {}
+
+
+def _enrich_metadata_with_fund_profile(metadata: Dict[str, Any], fund_profile: Mapping[str, Any]) -> Dict[str, Any]:
+    if not fund_profile:
+        return metadata
+    enriched = dict(metadata)
+    overview = dict(fund_profile.get("overview") or {})
+    style = dict(fund_profile.get("style") or {})
+    fund_name = str(overview.get("基金简称", "")).strip()
+    if fund_name:
+        enriched["name"] = fund_name
+    sector = str(style.get("sector", "")).strip()
+    if sector and sector != "综合":
+        enriched["sector"] = sector
+    chain_nodes = list(style.get("chain_nodes") or [])
+    if chain_nodes:
+        enriched["chain_nodes"] = chain_nodes
+    benchmark = str(overview.get("业绩比较基准", "")).strip()
+    if benchmark:
+        enriched["benchmark"] = benchmark
+    manager_name = str(overview.get("基金经理人", "")).strip()
+    if manager_name:
+        enriched["manager_name"] = manager_name
+    return enriched
+
+
+FUND_BENCHMARK_HINTS = [
+    (("战略新兴", "新兴产业"), ["战略新兴", "新兴产业"]),
+    (("恒生科技", "港股科技"), ["恒生科技", "港股科技"]),
+    (("沪深300",), ["沪深300"]),
+    (("中证a500", "a500"), ["中证A500"]),
+    (("中证500",), ["中证500"]),
+    (("创业板",), ["创业板"]),
+    (("科创50",), ["科创50"]),
+    (("半导体", "芯片"), ["半导体", "芯片"]),
+    (("军工", "国防"), ["军工", "国防"]),
+    (("消费", "食品饮料", "家电"), ["消费", "内需"]),
+    (("高股息", "红利"), ["高股息", "红利"]),
+    (("黄金", "贵金属"), ["黄金", "贵金属"]),
+    (("电网", "电力"), ["电网", "电力"]),
+]
+
+FUND_INDUSTRY_HINTS = [
+    (("电子", "半导体", "芯片"), ["电子", "半导体", "芯片"]),
+    (("信息技术", "软件", "互联网", "通信", "通讯"), ["信息技术", "软件", "通信", "数据中心"]),
+    (("军工", "国防", "航天"), ["军工", "国防", "航天"]),
+    (("有色", "金属", "铜", "铝"), ["有色", "铜", "铝"]),
+    (("公用事业", "电力", "电网"), ["电力", "电网", "公用事业"]),
+    (("医药", "医疗"), ["医药", "医疗"]),
+    (("消费", "零售", "食品", "饮料", "家电"), ["消费", "零售", "家电"]),
+]
+
+FUND_NOISY_KEYWORDS = {
+    "ai",
+    "人工智能",
+    "科技",
+    "growth",
+    "technology",
+    "cloud",
+    "software",
+    "算力",
+    "成长股估值修复",
+    "新兴产业",
+}
+
+
+def _unique_strings(items: Sequence[Any]) -> List[str]:
+    cleaned: List[str] = []
+    for item in items:
+        value = str(item).strip()
+        if value and value not in cleaned:
+            cleaned.append(value)
+    return cleaned
+
+
+def _fund_top_holdings(fund_profile: Optional[Mapping[str, Any]], top_n: int = 5) -> List[Dict[str, Any]]:
+    return list((fund_profile or {}).get("top_holdings") or [])[:top_n]
+
+
+def _fund_top_holding_names(fund_profile: Optional[Mapping[str, Any]], top_n: int = 5) -> List[str]:
+    return _unique_strings(item.get("股票名称", "") for item in _fund_top_holdings(fund_profile, top_n))
+
+
+def _fund_benchmark_keywords(fund_profile: Optional[Mapping[str, Any]]) -> List[str]:
+    overview = dict((fund_profile or {}).get("overview") or {})
+    benchmark = str(overview.get("业绩比较基准", "")).strip()
+    if not benchmark:
+        return []
+    lowered = benchmark.lower()
+    keywords: List[str] = []
+    for tokens, outputs in FUND_BENCHMARK_HINTS:
+        if any(token.lower() in lowered for token in tokens):
+            keywords.extend(outputs)
+    if not keywords:
+        keywords.append(benchmark)
+    return _unique_strings(keywords)
+
+
+def _fund_industry_keywords(fund_profile: Optional[Mapping[str, Any]]) -> List[str]:
+    rows = list((fund_profile or {}).get("industry_allocation") or [])[:5]
+    keywords: List[str] = []
+    for row in rows:
+        label = str(row.get("行业类别", "")).strip()
+        if not label:
+            continue
+        lowered = label.lower()
+        for tokens, outputs in FUND_INDUSTRY_HINTS:
+            if any(token.lower() in lowered for token in tokens):
+                keywords.extend(outputs)
+        if label not in {"制造业", "综合"}:
+            keywords.append(label)
+    return _unique_strings(keywords)
+
+
+def _fund_theme_keywords(metadata: Mapping[str, Any], fund_profile: Optional[Mapping[str, Any]]) -> List[str]:
+    sector = str(metadata.get("sector", "")).strip()
+    benchmark_keys = _fund_benchmark_keywords(fund_profile)
+    industry_keys = _fund_industry_keywords(fund_profile)
+    holding_names = _fund_top_holding_names(fund_profile, top_n=5)
+    keywords = [sector, *benchmark_keys, *industry_keys, *holding_names]
+    return _unique_strings(keywords)
 
 
 def _safe_series(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -448,12 +582,33 @@ def _metadata_news_keys(metadata: Mapping[str, Any]) -> List[str]:
     return expanded
 
 
-def _valuation_keywords(metadata: Mapping[str, Any]) -> List[str]:
+def _valuation_keywords(
+    metadata: Mapping[str, Any],
+    asset_type: str = "",
+    fund_profile: Optional[Mapping[str, Any]] = None,
+) -> List[str]:
     name = str(metadata.get("name", "")).strip()
     sector = str(metadata.get("sector", "")).strip()
     chain_nodes = [str(item).strip() for item in metadata.get("chain_nodes", []) if str(item).strip()]
     keywords: List[str] = []
-    if "半导体" in name or "芯片" in name or "半导体" in chain_nodes:
+    if asset_type == "cn_fund" and fund_profile:
+        fund_keys = _fund_theme_keywords(metadata, fund_profile)
+        benchmark_keys = _fund_benchmark_keywords(fund_profile)
+        industry_keys = _fund_industry_keywords(fund_profile)
+        holdings_text = " ".join(_fund_top_holding_names(fund_profile))
+        semis_exposed = any(token in holdings_text for token in ("寒武纪", "中芯", "北方华创", "澜起", "长电", "韦尔", "兆易", "芯片", "半导体"))
+        if benchmark_keys:
+            keywords.extend(benchmark_keys)
+        if industry_keys:
+            keywords.extend(industry_keys[:3])
+        if sector and sector not in {"综合", "科技"}:
+            keywords.append(sector)
+        if semis_exposed:
+            keywords.extend(["半导体", "芯片"])
+        elif sector == "科技":
+            keywords.extend(["科技", "战略新兴", "信息技术", "通信"])
+        keywords.extend(fund_keys[:3])
+    elif "半导体" in name or "芯片" in name or "半导体" in chain_nodes:
         keywords.extend(["半导体", "芯片"])
     elif "黄金" in name:
         keywords.append("黄金")
@@ -470,6 +625,28 @@ def _valuation_keywords(metadata: Mapping[str, Any]) -> List[str]:
         if keyword and keyword not in deduped:
             deduped.append(keyword)
     return deduped
+
+
+def _fund_financial_proxy(
+    collector: ValuationCollector,
+    fund_profile: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    holdings = _fund_top_holdings(fund_profile, top_n=5)
+    normalized_holdings = [
+        {
+            "symbol": item.get("股票代码", ""),
+            "name": item.get("股票名称", ""),
+            "weight": item.get("占净值比例", 0.0),
+        }
+        for item in holdings
+        if str(item.get("股票代码", "")).strip()
+    ]
+    if not normalized_holdings:
+        return {}
+    try:
+        return collector.get_weighted_stock_financial_proxies(normalized_holdings, top_n=5)
+    except Exception:
+        return {}
 
 
 def _board_keywords(metadata: Mapping[str, Any]) -> List[str]:
@@ -619,7 +796,11 @@ def _load_catalyst_profiles(path_value: str) -> Dict[str, Any]:
     return dict(payload.get("profiles", {}))
 
 
-def _catalyst_profile(metadata: Mapping[str, Any], config: Mapping[str, Any]) -> Dict[str, Any]:
+def _catalyst_profile(
+    metadata: Mapping[str, Any],
+    config: Mapping[str, Any],
+    fund_profile: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
     path_value = str(config.get("catalyst_profiles_file", "config/catalyst_profiles.yaml"))
     profiles = _load_catalyst_profiles(path_value)
     sector = str(metadata.get("sector", "")).strip()
@@ -629,6 +810,8 @@ def _catalyst_profile(metadata: Mapping[str, Any], config: Mapping[str, Any]) ->
     lowered_name = name.lower()
     lowered_nodes = [item.lower() for item in chain_nodes]
     derived = _derived_catalyst_profile(metadata)
+    if fund_profile:
+        derived = _merge_catalyst_profiles(derived, _fund_specific_catalyst_profile(metadata, fund_profile))
     for profile_name, payload in profiles.items():
         themes = [str(item).strip() for item in payload.get("themes", []) if str(item).strip()]
         if any(theme.lower() in lowered_name for theme in themes) or any(theme.lower() in lowered_nodes for theme in themes):
@@ -644,7 +827,17 @@ def _catalyst_profile(metadata: Mapping[str, Any], config: Mapping[str, Any]) ->
 
 def _merge_catalyst_profiles(*profiles: Mapping[str, Any]) -> Dict[str, Any]:
     merged: Dict[str, Any] = {}
-    list_keys = {"themes", "keywords", "policy_keywords", "domestic_leaders", "overseas_leaders", "earnings_keywords", "event_keywords"}
+    list_keys = {
+        "themes",
+        "keywords",
+        "policy_keywords",
+        "domestic_leaders",
+        "overseas_leaders",
+        "earnings_keywords",
+        "event_keywords",
+        "strict_keywords",
+        "search_terms",
+    }
     for profile in profiles:
         if not profile:
             continue
@@ -659,6 +852,38 @@ def _merge_catalyst_profiles(*profiles: Mapping[str, Any]) -> Dict[str, Any]:
             elif value not in (None, "", []):
                 merged[key] = value
     return merged
+
+
+def _fund_specific_catalyst_profile(
+    metadata: Mapping[str, Any],
+    fund_profile: Mapping[str, Any],
+) -> Dict[str, Any]:
+    sector = str(metadata.get("sector", "综合")).strip()
+    base = dict(GENERIC_CATALYST_PROFILES.get(sector, GENERIC_CATALYST_PROFILES["宽基"]))
+    benchmark_keywords = _fund_benchmark_keywords(fund_profile)
+    industry_keywords = _fund_industry_keywords(fund_profile)
+    holding_names = _fund_top_holding_names(fund_profile, top_n=5)
+    base_keywords = [
+        str(item).strip()
+        for item in base.get("keywords", [])
+        if str(item).strip() and str(item).strip().lower() not in FUND_NOISY_KEYWORDS
+    ]
+    strict_keywords = _unique_strings([*holding_names, *benchmark_keywords, *industry_keywords, *base_keywords, *base.get("event_keywords", [])])
+    search_terms = _unique_strings([*holding_names[:3], *benchmark_keywords[:2], *industry_keywords[:3], *base_keywords[:2]])
+    profile = _merge_catalyst_profiles(
+        base,
+        {
+            "profile_name": f"{sector or '基金'}基金",
+            "themes": [sector, *benchmark_keywords],
+            "keywords": [*benchmark_keywords, *industry_keywords, *base_keywords, *holding_names[:3]],
+            "domestic_leaders": holding_names[:5] or list(base.get("domestic_leaders", [])),
+            "strict_keywords": strict_keywords[:12],
+            "search_terms": search_terms[:8],
+            "strict_mode": True,
+            "sector_hint": sector,
+        },
+    )
+    return profile
 
 
 def _derived_catalyst_profile(metadata: Mapping[str, Any]) -> Dict[str, Any]:
@@ -759,6 +984,9 @@ def _sector_catalyst_categories(metadata: Mapping[str, Any], profile: Mapping[st
 
 
 def _catalyst_search_terms(metadata: Mapping[str, Any], profile: Mapping[str, Any]) -> List[str]:
+    explicit_terms = [str(item).strip() for item in profile.get("search_terms", []) if str(item).strip()]
+    if explicit_terms:
+        return explicit_terms[:8]
     candidates = [
         str(metadata.get("name", "")).strip(),
         str(metadata.get("sector", "")).strip(),
@@ -779,6 +1007,10 @@ def _catalyst_search_terms(metadata: Mapping[str, Any], profile: Mapping[str, An
 
 def _strict_relevance_tokens(profile: Mapping[str, Any], tokens: Sequence[str]) -> List[str]:
     profile_name = str(profile.get("profile_name", "")).strip()
+    if bool(profile.get("strict_mode")):
+        explicit = [str(token).strip() for token in profile.get("strict_keywords", []) if str(token).strip()]
+        if explicit:
+            return explicit
     if profile_name not in {"纳斯达克", "港股科技"}:
         return [str(token).strip() for token in tokens if str(token).strip()]
 
@@ -827,6 +1059,8 @@ def _category_item_is_relevant(
     if category not in allowed_categories:
         return False
     text = _headline_text(item)
+    if bool(profile.get("strict_mode")):
+        return _contains_any(text, strict_tokens)
     if _contains_any(text, related_tokens):
         if str(profile.get("profile_name", "")).strip() in {"纳斯达克", "港股科技"} and source not in {"reuters", "bloomberg", "financial times", "ft"}:
             return _contains_any(text, strict_tokens)
@@ -920,6 +1154,7 @@ def _current_factor_state(context: Mapping[str, Any]) -> Dict[str, int]:
 
 
 def _hard_checks(
+    asset_type: str,
     metadata: Mapping[str, Any],
     history: pd.DataFrame,
     metrics: Mapping[str, float],
@@ -928,6 +1163,7 @@ def _hard_checks(
     macro_score: Optional[int],
     correlation_pair: Optional[tuple[str, float]],
     fundamental_dimension: Mapping[str, Any],
+    fund_profile: Optional[Mapping[str, Any]] = None,
 ) -> tuple[List[Dict[str, str]], List[str], List[str]]:
     checks: List[Dict[str, str]] = []
     exclusion_reasons: List[str] = []
@@ -937,15 +1173,40 @@ def _hard_checks(
     min_history_days = int(opportunity_cfg.get("min_listing_days", 60))
     price_percentile = float(metrics.get("price_percentile_1y", 0.5))
 
-    liquidity_ok = float(metrics.get("avg_turnover_20d", 0.0)) >= min_turnover
-    checks.append({"name": "流动性", "status": "✅" if liquidity_ok else "❌", "detail": f"日均成交 {metrics.get('avg_turnover_20d', 0.0) / 1e8:.2f} 亿"})
-    if not liquidity_ok:
-        exclusion_reasons.append("日均成交额低于 5000 万")
+    if asset_type == "cn_fund":
+        overview = dict((fund_profile or {}).get("overview") or {})
+        net_asset_text = str(overview.get("净资产规模", "")).strip()
+        net_asset = None
+        match = re.search(r"(\d+(?:\.\d+)?)", net_asset_text)
+        if match:
+            net_asset = float(match.group(1))
+        liquidity_ok = bool(net_asset and net_asset >= 1.0)
+        checks.append(
+            {
+                "name": "基金规模",
+                "status": "✅" if liquidity_ok else "⚠️",
+                "detail": net_asset_text or "未披露净资产规模",
+            }
+        )
+        if net_asset is not None and net_asset < 1.0:
+            exclusion_reasons.append("基金规模偏小")
+    else:
+        liquidity_ok = float(metrics.get("avg_turnover_20d", 0.0)) >= min_turnover
+        checks.append({"name": "流动性", "status": "✅" if liquidity_ok else "❌", "detail": f"日均成交 {metrics.get('avg_turnover_20d', 0.0) / 1e8:.2f} 亿"})
+        if not liquidity_ok:
+            exclusion_reasons.append("日均成交额低于 5000 万")
 
     listed_ok = len(history) >= min_history_days
     checks.append({"name": "上市时长", "status": "✅" if listed_ok else "❌", "detail": f"有效历史样本 {len(history)} 个交易日"})
     if not listed_ok:
         exclusion_reasons.append("上市不满 60 个交易日")
+
+    if asset_type == "cn_stock":
+        stock_name = str(metadata.get("name", ""))
+        is_st = stock_name.upper().startswith(("ST", "*ST"))
+        checks.append({"name": "ST 风险", "status": "❌" if is_st else "✅", "detail": f"{'ST / *ST 股票' if is_st else '非 ST 股票'}"})
+        if is_st:
+            exclusion_reasons.append("ST / *ST 股票，退市风险较高")
 
     checks.append({"name": "基本面底线", "status": "ℹ️", "detail": "当前以 ETF / 行业代理为主，利润同比底线暂未接入原始财报数据"})
     valuation_snapshot = dict(fundamental_dimension.get("valuation_snapshot") or {})
@@ -968,7 +1229,10 @@ def _hard_checks(
     else:
         checks.append({"name": "估值极端", "status": "✅", "detail": f"价格位置代理分位 {price_percentile:.0%}"})
 
-    checks.append({"name": "解禁压力", "status": "ℹ️", "detail": "解禁日历尚未接入，当前不纳入硬性排除"})
+    if asset_type == "cn_fund":
+        checks.append({"name": "解禁压力", "status": "✅", "detail": "开放式基金不适用解禁压力"})
+    else:
+        checks.append({"name": "解禁压力", "status": "ℹ️", "detail": "解禁日历尚未接入，当前不纳入硬性排除"})
 
     return_5d = float(metrics.get("return_5d", 0.0))
     close_returns = history["close"].pct_change().dropna()
@@ -1108,6 +1372,7 @@ def _fundamental_dimension(
     metadata: Mapping[str, Any],
     metrics: Mapping[str, float],
     config: Mapping[str, Any],
+    fund_profile: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     factors: List[Dict[str, Any]] = []
     raw = 0
@@ -1121,7 +1386,7 @@ def _fundamental_dimension(
     if asset_type in {"cn_etf", "cn_index", "cn_fund"}:
         collector = ValuationCollector(config)
         try:
-            valuation_snapshot = collector.get_cn_index_snapshot(_valuation_keywords(metadata))
+            valuation_snapshot = collector.get_cn_index_snapshot(_valuation_keywords(metadata, asset_type, fund_profile))
         except Exception:
             valuation_snapshot = None
         if valuation_snapshot:
@@ -1129,10 +1394,32 @@ def _fundamental_dimension(
                 valuation_history = collector.get_cn_index_value_history(str(valuation_snapshot.get("index_code", "")))
             except Exception:
                 valuation_history = pd.DataFrame()
-            try:
+        try:
+            if asset_type == "cn_fund":
+                financial_proxy = _fund_financial_proxy(collector, fund_profile)
+            elif valuation_snapshot:
                 financial_proxy = collector.get_cn_index_financial_proxies(str(valuation_snapshot.get("index_code", "")), top_n=5)
-            except Exception:
-                financial_proxy = {}
+        except Exception:
+            financial_proxy = {}
+        try:
+            sector_flow = _sector_flow_snapshot(metadata, MarketDriversCollector(config).collect())
+        except Exception:
+            sector_flow = {}
+
+    if asset_type == "cn_stock":
+        collector = ValuationCollector(config)
+        try:
+            financial_proxy = collector.get_cn_stock_financial_proxy(symbol)
+        except Exception:
+            financial_proxy = {}
+        stock_pe = metadata.get("pe_ttm")
+        stock_pb = metadata.get("pb")
+        if stock_pe is not None:
+            try:
+                pe_ttm = float(stock_pe)
+                valuation_snapshot = {"index_name": str(metadata.get("name", symbol)), "pe_ttm": pe_ttm}
+            except (ValueError, TypeError):
+                pass
         try:
             sector_flow = _sector_flow_snapshot(metadata, MarketDriversCollector(config).collect())
         except Exception:
@@ -1199,6 +1486,8 @@ def _fundamental_dimension(
     revenue_yoy = financial_proxy.get("revenue_yoy")
     if revenue_yoy is None:
         revenue_yoy = financial_proxy.get("profit_yoy")
+    revenue_label = "前五大重仓股加权增速代理" if asset_type == "cn_fund" else "个股增速" if asset_type == "cn_stock" else "前五大成分股加权增速代理"
+    proxy_scope_detail = "当前优先用前五大重仓股财报做加权代理" if asset_type == "cn_fund" else "当前用个股最新财报数据" if asset_type == "cn_stock" else "当前优先用前五大成分股营收同比"
     if revenue_yoy is not None:
         revenue_award = 20 if float(revenue_yoy) >= 20 else 15 if float(revenue_yoy) >= 10 else 8 if float(revenue_yoy) >= 5 else 0
         raw += revenue_award
@@ -1206,14 +1495,14 @@ def _fundamental_dimension(
         factors.append(
             _factor_row(
                 "盈利增速",
-                f"前五大成分股加权增速代理 {float(revenue_yoy):.1f}%",
+                f"{revenue_label} {float(revenue_yoy):.1f}%",
                 revenue_award,
                 20,
-                f"当前优先用前五大成分股营收同比，缺失时回退到利润同比；覆盖权重约 {financial_proxy.get('coverage_weight', 0.0):.1f}%。",
+                f"{proxy_scope_detail}，缺失时回退到利润同比；覆盖权重约 {financial_proxy.get('coverage_weight', 0.0):.1f}%。",
             )
         )
     else:
-        factors.append(_factor_row("盈利增速", "缺失", None, 20, "当前未接入对应指数或行业的营收同比代理"))
+        factors.append(_factor_row("盈利增速", "缺失", None, 20, "当前未接入对应指数/行业或重仓股的营收同比代理"))
 
     roe_value = financial_proxy.get("roe")
     if roe_value is not None:
@@ -1223,14 +1512,14 @@ def _fundamental_dimension(
         factors.append(
             _factor_row(
                 "ROE",
-                f"前五大成分股加权 ROE {float(roe_value):.1f}%",
+                f"{'前五大重仓股' if asset_type == 'cn_fund' else '个股' if asset_type == 'cn_stock' else '前五大成分股'}加权 ROE {float(roe_value):.1f}%",
                 roe_award,
                 20,
                 f"财务代理最新报告期 {financial_proxy.get('report_date') or '未知'}。",
             )
         )
     else:
-        factors.append(_factor_row("ROE", "缺失", None, 20, "当前未接入对应指数或行业的 ROE 代理"))
+        factors.append(_factor_row("ROE", "缺失", None, 20, "当前未接入对应指数/行业或重仓股的 ROE 代理"))
 
     gross_margin = financial_proxy.get("gross_margin")
     if gross_margin is not None:
@@ -1240,14 +1529,14 @@ def _fundamental_dimension(
         factors.append(
             _factor_row(
                 "毛利率",
-                f"前五大成分股加权毛利率 {float(gross_margin):.1f}%",
+                f"{'前五大重仓股' if asset_type == 'cn_fund' else '个股' if asset_type == 'cn_stock' else '前五大成分股'}加权毛利率 {float(gross_margin):.1f}%",
                 margin_award,
                 15,
-                "用成分股加权毛利率代理行业定价权和成本结构。",
+                "用重仓股/成分股加权毛利率代理行业定价权和成本结构。",
             )
         )
     else:
-        factors.append(_factor_row("毛利率", "缺失", None, 15, "当前未接入对应行业毛利率代理"))
+        factors.append(_factor_row("毛利率", "缺失", None, 15, "当前未接入对应行业或重仓股毛利率代理"))
 
     profit_yoy = financial_proxy.get("profit_yoy")
     growth_base = None
@@ -1266,7 +1555,7 @@ def _fundamental_dimension(
                 f"PEG 约 {peg_value:.2f}",
                 peg_award,
                 10,
-                "用真实指数 PE 除以前五大成分股加权增速代理，回答‘增长是否已经被定价’。",
+                f"用真实指数 PE 除以{'前五大重仓股' if asset_type == 'cn_fund' else '个股' if asset_type == 'cn_stock' else '前五大成分股'}加权增速代理，回答'增长是否已经被定价'。",
             )
         )
     else:
@@ -1335,12 +1624,16 @@ def _fundamental_dimension(
     }
 
 
-def _catalyst_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+def _catalyst_dimension(
+    metadata: Mapping[str, Any],
+    context: Mapping[str, Any],
+    fund_profile: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
     factors: List[Dict[str, Any]] = []
     raw = 0
     available = 0
     config = dict(context.get("config", {}))
-    profile = _catalyst_profile(metadata, config)
+    profile = _catalyst_profile(metadata, config, fund_profile)
     news_items = context.get("news_report", {}).get("all_items") or context.get("news_report", {}).get("items", [])
     sector = str(metadata.get("sector", ""))
     keyword_keys = _metadata_news_keys(metadata)
@@ -1617,9 +1910,12 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
     else:
         factors.append(_factor_row("公募/热度代理", "缺失", None, 30, "公募低配/热度代理暂缺"))
 
-    factors.append(_factor_row("高管增持", "ETF / 指数产品不适用", 0, 0, "该因子主要适用于个股，不纳入 ETF 评分。", display_score="不适用"))
+    if asset_type == "cn_stock":
+        factors.append(_factor_row("高管增持", "个股高管增持数据暂未接入", None, 10, "后续可接入 akshare 高管增减持数据。"))
+    else:
+        factors.append(_factor_row("高管增持", "ETF / 指数产品不适用", 0, 0, "该因子主要适用于个股，不纳入 ETF 评分。", display_score="不适用"))
 
-    if asset_type == "cn_etf":
+    if asset_type in {"cn_etf", "cn_stock"}:
         if northbound:
             north_value = northbound.get("net_value")
             north_award = 20 if north_value is not None and float(north_value) > 0 else 0
@@ -1676,6 +1972,22 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
                 )
             else:
                 factors.append(_factor_row("机构资金承接", "缺失", None, 10, f"ETF 资金流数据缺失: {exc}"))
+    elif asset_type == "cn_stock":
+        if sector_flow:
+            chips_award_stock = 10 if float(sector_flow.get("main_flow") or 0.0) > 0 else 0
+            raw += chips_award_stock
+            available += 10
+            factors.append(
+                _factor_row(
+                    "机构资金承接",
+                    f"{sector_flow.get('name') or metadata.get('sector', '行业')} 主力净{'流入' if (sector_flow.get('main_flow') or 0) > 0 else '流出'} {_fmt_yi_number(sector_flow.get('main_flow'))}",
+                    chips_award_stock,
+                    10,
+                    "个股资金流用所属行业主力资金流方向代理。",
+                )
+            )
+        else:
+            factors.append(_factor_row("机构资金承接", "缺失", None, 10, "个股所属行业资金流数据缺失"))
     else:
         factors.append(_factor_row("机构资金承接", "该项不适用", None, 10, "当前只对 A 股 ETF 接稳定资金流代理"))
 
@@ -2065,8 +2377,15 @@ def _headline_core(
 
 def _asset_note(metadata: Mapping[str, Any], asset_type: str) -> str:
     sector = str(metadata.get("sector", "该主题"))
+    if asset_type == "cn_stock":
+        return f"这是一只 A 股个股，所属行业为 `{sector}`，需要关注个股层面的业绩兑现与公司治理风险。"
     if asset_type in {"cn_etf", "us", "hk", "hk_index"}:
         return f"这只 ETF 本质上更像在买 `{sector}` 方向的核心风格暴露，而不是无差别买整个市场。"
+    if asset_type == "cn_fund":
+        manager_name = str(metadata.get("manager_name", "")).strip()
+        if manager_name:
+            return f"这只场外基金本质上是在买基金经理 `{manager_name}` 的主动选股框架，以及当前持仓所暴露的 `{sector}` 风格。"
+        return f"这只场外基金本质上是在买基金经理的主动选股框架，以及当前持仓所暴露的 `{sector}` 风格。"
     return ""
 
 
@@ -2079,6 +2398,7 @@ def _build_narrative(
     technical: Mapping[str, Any],
     action: Mapping[str, str],
     context: Mapping[str, Any],
+    fund_profile: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     direction = _direction_label(dimensions)
     cycle = "中期(1-3月)" if (_dimension_score(dimensions, "relative_strength") or 0) >= 55 or (_dimension_score(dimensions, "macro") or 0) >= 30 else "短期(1-4周)"
@@ -2123,6 +2443,10 @@ def _build_narrative(
     )
     if _asset_note(metadata, asset_type):
         macro_driver += f" {_asset_note(metadata, asset_type)}"
+    if asset_type == "cn_fund" and fund_profile:
+        style_summary = str(dict(fund_profile.get("style") or {}).get("summary", "")).strip()
+        if style_summary:
+            macro_driver += f" {style_summary}"
 
     if chips_score is None:
         flow_driver = "增量资金数据目前不完整，所以暂时看不到很强的机构加仓确认；当前更像配置属性或相对强弱在支撑。"
@@ -2130,6 +2454,10 @@ def _build_narrative(
         flow_driver = "资金面已经开始给出确认，说明这条线不只是讲故事，而是有增量资金在承接。"
     else:
         flow_driver = "资金面暂时没有形成明确共振，所以现阶段更多还是看方向和结构，而不是看资金追买。"
+    if asset_type == "cn_fund" and fund_profile:
+        positioning = str(dict(fund_profile.get("style") or {}).get("positioning", "")).strip()
+        if positioning:
+            flow_driver += f" {positioning}"
 
     if relative_score >= 70:
         relative_driver = "相对强弱仍占优，说明资金没有彻底离开这条线；即使短线有波动，也更像强势方向内部的节奏调整。"
@@ -2144,6 +2472,10 @@ def _build_narrative(
         technical_driver = f"技术面最值得看的不是强趋势，而是价格已经回到 `{support_signal}` 附近；但 `{macd_signal}`，短线动能还需要再修复。"
     else:
         technical_driver = f"技术面当前最大问题不是完全破位，而是 `{macd_signal}`，趋势确认不足。"
+    if asset_type == "cn_fund" and fund_profile:
+        selection = str(dict(fund_profile.get("style") or {}).get("selection", "")).strip()
+        if selection:
+            technical_driver += f" {selection}"
 
     if macro_score >= 30 and relative_score >= 60 and tech_score < 50:
         contradiction = "中期逻辑偏正面，但短线动能还没有重新修复，因此更适合等待确认，而不是直接追价。"
@@ -2364,6 +2696,9 @@ def analyze_opportunity(
     runtime_context = dict(context or build_market_context(config, relevant_asset_types=[asset_type, "cn_etf", "futures"]))
     runtime_context["config"] = dict(config)
     metadata = _merge_metadata(symbol, asset_type, metadata_override, config)
+    fund_profile = _collect_fund_profile(symbol, config) if asset_type == "cn_fund" else {}
+    if fund_profile:
+        metadata = _enrich_metadata_with_fund_profile(metadata, fund_profile)
     history = normalize_ohlcv_frame(fetch_asset_history(symbol, asset_type, dict(config)))
     technical = TechnicalAnalyzer(history).generate_scorecard(dict(config).get("technical", {}))
     metrics = compute_history_metrics(history)
@@ -2379,8 +2714,8 @@ def analyze_opportunity(
 
     dimensions = {
         "technical": _technical_dimension(history, technical),
-        "fundamental": _fundamental_dimension(symbol, asset_type, metadata, metrics, config),
-        "catalyst": _catalyst_dimension(metadata, runtime_context),
+        "fundamental": _fundamental_dimension(symbol, asset_type, metadata, metrics, config, fund_profile),
+        "catalyst": _catalyst_dimension(metadata, runtime_context, fund_profile),
         "relative_strength": _relative_strength_dimension(symbol, asset_type, metadata, metrics, asset_returns, runtime_context),
         "chips": _chips_dimension(symbol, asset_type, metadata, runtime_context, config),
         "risk": _risk_dimension(symbol, asset_type, history, asset_returns, runtime_context, correlation_pair),
@@ -2388,6 +2723,7 @@ def analyze_opportunity(
         "macro": _macro_dimension(metadata, runtime_context),
     }
     checks, exclusion_reasons, warnings = _hard_checks(
+        asset_type,
         metadata,
         history,
         metrics,
@@ -2396,6 +2732,7 @@ def analyze_opportunity(
         dimensions["macro"]["score"],
         correlation_pair,
         dimensions["fundamental"],
+        fund_profile,
     )
     rating = _rating_from_dimensions(dimensions, warnings)
     action = _action_plan({"rating": rating, "dimensions": dimensions}, history, technical)
@@ -2422,6 +2759,7 @@ def analyze_opportunity(
         technical,
         action,
         runtime_context,
+        fund_profile,
     )
 
     return {
@@ -2429,6 +2767,7 @@ def analyze_opportunity(
         "name": str(metadata.get("name", symbol)),
         "asset_type": asset_type,
         "metadata": metadata,
+        "fund_profile": fund_profile,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "history": history,
         "benchmark_symbol": benchmark_symbol,
@@ -2590,3 +2929,226 @@ def compare_opportunities(symbols: Sequence[str], config: Mapping[str, Any]) -> 
 
 def detect_asset_type_for_compare(symbol: str, config: Mapping[str, Any]) -> str:
     return detect_asset_type(symbol, config)
+
+
+# ---------------------------------------------------------------------------
+# Stock Industry Mapping (A-share realtime data industry → engine sector)
+# ---------------------------------------------------------------------------
+_INDUSTRY_TO_SECTOR: Dict[str, str] = {}
+for _sector_name, _keywords in [
+    ("科技", ("半导体", "芯片", "通信", "软件", "计算机", "电子", "光学", "IT", "互联网", "传媒")),
+    ("消费", ("食品", "饮料", "白酒", "家电", "酒店", "旅游", "零售", "纺织", "服装", "商贸")),
+    ("医药", ("医药", "医疗", "生物", "制药")),
+    ("能源", ("石油", "煤炭", "能源")),
+    ("有色", ("有色", "铜", "铝", "锂", "稀土")),
+    ("军工", ("军工", "国防", "航空", "航天")),
+    ("高股息", ("银行", "保险", "公用事业", "电力")),
+    ("电网", ("电力设备", "电气设备", "电网", "储能")),
+    ("黄金", ("贵金属",)),
+]:
+    for _kw in _keywords:
+        _INDUSTRY_TO_SECTOR[_kw] = _sector_name
+
+
+def _map_industry_to_sector(industry: str) -> tuple[str, List[str]]:
+    """Map a stock's industry classification to engine sector + chain_nodes."""
+    for keyword, sector in _INDUSTRY_TO_SECTOR.items():
+        if keyword in industry:
+            _, chain_nodes = _normalize_sector(industry, sector)
+            return sector, chain_nodes
+    return _normalize_sector(industry)
+
+
+def build_stock_pool(
+    config: Mapping[str, Any],
+    market: str = "all",
+    sector_filter: str = "",
+    max_candidates: int = 60,
+) -> tuple[List[PoolItem], List[str]]:
+    """Build a pool of individual stocks for scanning.
+
+    ``market``: ``"cn"`` / ``"hk"`` / ``"us"`` / ``"all"``.
+    """
+    pool: List[PoolItem] = []
+    warnings: List[str] = []
+    seen: set[str] = set()
+    opportunity_cfg = dict(config).get("opportunity", {})
+    min_turnover = float(opportunity_cfg.get("stock_min_turnover", 50_000_000))
+    min_market_cap = float(opportunity_cfg.get("stock_min_market_cap", 5_000_000_000))
+    lowered_filter = sector_filter.lower().strip()
+
+    # --- A-share stocks ---
+    if market in {"cn", "all"}:
+        try:
+            realtime = ChinaMarketCollector(config).get_stock_realtime()
+            code_col = "代码" if "代码" in realtime.columns else None
+            name_col = "名称" if "名称" in realtime.columns else None
+            amount_col = "成交额" if "成交额" in realtime.columns else None
+            cap_col = "总市值" if "总市值" in realtime.columns else None
+            pe_col = next((c for c in realtime.columns if "市盈率" in c), None)
+            pb_col = next((c for c in realtime.columns if "市净率" in c), None)
+            industry_col = next((c for c in realtime.columns if c in ("行业", "所属行业")), None)
+
+            if code_col and name_col and amount_col:
+                frame = realtime.copy()
+                for col in [amount_col, cap_col]:
+                    if col:
+                        frame[col] = pd.to_numeric(frame[col], errors="coerce").fillna(0.0)
+                # Basic filters
+                frame = frame[frame[amount_col] >= min_turnover]
+                if cap_col:
+                    frame = frame[frame[cap_col] >= min_market_cap]
+                # Exclude ST stocks
+                frame = frame[~frame[name_col].astype(str).str.upper().str.contains(r"^[\*]?ST", na=False, regex=True)]
+                # Exclude new stocks (codes starting with "N" in name)
+                frame = frame[~frame[name_col].astype(str).str.startswith("N", na=False)]
+                # Sector filter
+                if lowered_filter:
+                    name_match = frame[name_col].astype(str).str.lower().str.contains(lowered_filter, na=False)
+                    industry_match = frame[industry_col].astype(str).str.lower().str.contains(lowered_filter, na=False) if industry_col else pd.Series(False, index=frame.index)
+                    frame = frame[name_match | industry_match]
+                # Sort by turnover and take top candidates
+                frame = frame.sort_values(amount_col, ascending=False).head(max_candidates)
+
+                for _, row in frame.iterrows():
+                    symbol = str(row[code_col])
+                    if symbol in seen:
+                        continue
+                    name = str(row[name_col])
+                    industry = str(row[industry_col]) if industry_col and pd.notna(row.get(industry_col)) else ""
+                    sector, chain_nodes = _map_industry_to_sector(industry) if industry else _normalize_sector(name)
+                    meta: Dict[str, Any] = {}
+                    if pe_col and pd.notna(row.get(pe_col)):
+                        meta["pe_ttm"] = float(row[pe_col])
+                    if pb_col and pd.notna(row.get(pb_col)):
+                        meta["pb"] = float(row[pb_col])
+                    pool.append(
+                        PoolItem(
+                            symbol=symbol,
+                            name=name,
+                            asset_type="cn_stock",
+                            region="CN",
+                            sector=sector,
+                            chain_nodes=chain_nodes,
+                            source="all_market_stock",
+                            turnover=float(row[amount_col]),
+                            in_watchlist=False,
+                            metadata=meta,
+                        )
+                    )
+                    seen.add(symbol)
+        except Exception as exc:
+            warnings.append(f"A 股全市场个股池拉取失败: {exc}")
+
+    # --- HK / US curated pools ---
+    stock_pools_path = resolve_project_path(config.get("stock_pools_file", "config/stock_pools.yaml"))
+    curated = load_yaml(stock_pools_path, default={}) or {}
+
+    if market in {"hk", "all"}:
+        for item in curated.get("hk_stocks", []):
+            symbol = str(item.get("symbol", ""))
+            if not symbol or symbol in seen:
+                continue
+            if lowered_filter and lowered_filter not in str(item.get("name", "")).lower() and lowered_filter not in str(item.get("sector", "")).lower():
+                continue
+            sector, chain_nodes = _normalize_sector(str(item.get("name", symbol)), str(item.get("sector", "综合")))
+            pool.append(
+                PoolItem(
+                    symbol=symbol,
+                    name=str(item.get("name", symbol)),
+                    asset_type="hk",
+                    region="HK",
+                    sector=sector,
+                    chain_nodes=chain_nodes,
+                    source="curated_hk",
+                    in_watchlist=False,
+                )
+            )
+            seen.add(symbol)
+
+    if market in {"us", "all"}:
+        for item in curated.get("us_stocks", []):
+            symbol = str(item.get("symbol", ""))
+            if not symbol or symbol in seen:
+                continue
+            if lowered_filter and lowered_filter not in str(item.get("name", "")).lower() and lowered_filter not in str(item.get("sector", "")).lower():
+                continue
+            sector, chain_nodes = _normalize_sector(str(item.get("name", symbol)), str(item.get("sector", "综合")))
+            pool.append(
+                PoolItem(
+                    symbol=symbol,
+                    name=str(item.get("name", symbol)),
+                    asset_type="us",
+                    region="US",
+                    sector=sector,
+                    chain_nodes=chain_nodes,
+                    source="curated_us",
+                    in_watchlist=False,
+                )
+            )
+            seen.add(symbol)
+
+    return pool, warnings
+
+
+def discover_stock_opportunities(
+    config: Mapping[str, Any],
+    top_n: int = 20,
+    market: str = "all",
+    sector_filter: str = "",
+) -> Dict[str, Any]:
+    """Scan a stock universe and surface top picks."""
+    relevant_types = list(dict.fromkeys(["cn_stock", "cn_etf", "hk", "us", "futures"]))
+    context = build_market_context(config, relevant_asset_types=relevant_types)
+    pool, pool_warnings = build_stock_pool(config, market=market, sector_filter=sector_filter)
+    passed = 0
+    analyses: List[Dict[str, Any]] = []
+    blind_spots: List[str] = list(pool_warnings)
+    for item in pool:
+        try:
+            override: Dict[str, Any] = {
+                "name": item.name,
+                "sector": item.sector,
+                "chain_nodes": item.chain_nodes,
+                "region": item.region,
+                "in_watchlist": item.in_watchlist,
+            }
+            if item.metadata:
+                override.update(item.metadata)
+            analysis = analyze_opportunity(
+                item.symbol,
+                item.asset_type,
+                config,
+                context=context,
+                metadata_override=override,
+            )
+        except Exception as exc:
+            blind_spots.append(f"{item.symbol} ({item.name}) 扫描失败: {exc}")
+            continue
+        if analysis["excluded"]:
+            continue
+        passed += 1
+        if analysis["rating"]["rank"] > 0:
+            analyses.append(analysis)
+    analyses.sort(
+        key=lambda a: (
+            a["rating"]["rank"],
+            a["dimensions"]["technical"]["score"] or 0,
+            a["dimensions"]["fundamental"]["score"] or 0,
+            a["dimensions"]["relative_strength"]["score"] or 0,
+        ),
+        reverse=True,
+    )
+    market_labels = {"cn": "A 股", "hk": "港股", "us": "美股", "all": "全市场"}
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "scan_pool": len(pool),
+        "passed_pool": passed,
+        "market": market,
+        "market_label": market_labels.get(market, market),
+        "regime": context.get("regime", {}),
+        "day_theme": context.get("day_theme", {}),
+        "top": analyses[:top_n],
+        "blind_spots": blind_spots[:10],
+        "sector_filter": sector_filter,
+    }

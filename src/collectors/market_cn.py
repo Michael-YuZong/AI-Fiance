@@ -138,6 +138,48 @@ class ChinaMarketCollector(BaseCollector):
                     pass
             raise primary_exc
 
+    def get_stock_daily(
+        self,
+        symbol: str,
+        period: str = "daily",
+        adjust: str = "qfq",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> pd.DataFrame:
+        """A 股个股日 K 线。"""
+        start = start_date or self._date_str(-365 * 3)
+        end = end_date or self._date_str()
+        try:
+            fetcher = self._ak_function("stock_zh_a_hist")
+            return self.cached_call(
+                f"cn_market:stock_daily:{symbol}:{period}:{adjust}:{start}:{end}",
+                fetcher,
+                symbol=symbol,
+                period=period,
+                start_date=start,
+                end_date=end,
+                adjust=adjust,
+            )
+        except Exception as primary_exc:
+            if yf is None:
+                raise primary_exc
+            ticker = self._yahoo_symbol(symbol)
+            try:
+                return self.cached_call(
+                    f"cn_market:yahoo_stock_daily:{ticker}:{period}",
+                    yf.Ticker(ticker).history,
+                    period="3y" if period == "daily" else period,
+                    interval="1d",
+                    auto_adjust=False,
+                )
+            except Exception:
+                raise primary_exc
+
+    def get_stock_realtime(self) -> pd.DataFrame:
+        """A 股全市场实时行情（含代码、名称、市值、成交额、涨跌幅、PE、PB 等）。"""
+        fetcher = self._ak_function("stock_zh_a_spot_em")
+        return self.cached_call("cn_market:stock_realtime", fetcher, ttl_hours=1)
+
     def get_etf_realtime(self) -> pd.DataFrame:
         """ETF 实时行情。"""
         fetcher = self._ak_function("fund_etf_spot_em")
@@ -164,13 +206,22 @@ class ChinaMarketCollector(BaseCollector):
         return self.cached_call("cn_market:north_south_flow", fetcher, ttl_hours=0)
 
     def get_margin_trading(self) -> pd.DataFrame:
-        """融资融券数据。"""
+        """融资融券数据（T+1 披露，自动回退到最近交易日）。"""
         fetcher = self._ak_function("stock_margin_detail_sse")
-        return self.cached_call(
-            f"cn_market:margin:{self._date_str()}",
-            fetcher,
-            date=self._date_str(),
-        )
+        # Try today, then fall back up to 5 days for weekends/holidays
+        for offset in range(0, 6):
+            date_str = self._date_str(offset_days=-offset)
+            try:
+                df = self.cached_call(
+                    f"cn_market:margin:{date_str}",
+                    fetcher,
+                    date=date_str,
+                )
+                if not df.empty:
+                    return df
+            except Exception:
+                continue
+        return pd.DataFrame()
 
     def get_sector_pe(self, sector: str) -> pd.DataFrame:
         """板块估值数据。"""

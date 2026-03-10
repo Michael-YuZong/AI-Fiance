@@ -51,6 +51,8 @@ def fetch_asset_history(
     context = get_asset_context(symbol, asset_type, config)
     if asset_type == "cn_etf":
         return ChinaMarketCollector(config).get_etf_daily(context.source_symbol)
+    if asset_type == "cn_stock":
+        return ChinaMarketCollector(config).get_stock_daily(context.source_symbol)
     if asset_type == "cn_index":
         return ChinaMarketCollector(config).get_index_daily(context.symbol, proxy_symbol=context.source_symbol)
     if asset_type == "cn_fund":

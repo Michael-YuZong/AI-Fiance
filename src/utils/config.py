@@ -79,7 +79,12 @@ def detect_asset_type(symbol: str, config: Mapping[str, Any]) -> str:
 
     if re.fullmatch(r"\d{6}", symbol):
         etf_prefixes = ("15", "16", "50", "51", "52", "53", "56", "58", "59")
-        return "cn_etf" if symbol.startswith(etf_prefixes) else "cn_fund"
+        stock_prefixes = ("00", "30", "60", "68")
+        if symbol.startswith(etf_prefixes):
+            return "cn_etf"
+        if symbol.startswith(stock_prefixes):
+            return "cn_stock"
+        return "cn_fund"
 
     mapping = config.get("asset_type_mapping", {})
     for pattern, asset_type in mapping.items():

@@ -91,6 +91,8 @@ def _data_sources(analysis: Dict[str, Any]) -> str:
         sources.append("估值: 价格位置代理")
     sources.append("催化: RSS + 动态关键词检索")
     sources.append("事件: 本地事件日历")
+    if analysis.get("asset_type") == "cn_fund":
+        sources.append("基金画像: 天天基金 + 雪球")
     if analysis.get("day_theme", {}).get("label"):
         sources.append("上下文: 晨报主线/Regime")
     return "；".join(sources)
@@ -113,6 +115,10 @@ def _missing_data_notes(analysis: Dict[str, Any]) -> str:
             preview = "、".join(missing_factors[:3])
             suffix = "等" if len(missing_factors) > 3 else ""
             items.append(f"{label}: {preview}{suffix}")
+    if analysis.get("asset_type") == "cn_fund":
+        for note in (analysis.get("fund_profile") or {}).get("notes", []):
+            if "缺失" in str(note):
+                items.append(str(note))
     return "；".join(items) if items else "—"
 
 
@@ -140,6 +146,171 @@ def _linked_briefing(analysis: Dict[str, Any]) -> str:
     if regime:
         return f"背景 Regime `{regime}`"
     return "—"
+
+
+def _fmt_number(value: Any, digits: int = 2, suffix: str = "") -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        return f"{float(value):.{digits}f}{suffix}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_pct_point(value: Any) -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        return f"{float(value):.2f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
+    if analysis.get("asset_type") != "cn_fund":
+        return []
+    profile = dict(analysis.get("fund_profile") or {})
+    if not profile:
+        return []
+    overview = dict(profile.get("overview") or {})
+    manager = dict(profile.get("manager") or {})
+    style = dict(profile.get("style") or {})
+    rating = dict(profile.get("rating") or {})
+    top_holdings = list(profile.get("top_holdings") or [])
+    asset_mix = list(profile.get("asset_allocation") or [])
+    industries = list(profile.get("industry_allocation") or [])
+    achievement = dict(profile.get("achievement") or {})
+
+    lines = [
+        "",
+        "## 基金画像",
+    ]
+    lines.extend(
+        _table(
+            ["项目", "内容"],
+            [
+                ["基金类型", overview.get("基金类型", "—")],
+                ["基金公司", overview.get("基金管理人", "—")],
+                ["基金经理", overview.get("基金经理人", "—")],
+                ["成立日期", overview.get("成立日期/规模", "—")],
+                ["净资产规模", overview.get("净资产规模", "—")],
+                ["业绩比较基准", overview.get("业绩比较基准", "—")],
+                [
+                    "基金评级",
+                    " / ".join(
+                        part
+                        for part in [
+                            f"5星家数 {_fmt_number(rating.get('five_star_count'), 0)}" if rating else "",
+                            f"晨星 {_fmt_number(rating.get('morningstar'), 0)}" if rating.get("morningstar") is not None else "",
+                            f"上海证券 {_fmt_number(rating.get('shanghai'), 0)}" if rating.get("shanghai") is not None else "",
+                            f"招商证券 {_fmt_number(rating.get('zhaoshang'), 0)}" if rating.get("zhaoshang") is not None else "",
+                            f"济安金信 {_fmt_number(rating.get('jiaan'), 0)}" if rating.get("jiaan") is not None else "",
+                        ]
+                        if part
+                    )
+                    or "—",
+                ],
+            ],
+        )
+    )
+
+    if achievement:
+        perf_rows = []
+        for period in ("近1月", "近3月", "近6月", "今年以来", "成立以来"):
+            item = achievement.get(period)
+            if not item:
+                continue
+            perf_rows.append(
+                [
+                    period,
+                    _fmt_pct_point(item.get("return_pct")),
+                    _fmt_pct_point(item.get("max_drawdown_pct")),
+                    item.get("peer_rank", "—"),
+                ]
+            )
+        if perf_rows:
+            lines.extend(["", "### 业绩快照"])
+            lines.extend(_table(["区间", "收益", "最大回撤", "同类排名"], perf_rows))
+
+    lines.extend(["", "## 基金成分分析"])
+    lines.append(style.get("summary", "这只基金本质上是在买基金经理的主动组合框架。"))
+
+    if asset_mix:
+        lines.extend(["", "### 资产配置"])
+        lines.extend(
+            _table(
+                ["资产类型", "仓位占比"],
+                [[item.get("资产类型", "—"), _fmt_pct_point(item.get("仓位占比"))] for item in asset_mix],
+            )
+        )
+
+    if top_holdings:
+        lines.extend(["", "### 前十大持仓"])
+        lines.extend(
+            _table(
+                ["股票代码", "股票名称", "占净值比例", "持仓市值", "季度"],
+                [
+                    [
+                        item.get("股票代码", "—"),
+                        item.get("股票名称", "—"),
+                        _fmt_pct_point(item.get("占净值比例")),
+                        _fmt_number(item.get("持仓市值")),
+                        item.get("季度", "—"),
+                    ]
+                    for item in top_holdings[:10]
+                ],
+            )
+        )
+
+    if industries:
+        lines.extend(["", "### 行业暴露"])
+        lines.extend(
+            _table(
+                ["行业", "占净值比例", "截止时间"],
+                [
+                    [
+                        item.get("行业类别", "—"),
+                        _fmt_pct_point(item.get("占净值比例")),
+                        item.get("截止时间", "—"),
+                    ]
+                    for item in industries[:8]
+                ],
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 基金经理风格分析",
+        ]
+    )
+    lines.extend(
+        _table(
+            ["维度", "说明"],
+            [
+                ["风格标签", " / ".join(style.get("tags", [])) or "—"],
+                ["仓位画像", style.get("positioning", "—")],
+                ["选股方式", style.get("selection", "—")],
+                ["风格一致性", style.get("consistency", "—")],
+                ["基准映射", style.get("benchmark_note", "—")],
+                [
+                    "经理画像",
+                    (
+                        f"{manager.get('name', '—')} | 从业 {_fmt_number(manager.get('tenure_days'), 0)} 天"
+                        f" | 在管规模 {_fmt_number(manager.get('aum_billion'))} 亿"
+                        f" | 最佳回报 {_fmt_pct_point(manager.get('best_return_pct'))}"
+                    )
+                    if manager
+                    else "—"
+                ],
+            ],
+        )
+    )
+    if profile.get("notes"):
+        lines.extend(["", "### 数据说明"])
+        for item in profile["notes"]:
+            lines.append(f"- {item}")
+    return lines
 
 
 def _visual_lines(visuals: Optional[Mapping[str, str]]) -> List[str]:
@@ -266,10 +437,12 @@ class OpportunityReportRenderer:
                 f"2. **资金面 / 配置面**: {narrative['drivers']['flow']}",
                 f"3. **相对强弱**: {narrative['drivers']['relative']}",
                 f"4. **技术结构**: {narrative['drivers']['technical']}",
-                "",
-                "## 值得继续看的理由",
             ]
         )
+        fund_profile_lines = _fund_profile_lines(analysis)
+        if fund_profile_lines:
+            lines.extend(fund_profile_lines)
+        lines.extend(["", "## 值得继续看的理由"])
         for item in narrative["positives"]:
             lines.append(f"- {item}")
         lines.extend(["", "## 现在不适合激进的理由"])
@@ -513,3 +686,84 @@ class OpportunityReportRenderer:
             ]
         )
         return "\n".join(lines)
+
+    def render_stock_picks(self, payload: Dict[str, Any]) -> str:
+        """Render stock recommendation report."""
+        regime = payload.get("regime", {})
+        day_theme = payload.get("day_theme", {})
+        top = payload.get("top", [])
+        market_label = payload.get("market_label", "全市场")
+        sector_filter = payload.get("sector_filter", "")
+
+        # Count by market
+        cn_count = sum(1 for a in top if a.get("asset_type") == "cn_stock")
+        hk_count = sum(1 for a in top if a.get("asset_type") == "hk")
+        us_count = sum(1 for a in top if a.get("asset_type") == "us")
+
+        lines = [
+            f"# 个股精选 TOP {len(top)} | {payload['generated_at'][:10]}",
+            "",
+            f"> 范围: {market_label}" + (f" / {sector_filter}" if sector_filter else ""),
+            f"> 扫描池: {payload.get('scan_pool', 0)}只 | 过门槛: {payload.get('passed_pool', 0)}只 | Regime: {regime.get('current_regime', 'unknown')} | 主线: {day_theme.get('label', '未识别')}",
+        ]
+
+        market_parts = []
+        if cn_count:
+            market_parts.append(f"A 股 {cn_count} 只")
+        if hk_count:
+            market_parts.append(f"港股 {hk_count} 只")
+        if us_count:
+            market_parts.append(f"美股 {us_count} 只")
+        if market_parts:
+            lines.append(f"> 入选分布: {' / '.join(market_parts)}")
+
+        lines.append("")
+
+        if not top:
+            lines.append("当前没有达到输出阈值的个股。")
+            return "\n".join(lines)
+
+        for index, analysis in enumerate(top, start=1):
+            asset_type = analysis.get("asset_type", "")
+            market_tag = {"cn_stock": "A", "hk": "HK", "us": "US"}.get(asset_type, "")
+            lines.extend(
+                [
+                    f"### {index}. [{market_tag}] {analysis['name']} ({analysis['symbol']})  {analysis['rating']['stars']} {analysis['rating']['label']}",
+                    "",
+                    "**八维雷达：**",
+                ]
+            )
+            lines.extend(_table(["维度", "得分", "核心信号"], _dimension_rows(analysis)))
+            lines.extend(
+                [
+                    "",
+                    f"**结论：** {analysis['conclusion']}",
+                ]
+            )
+            for risk in analysis["rating"]["warnings"][:2]:
+                lines.append(risk)
+            lines.extend(
+                [
+                    "",
+                    "**建议操作：**",
+                    f"- 介入条件：{analysis['action']['entry']}",
+                    f"- 建议仓位：{analysis['action']['position']}",
+                    f"- 止损参考：{analysis['action']['stop']}",
+                    f"- 目标参考：{analysis['action'].get('target', '待定')}",
+                    "",
+                    "---",
+                ]
+            )
+
+        if payload.get("blind_spots"):
+            lines.extend(["", "## 数据盲区与降级说明"])
+            for item in payload["blind_spots"]:
+                lines.append(f"- {item}")
+
+        lines.extend(
+            [
+                "",
+                "> 免责声明：以上为量化多因子筛选结果，不构成投资建议。个股风险显著高于 ETF，请结合自身风险承受能力审慎决策。",
+            ]
+        )
+        return "\n".join(lines).rstrip()
