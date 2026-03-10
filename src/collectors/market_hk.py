@@ -26,6 +26,10 @@ class HongKongMarketCollector(BaseCollector):
             return self.SYMBOL_MAP[symbol]
         if symbol.isdigit() and len(symbol) == 5:
             return f"{symbol}.HK"
+        # yfinance uses 4-digit HK codes (e.g. 0700.HK, not 00700.HK)
+        if symbol.upper().endswith(".HK"):
+            code = symbol[:-3].lstrip("0") or "0"
+            return f"{code.zfill(4)}.HK"
         return symbol
 
     def get_history(self, symbol: str, period: str = "3y", interval: str = "1d") -> pd.DataFrame:
