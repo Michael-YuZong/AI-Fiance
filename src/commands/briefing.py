@@ -2982,6 +2982,29 @@ def _evaluate_prior_verification(
     return result[:5]
 
 
+def _noon_breadth(overview: Dict[str, Any], pulse: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract breadth metrics from overview/pulse for noon logic."""
+    breadth = overview.get("breadth", {}) or {}
+    up = int(breadth.get("up_count", 0))
+    down = int(breadth.get("down_count", 0))
+    ratio = up / down if down > 0 else 1.0
+    zt = len(pulse.get("zt_pool", pd.DataFrame()))
+    dt = len(pulse.get("dt_pool", pd.DataFrame()))
+    risk_on = ratio > 2.0 or (up > down * 1.5 and zt > max(dt, 1) * 3)
+    return {"up": up, "down": down, "ratio": ratio, "zt": zt, "dt": dt, "risk_on": risk_on}
+
+
+# Core verification keywords — failure on these invalidates the narrative,
+# not just one of N equal-weight checks.
+_CORE_VERIFY_KEYWORDS: Dict[str, List[str]] = {
+    "energy_shock": ["原油", "黄金"],
+    "defensive_riskoff": ["黄金", "VIX"],
+    "rate_growth": ["VIX", "QQQM"],
+    "ai_semis": ["HSTECH", "半导体"],
+    "china_policy": ["561380"],
+}
+
+
 def _noon_strategy_adjustment(
     prior_headline: str,
     eval_rows: List[List[str]],
@@ -2993,41 +3016,39 @@ def _noon_strategy_adjustment(
     """Generate strategy adjustment lines for the noon briefing."""
     lines: List[str] = []
     if prior_headline:
-        lines.append(f"晨报主线: {prior_headline}")
+        lines.append(f"晨报主线: **{prior_headline}**")
 
-    # Determine market sentiment from breadth data
-    up_count = int(pulse.get("breadth", {}).get("up", 0))
-    down_count = int(pulse.get("breadth", {}).get("down", 0))
-    ratio = up_count / down_count if down_count > 0 else 1.0
-    zt_count = len(pulse.get("zt_pool", pd.DataFrame()))
-    dt_count = len(pulse.get("dt_pool", pd.DataFrame()))
-    risk_on = ratio > 2.0 or (up_count > down_count * 1.5 and zt_count > dt_count * 3)
+    b = _noon_breadth(overview, pulse)
 
     if not eval_rows:
-        if risk_on:
-            lines.append(f"暂无晨报验证点。盘面涨跌比 {ratio:.1f}:1，市场偏 risk-on，可跟随强势方向。")
-        else:
-            lines.append("暂无晨报验证点，无法自动修正策略。参考当前盘面自行判断。")
+        lines.append(f"暂无晨报验证点。盘面涨跌比 {b['ratio']:.1f}:1，涨停 {b['zt']} / 跌停 {b['dt']}。")
         return lines
 
     hits = sum(1 for r in eval_rows if r[-1] == "✅")
     total = len(eval_rows)
 
-    if hits == total:
-        lines.append(f"上午验证 {hits}/{total} 全部兑现，主线逻辑延续，下午可沿用晨报策略。")
+    # --- core verification point check ---
+    theme = str(narrative.get("theme", "macro_background"))
+    core_kws = _CORE_VERIFY_KEYWORDS.get(theme, [])
+    core_failed = [
+        r[0] for r in eval_rows
+        if r[-1] == "❌" and any(kw in r[0] for kw in core_kws)
+    ]
+
+    if core_failed:
+        lines.append(f"上午验证 {hits}/{total}，但核心假设验证点「{'、'.join(core_failed)}」未兑现，晨报叙事基础已动摇。")
+    elif hits == total:
+        lines.append(f"上午验证 {hits}/{total} 全部兑现，主线逻辑延续。")
     elif hits >= total / 2:
-        lines.append(f"上午验证 {hits}/{total} 部分兑现，主线大体有效，但需留意未兑现验证点对应方向的风险。")
+        lines.append(f"上午验证 {hits}/{total} 部分兑现，主线大体有效。")
     else:
         lines.append(f"上午验证仅 {hits}/{total} 兑现，晨报主线可能需要修正。")
         failed = [r[0] for r in eval_rows if r[-1] == "❌"]
         if failed:
             lines.append(f"未兑现: {'、'.join(failed[:3])}。")
 
-    # Override with actual market breadth signal
-    if risk_on and hits < total / 2:
-        lines.append(f"但盘面涨跌比 {ratio:.1f}:1（涨停{zt_count}/跌停{dt_count}），实际市场偏 risk-on。晨报主线与盘面方向冲突，下午应跟随盘面修复方向而非继续防守。")
-    elif not risk_on and hits == total:
-        lines.append(f"但盘面涨跌比仅 {ratio:.1f}:1，市场实际偏弱，即使验证全部兑现也需谨慎。")
+    # breadth reality check
+    lines.append(f"盘面涨跌比 {b['ratio']:.1f}:1，涨停 {b['zt']} / 跌停 {b['dt']}{'，实际偏 risk-on' if b['risk_on'] else ''}。")
 
     if snapshots:
         strongest = max(snapshots, key=lambda s: s.return_1d)
@@ -3042,29 +3063,41 @@ def _noon_action_lines(
     narrative: Dict[str, Any],
     monitor_rows: List[Dict[str, Any]],
     pulse: Dict[str, Any],
+    overview: Dict[str, Any] | None = None,
 ) -> List[str]:
-    """Generate afternoon action recommendations for noon briefing."""
-    hits = sum(1 for r in eval_rows if r[-1] == "✅") if eval_rows else 0
-    total = len(eval_rows) if eval_rows else 0
+    """Generate afternoon observation hints for noon briefing.
 
-    up_count = int(pulse.get("breadth", {}).get("up", 0))
-    down_count = int(pulse.get("breadth", {}).get("down", 0))
-    ratio = up_count / down_count if down_count > 0 else 1.0
-    risk_on = ratio > 2.0
-
+    Keep it data-driven and light on conclusions — most institutional
+    commentary waits until close so intraday calls risk being wrong.
+    """
     lines: List[str] = []
-    if risk_on:
-        lines.append(f"盘面涨跌比 {ratio:.1f}:1，市场偏进攻。下午跟随强势方向，可适度加仓确认中的主线。")
-    elif total > 0 and hits == total:
-        lines.append("下午延续晨报策略，顺势持有不追高。关注尾盘是否出现获利盘压力。")
-    elif total > 0 and hits < total / 2 and not risk_on:
-        lines.append("下午偏防守，减少追高操作。若持仓方向与未兑现验证点一致，考虑减仓。")
+
+    if not snapshots:
+        lines.append("下午继续观察，数据不足暂不给方向。")
+        return lines
+
+    b = _noon_breadth(overview or {}, pulse)
+    if b["up"] > 0:
+        tone = "偏进攻" if b["risk_on"] else "偏均衡" if b["ratio"] > 1.0 else "偏防守"
+        lines.append(f"上午盘面涨跌比 {b['ratio']:.1f}:1，{tone}。下午关注能否延续。")
+
+    # --- separate trend anchor vs elastic leaders ---
+    trend_anchor = max(snapshots, key=lambda s: s.signal_score)
+    elastic_leader = max(snapshots, key=lambda s: s.return_1d)
+
+    if trend_anchor.symbol == elastic_leader.symbol:
+        lines.append(f"趋势与弹性共振: {trend_anchor.name}（1日 {format_pct(trend_anchor.return_1d)}，信号 {trend_anchor.signal_score}）。")
     else:
-        lines.append("下午保持灵活，验证与观察并行。")
-    if snapshots:
-        strongest = max(snapshots, key=lambda s: s.signal_score)
-        lines.append(f"下午重点关注 {strongest.name}，它当前信号最强，可作为主线验证器。")
-    lines.append("执行节奏: 13:00 开盘后先观察 15 分钟延续性，确认后再执行。")
+        lines.append(
+            f"趋势锚: {trend_anchor.name}（信号 {trend_anchor.signal_score}，1日 {format_pct(trend_anchor.return_1d)}）；"
+            f"弹性领涨: {elastic_leader.name}（1日 {format_pct(elastic_leader.return_1d)}，信号 {elastic_leader.signal_score}）。"
+        )
+        # when elastic leader's return is much higher, hint that the market
+        # may be rotating, but state it as observation not recommendation
+        if elastic_leader.return_1d > trend_anchor.return_1d + 0.015:
+            lines.append("弹性方向明显强于趋势锚，盘中风格可能在切换，留意是否扩散。")
+
+    lines.append("执行节奏: 13:00 开盘后先观察 15 分钟延续性，再决定动作。")
     return lines[:4]
 
 
@@ -3254,7 +3287,7 @@ def _build_noon_payload(
         "industry_rows": industry_rows,
         "watchlist_rows": watchlist_rows,
         "strategy_adjustment_lines": _noon_strategy_adjustment(prior_headline, eval_rows, snapshots, narrative, overview, pulse),
-        "afternoon_action_lines": _noon_action_lines(eval_rows, snapshots, narrative, monitor_rows, pulse),
+        "afternoon_action_lines": _noon_action_lines(eval_rows, snapshots, narrative, monitor_rows, pulse, overview),
         "afternoon_verification_rows": _noon_verification_rows(snapshots, monitor_rows),
         "afternoon_event_rows": _workflow_event_rows(events),
         "portfolio_lines": _portfolio_lines(config),

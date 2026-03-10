@@ -119,7 +119,7 @@ BOARD_MATCH_ALIASES = {
     "科技": ["半导体", "芯片", "人工智能", "AI", "消费电子", "软件服务", "通信设备", "算力"],
     "黄金": ["黄金", "贵金属"],
     "能源": ["能源", "油气", "石油", "煤炭", "天然气"],
-    "高股息": ["红利", "高股息", "银行", "电信", "公用事业"],
+    "高股息": ["红利", "高股息", "电信", "运营商", "公用事业"],
     "医药": ["医药", "医疗", "创新药", "医疗器械"],
     "消费": ["消费", "食品饮料", "家电", "零售", "旅游"],
     "军工": ["军工", "国防军工", "航天航空", "商业航天", "军民融合", "卫星"],
@@ -941,23 +941,31 @@ def _catalyst_keywords(metadata: Mapping[str, Any]) -> List[str]:
     name = str(metadata.get("name", "")).strip()
     sector = str(metadata.get("sector", "")).strip()
     chain_nodes = [str(item).strip() for item in metadata.get("chain_nodes", []) if str(item).strip()]
-    if "半导体" in name or "芯片" in name or "半导体" in chain_nodes:
-        return ["半导体", "芯片", "存储", "semiconductor", "chip", "foundry", "fab", "tsmc", "台积电", "micron", "美光", "hynix", "海力士", "gpu", "capex", "涨价", "drAM", "nand"]
+    industry = str(metadata.get("industry", "")).strip()
+    # For individual stocks, always include stock name + industry as base keywords
+    stock_base = [name] if name and name != sector else []
+    if industry and industry not in stock_base:
+        stock_base.append(industry)
+    if "半导体" in name or "芯片" in name or "半导体" in chain_nodes or "半导体" in industry:
+        return stock_base + ["半导体", "芯片", "存储", "semiconductor", "chip", "foundry", "fab", "tsmc", "台积电", "micron", "美光", "hynix", "海力士", "gpu", "capex", "涨价", "drAM", "nand"]
     if sector == "电网":
-        return ["电网", "电力", "特高压", "智能电网", "grid", "utility"]
+        return stock_base + ["电网", "电力", "特高压", "智能电网", "grid", "utility", "光伏", "储能", "新能源"]
     if sector == "黄金":
-        return ["黄金", "gold", "bullion", "央行", "central bank"]
+        return stock_base + ["黄金", "gold", "bullion", "央行", "central bank"]
     if sector == "有色":
-        return ["有色", "铜", "铝", "copper", "aluminum", "metal"]
+        return stock_base + ["有色", "铜", "铝", "copper", "aluminum", "metal", "矿业", "金价", "铜价", "产能"]
     if sector == "能源":
-        return ["原油", "oil", "gas", "能源", "opec", "lng"]
+        return stock_base + ["原油", "oil", "gas", "能源", "opec", "lng"]
     if sector == "军工":
-        return ["军工", "国防", "defense", "aerospace", "军贸", "导弹", "无人机", "卫星"]
+        return stock_base + ["军工", "国防", "defense", "aerospace", "军贸", "导弹", "无人机", "卫星"]
     if sector == "高股息":
-        return ["高股息", "红利", "dividend", "yield", "utility", "bank"]
+        return stock_base + ["高股息", "红利", "dividend", "yield", "utility", "bank"]
+    if sector == "科技":
+        return stock_base + ["科技", "ai", "算力", "芯片", "半导体", "光模块", "PCB", "数据中心", "capex"]
     if "纳斯达克" in name or "纳指" in name:
-        return ["nasdaq", "纳斯达克", "纳指", "big tech", "earnings", "guidance", "ai"]
-    return _metadata_news_keys(metadata)
+        return stock_base + ["nasdaq", "纳斯达克", "纳指", "big tech", "earnings", "guidance", "ai"]
+    result = _metadata_news_keys(metadata)
+    return stock_base + [k for k in result if k not in stock_base]
 
 
 def _dedupe_news_items(items: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
@@ -1425,6 +1433,19 @@ def _fundamental_dimension(
         except Exception:
             sector_flow = {}
 
+    # HK/US individual stocks: fetch real fundamentals via yfinance
+    if asset_type in {"hk", "us"}:
+        collector = ValuationCollector(config)
+        try:
+            yf_data = collector.get_yf_fundamental(symbol, asset_type)
+        except Exception:
+            yf_data = {}
+        if yf_data.get("pe_ttm") is not None:
+            valuation_snapshot = {"index_name": str(metadata.get("name", symbol)), "pe_ttm": yf_data["pe_ttm"]}
+        # Merge yfinance data into financial_proxy (roe, revenue_yoy, gross_margin)
+        if yf_data:
+            financial_proxy = {**financial_proxy, **{k: v for k, v in yf_data.items() if v is not None and k != "pe_ttm"}}
+
     pe_ttm = None if not valuation_snapshot else valuation_snapshot.get("pe_ttm")
     pe_percentile = None
     dividend_yield = None
@@ -1442,17 +1463,34 @@ def _fundamental_dimension(
 
     if pe_ttm is not None:
         pe_value = float(pe_ttm)
-        pe_award = 25 if pe_percentile is not None and pe_percentile < 0.30 else 10 if pe_percentile is not None and pe_percentile < 0.50 else 10 if pe_value < 20 else 0
+        if asset_type == "cn_stock" and pe_percentile is None:
+            # For individual stocks without PE history, score directly by PE level
+            if pe_value <= 0:
+                pe_award = 0  # negative PE = loss-making
+            elif pe_value < 15:
+                pe_award = 25  # value zone
+            elif pe_value < 25:
+                pe_award = 20  # reasonable
+            elif pe_value < 40:
+                pe_award = 10  # growth premium
+            elif pe_value < 60:
+                pe_award = 5   # expensive
+            else:
+                pe_award = 0   # extremely expensive
+            detail = f"个股滚动 PE {pe_value:.1f}x，直接按绝对水平评分。"
+        else:
+            pe_award = 25 if pe_percentile is not None and pe_percentile < 0.30 else 10 if pe_percentile is not None and pe_percentile < 0.50 else 10 if pe_value < 20 else 0
+            detail = "当前接入的是相关指数滚动 PE；价格位置另算，不与估值分位混用。"
         raw += pe_award
         available += 25
-        detail = "当前接入的是相关指数滚动 PE；价格位置另算，不与估值分位混用。"
         if pe_percentile is not None:
             detail += f" 近样本 PE 分位约 {pe_percentile:.0%}。"
         if dividend_yield is not None:
             detail += f" 当前股息率约 {dividend_yield:.2f}%。"
+        factor_label = "个股估值" if asset_type == "cn_stock" else "真实指数估值"
         factors.append(
             _factor_row(
-                "真实指数估值",
+                factor_label,
                 f"{valuation_snapshot.get('index_name', '相关指数')} PE {pe_value:.1f}x" + (f" / 分位 {pe_percentile:.0%}" if pe_percentile is not None else ""),
                 pe_award,
                 25,
@@ -1592,6 +1630,12 @@ def _fundamental_dimension(
         available += 10
 
     score = _normalize_dimension(raw, available, 100)
+    # When data coverage is very low (proxy-only, e.g. HK/US stocks with no PE/ROE data),
+    # cap the score. With only price-percentile proxy (available=25), normalization would
+    # give 100/100 which severely distorts rankings. Cap at 55 to keep it below the "strong
+    # fundamental" threshold used in rating logic.
+    if score is not None and available < 35:
+        score = min(score, 55)
     summary = _dimension_summary(
         score,
         "估值/资金承接代理偏正面，但当前仍是 ETF/行业代理视角。",
@@ -1667,11 +1711,69 @@ def _catalyst_dimension(
         except Exception:
             dynamic_related_news = []
     news_pool = _dedupe_news_items([*strict_related_news, *category_related_news, *dynamic_related_news])
+
+    # For cn_stock: inject per-stock news from akshare (东方财富个股新闻).
+    stock_news_items: List[Mapping[str, Any]] = []
+    asset_type_str = str(metadata.get("asset_type", ""))
+    if asset_type_str == "cn_stock":
+        try:
+            stock_news_items = NewsCollector(config).get_stock_news(str(metadata.get("symbol", "")))
+            if stock_news_items:
+                news_pool = _dedupe_news_items([*news_pool, *stock_news_items])
+        except Exception:
+            stock_news_items = []
+
     related_events = []
     for event in context.get("events", []):
         text = f"{event.get('title', '')} {event.get('note', '')}"
         if _contains_any(text, [*keyword_keys, *event_keys, *domestic_leaders, *overseas_leaders]):
             related_events.append(event)
+
+    # For individual stocks: distinguish company-specific news from sector-level news.
+    # Sector-level news (e.g. "AI政策利好科技板块") should not get full policy-catalyst credit
+    # unless the specific stock/company is mentioned by name.
+    # Applies to cn_stock, hk, and us — ETFs/indexes/funds stay sector-level scoring.
+    _individual_asset_types = {"cn_stock", "hk", "us"}
+    is_individual_stock = str(metadata.get("asset_type", "")) in _individual_asset_types
+    stock_name = str(metadata.get("name", ""))
+    symbol_str = str(metadata.get("symbol", ""))
+    # Build stock-name tokens: full name + first 2 chars (for 4+ char Chinese names).
+    # For HK stocks: also strip common suffixes like "-W", "-S", "-SW", "集团" etc.
+    # For US stocks: use the ticker symbol as well (e.g. COIN, SNOW, MSFT).
+    stock_name_tokens: List[str] = []
+    if is_individual_stock and stock_name and stock_name != symbol_str:
+        # Clean HK name variants: 快手-W → 快手, 小米集团-W → 小米集团 / 小米
+        clean_name = stock_name.split("-")[0].strip()
+        stock_name_tokens.append(stock_name)
+        if clean_name and clean_name != stock_name:
+            stock_name_tokens.append(clean_name)
+        if len(clean_name) >= 4:
+            stock_name_tokens.append(clean_name[:2])
+        elif len(stock_name) >= 4:
+            stock_name_tokens.append(stock_name[:2])
+        # For US stocks: add ticker symbol (e.g. MSFT, COIN)
+        if str(metadata.get("asset_type", "")) == "us" and symbol_str and not symbol_str.startswith("0"):
+            stock_name_tokens.append(symbol_str.upper())
+    stock_specific_pool = (
+        [item for item in news_pool if _contains_any(_headline_text(item), stock_name_tokens)]
+        if stock_name_tokens else news_pool
+    )
+    # For HK/US individual stocks: if stock_specific_pool is empty, proactively search
+    # Google News RSS with the stock name/ticker to get company-level catalyst news.
+    if is_individual_stock and stock_name_tokens and not stock_specific_pool and asset_type_str in {"hk", "us"}:
+        try:
+            search_terms = [t for t in stock_name_tokens if len(t) >= 2][:3]
+            hk_us_news = NewsCollector(config).search_by_keywords(
+                search_terms,
+                preferred_sources=_preferred_catalyst_sources(metadata, profile),
+                limit=6,
+                recent_days=7,
+            )
+            if hk_us_news:
+                news_pool = _dedupe_news_items([*news_pool, *hk_us_news])
+                stock_specific_pool = [item for item in news_pool if _contains_any(_headline_text(item), stock_name_tokens)]
+        except Exception:
+            pass
 
     policy_items = [
         item
@@ -1684,10 +1786,19 @@ def _catalyst_dimension(
         and _contains_any(_headline_text(item), strict_tokens)
     ]
     policy_pick = _pick_best_news_item(policy_items, policy_keys, keyword_keys)
-    policy_award = 30 if policy_items else 0
+    if is_individual_stock and stock_name_tokens:
+        # cn_stock: full 30pts only when the policy news names the company directly;
+        # sector-level policy (e.g. industry-wide AI/tech support) gets only 10pts.
+        specific_policy_items = [item for item in policy_items if _contains_any(_headline_text(item), stock_name_tokens)]
+        policy_award = 30 if specific_policy_items else (10 if policy_items else 0)
+    else:
+        policy_award = 30 if policy_items else 0
+    # For cn_stock with per-stock news: redistribute weights (policy 25, leader 15, new factor 15)
+    _policy_max = 25 if (asset_type_str == "cn_stock" and stock_name_tokens) else 30
+    policy_award = min(policy_award, _policy_max)
     raw += policy_award
-    available += 30
-    factors.append(_factor_row("政策催化", policy_pick["title"] if policy_pick else "近 7 日未命中直接政策催化", policy_award, 30, "政策原文和一级媒体优先"))
+    available += _policy_max
+    factors.append(_factor_row("政策催化", policy_pick["title"] if policy_pick else "近 7 日未命中直接政策催化", policy_award, _policy_max, "政策原文和一级媒体优先"))
 
     leader_items = [
         item
@@ -1703,10 +1814,32 @@ def _catalyst_dimension(
         )
     ]
     leader_pick = _pick_best_news_item(leader_items, [*domestic_leaders, *strict_event_keys], keyword_keys)
-    leader_award = 25 if leader_items else 0
+    _leader_max = 15 if (asset_type_str == "cn_stock" and stock_name_tokens) else 25
+    leader_award = _leader_max if leader_items else 0
     raw += leader_award
-    available += 25
-    factors.append(_factor_row("龙头公告/业绩", leader_pick["title"] if leader_pick else "未命中直接龙头公告", leader_award, 25, "优先看订单、扩产、回购、并购或超预期业绩"))
+    available += _leader_max
+    factors.append(_factor_row("龙头公告/业绩", leader_pick["title"] if leader_pick else "未命中直接龙头公告", leader_award, _leader_max, "优先看订单、扩产、回购、并购或超预期业绩"))
+
+    # --- New factor: per-stock announcement/event (cn_stock only, 15pts max) ---
+    if asset_type_str == "cn_stock" and stock_name_tokens:
+        _positive_announcement_keys = ("业绩预增", "订单", "回购", "增持", "扩产", "投产", "量产", "分红", "中标", "签约", "战略合作", "并购", "重组", "涨价", "上调", "突破")
+        announcement_pool = [item for item in stock_news_items if item.get("category") == "stock_announcement"]
+        positive_announcements = [item for item in announcement_pool if _contains_any(str(item.get("title", "")), _positive_announcement_keys)]
+        if positive_announcements:
+            ann_award = 15
+            ann_pick = positive_announcements[0]
+            ann_detail = f"近期个股公告命中正面事件关键词 ({len(positive_announcements)} 条)"
+        elif announcement_pool:
+            ann_award = 5
+            ann_pick = announcement_pool[0]
+            ann_detail = f"有个股新闻 {len(announcement_pool)} 条，但未命中强正面关键词"
+        else:
+            ann_award = 0
+            ann_pick = None
+            ann_detail = "未获取到个股公告/事件数据"
+        raw += ann_award
+        available += 15
+        factors.append(_factor_row("个股公告/事件", ann_pick["title"] if ann_pick else "无个股公告", ann_award, 15, ann_detail))
 
     overseas_keyword_map = {
         "科技": ["tsmc", "台积电", "nvidia", "英伟达", "micron", "美光", "hynix", "海力士", "asml", "broadcom", "amd", "gpu", "semiconductor", "foundry", "fab", "capex"],
@@ -1737,12 +1870,18 @@ def _catalyst_dimension(
     available += 20
     factors.append(_factor_row("海外映射", overseas_pick["title"] if overseas_pick else "未命中直接海外映射", overseas_award, 20, "重点看海外龙头财报/指引或模型产品催化"))
 
-    density_award = 10 if len(news_pool) >= 3 else 0
+    # For individual stocks: density and heat only count articles that directly mention the stock.
+    # This prevents sector-level news (e.g. broad AI/tech news) from inflating density scores.
+    density_pool = stock_specific_pool if (is_individual_stock and stock_name_tokens) else news_pool
+    density_count = len(density_pool)
+    density_label = f"个股相关头条 {density_count} 条（行业头条 {len(news_pool)} 条）" if (is_individual_stock and stock_name_tokens) else f"相关头条 {len(news_pool)} 条"
+    density_award = 10 if density_count >= 2 else (5 if density_count >= 1 else 0)
     raw += density_award
     available += 10
-    factors.append(_factor_row("研报/新闻密度", f"相关头条 {len(news_pool)} 条", density_award, 10, "当前用一级媒体新闻密度代理"))
+    factors.append(_factor_row("研报/新闻密度", density_label, density_award, 10, "个股直接提及的一级媒体头条密度"))
 
-    source_count = len({str(item.get("source", "")) for item in news_pool if item.get("source")})
+    heat_pool = stock_specific_pool if (is_individual_stock and stock_name_tokens) else news_pool
+    source_count = len({str(item.get("source", "")) for item in heat_pool if item.get("source")})
     heat_award = 10 if source_count >= 2 else 0
     raw += heat_award
     available += 10
@@ -1817,7 +1956,16 @@ def _relative_strength_dimension(
         bench_20d = float(benchmark_returns.tail(20).sum())
         rel_5d = float(metrics.get("return_5d", 0.0)) - bench_5d
         rel_20d = float(metrics.get("return_20d", 0.0)) - bench_20d
-        turn_award = 30 if rel_5d > 0 and rel_20d <= 0 else 20 if rel_20d > 0 else 0
+        # Turnaround (20d negative → 5d positive) is most valuable; persistent excess is good too.
+        # Bonus: large 5d excess (>5%) adds 5pts regardless of 20d direction.
+        if rel_5d > 0 and rel_20d <= 0:
+            turn_award = 30
+        elif rel_20d > 0 and rel_5d > 0.05:
+            turn_award = 25  # strong persistent outperformance
+        elif rel_20d > 0:
+            turn_award = 20
+        else:
+            turn_award = 0
         raw += turn_award
         available += 30
         factors.append(_factor_row("超额拐点", f"相对基准 5日 {format_pct(rel_5d)} / 20日 {format_pct(rel_20d)}", turn_award, 30, "相对基准从负转正更接近轮动切换窗口"))
@@ -1826,7 +1974,9 @@ def _relative_strength_dimension(
 
     board_move = _sector_board_match(metadata, context.get("drivers", {}))
     if board_move is not None:
-        breadth_award = 25 if board_move > 0.01 else 10 if board_move > 0 else 0
+        # Lowered threshold: 0.3% sector gain already qualifies as meaningful breadth.
+        # Previous threshold of 1% was too strict for normal A-share sector rotations.
+        breadth_award = 25 if board_move > 0.003 else 10 if board_move > 0 else 0
         raw += breadth_award
         available += 25
         factors.append(_factor_row("板块扩散", f"板块涨跌幅 {format_pct(board_move)}", breadth_award, 25, "板块内部越普涨，越像轮动扩散"))
@@ -1889,8 +2039,13 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
     heat_rank = hot_rank.get("rank")
     if heat_rank is not None:
         crowding_award = 30 if float(heat_rank) > 50 else 15 if float(heat_rank) > 20 else 0
-        signal = f"热门度排名约 {int(float(heat_rank))}"
-        detail = "当前用热门榜位置做公募/热度代理；排名越靠后，说明没那么拥挤。"
+        # Check whether the hot_rank row matched the individual stock or just the sector.
+        # If the matched row name doesn't contain the stock name, it's a sector-level proxy.
+        hot_rank_name = str(hot_rank.get("name", ""))
+        stock_nm = str(metadata.get("name", ""))
+        is_stock_level_rank = stock_nm and stock_nm[:2] in hot_rank_name
+        signal = f"热门度排名约 {int(float(heat_rank))}" if is_stock_level_rank else f"行业热门度约 {int(float(heat_rank))}（板块代理）"
+        detail = "当前用热门榜位置做公募/热度代理；排名越靠后，说明没那么拥挤。" if is_stock_level_rank else "当前热门榜未匹配到个股，改用板块热门度做代理，区分度有限。"
         raw += crowding_award
         available += 30
         factors.append(_factor_row("公募/热度代理", signal, crowding_award, 30, detail))
@@ -2245,7 +2400,7 @@ def _rating_from_dimensions(dimensions: Mapping[str, Mapping[str, Any]], warning
         rank, label, meaning = 4, "强机会", "四维共振，具备建仓计划条件。"
     elif ok(fundamental, 60) and (ok(catalyst, 50) or ok(relative, 60)) and ok(tech, 40):
         rank, label, meaning = 3, "较强机会", "逻辑成立，但还需要一个维度继续确认。"
-    elif (ok(tech, 70) and catalyst is not None and catalyst < 30) or (ok(catalyst, 60) and tech is not None and tech < 40):
+    elif (ok(tech, 70) and catalyst is not None and catalyst < 50) or (ok(catalyst, 60) and tech is not None and tech < 40):
         rank, label, meaning = 2, "储备机会", "单维度亮灯但还未形成共振。"
     else:
         strong_dims = sum(1 for item in dimensions.values() if item.get("score") is not None and item.get("score", 0) >= 70)
@@ -2651,31 +2806,100 @@ def _action_plan(
     analysis: Mapping[str, Any],
     history: pd.DataFrame,
     technical: Mapping[str, Any],
+    correlation_pair: Optional[tuple] = None,
+    metrics: Optional[Mapping[str, float]] = None,
 ) -> Dict[str, str]:
     rating = analysis["rating"]["rank"]
     tech = analysis["dimensions"]["technical"]["score"]
+    risk_score = analysis["dimensions"]["risk"]["score"] or 0
+    relative_score = analysis["dimensions"]["relative_strength"]["score"] or 0
+    catalyst_score = analysis["dimensions"]["catalyst"]["score"] or 0
     macro_reverse = analysis["dimensions"]["macro"].get("macro_reverse", False)
     rsi = float(technical.get("rsi", {}).get("RSI", 50.0))
     fib_levels = technical.get("fibonacci", {}).get("levels", {})
     ma60 = float(technical.get("ma_system", {}).get("mas", {}).get("MA60", history["close"].iloc[-1]))
     stop_ref = max(float(fib_levels.get("0.382", 0.0)), float(fib_levels.get("0.500", 0.0)), ma60)
     target_ref = float(history["high"].tail(60).max())
+    vol_percentile = float((metrics or {}).get("volatility_percentile_1y", 0.5))
+
     if rating >= 3 and not macro_reverse:
         direction = "做多"
     elif rating == 2:
         direction = "观望"
+    elif risk_score >= 70 and relative_score >= 60:
+        direction = "观望偏多"
     else:
         direction = "回避"
+
+    # --- Entry conditions: incorporate risk and relative strength ---
     if rsi > 70:
         entry = "等 RSI 回落到 60 附近且 MACD 不死叉，再考虑分批介入"
     elif tech is not None and tech >= 70:
         entry = "等回踩 MA20 / MA60 或关键斐波那契支撑后企稳，再做首次试探"
-    else:
+    elif tech is not None and tech >= 55:
+        entry = "MACD 走强时可试探介入，建议在 MA20 附近分批布局，勿追高"
+    elif risk_score >= 70 and relative_score >= 60:
+        entry = "风险收益比占优且轮动信号到位，可在技术企稳（如 MACD 转强或站上 MA20）时小仓位介入"
+    elif risk_score >= 70 and tech is not None and tech >= 40:
+        entry = "下行空间有限，等技术面配合（MACD 走强或 MA20 企稳）时可低吸"
+    elif relative_score >= 70:
+        entry = "板块轮动信号明确，可在回踩 MA20 附近时介入，但需严控仓位"
+    elif tech is not None and tech >= 40:
         entry = "先等 MACD 再次转强或站回 MA20，避免在弱趋势里提前出手"
-    position = "首次建仓 ≤5%，确认后再加到 10%" if rating >= 3 else "先不超过 5% 试错" if rating == 2 else "暂不出手"
-    timeframe = "中线配置(1-3月)" if rating >= 3 else "短线交易(1-2周)" if rating == 2 else "等待更好窗口"
+    else:
+        entry = "技术结构偏弱，等 MA20 / MA60 方向向上拐头后再考虑介入时机"
+
+    # --- Position sizing: differentiated by risk/relative when rating is low ---
+    if rating >= 3:
+        if tech is not None and tech >= 70:
+            position = "首次建仓 ≤8%，确认突破后可加到 15%"
+        elif tech is not None and tech >= 55:
+            position = "首次建仓 ≤5%，确认后再加到 10%"
+        else:
+            position = "首次建仓 ≤3%，等结构进一步确认后再加仓"
+    elif rating == 2:
+        position = "先不超过 5% 试错"
+    elif risk_score >= 70 and relative_score >= 60:
+        position = "≤2% 试探，风险收益比可控但需严格止损"
+    elif risk_score >= 70:
+        position = "≤2% 试探，下行空间有限但催化不足，严格止损"
+    elif relative_score >= 70:
+        position = "≤2% 轮动跟踪仓，需紧跟板块信号"
+    else:
+        position = "暂不出手"
+
+    timeframe = "中线配置(1-3月)" if rating >= 3 else "短线交易(1-2周)" if rating >= 2 or (risk_score >= 70 and relative_score >= 60) else "等待更好窗口"
     target = f"先看前高/近 60 日高点 {target_ref:.3f} 附近的承压与突破情况"
     stop = f"跌破 {stop_ref:.3f} 或主线/催化失效时重新评估"
+
+    # --- Portfolio-level position management ---
+    if risk_score >= 70:
+        max_exposure = "单标的 ≤10%"
+    elif risk_score >= 50:
+        max_exposure = "单标的 ≤6%"
+    else:
+        max_exposure = "单标的 ≤3%"
+
+    if rating >= 3:
+        scaling = "分 2-3 批建仓，每次确认后加仓"
+    elif rating == 2:
+        scaling = "一次性小仓位，不加仓"
+    else:
+        scaling = "仅观察仓，不加仓"
+
+    if vol_percentile < 0.30:
+        stop_loss_pct = "-5%"
+    elif vol_percentile <= 0.60:
+        stop_loss_pct = "-8%"
+    else:
+        stop_loss_pct = "-10%"
+
+    corr_warning = ""
+    if correlation_pair and len(correlation_pair) >= 2:
+        corr_symbol, corr_value = correlation_pair[0], correlation_pair[1]
+        if corr_value is not None and float(corr_value) > 0.7:
+            corr_warning = f"与持仓 {corr_symbol} 相关度 {float(corr_value):.2f}，注意合计敞口"
+
     return {
         "direction": direction,
         "entry": entry,
@@ -2683,6 +2907,10 @@ def _action_plan(
         "stop": stop,
         "target": target,
         "timeframe": timeframe,
+        "max_portfolio_exposure": max_exposure,
+        "scaling_plan": scaling,
+        "stop_loss_pct": stop_loss_pct,
+        "correlated_warning": corr_warning,
     }
 
 
@@ -2735,7 +2963,7 @@ def analyze_opportunity(
         fund_profile,
     )
     rating = _rating_from_dimensions(dimensions, warnings)
-    action = _action_plan({"rating": rating, "dimensions": dimensions}, history, technical)
+    action = _action_plan({"rating": rating, "dimensions": dimensions}, history, technical, correlation_pair, metrics)
     notes: List[str] = list(runtime_context.get("notes", []))
     if metadata.get("in_watchlist"):
         notes.append("该标的已在 watchlist 中，本次分析更偏复核而不是首次发现。")
@@ -2936,27 +3164,51 @@ def detect_asset_type_for_compare(symbol: str, config: Mapping[str, Any]) -> str
 # ---------------------------------------------------------------------------
 _INDUSTRY_TO_SECTOR: Dict[str, str] = {}
 for _sector_name, _keywords in [
-    ("科技", ("半导体", "芯片", "通信", "软件", "计算机", "电子", "光学", "IT", "互联网", "传媒")),
-    ("消费", ("食品", "饮料", "白酒", "家电", "酒店", "旅游", "零售", "纺织", "服装", "商贸")),
-    ("医药", ("医药", "医疗", "生物", "制药")),
-    ("能源", ("石油", "煤炭", "能源")),
-    ("有色", ("有色", "铜", "铝", "锂", "稀土")),
-    ("军工", ("军工", "国防", "航空", "航天")),
-    ("高股息", ("银行", "保险", "公用事业", "电力")),
-    ("电网", ("电力设备", "电气设备", "电网", "储能")),
-    ("黄金", ("贵金属",)),
+    ("科技", ("半导体", "芯片", "通信", "软件", "计算机", "电子", "光学", "IT", "互联网", "传媒",
+              "光电", "光模块", "PCB", "印制电路", "元件", "集成电路", "分立器件", "消费电子",
+              "游戏", "数据", "云计算", "信息", "网络", "通信设备")),
+    ("消费", ("食品", "饮料", "白酒", "家电", "酒店", "旅游", "零售", "纺织", "服装", "商贸",
+              "汽车", "乘用车", "轻工", "家居", "餐饮")),
+    ("医药", ("医药", "医疗", "生物", "制药", "化学制药", "中药", "医疗器械")),
+    ("能源", ("石油", "煤炭", "能源", "天然气", "油气", "油服")),
+    ("有色", ("有色", "铜", "铝", "锂", "稀土", "工业金属", "小金属", "矿业", "钴", "镍", "锌")),
+    ("军工", ("军工", "国防", "航空", "航天", "船舶", "兵器")),
+    ("高股息", ("银行", "保险", "公用事业", "证券", "多元金融")),
+    ("电网", ("电力设备", "电气设备", "电网", "储能", "光伏", "风电", "新能源", "逆变器", "电池")),
+    ("黄金", ("贵金属", "黄金")),
 ]:
     for _kw in _keywords:
         _INDUSTRY_TO_SECTOR[_kw] = _sector_name
 
+# Stock-name-level keyword fallback for when industry field is unavailable
+_STOCK_NAME_TO_SECTOR: Dict[str, str] = {}
+for _sector_name, _keywords in [
+    ("有色", ("矿业", "矿产", "铜业", "铝业", "锂业", "稀土", "钴业", "镍", "金属")),
+    ("科技", ("科技", "通信", "光电", "电子", "软件", "信息", "数据", "网络", "半导", "芯片", "光纤")),
+    ("电网", ("电源", "电力", "电气", "电池", "储能", "光伏", "风电", "新能源", "逆变")),
+    ("消费", ("汽车", "食品", "饮料", "酒", "家电", "服饰", "旅游", "零售")),
+    ("能源", ("石油", "石化", "煤", "能源", "天然气")),
+    ("医药", ("医药", "医疗", "制药", "生物", "药业")),
+    ("军工", ("军工", "航空", "航天", "船舶", "国防")),
+    ("高股息", ("银行", "保险", "证券")),
+]:
+    for _kw in _keywords:
+        _STOCK_NAME_TO_SECTOR[_kw] = _sector_name
 
-def _map_industry_to_sector(industry: str) -> tuple[str, List[str]]:
+
+def _map_industry_to_sector(industry: str, stock_name: str = "") -> tuple[str, List[str]]:
     """Map a stock's industry classification to engine sector + chain_nodes."""
+    # Priority 1: match via EM industry classification
     for keyword, sector in _INDUSTRY_TO_SECTOR.items():
         if keyword in industry:
             _, chain_nodes = _normalize_sector(industry, sector)
             return sector, chain_nodes
-    return _normalize_sector(industry)
+    # Priority 2: match via stock name keywords
+    for keyword, sector in _STOCK_NAME_TO_SECTOR.items():
+        if keyword in stock_name:
+            _, chain_nodes = _normalize_sector(stock_name, sector)
+            return sector, chain_nodes
+    return _normalize_sector(industry or stock_name)
 
 
 def build_stock_pool(
@@ -3014,10 +3266,19 @@ def build_stock_pool(
                     symbol = str(row[code_col])
                     if symbol in seen:
                         continue
+                    # Skip codes that are actually funds (detect_asset_type check)
+                    if detect_asset_type(symbol, config) != "cn_stock":
+                        continue
                     name = str(row[name_col])
+                    # Get real industry classification from EM
                     industry = str(row[industry_col]) if industry_col and pd.notna(row.get(industry_col)) else ""
-                    sector, chain_nodes = _map_industry_to_sector(industry) if industry else _normalize_sector(name)
-                    meta: Dict[str, Any] = {}
+                    if not industry:
+                        try:
+                            industry = ChinaMarketCollector(config).get_stock_industry(symbol)
+                        except Exception:
+                            industry = ""
+                    sector, chain_nodes = _map_industry_to_sector(industry, name)
+                    meta: Dict[str, Any] = {"industry": industry}
                     if pe_col and pd.notna(row.get(pe_col)):
                         meta["pe_ttm"] = float(row[pe_col])
                     if pb_col and pd.notna(row.get(pb_col)):
@@ -3132,7 +3393,10 @@ def discover_stock_opportunities(
     analyses.sort(
         key=lambda a: (
             a["rating"]["rank"],
-            sum((d.get("score") or 0) for d in a["dimensions"].values()),
+            # Macro score counted 3x so regime alignment has material impact on ranking.
+            # In stagflation, a stock with macro=30/40 should rank clearly above macro=10/40
+            # even if its technical score is similar.
+            sum((d.get("score") or 0) for d in a["dimensions"].values()) + 2 * (a["dimensions"]["macro"]["score"] or 0),
             a["dimensions"]["technical"]["score"] or 0,
             a["dimensions"]["fundamental"]["score"] or 0,
         ),

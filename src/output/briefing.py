@@ -284,7 +284,7 @@ class BriefingRenderer:
 
         _append_block(lines, "2. 策略修正")
         _append_subsection(lines, "2.1 主线修正", payload.get("strategy_adjustment_lines", []))
-        _append_subsection(lines, "2.2 下午怎么做", payload.get("afternoon_action_lines", []))
+        _append_subsection(lines, "2.2 下午观察", payload.get("afternoon_action_lines", []))
 
         _append_block(lines, "3. 下午看点")
         _append_table_subsection(

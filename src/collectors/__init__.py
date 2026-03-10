@@ -3,6 +3,7 @@
 from .asset_lookup import AssetLookupCollector
 from .commodity import CommodityCollector
 from .events import EventsCollector
+from .fund_profile import FundProfileCollector
 from .global_flow import GlobalFlowCollector
 from .macro_cn import ChinaMacroCollector
 from .macro_us import USMacroCollector
@@ -29,6 +30,7 @@ __all__ = [
     "USMarketCollector",
     "CommodityCollector",
     "EventsCollector",
+    "FundProfileCollector",
     "AssetLookupCollector",
     "NewsCollector",
     "SocialSentimentCollector",

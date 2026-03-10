@@ -24,7 +24,7 @@ NEWS_SOURCE_ALIASES = {
 
 COMMAND_TIMEOUTS = {
     "discover": 45,
-    "scan": 45,
+    "scan": 90,
     "compare": 45,
     "briefing": 45,
     "backtest": 60,
@@ -46,7 +46,8 @@ def main() -> None:
 
     watchlist_symbols = [item["symbol"] for item in load_watchlist()]
     portfolio_symbols = [item["symbol"] for item in PortfolioRepository().list_holdings()]
-    resolved_assets = AssetLookupCollector(config).search(request, limit=6) if _should_resolve_assets(request) else []
+    explicit_symbol = _has_explicit_symbol(request)
+    resolved_assets = AssetLookupCollector(config).search(request, limit=6) if _should_resolve_assets(request) and not explicit_symbol else []
     resolved_symbols = [item["symbol"] for item in resolved_assets]
     routed = route_request(
         request,
@@ -169,6 +170,10 @@ def _should_resolve_assets(request: str) -> bool:
     ]
     lowered = request.lower()
     return any(keyword.lower() in lowered for keyword in keywords)
+
+
+def _has_explicit_symbol(request: str) -> bool:
+    return bool(re.search(r"\b[A-Z]{1,5}\b|(?<!\d)\d{5,6}(?!\d)|\b[A-Z]{1,2}\d\b", request.upper()))
 
 
 if __name__ == "__main__":

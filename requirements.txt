@@ -1,6 +1,9 @@
 # 数据采集
+tushare>=1.4.0
 akshare>=1.12.0
 yfinance>=0.2.31
+efinance>=0.5.0
+baostock>=0.8.8
 fredapi>=0.5.1
 feedparser>=6.0.10
 requests>=2.31.0

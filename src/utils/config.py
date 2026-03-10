@@ -79,10 +79,18 @@ def detect_asset_type(symbol: str, config: Mapping[str, Any]) -> str:
 
     if re.fullmatch(r"\d{6}", symbol):
         etf_prefixes = ("15", "16", "50", "51", "52", "53", "56", "58", "59")
-        stock_prefixes = ("00", "30", "60", "68")
+        stock_prefixes = ("60", "68", "00", "30")
+        # 00 prefix: 000xxx-004xxx are SZ stocks, 005xxx+ are often funds
         if symbol.startswith(etf_prefixes):
             return "cn_etf"
-        if symbol.startswith(stock_prefixes):
+        if symbol.startswith(("60", "68")):
+            return "cn_stock"
+        if symbol.startswith("00"):
+            # SZ main board stocks: 000xxx-004xxx
+            if symbol[:3] in ("000", "001", "002", "003", "004"):
+                return "cn_stock"
+            return "cn_fund"
+        if symbol.startswith("30"):
             return "cn_stock"
         return "cn_fund"
 

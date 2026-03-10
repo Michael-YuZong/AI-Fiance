@@ -96,7 +96,7 @@ def test_noon_renderer_outputs_core_sections():
     assert "### 1.3 Watchlist 表现" in rendered
     assert "## 2. 策略修正" in rendered
     assert "### 2.1 主线修正" in rendered
-    assert "### 2.2 下午怎么做" in rendered
+    assert "### 2.2 下午观察" in rendered
     assert "## 3. 下午看点" in rendered
     assert "### 3.1 下午验证点" in rendered
     assert "### 3.2 操作提醒" in rendered

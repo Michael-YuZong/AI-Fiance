@@ -4,9 +4,11 @@
 # `config/config.advanced.example.yaml` 复制到 `config/config.yaml`。
 
 # API Keys
+# Tushare 是 A 股数据的首选源（2000 积分套餐即可覆盖大部分数据）
+# 获取 token: https://tushare.pro/register
 api_keys:
-  fred: "YOUR_FRED_API_KEY"
   tushare: "YOUR_TUSHARE_TOKEN"
+  fred: "YOUR_FRED_API_KEY"
 
 # 常用调度
 schedule:

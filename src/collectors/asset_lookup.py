@@ -1,4 +1,4 @@
-"""Asset keyword lookup with alias and live ETF search fallback."""
+"""Asset keyword lookup with alias and live ETF search fallback — Tushare-first."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ THEME_QUERY_EXPANSIONS = {
 
 
 class AssetLookupCollector(BaseCollector):
-    """Resolve natural-language ETF keywords into symbols."""
+    """Resolve natural-language ETF keywords into symbols. Tushare stock_basic/fund_basic 优先。"""
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None) -> None:
         super().__init__(dict(config or {}), name="AssetLookupCollector")
@@ -34,7 +34,7 @@ class AssetLookupCollector(BaseCollector):
         self.alias_path = resolve_project_path(alias_file)
 
     def search(self, keyword: str, limit: int = 8) -> List[Dict[str, Any]]:
-        """Search aliases first, then try a live ETF universe lookup."""
+        """Search aliases first, then try Tushare, then AKShare live lookup."""
         cleaned = self._normalize_query(keyword)
         if not cleaned:
             return []
@@ -42,18 +42,23 @@ class AssetLookupCollector(BaseCollector):
         alias_matches = self._search_aliases(cleaned)
         live_matches: List[Dict[str, Any]] = []
         if not alias_matches:
-            for term in self._candidate_terms(cleaned):
-                for item in self._search_live_fund_names(term):
-                    if item not in live_matches:
-                        live_matches.append(item)
-                if len(live_matches) >= limit:
-                    break
-                if self._looks_like_symbol(term):
-                    for item in self._search_live_etf(term):
+            # Tushare stock_basic / fund_basic (primary)
+            live_matches = self._search_tushare(cleaned)
+
+            # AKShare fallback
+            if not live_matches:
+                for term in self._candidate_terms(cleaned):
+                    for item in self._search_live_fund_names(term):
                         if item not in live_matches:
                             live_matches.append(item)
                     if len(live_matches) >= limit:
                         break
+                    if self._looks_like_symbol(term):
+                        for item in self._search_live_etf(term):
+                            if item not in live_matches:
+                                live_matches.append(item)
+                        if len(live_matches) >= limit:
+                            break
 
         combined: List[Dict[str, Any]] = []
         seen = set()
@@ -164,6 +169,51 @@ class AssetLookupCollector(BaseCollector):
             )
         return result
 
+    def _search_tushare(self, keyword: str) -> List[Dict[str, Any]]:
+        """Search Tushare stock_basic and fund_basic for matching assets."""
+        results: List[Dict[str, Any]] = []
+
+        # 股票搜索
+        try:
+            stock_df = self._ts_call("stock_basic", fields="ts_code,symbol,name,industry,list_status")
+            if stock_df is not None and not stock_df.empty:
+                mask = (
+                    stock_df["name"].astype(str).str.contains(keyword, case=False, na=False)
+                    | stock_df["symbol"].astype(str).str.contains(keyword, case=False, na=False)
+                )
+                for _, row in stock_df[mask].head(4).iterrows():
+                    results.append({
+                        "symbol": self._from_ts_code(str(row["ts_code"])),
+                        "name": str(row.get("name", "")),
+                        "asset_type": "cn_stock",
+                        "sector": str(row.get("industry", "")),
+                        "source": "tushare_stock_basic",
+                        "match_type": "live_search",
+                    })
+        except Exception:
+            pass
+
+        # 基金搜索
+        try:
+            fund_df = self._ts_call("fund_basic", market="E")  # 场内ETF
+            if fund_df is not None and not fund_df.empty:
+                mask = (
+                    fund_df["name"].astype(str).str.contains(keyword, case=False, na=False)
+                    | fund_df["ts_code"].astype(str).str.contains(keyword, case=False, na=False)
+                )
+                for _, row in fund_df[mask].head(4).iterrows():
+                    results.append({
+                        "symbol": self._from_ts_code(str(row["ts_code"])),
+                        "name": str(row.get("name", "")),
+                        "asset_type": "cn_etf",
+                        "source": "tushare_fund_basic",
+                        "match_type": "live_search",
+                    })
+        except Exception:
+            pass
+
+        return results[:8]
+
     def _search_live_etf(self, keyword: str) -> List[Dict[str, Any]]:
         if ak is None:
             return []
@@ -228,12 +278,27 @@ class AssetLookupCollector(BaseCollector):
             {
                 "symbol": str(row[code_col]),
                 "name": str(row[name_col]),
-                "asset_type": "cn_etf",
+                "asset_type": self._infer_fund_asset_type(row, name_col),
                 "source": "fund_name_em",
                 "match_type": "live_name_search",
             }
             for row in ranked_rows
         ]
+
+    def _infer_fund_asset_type(self, row: Mapping[str, Any], name_col: str) -> str:
+        name = str(row.get(name_col, "")).strip()
+        fund_type = str(row.get("基金类型", "")).strip()
+        symbol = str(row.get("基金代码", "")).strip()
+        upper_name = name.upper()
+        if "ETF" in upper_name and "联接" not in name and "LOF" not in upper_name:
+            return "cn_etf"
+        if "LOF" in upper_name:
+            return "cn_fund"
+        if symbol.startswith(("15", "16", "50", "51", "52", "53", "56", "58", "59")) and "联接" not in name:
+            return "cn_etf"
+        if "联接" in name or "发起" in name or "混合" in fund_type or "债券" in fund_type or "QDII" in fund_type:
+            return "cn_fund"
+        return "cn_fund"
 
     def _normalize_query(self, keyword: str) -> str:
         cleaned = keyword.strip()

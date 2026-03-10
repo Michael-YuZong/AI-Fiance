@@ -48,10 +48,10 @@
 
 ### 1. 安装
 
-推荐 Python `3.11+`。
+推荐 Python `3.13+`。
 
 ```bash
-python3.11 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -133,6 +133,23 @@ python -m src.commands.assistant 如果美股跌20%我的组合会怎样
 
 这是当前项目最重要的一层设计。
 
+### 数据源优先级
+
+所有 A 股数据优先走 Tushare（2000 积分套餐），覆盖：
+
+- **行情**：日/周/月线 + 精准复权因子 (`daily` + `adj_factor`)
+- **基本面**：PE/PB/PS/换手率/市值 (`daily_basic`) + ROE/毛利率/营收增速 (`fina_indicator`)
+- **财报**：三大表 (`income` / `balancesheet` / `cashflow`) — 单只循环拉取
+- **宏观**：PMI/CPI/PPI/M2/社融/LPR/GDP
+- **指数**：日线 (`index_daily`) + 成分权重 (`index_weight`)
+- **资金面**：沪深港通资金流向 (`moneyflow_hsgt`) + 十大成交股 (`hsgt_top10`)
+- **情绪面**：龙虎榜 (`top_list` / `top_inst`)
+- **杠杆面**：融资融券 (`margin`)
+- **风险面**：股权质押 (`pledge_stat`)
+- **基金/ETF**：列表 (`fund_basic`) + 净值 (`fund_nav`) + ETF 日线 (`fund_daily`)
+
+Tushare 不覆盖或失败时，自动回退到 AKShare / yfinance / efinance。
+
 ### 标的代码识别
 
 - 先查 `config/asset_aliases.yaml`
@@ -140,10 +157,17 @@ python -m src.commands.assistant 如果美股跌20%我的组合会怎样
 - 再查全量基金名称表
 - 仍不足时，agent 可以联网补查
 
+### A 股行情数据
+
+- 首选 `Tushare daily + adj_factor`（精准复权）
+- 失败时回退到 `AKShare / Eastmoney`
+- 再失败回退到 `Yahoo Finance` 的 `.SS / .SZ`
+
 ### A 股 ETF 日线
 
-- 首选 `AKShare / Eastmoney`
-- 失败时回退到 `Yahoo Finance` 的 `.SS / .SZ`
+- 首选 `Tushare fund_daily`
+- 失败时回退到 `AKShare / Eastmoney`
+- 再失败回退到 `Yahoo Finance` 的 `.SS / .SZ`
 
 ### 新闻
 

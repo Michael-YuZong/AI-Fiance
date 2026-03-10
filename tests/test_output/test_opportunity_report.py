@@ -66,6 +66,10 @@ def _sample_analysis(symbol: str, name: str) -> dict:
             "stop": "跌破 2.10 重评",
             "target": "先看前高 2.35",
             "timeframe": "中线配置(1-3月)",
+            "max_portfolio_exposure": "单标的 ≤10%",
+            "scaling_plan": "分 2-3 批建仓，每次确认后加仓",
+            "stop_loss_pct": "-8%",
+            "correlated_warning": "",
         },
         "narrative": {
             "headline": "这是一个**中期偏多，但短线略有拥挤**的标的。当前核心不是没逻辑，而是**逻辑仍在但当前位置赔率一般**。",
@@ -196,3 +200,41 @@ def test_opportunity_renderer_compare_uses_total_score_when_rank_ties():
         {"generated_at": "2026-03-09 08:00:00", "analyses": [analysis_a, analysis_b], "best_symbol": "561380"}
     )
     assert "评级相同，但综合八维总分" in compare
+
+
+def test_opportunity_renderer_includes_fund_profile_sections():
+    analysis = _sample_analysis("022365", "永赢科技智选混合发起C")
+    analysis["asset_type"] = "cn_fund"
+    analysis["fund_profile"] = {
+        "overview": {
+            "基金类型": "混合型-偏股",
+            "基金管理人": "永赢基金",
+            "基金经理人": "任桀",
+            "净资产规模": "107.79亿元（截止至：2025年12月31日）",
+            "成立日期/规模": "2024年10月30日 / 0.103亿份",
+            "业绩比较基准": "中国战略新兴产业成份指数收益率*70%+恒生科技指数收益率*10%",
+        },
+        "achievement": {
+            "近1月": {"return_pct": -1.06, "max_drawdown_pct": 6.8, "peer_rank": "968/5198"},
+            "今年以来": {"return_pct": -1.36, "max_drawdown_pct": 6.8, "peer_rank": "3780/5246"},
+        },
+        "asset_allocation": [{"资产类型": "股票", "仓位占比": 80.34}, {"资产类型": "现金", "仓位占比": 18.91}],
+        "top_holdings": [{"股票代码": "300738", "股票名称": "奥飞数据", "占净值比例": 9.30, "持仓市值": 2338.66, "季度": "2025年1季度股票投资明细"}],
+        "industry_allocation": [{"行业类别": "科技", "占净值比例": 45.2, "截止时间": "2025-12-31"}],
+        "manager": {"name": "任桀", "tenure_days": 495, "aum_billion": 161.72, "best_return_pct": 281.99, "current_fund_count": 2},
+        "rating": {"five_star_count": 1, "morningstar": 3, "shanghai": 4, "zhaoshang": 5, "jiaan": 4},
+        "style": {
+            "tags": ["科技主题", "高仓位主动", "高集中选股"],
+            "summary": "这只基金更像在买科技方向的主动选股框架。",
+            "positioning": "股票仓位高。",
+            "selection": "前五大重仓合计较高。",
+            "consistency": "风格一致性较强。",
+            "benchmark_note": "基准偏科技成长。",
+        },
+        "notes": ["基金评级缺失"],
+    }
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+    assert "## 基金画像" in rendered
+    assert "## 基金成分分析" in rendered
+    assert "## 基金经理风格分析" in rendered
+    assert "### 前十大持仓" in rendered

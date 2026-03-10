@@ -1,4 +1,4 @@
-"""China market data collector."""
+"""China market data collector — Tushare-first, AKShare/yfinance fallback."""
 
 from __future__ import annotations
 
@@ -20,9 +20,14 @@ try:
 except ImportError:  # pragma: no cover
     yf = None
 
+try:
+    import efinance as ef
+except ImportError:  # pragma: no cover
+    ef = None
+
 
 class ChinaMarketCollector(BaseCollector):
-    """A 股 ETF 行情与技术数据采集。"""
+    """A 股 ETF 行情与技术数据采集。Tushare 优先，AKShare/yfinance 兜底。"""
 
     def _yahoo_symbol(self, symbol: str) -> str:
         if len(symbol) == 6 and symbol.isdigit():
@@ -41,102 +46,7 @@ class ChinaMarketCollector(BaseCollector):
     def _date_str(self, offset_days: int = 0) -> str:
         return (datetime.now() + timedelta(days=offset_days)).strftime("%Y%m%d")
 
-    def get_etf_daily(
-        self,
-        symbol: str,
-        period: str = "daily",
-        adjust: str = "qfq",
-        start_date: str = "",
-        end_date: str = "",
-    ) -> pd.DataFrame:
-        """ETF 日 K 线。"""
-        start = start_date or self._date_str(-365 * 3)
-        end = end_date or self._date_str()
-        try:
-            fetcher = self._ak_function("fund_etf_hist_em")
-            return self.cached_call(
-                f"cn_market:etf_daily:{symbol}:{period}:{adjust}:{start}:{end}",
-                fetcher,
-                symbol=symbol,
-                period=period,
-                start_date=start,
-                end_date=end,
-                adjust=adjust,
-            )
-        except Exception as primary_exc:
-            if yf is None:
-                raise primary_exc
-            ticker = self._yahoo_symbol(symbol)
-            try:
-                return self.cached_call(
-                    f"cn_market:yahoo_etf_daily:{ticker}:{period}",
-                    yf.Ticker(ticker).history,
-                    period="3y" if period == "daily" else period,
-                    interval="1d",
-                    auto_adjust=False,
-                )
-            except Exception:
-                raise primary_exc
-
-    def get_index_daily(
-        self,
-        symbol: str,
-        period: str = "daily",
-        start_date: str = "",
-        end_date: str = "",
-        proxy_symbol: str = "",
-    ) -> pd.DataFrame:
-        """A 股指数历史行情；必要时可回退到代表性 ETF 代理。"""
-        start = start_date or self._date_str(-365 * 3)
-        end = end_date or self._date_str()
-        if proxy_symbol and proxy_symbol != symbol:
-            try:
-                return self.get_etf_daily(proxy_symbol, period="daily", adjust="qfq", start_date=start, end_date=end)
-            except Exception:
-                pass
-        try:
-            fetcher = self._ak_function("index_zh_a_hist")
-            return self.cached_call(
-                f"cn_market:index_daily:{symbol}:{period}:{start}:{end}",
-                fetcher,
-                symbol=symbol,
-                period=period,
-                start_date=start,
-                end_date=end,
-            )
-        except Exception as primary_exc:
-            if proxy_symbol and proxy_symbol != symbol:
-                try:
-                    return self.get_etf_daily(proxy_symbol, period="daily", adjust="qfq", start_date=start, end_date=end)
-                except Exception:
-                    pass
-            raise primary_exc
-
-    def get_open_fund_daily(
-        self,
-        symbol: str,
-        indicator: str = "单位净值走势",
-        period: str = "3年",
-        proxy_symbol: str = "",
-    ) -> pd.DataFrame:
-        """开放式基金净值走势，转换为可复用的 OHLCV 结构。"""
-        try:
-            fetcher = self._ak_function("fund_open_fund_info_em")
-            frame = self.cached_call(
-                f"cn_market:open_fund:{symbol}:{indicator}:{period}",
-                fetcher,
-                symbol=symbol,
-                indicator=indicator,
-                period=period,
-            )
-            return self._normalize_open_fund_nav(frame)
-        except Exception as primary_exc:
-            if proxy_symbol and proxy_symbol != symbol:
-                try:
-                    return self.get_etf_daily(proxy_symbol)
-                except Exception:
-                    pass
-            raise primary_exc
+    # ── A 股个股日 K ──────────────────────────────────────────
 
     def get_stock_daily(
         self,
@@ -146,9 +56,19 @@ class ChinaMarketCollector(BaseCollector):
         start_date: str = "",
         end_date: str = "",
     ) -> pd.DataFrame:
-        """A 股个股日 K 线。"""
+        """A 股个股日 K 线。Tushare daily + adj_factor 优先。"""
         start = start_date or self._date_str(-365 * 3)
         end = end_date or self._date_str()
+
+        # ── Tushare (primary) ──
+        try:
+            frame = self._ts_stock_daily(symbol, start, end, adjust)
+            if frame is not None and not frame.empty:
+                return frame
+        except Exception:
+            pass
+
+        # ── AKShare (fallback 1) ──
         try:
             fetcher = self._ak_function("stock_zh_a_hist")
             return self.cached_call(
@@ -175,15 +95,366 @@ class ChinaMarketCollector(BaseCollector):
             except Exception:
                 raise primary_exc
 
+    def _ts_stock_daily(self, symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame | None:
+        """Tushare daily + adj_factor → 前/后复权 OHLCV。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"cn_market:ts_stock_daily:{ts_code}:{start}:{end}:{adjust}"
+        cached = self._load_cache(cache_key)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("daily", ts_code=ts_code, start_date=start, end_date=end)
+        if raw is None or raw.empty:
+            return None
+
+        if adjust in ("qfq", "hfq"):
+            adj = self._ts_call("adj_factor", ts_code=ts_code, start_date=start, end_date=end)
+            if adj is not None and not adj.empty:
+                raw = raw.merge(adj[["trade_date", "adj_factor"]], on="trade_date", how="left")
+                raw["adj_factor"] = raw["adj_factor"].ffill().bfill()
+                if adjust == "qfq":
+                    latest_factor = raw["adj_factor"].iloc[0]  # 按 trade_date 降序
+                    ratio = raw["adj_factor"] / latest_factor
+                elif adjust == "hfq":
+                    ratio = raw["adj_factor"]
+                else:
+                    ratio = 1.0
+                for col in ("open", "high", "low", "close"):
+                    raw[col] = raw[col] * ratio
+
+        frame = raw.rename(columns={
+            "trade_date": "日期", "open": "开盘", "high": "最高",
+            "low": "最低", "close": "收盘", "vol": "成交量", "amount": "成交额",
+        })
+        frame["日期"] = pd.to_datetime(frame["日期"], format="%Y%m%d")
+        frame = frame.sort_values("日期").reset_index(drop=True)
+        self._save_cache(cache_key, frame)
+        return frame
+
+    # ── ETF 日 K ──────────────────────────────────────────────
+
+    def get_etf_daily(
+        self,
+        symbol: str,
+        period: str = "daily",
+        adjust: str = "qfq",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> pd.DataFrame:
+        """ETF 日 K 线。Tushare fund_daily 优先。"""
+        start = start_date or self._date_str(-365 * 3)
+        end = end_date or self._date_str()
+
+        # ── Tushare (primary) ──
+        try:
+            frame = self._ts_etf_daily(symbol, start, end, adjust)
+            if frame is not None and not frame.empty:
+                return frame
+        except Exception:
+            pass
+
+        # ── AKShare (fallback 1) ──
+        try:
+            fetcher = self._ak_function("fund_etf_hist_em")
+            return self.cached_call(
+                f"cn_market:etf_daily:{symbol}:{period}:{adjust}:{start}:{end}",
+                fetcher,
+                symbol=symbol,
+                period=period,
+                start_date=start,
+                end_date=end,
+                adjust=adjust,
+            )
+        except Exception as primary_exc:
+            if yf is None:
+                raise primary_exc
+            ticker = self._yahoo_symbol(symbol)
+            try:
+                return self.cached_call(
+                    f"cn_market:yahoo_etf_daily:{ticker}:{period}",
+                    yf.Ticker(ticker).history,
+                    period="3y" if period == "daily" else period,
+                    interval="1d",
+                    auto_adjust=False,
+                )
+            except Exception:
+                raise primary_exc
+
+    def _ts_etf_daily(self, symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame | None:
+        """Tushare fund_daily → ETF OHLCV。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"cn_market:ts_etf_daily:{ts_code}:{start}:{end}:{adjust}"
+        cached = self._load_cache(cache_key)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("fund_daily", ts_code=ts_code, start_date=start, end_date=end)
+        if raw is None or raw.empty:
+            return None
+
+        if adjust in ("qfq", "hfq"):
+            adj = self._ts_call("adj_factor", ts_code=ts_code, start_date=start, end_date=end)
+            if adj is not None and not adj.empty:
+                raw = raw.merge(adj[["trade_date", "adj_factor"]], on="trade_date", how="left")
+                raw["adj_factor"] = raw["adj_factor"].ffill().bfill()
+                if adjust == "qfq":
+                    latest_factor = raw["adj_factor"].iloc[0]
+                    ratio = raw["adj_factor"] / latest_factor
+                else:
+                    ratio = raw["adj_factor"]
+                for col in ("open", "high", "low", "close"):
+                    raw[col] = raw[col] * ratio
+
+        frame = raw.rename(columns={
+            "trade_date": "日期", "open": "开盘", "high": "最高",
+            "low": "最低", "close": "收盘", "vol": "成交量", "amount": "成交额",
+        })
+        frame["日期"] = pd.to_datetime(frame["日期"], format="%Y%m%d")
+        frame = frame.sort_values("日期").reset_index(drop=True)
+        self._save_cache(cache_key, frame)
+        return frame
+
+    # ── 指数日 K ──────────────────────────────────────────────
+
+    def get_index_daily(
+        self,
+        symbol: str,
+        period: str = "daily",
+        start_date: str = "",
+        end_date: str = "",
+        proxy_symbol: str = "",
+    ) -> pd.DataFrame:
+        """A 股指数历史行情。Tushare index_daily 优先。"""
+        start = start_date or self._date_str(-365 * 3)
+        end = end_date or self._date_str()
+        if proxy_symbol and proxy_symbol != symbol:
+            try:
+                return self.get_etf_daily(proxy_symbol, period="daily", adjust="qfq", start_date=start, end_date=end)
+            except Exception:
+                pass
+
+        # ── Tushare (primary) ──
+        try:
+            frame = self._ts_index_daily(symbol, start, end)
+            if frame is not None and not frame.empty:
+                return frame
+        except Exception:
+            pass
+
+        # ── AKShare (fallback) ──
+        try:
+            fetcher = self._ak_function("index_zh_a_hist")
+            return self.cached_call(
+                f"cn_market:index_daily:{symbol}:{period}:{start}:{end}",
+                fetcher,
+                symbol=symbol,
+                period=period,
+                start_date=start,
+                end_date=end,
+            )
+        except Exception as primary_exc:
+            if proxy_symbol and proxy_symbol != symbol:
+                try:
+                    return self.get_etf_daily(proxy_symbol, period="daily", adjust="qfq", start_date=start, end_date=end)
+                except Exception:
+                    pass
+            raise primary_exc
+
+    def _ts_index_daily(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
+        """Tushare index_daily。指数代码需要 SH/SZ 后缀。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"cn_market:ts_index_daily:{ts_code}:{start}:{end}"
+        cached = self._load_cache(cache_key)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("index_daily", ts_code=ts_code, start_date=start, end_date=end)
+        if raw is None or raw.empty:
+            return None
+
+        frame = raw.rename(columns={
+            "trade_date": "日期", "open": "开盘", "high": "最高",
+            "low": "最低", "close": "收盘", "vol": "成交量", "amount": "成交额",
+        })
+        frame["日期"] = pd.to_datetime(frame["日期"], format="%Y%m%d")
+        frame = frame.sort_values("日期").reset_index(drop=True)
+        self._save_cache(cache_key, frame)
+        return frame
+
+    # ── 开放式基金净值 ────────────────────────────────────────
+
+    def get_open_fund_daily(
+        self,
+        symbol: str,
+        indicator: str = "单位净值走势",
+        period: str = "3年",
+        proxy_symbol: str = "",
+    ) -> pd.DataFrame:
+        """开放式基金净值走势。Tushare fund_nav 优先。"""
+        # ── Tushare (primary) ──
+        try:
+            frame = self._ts_fund_nav(symbol)
+            if frame is not None and not frame.empty:
+                return frame
+        except Exception:
+            pass
+
+        # ── AKShare (fallback) ──
+        try:
+            fetcher = self._ak_function("fund_open_fund_info_em")
+            frame = self.cached_call(
+                f"cn_market:open_fund:{symbol}:{indicator}:{period}",
+                fetcher,
+                symbol=symbol,
+                indicator=indicator,
+                period=period,
+            )
+            return self._normalize_open_fund_nav(frame)
+        except Exception as primary_exc:
+            if proxy_symbol and proxy_symbol != symbol:
+                try:
+                    return self.get_etf_daily(proxy_symbol)
+                except Exception:
+                    pass
+            raise primary_exc
+
+    def _ts_fund_nav(self, symbol: str) -> pd.DataFrame | None:
+        """Tushare fund_nav → 基金净值历史。"""
+        cache_key = f"cn_market:ts_fund_nav:{symbol}"
+        cached = self._load_cache(cache_key)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("fund_nav", ts_code=symbol)
+        if raw is None or raw.empty:
+            return None
+
+        nav = raw[["end_date", "unit_nav"]].copy()
+        nav.columns = ["date", "close"]
+        nav["date"] = pd.to_datetime(nav["date"], format="%Y%m%d", errors="coerce")
+        nav["close"] = pd.to_numeric(nav["close"], errors="coerce")
+        nav = nav.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+        if nav.empty:
+            return None
+        for column in ("open", "high", "low"):
+            nav[column] = nav["close"]
+        nav["volume"] = 0.0
+        nav["amount"] = np.nan
+        result = nav[["date", "open", "high", "low", "close", "volume", "amount"]]
+        self._save_cache(cache_key, result)
+        return result
+
+    # ── 实时行情（Tushare daily_basic 替代实时快照） ───────────
+
     def get_stock_realtime(self) -> pd.DataFrame:
-        """A 股全市场实时行情（含代码、名称、市值、成交额、涨跌幅、PE、PB 等）。"""
-        fetcher = self._ak_function("stock_zh_a_spot_em")
-        return self.cached_call("cn_market:stock_realtime", fetcher, ttl_hours=1)
+        """A 股全市场行情快照（含代码、名称、市值、PE、PB 等）。
+
+        Tushare daily_basic 提供更精准的 PE/PB/PS/换手率/市值数据。
+        但 daily_basic 是收盘后更新，盘中仍需 akshare 实时行情兜底。
+        """
+        # ── Tushare daily_basic (primary — 收盘后数据更精准) ──
+        try:
+            frame = self._ts_daily_basic_snapshot()
+            if frame is not None and not frame.empty:
+                return frame
+        except Exception:
+            pass
+
+        # ── AKShare (fallback — 盘中实时) ──
+        try:
+            fetcher = self._ak_function("stock_zh_a_spot_em")
+            return self.cached_call("cn_market:stock_realtime", fetcher, ttl_hours=1)
+        except Exception as primary_exc:
+            if ef is None:
+                raise primary_exc
+            try:
+                frame = self.cached_call(
+                    "cn_market:stock_realtime:efinance",
+                    ef.stock.get_realtime_quotes,
+                    ttl_hours=1,
+                )
+                return self._normalize_efinance_stock_realtime(frame)
+            except Exception:
+                raise primary_exc
+
+    def _ts_daily_basic_snapshot(self) -> pd.DataFrame | None:
+        """Tushare daily_basic 全市场快照 — 提供 PE/PB/PS/换手率/市值。"""
+        cache_key = "cn_market:ts_daily_basic_snapshot"
+        cached = self._load_cache(cache_key, ttl_hours=1)
+        if cached is not None:
+            return cached
+
+        trade_date = self._date_str()
+        raw = self._ts_call("daily_basic", trade_date=trade_date)
+        if raw is None or raw.empty:
+            # 可能还没收盘，尝试前一个交易日
+            raw = self._ts_call("daily_basic", trade_date=self._date_str(-1))
+        if raw is None or raw.empty:
+            return None
+
+        frame = raw.rename(columns={
+            "ts_code": "ts_code_raw",
+            "trade_date": "trade_date_raw",
+            "close": "最新价",
+            "turnover_rate": "换手率",
+            "turnover_rate_f": "换手率(自由)",
+            "volume_ratio": "量比",
+            "pe": "市盈率(动态)",
+            "pe_ttm": "市盈率TTM",
+            "pb": "市净率",
+            "ps": "市销率",
+            "ps_ttm": "市销率TTM",
+            "dv_ratio": "股息率",
+            "dv_ttm": "股息率TTM",
+            "total_share": "总股本",
+            "float_share": "流通股本",
+            "total_mv": "总市值",
+            "circ_mv": "流通市值",
+        })
+        frame["代码"] = frame["ts_code_raw"].apply(self._from_ts_code)
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def get_stock_industry(self, symbol: str) -> str:
+        """查询个股所属行业。Tushare stock_basic 优先。"""
+        ts_code = self._to_ts_code(symbol)
+        try:
+            raw = self._ts_call("stock_basic", ts_code=ts_code, fields="ts_code,name,industry")
+            if raw is not None and not raw.empty:
+                industry = raw.iloc[0].get("industry", "")
+                if industry:
+                    return str(industry)
+        except Exception:
+            pass
+
+        # AKShare fallback
+        try:
+            fetcher = self._ak_function("stock_individual_info_em")
+            df = self.cached_call(f"cn_market:stock_info:{symbol}", fetcher, symbol=symbol, ttl_hours=24)
+            row = df[df["item"] == "行业"]
+            if not row.empty:
+                return str(row.iloc[0]["value"])
+        except Exception:
+            pass
+        return ""
 
     def get_etf_realtime(self) -> pd.DataFrame:
         """ETF 实时行情。"""
-        fetcher = self._ak_function("fund_etf_spot_em")
-        return self.cached_call("cn_market:etf_realtime", fetcher, ttl_hours=0)
+        try:
+            fetcher = self._ak_function("fund_etf_spot_em")
+            return self.cached_call("cn_market:etf_realtime", fetcher, ttl_hours=0)
+        except Exception as primary_exc:
+            if ef is None:
+                raise primary_exc
+            try:
+                frame = self.cached_call(
+                    "cn_market:etf_realtime:efinance",
+                    ef.fund.get_realtime_quotes,
+                    ttl_hours=0,
+                )
+                return self._normalize_efinance_etf_realtime(frame)
+            except Exception:
+                raise primary_exc
 
     def get_etf_fund_flow(self, symbol: str) -> pd.DataFrame:
         """ETF 资金流向。"""
@@ -201,14 +472,46 @@ class ChinaMarketCollector(BaseCollector):
         return pd.DataFrame()
 
     def get_north_south_flow(self) -> pd.DataFrame:
-        """北向 / 南向资金净流入。"""
+        """北向 / 南向资金净流入。Tushare moneyflow_hsgt 优先。"""
+        # ── Tushare (primary) ──
+        try:
+            frame = self._ts_north_south_flow()
+            if frame is not None and not frame.empty:
+                return frame
+        except Exception:
+            pass
+
+        # ── AKShare (fallback) ──
         fetcher = self._ak_function("stock_hsgt_fund_flow_summary_em")
         return self.cached_call("cn_market:north_south_flow", fetcher, ttl_hours=0)
 
+    def _ts_north_south_flow(self) -> pd.DataFrame | None:
+        """Tushare moneyflow_hsgt — 沪深港通资金流向。"""
+        cache_key = "cn_market:ts_north_south_flow"
+        cached = self._load_cache(cache_key, ttl_hours=1)
+        if cached is not None:
+            return cached
+
+        start = self._date_str(-30)
+        end = self._date_str()
+        raw = self._ts_call("moneyflow_hsgt", start_date=start, end_date=end)
+        if raw is None or raw.empty:
+            return None
+        self._save_cache(cache_key, raw)
+        return raw
+
     def get_margin_trading(self) -> pd.DataFrame:
-        """融资融券数据（T+1 披露，自动回退到最近交易日）。"""
+        """融资融券数据。Tushare margin_detail 优先。"""
+        # ── Tushare (primary) ──
+        try:
+            frame = self._ts_margin()
+            if frame is not None and not frame.empty:
+                return frame
+        except Exception:
+            pass
+
+        # ── AKShare (fallback) ──
         fetcher = self._ak_function("stock_margin_detail_sse")
-        # Try today, then fall back up to 5 days for weekends/holidays
         for offset in range(0, 6):
             date_str = self._date_str(offset_days=-offset)
             try:
@@ -222,6 +525,21 @@ class ChinaMarketCollector(BaseCollector):
             except Exception:
                 continue
         return pd.DataFrame()
+
+    def _ts_margin(self) -> pd.DataFrame | None:
+        """Tushare margin — 融资融券汇总。"""
+        cache_key = "cn_market:ts_margin"
+        cached = self._load_cache(cache_key, ttl_hours=2)
+        if cached is not None:
+            return cached
+
+        for offset in range(0, 6):
+            trade_date = self._date_str(-offset)
+            raw = self._ts_call("margin", trade_date=trade_date)
+            if raw is not None and not raw.empty:
+                self._save_cache(cache_key, raw)
+                return raw
+        return None
 
     def get_sector_pe(self, sector: str) -> pd.DataFrame:
         """板块估值数据。"""
@@ -237,6 +555,8 @@ class ChinaMarketCollector(BaseCollector):
             period="日k",
             adjust="qfq",
         )
+
+    # ── 内部工具方法 ──────────────────────────────────────────
 
     def _normalize_open_fund_nav(self, frame: pd.DataFrame) -> pd.DataFrame:
         if frame is None or frame.empty:
@@ -260,3 +580,32 @@ class ChinaMarketCollector(BaseCollector):
         nav["volume"] = 0.0
         nav["amount"] = np.nan
         return nav[["date", "open", "high", "low", "close", "volume", "amount"]]
+
+    # --- efinance fallback normalization helpers ---
+
+    def _normalize_efinance_stock_realtime(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Map efinance stock realtime columns to akshare-compatible names."""
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        col_map = {
+            "股票代码": "代码",
+            "股票名称": "名称",
+            "动态市盈率": "市盈率(动态)",
+            # 成交额, 总市值, 流通市值 already match
+        }
+        return frame.rename(columns=col_map)
+
+    def _normalize_efinance_etf_realtime(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Map efinance stock quotes to ETF realtime format, filtering ETF codes."""
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        col_map = {
+            "股票代码": "代码",
+            "股票名称": "名称",
+            "动态市盈率": "市盈率(动态)",
+        }
+        result = frame.rename(columns=col_map)
+        code_col = "代码"
+        if code_col in result.columns:
+            result = result[result[code_col].astype(str).str.match(r"^[15]\d{5}$", na=False)]
+        return result.reset_index(drop=True)

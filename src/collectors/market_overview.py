@@ -1,10 +1,10 @@
-"""High-level market overview collector for briefing generation."""
+"""High-level market overview collector for briefing generation — Tushare-first."""
 
 from __future__ import annotations
 
 import io
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional
 
 import pandas as pd
@@ -25,7 +25,10 @@ except ImportError:  # pragma: no cover
 
 
 class MarketOverviewCollector(BaseCollector):
-    """Collect index-level snapshots for briefing overview tables."""
+    """Collect index-level snapshots for briefing overview tables.
+
+    国内指数行情优先用 Tushare index_daily，海外指数继续用 yfinance。
+    """
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None) -> None:
         super().__init__(dict(config or {}), name="MarketOverviewCollector")
@@ -45,6 +48,13 @@ class MarketOverviewCollector(BaseCollector):
         }
 
     def _collect_domestic(self, indices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """国内指数行情。Tushare index_daily 优先。"""
+        # ── Tushare (primary) ──
+        ts_rows = self._ts_domestic_indices(indices)
+        if ts_rows:
+            return ts_rows
+
+        # ── AKShare (fallback) ──
         if ak is None:
             return []
         spot = self.cached_call(
@@ -80,6 +90,44 @@ class MarketOverviewCollector(BaseCollector):
                     "proxy_note": str(item.get("proxy_note", "")).strip(),
                 }
             )
+        return rows
+
+    def _ts_domestic_indices(self, indices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Tushare index_daily — 国内指数日线快照。"""
+        rows: List[Dict[str, Any]] = []
+        for item in indices:
+            code = str(item.get("symbol", "")).strip()
+            if not code:
+                continue
+            ts_code = self._to_ts_code(code)
+            try:
+                end = datetime.now().strftime("%Y%m%d")
+                start = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
+                raw = self._ts_call("index_daily", ts_code=ts_code, start_date=start, end_date=end)
+                if raw is None or raw.empty:
+                    continue
+                raw = raw.sort_values("trade_date", ascending=False)
+                latest_row = raw.iloc[0]
+                prev_row = raw.iloc[1] if len(raw) > 1 else latest_row
+                close = float(latest_row["close"])
+                prev_close = float(prev_row["close"])
+                change_pct = (close / prev_close - 1) if prev_close else None
+                amount = float(latest_row.get("amount", 0)) / 1e4  # 千元→亿
+                rows.append(
+                    {
+                        "name": str(item.get("name", code)),
+                        "symbol": code,
+                        "latest": close,
+                        "change_pct": change_pct,
+                        "amount": amount if amount else None,
+                        "amount_delta": None,
+                        "open": float(latest_row.get("open", close)),
+                        "prev_close": prev_close,
+                        "proxy_note": str(item.get("proxy_note", "")).strip(),
+                    }
+                )
+            except Exception:
+                continue
         return rows
 
     def _collect_breadth(self) -> Dict[str, Any]:

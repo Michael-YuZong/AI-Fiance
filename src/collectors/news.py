@@ -12,6 +12,11 @@ from src.collectors.base import BaseCollector
 from src.utils.config import resolve_project_path
 from src.utils.data import load_yaml
 
+try:
+    import akshare as ak
+except ImportError:  # pragma: no cover
+    ak = None
+
 
 def _format_pct(value: float) -> str:
     return f"{value * 100:+.2f}%"
@@ -199,6 +204,44 @@ class NewsCollector(BaseCollector):
 
         ranked = self._rank_items(items, preferred)
         return self._diversify_items(ranked, limit)
+
+    def get_stock_news(self, symbol: str, limit: int = 10) -> List[Dict[str, str]]:
+        """Fetch per-stock news from akshare (A-share only)."""
+        if ak is None:
+            return []
+        fetcher = getattr(ak, "stock_news_em", None)
+        if not callable(fetcher):
+            return []
+        try:
+            frame = self.cached_call(
+                f"news:stock:{symbol}",
+                fetcher,
+                symbol=symbol,
+                ttl_hours=2,
+            )
+        except Exception:
+            return []
+        if frame is None or frame.empty:
+            return []
+        title_col = next((c for c in frame.columns if "新闻标题" in c or "title" in c.lower()), None)
+        source_col = next((c for c in frame.columns if "新闻来源" in c or "来源" in c or "source" in c.lower()), None)
+        time_col = next((c for c in frame.columns if "发布时间" in c or "时间" in c or "date" in c.lower()), None)
+        if not title_col:
+            return []
+        items: List[Dict[str, str]] = []
+        for _, row in frame.head(limit).iterrows():
+            title = str(row.get(title_col, "")).strip()
+            if not title:
+                continue
+            items.append({
+                "category": "stock_announcement",
+                "title": title,
+                "source": str(row.get(source_col, "东方财富")).strip() if source_col else "东方财富",
+                "configured_source": "东方财富",
+                "must_include": False,
+                "link": str(row.get("新闻链接", "")).strip() if "新闻链接" in frame.columns else "",
+            })
+        return items
 
     def _fetch_feed(self, url: str) -> feedparser.FeedParserDict:
         response = requests.get(

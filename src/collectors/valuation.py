@@ -1,4 +1,4 @@
-"""Valuation, index metadata, and financial proxy collectors."""
+"""Valuation, index metadata, and financial proxy collectors — Tushare-first."""
 
 from __future__ import annotations
 
@@ -14,19 +14,49 @@ try:
 except ImportError:  # pragma: no cover
     ak = None
 
+try:
+    import yfinance as yf
+except ImportError:  # pragma: no cover
+    yf = None
+
+try:
+    import baostock as bs
+except ImportError:  # pragma: no cover
+    bs = None
+
 
 class ValuationCollector(BaseCollector):
-    """Collect ETF scale, index valuation snapshots, and financial proxies."""
+    """Collect ETF scale, index valuation snapshots, and financial proxies.
+
+    Tushare 优先（daily_basic / fina_indicator / index_weight），AKShare 兜底。
+    """
 
     def _require_ak(self):
         if ak is None:
             raise RuntimeError("akshare is not installed")
         return ak
 
+    # ── ETF NAV ──────────────────────────────────────────────
+
     def get_cn_etf_nav_history(self, symbol: str, days: int = 120) -> pd.DataFrame:
-        client = self._require_ak()
+        """ETF 净值历史。Tushare fund_nav 优先。"""
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+
+        # Tushare
+        try:
+            raw = self._ts_call("fund_nav", ts_code=symbol)
+            if raw is not None and not raw.empty:
+                raw["end_date"] = pd.to_datetime(raw["end_date"], format="%Y%m%d", errors="coerce")
+                mask = raw["end_date"] >= pd.to_datetime(start_date, format="%Y%m%d")
+                filtered = raw[mask].sort_values("end_date").reset_index(drop=True)
+                if not filtered.empty:
+                    return filtered
+        except Exception:
+            pass
+
+        # AKShare fallback
+        client = self._require_ak()
         return self.cached_call(
             f"valuation:nav:{symbol}:{start_date}:{end_date}",
             client.fund_etf_fund_info_em,
@@ -55,6 +85,8 @@ class ValuationCollector(BaseCollector):
             if not filtered.empty:
                 return filtered.iloc[0].to_dict()
         return None
+
+    # ── 指数估值快照 ─────────────────────────────────────────
 
     def get_cn_index_snapshot(self, keywords: Sequence[str]) -> Optional[Dict[str, Any]]:
         """Find a CSI/CNI index valuation snapshot by keyword heuristics."""
@@ -116,8 +148,19 @@ class ValuationCollector(BaseCollector):
             ttl_hours=12,
         )
 
+    # ── 指数成分权重 ─────────────────────────────────────────
+
     def get_cn_index_constituent_weights(self, index_code: str, top_n: int = 10) -> pd.DataFrame:
-        """Fetch the latest index constituent weights."""
+        """Fetch the latest index constituent weights. Tushare index_weight 优先。"""
+        # ── Tushare (primary) ──
+        try:
+            frame = self._ts_index_weight(index_code, top_n)
+            if frame is not None and not frame.empty:
+                return frame
+        except Exception:
+            pass
+
+        # ── AKShare (fallback) ──
         client = self._require_ak()
         fetcher = getattr(client, "index_stock_cons_weight_csindex", None)
         if not callable(fetcher):
@@ -143,41 +186,251 @@ class ValuationCollector(BaseCollector):
             normalized = normalized.head(top_n)
         return normalized[["symbol", "name", "weight"]].reset_index(drop=True)
 
-    def get_cn_stock_financial_proxy(self, symbol: str) -> Dict[str, Any]:
-        """Fetch the latest single-stock financial proxy metrics."""
-        client = self._require_ak()
-        fetchers: list[tuple[str, Any, Dict[str, Any]]] = []
-        abstract_fetcher = getattr(client, "stock_financial_abstract_new_ths", None)
-        if callable(abstract_fetcher):
-            fetchers.append(
-                (
-                    f"valuation:stock_financial:ths:{symbol}",
-                    abstract_fetcher,
-                    {"symbol": symbol, "indicator": "按报告期"},
-                )
-            )
-        indicator_fetcher = getattr(client, "stock_financial_analysis_indicator_em", None)
-        if callable(indicator_fetcher):
-            fetchers.append(
-                (
-                    f"valuation:stock_financial:em:{symbol}",
-                    indicator_fetcher,
-                    {"symbol": self._eastmoney_symbol(symbol), "indicator": "按报告期"},
-                )
-            )
+    def _ts_index_weight(self, index_code: str, top_n: int) -> pd.DataFrame | None:
+        """Tushare index_weight — 指数成分权重。"""
+        ts_code = self._to_ts_code(index_code)
+        cache_key = f"valuation:ts_index_weight:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
 
-        last_error: Optional[Exception] = None
-        for cache_key, fetcher, kwargs in fetchers:
-            try:
-                frame = self.cached_call(cache_key, fetcher, ttl_hours=24, **kwargs)
-                parsed = self._parse_stock_financial_frame(frame)
-                if parsed:
-                    return parsed
-            except Exception as exc:  # pragma: no cover - network/source variance
-                last_error = exc
-        if last_error is not None:
-            raise last_error
+        raw = self._ts_call("index_weight", index_code=ts_code)
+        if raw is None or raw.empty:
+            return None
+
+        # 取最新一期
+        if "trade_date" in raw.columns:
+            latest_date = raw["trade_date"].max()
+            raw = raw[raw["trade_date"] == latest_date]
+
+        frame = pd.DataFrame({
+            "symbol": raw["con_code"].apply(self._from_ts_code),
+            "name": raw.get("con_name", raw["con_code"].apply(self._from_ts_code)),
+            "weight": pd.to_numeric(raw["weight"], errors="coerce"),
+        })
+        frame = frame.dropna(subset=["weight"]).sort_values("weight", ascending=False)
+        if top_n > 0:
+            frame = frame.head(top_n)
+        result = frame.reset_index(drop=True)
+        self._save_cache(cache_key, result)
+        return result
+
+    # ── 个股财务代理指标 ─────────────────────────────────────
+
+    def get_cn_stock_financial_proxy(self, symbol: str) -> Dict[str, Any]:
+        """Fetch the latest single-stock financial proxy metrics.
+
+        Tushare fina_indicator 优先 → AKShare THS/EM 兜底。
+        """
+        # ── Tushare fina_indicator (primary) ──
+        try:
+            result = self._tushare_stock_financial(symbol)
+            if result:
+                return result
+        except Exception:
+            pass
+
+        # ── Tushare daily_basic (补充 PE/PB) ──
+        try:
+            basic = self._ts_daily_basic_for_stock(symbol)
+        except Exception:
+            basic = {}
+
+        # ── AKShare THS/EM (fallback) ──
+        if ak is not None:
+            fetchers: list[tuple[str, Any, Dict[str, Any]]] = []
+            abstract_fetcher = getattr(ak, "stock_financial_abstract_new_ths", None)
+            if callable(abstract_fetcher):
+                fetchers.append(
+                    (
+                        f"valuation:stock_financial:ths:{symbol}",
+                        abstract_fetcher,
+                        {"symbol": symbol, "indicator": "按报告期"},
+                    )
+                )
+            indicator_fetcher = getattr(ak, "stock_financial_analysis_indicator_em", None)
+            if callable(indicator_fetcher):
+                fetchers.append(
+                    (
+                        f"valuation:stock_financial:em:{symbol}",
+                        indicator_fetcher,
+                        {"symbol": self._eastmoney_symbol(symbol), "indicator": "按报告期"},
+                    )
+                )
+
+            last_error: Optional[Exception] = None
+            for cache_key, fetcher, kwargs in fetchers:
+                try:
+                    frame = self.cached_call(cache_key, fetcher, ttl_hours=24, **kwargs)
+                    parsed = self._parse_stock_financial_frame(frame)
+                    if parsed:
+                        # 合并 daily_basic 的 PE/PB
+                        if basic:
+                            parsed.setdefault("pe_ttm", basic.get("pe_ttm"))
+                            parsed.setdefault("pb", basic.get("pb"))
+                            parsed.setdefault("ps_ttm", basic.get("ps_ttm"))
+                            parsed.setdefault("dv_ratio", basic.get("dv_ratio"))
+                            parsed.setdefault("total_mv", basic.get("total_mv"))
+                        return parsed
+                except Exception as exc:
+                    last_error = exc
+
+        # 如果只有 daily_basic 有数据
+        if basic:
+            return basic
+
         raise RuntimeError("No stock financial proxy source available")
+
+    def _tushare_stock_financial(self, symbol: str) -> Dict[str, Any]:
+        """Tushare fina_indicator — 直接获取 ROE/毛利率/营收增速等高阶指标。
+
+        2000 积分只能单只循环拉取，不能全市场一次性下载。
+        """
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"valuation:ts_fina_indicator:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("fina_indicator", ts_code=ts_code)
+        if raw is None or raw.empty:
+            return {}
+
+        # 取最新一期
+        if "end_date" in raw.columns:
+            raw = raw.sort_values("end_date", ascending=False)
+        latest = raw.iloc[0]
+
+        def _safe_float(val: Any) -> Optional[float]:
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return None
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return None
+
+        result: Dict[str, Any] = {
+            "report_date": str(latest.get("end_date", "")),
+            "roe": _safe_float(latest.get("roe")),
+            "roe_dt": _safe_float(latest.get("roe_dt")),
+            "gross_margin": _safe_float(latest.get("grossprofit_margin")),
+            "revenue_yoy": _safe_float(latest.get("or_yoy")),  # 营业收入同比
+            "profit_yoy": _safe_float(latest.get("netprofit_yoy")),  # 净利同比
+            "profit_dedt_yoy": _safe_float(latest.get("dt_netprofit_yoy")),  # 扣非净利同比
+            "debt_to_assets": _safe_float(latest.get("debt_to_assets")),
+            "current_ratio": _safe_float(latest.get("current_ratio")),
+            "eps": _safe_float(latest.get("eps")),
+            "bps": _safe_float(latest.get("bps")),
+            "cfps": _safe_float(latest.get("cfps")),
+            "op_income_yoy": _safe_float(latest.get("op_yoy")),  # 营业利润同比
+            "netprofit_margin": _safe_float(latest.get("netprofit_margin")),  # 净利率
+        }
+        # 去除所有 None 值
+        result = {k: v for k, v in result.items() if v is not None}
+        if result:
+            result["report_date"] = str(latest.get("end_date", ""))
+            self._save_cache(cache_key, result)
+        return result
+
+    def _ts_daily_basic_for_stock(self, symbol: str) -> Dict[str, Any]:
+        """从 Tushare daily_basic 获取个股最新 PE/PB/PS/换手率/市值。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"valuation:ts_daily_basic:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=4)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("daily_basic", ts_code=ts_code)
+        if raw is None or raw.empty:
+            return {}
+
+        latest = raw.sort_values("trade_date", ascending=False).iloc[0]
+
+        def _sf(val: Any) -> Optional[float]:
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return None
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return None
+
+        result = {}
+        pe = _sf(latest.get("pe_ttm"))
+        if pe is not None:
+            result["pe_ttm"] = pe
+        pb = _sf(latest.get("pb"))
+        if pb is not None:
+            result["pb"] = pb
+        ps = _sf(latest.get("ps_ttm"))
+        if ps is not None:
+            result["ps_ttm"] = ps
+        dv = _sf(latest.get("dv_ttm"))
+        if dv is not None:
+            result["dv_ratio"] = dv
+        mv = _sf(latest.get("total_mv"))
+        if mv is not None:
+            result["total_mv"] = mv
+        turnover = _sf(latest.get("turnover_rate_f"))
+        if turnover is not None:
+            result["turnover_rate"] = turnover
+
+        if result:
+            self._save_cache(cache_key, result)
+        return result
+
+    # ── 业绩预告 / 快报 ──────────────────────────────────────
+
+    def get_cn_stock_forecast(self, symbol: str) -> Dict[str, Any]:
+        """Tushare forecast — 业绩预告。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"valuation:ts_forecast:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("forecast", ts_code=ts_code)
+        if raw is None or raw.empty:
+            return {}
+
+        latest = raw.sort_values("ann_date", ascending=False).iloc[0]
+        result = {
+            "ann_date": str(latest.get("ann_date", "")),
+            "end_date": str(latest.get("end_date", "")),
+            "type": str(latest.get("type", "")),
+            "change_reason": str(latest.get("change_reason", "")),
+            "net_profit_min": latest.get("net_profit_min"),
+            "net_profit_max": latest.get("net_profit_max"),
+        }
+        self._save_cache(cache_key, result)
+        return result
+
+    def get_cn_stock_express(self, symbol: str) -> Dict[str, Any]:
+        """Tushare express — 业绩快报。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"valuation:ts_express:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("express", ts_code=ts_code)
+        if raw is None or raw.empty:
+            return {}
+
+        latest = raw.sort_values("ann_date", ascending=False).iloc[0]
+        result = {
+            "ann_date": str(latest.get("ann_date", "")),
+            "end_date": str(latest.get("end_date", "")),
+            "revenue": latest.get("revenue"),
+            "operate_profit": latest.get("operate_profit"),
+            "total_profit": latest.get("total_profit"),
+            "n_income": latest.get("n_income"),
+            "revenue_yoy": latest.get("yoy_sales"),
+            "profit_yoy": latest.get("yoy_net_profit"),
+        }
+        self._save_cache(cache_key, result)
+        return result
+
+    # ── 指数聚合财务 ─────────────────────────────────────────
 
     def get_cn_index_financial_proxies(self, index_code: str, top_n: int = 5) -> Dict[str, Any]:
         """Aggregate weighted financial proxies from top constituents."""
@@ -228,10 +481,151 @@ class ValuationCollector(BaseCollector):
             "constituents": constituents.to_dict("records"),
         }
 
+    def get_weighted_stock_financial_proxies(
+        self,
+        holdings: Sequence[Dict[str, Any]],
+        symbol_key: str = "symbol",
+        name_key: str = "name",
+        weight_key: str = "weight",
+        top_n: int = 5,
+    ) -> Dict[str, Any]:
+        """Aggregate weighted financial proxies from an arbitrary holdings list."""
+        normalized_rows: list[Dict[str, Any]] = []
+        for raw in list(holdings)[:top_n]:
+            symbol = str(raw.get(symbol_key, "")).strip()
+            weight = pd.to_numeric(pd.Series([raw.get(weight_key)]), errors="coerce").iloc[0]
+            if not symbol or pd.isna(weight) or float(weight) <= 0:
+                continue
+            normalized_rows.append(
+                {
+                    "symbol": symbol,
+                    "name": str(raw.get(name_key, symbol)).strip() or symbol,
+                    "weight": float(weight),
+                }
+            )
+        if not normalized_rows:
+            return {}
+
+        total_weight = float(sum(float(item["weight"]) for item in normalized_rows))
+        if total_weight <= 0:
+            return {}
+
+        rows: list[Dict[str, Any]] = []
+        for row in normalized_rows:
+            try:
+                snapshot = self.get_cn_stock_financial_proxy(row["symbol"])
+            except Exception:
+                continue
+            snapshot["weight"] = float(row["weight"])
+            snapshot["symbol"] = row["symbol"]
+            snapshot["name"] = row["name"]
+            rows.append(snapshot)
+
+        if not rows:
+            return {
+                "top_concentration": total_weight,
+                "coverage_weight": 0.0,
+                "coverage_ratio": 0.0,
+                "coverage_count": 0,
+                "constituents": normalized_rows,
+            }
+
+        metrics = {
+            "revenue_yoy": self._weighted_average(rows, "revenue_yoy"),
+            "profit_yoy": self._weighted_average(rows, "profit_yoy"),
+            "roe": self._weighted_average(rows, "roe"),
+            "gross_margin": self._weighted_average(rows, "gross_margin"),
+        }
+        report_dates = [str(item.get("report_date", "")).strip() for item in rows if str(item.get("report_date", "")).strip()]
+        coverage_weight = float(sum(float(item.get("weight", 0.0)) for item in rows))
+        return {
+            **metrics,
+            "top_concentration": total_weight,
+            "coverage_weight": coverage_weight,
+            "coverage_ratio": coverage_weight / total_weight if total_weight else 0.0,
+            "coverage_count": len(rows),
+            "report_date": max(report_dates) if report_dates else "",
+            "constituents": normalized_rows,
+        }
+
+    # ── HK/US yfinance 估值 ──────────────────────────────────
+
+    def get_yf_fundamental(self, symbol: str, asset_type: str) -> Dict[str, Any]:
+        """Fetch fundamental metrics for HK/US stocks via yfinance Ticker.info."""
+        if yf is None:
+            return {}
+        ticker = self._yf_ticker(symbol, asset_type)
+        if not ticker:
+            return {}
+        try:
+            info = self.cached_call(
+                f"valuation:yf_fundamental:{ticker}",
+                lambda: yf.Ticker(ticker).info,
+                ttl_hours=12,
+            )
+        except Exception:
+            return {}
+        if not isinstance(info, dict):
+            return {}
+        result: Dict[str, Any] = {}
+        pe = info.get("trailingPE")
+        if pe is not None:
+            try:
+                result["pe_ttm"] = float(pe)
+            except (ValueError, TypeError):
+                pass
+        ps = info.get("priceToSalesTrailing12Months")
+        if ps is not None:
+            try:
+                result["ps_ttm"] = float(ps)
+            except (ValueError, TypeError):
+                pass
+        roe = info.get("returnOnEquity")
+        if roe is not None:
+            try:
+                result["roe"] = float(roe) * 100  # decimal → percentage
+            except (ValueError, TypeError):
+                pass
+        rev_growth = info.get("revenueGrowth")
+        if rev_growth is not None:
+            try:
+                result["revenue_yoy"] = float(rev_growth) * 100
+            except (ValueError, TypeError):
+                pass
+        gross = info.get("grossMargins")
+        if gross is not None:
+            try:
+                result["gross_margin"] = float(gross) * 100
+            except (ValueError, TypeError):
+                pass
+        peg = info.get("trailingPegRatio")
+        if peg is not None:
+            try:
+                result["peg"] = float(peg)
+            except (ValueError, TypeError):
+                pass
+        return result
+
+    def _yf_ticker(self, symbol: str, asset_type: str) -> str:
+        """Convert symbol to yfinance ticker format."""
+        if asset_type == "hk":
+            if symbol.upper().endswith(".HK"):
+                code = symbol[:-3].lstrip("0") or "0"
+                return f"{code.zfill(4)}.HK"
+            if symbol.isdigit():
+                code = symbol.lstrip("0") or "0"
+                return f"{code.zfill(4)}.HK"
+            return symbol
+        if asset_type == "us":
+            return symbol.upper().replace(".US", "")
+        return symbol
+
     def _eastmoney_symbol(self, symbol: str) -> str:
         if symbol.startswith(("6", "9")):
             return f"{symbol}.SH"
         return f"{symbol}.SZ"
+
+    # ── 工具方法 ─────────────────────────────────────────────
 
     def _weighted_average(self, rows: Iterable[Dict[str, Any]], field: str) -> Optional[float]:
         pairs: list[tuple[float, float]] = []

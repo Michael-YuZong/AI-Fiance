@@ -742,18 +742,23 @@ class OpportunityReportRenderer:
             )
             for risk in analysis["rating"]["warnings"][:2]:
                 lines.append(risk)
+            action = analysis["action"]
             lines.extend(
                 [
                     "",
                     "**建议操作：**",
-                    f"- 介入条件：{analysis['action']['entry']}",
-                    f"- 建议仓位：{analysis['action']['position']}",
-                    f"- 止损参考：{analysis['action']['stop']}",
-                    f"- 目标参考：{analysis['action'].get('target', '待定')}",
-                    "",
-                    "---",
+                    f"- 介入条件：{action['entry']}",
+                    f"- 建议仓位：{action['position']}",
+                    f"- 单标的上限：{action.get('max_portfolio_exposure', '—')}",
+                    f"- 加仓节奏：{action.get('scaling_plan', '—')}",
+                    f"- 建议止损：{action.get('stop_loss_pct', '—')}",
+                    f"- 止损参考：{action['stop']}",
+                    f"- 目标参考：{action.get('target', '待定')}",
                 ]
             )
+            if action.get("correlated_warning"):
+                lines.append(f"- ⚠️ 相关性：{action['correlated_warning']}")
+            lines.extend(["", "---"])
 
         if payload.get("blind_spots"):
             lines.extend(["", "## 数据盲区与降级说明"])
