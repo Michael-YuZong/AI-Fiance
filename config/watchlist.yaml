@@ -34,3 +34,47 @@ watchlist:
     region: "CN"
     sector: "黄金"
     chain_nodes: ["黄金", "通胀预期"]
+  - symbol: "588200"
+    name: "科创芯片ETF"
+    asset_type: "cn_etf"
+    region: "CN"
+    sector: "半导体"
+    chain_nodes: ["半导体", "科创板", "国产替代"]
+  - symbol: "516960"
+    name: "工程机械ETF"
+    asset_type: "cn_etf"
+    region: "CN"
+    sector: "工程机械"
+    chain_nodes: ["基建", "工程机械", "出口"]
+  - symbol: "513120"
+    name: "港股创新药ETF"
+    asset_type: "cn_etf"
+    region: "HK"
+    sector: "创新药"
+    chain_nodes: ["创新药", "港股医药", "FDA"]
+  - symbol: "512400"
+    name: "有色金属ETF"
+    asset_type: "cn_etf"
+    region: "CN"
+    sector: "有色金属"
+    chain_nodes: ["铜铝", "锂", "稀土", "有色金属"]
+  - symbol: "512480"
+    name: "半导体ETF"
+    asset_type: "cn_etf"
+    region: "CN"
+    sector: "半导体"
+    chain_nodes: ["半导体", "算力", "AI硬件"]
+  - symbol: "515070"
+    name: "人工智能ETF"
+    asset_type: "cn_etf"
+    region: "CN"
+    sector: "人工智能"
+    chain_nodes: ["AI应用", "人工智能", "算力"]
+  - symbol: "000510"
+    name: "中证A500指数"
+    asset_type: "cn_index"
+    proxy_symbol: "159351"
+    region: "CN"
+    sector: "宽基"
+    chain_nodes: ["宽基", "A股核心资产", "内需"]
+    notes: "使用 159351 作为行情代理"

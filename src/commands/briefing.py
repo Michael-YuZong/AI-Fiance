@@ -62,6 +62,7 @@ class BriefingSnapshot:
     notes: str = ""
     technical: Dict[str, Any] = field(default_factory=dict)
     technical_bias: str = "分歧"
+    history: pd.DataFrame = field(default_factory=lambda: pd.DataFrame())
 
 
 REGIME_LABELS = {
@@ -82,7 +83,7 @@ THEME_ASSET_PREFERENCES = {
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate daily or weekly market briefing.")
-    parser.add_argument("mode", choices=["daily", "weekly"], help="Briefing mode")
+    parser.add_argument("mode", choices=["daily", "weekly", "noon", "evening"], help="Briefing mode")
     parser.add_argument("--news-source", action="append", default=[], help="Preferred news source, e.g. Reuters")
     parser.add_argument("--config", default="", help="Optional path to config YAML")
     return parser
@@ -308,6 +309,7 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
                 notes=item.get("notes", ""),
                 technical=technical,
                 technical_bias=technical_bias,
+                history=history,
             )
             snapshots.append(snapshot)
             rows.append(
@@ -1585,7 +1587,7 @@ def _liquidity_lines(config: Dict[str, Any]) -> List[str]:
             direction = "净流入" if north >= 0 else "净流出"
             lines.append(f"北向资金当日{direction}约 {_fmt_hsgt_amount(north)}。")
         else:
-            lines.append("北向资金当日读数接近 0 或未更新，今日改用南向资金、全市场主力流向和龙虎榜活跃度做代理。")
+            lines.append("北向资金当日净买额尚未更新（盘中或收盘前通常为 0），今日改用南向资金、全市场主力流向和龙虎榜活跃度做代理。")
         if abs(south) > 1e-6:
             direction = "净流入" if south >= 0 else "净流出"
             lines.append(f"南向资金当日{direction}约 {_fmt_hsgt_amount(south)}，可作为 HSTECH 情绪承接的辅助观察。")
@@ -1601,6 +1603,14 @@ def _liquidity_lines(config: Dict[str, Any]) -> List[str]:
 
     if margin.empty:
         lines.append("融资融券明细接口今日异常或为空，短线情绪改看昨日涨停承接、龙虎榜净买额和主力资金方向。")
+    else:
+        # Summarise margin balance from the latest available date
+        fin_bal_col = "融资余额"
+        if fin_bal_col in margin.columns:
+            total_bal = pd.to_numeric(margin[fin_bal_col], errors="coerce").sum()
+            if total_bal > 0:
+                bal_yi = total_bal / 1e8 if total_bal > 1e6 else total_bal
+                lines.append(f"融资余额约 {bal_yi:.0f} 亿元。")
     return lines[:4] or ["资金与流动性明细暂不可用。"]
 
 
@@ -2817,11 +2827,445 @@ def _appendix_allocation_rows(narrative: Dict[str, Any], monitor_rows: List[Dict
     return rows
 
 
+def _load_same_day_briefing(mode: str = "daily") -> Optional[str]:
+    """Load today's briefing markdown for the given mode, or None if not found."""
+    reports_dir = resolve_project_path("reports")
+    if not reports_dir.exists():
+        return None
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    path = reports_dir / f"{mode}_briefing_{date_str}.md"
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _parse_prior_verification_rows(md_text: Optional[str]) -> List[List[str]]:
+    """Extract verification point rows from a prior briefing markdown."""
+    if not md_text:
+        return []
+    section_match = re.search(r"### 4\.1 验证点表\s*(.*?)(?:\n### |\n## |\Z)", md_text, re.S)
+    if not section_match:
+        return []
+    rows: List[List[str]] = []
+    for line in section_match.group(1).splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if not cells or cells[0] in {"#", "---"} or all(set(cell) <= {"-"} for cell in cells):
+            continue
+        rows.append(cells)
+    return rows
+
+
+def _parse_prior_headline(md_text: Optional[str]) -> str:
+    """Extract the headline/main thesis from a prior briefing."""
+    if not md_text:
+        return ""
+    match = re.search(r"### 1\.1 今日主线\s*(.*?)(?:\n### |\n## |\Z)", md_text, re.S)
+    if not match:
+        return ""
+    lines = [line.strip() for line in match.group(1).splitlines() if line.strip()]
+    return lines[0] if lines else ""
+
+
+def _evaluate_prior_verification(
+    prior_rows: List[List[str]],
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+) -> List[List[str]]:
+    """Evaluate prior verification points against current data."""
+    if not prior_rows:
+        return []
+    monitor = _monitor_map(monitor_rows)
+    brent = monitor.get("布伦特原油", {})
+    vix = monitor.get("VIX波动率", {})
+    dxy = monitor.get("美元指数", {})
+    hstech = _find_snapshot(snapshots, "HSTECH")
+    grid = _find_snapshot(snapshots, "561380")
+    gld = _find_snapshot(snapshots, "GLD")
+
+    result: List[List[str]] = []
+    for row in prior_rows:
+        if len(row) < 3:
+            continue
+        label = row[1] if len(row) > 1 else ""
+        criterion = row[2] if len(row) > 2 else ""
+        actual = "暂无数据"
+        passed = False
+
+        if "原油" in label and brent:
+            open_price = _to_float(brent.get("open"))
+            close_price = _to_float(brent.get("latest"))
+            actual = f"收 {close_price:.2f}，{format_pct(_to_float(brent.get('return_1d')))}"
+            passed = close_price < open_price if open_price > 0 else False
+        elif "VIX" in label and vix:
+            vix_val = _to_float(vix.get("latest"))
+            actual = f"VIX {vix_val:.1f}"
+            passed = vix_val < 27
+        elif "HSTECH" in label and hstech:
+            actual = f"收 {hstech.latest_price:.3f}，{format_pct(hstech.return_1d)}"
+            passed = hstech.return_1d > 0
+        elif "561380" in label and grid:
+            actual = f"{format_pct(grid.return_1d)}"
+            try:
+                overview = MarketOverviewCollector({}).collect()
+                for item in overview.get("domestic_indices", []):
+                    if item.get("name") == "沪深300":
+                        hs300_pct = _to_float(item.get("change_pct"))
+                        alpha = grid.return_1d - hs300_pct
+                        actual = f"超额 {alpha*100:+.2f}%"
+                        passed = alpha > 0
+                        break
+            except Exception:
+                pass
+        elif "黄金" in label and gld:
+            actual = f"GLD {format_pct(gld.return_1d)}"
+            dxy_ret = _to_float(dxy.get("return_1d"))
+            passed = gld.return_1d > 0.005 and dxy_ret < 0
+        else:
+            actual = "标的数据缺失"
+            passed = False
+
+        result.append([label, criterion, actual, "✅" if passed else "❌"])
+
+    return result[:5]
+
+
+def _noon_strategy_adjustment(
+    prior_headline: str,
+    eval_rows: List[List[str]],
+    snapshots: List[BriefingSnapshot],
+    narrative: Dict[str, Any],
+) -> List[str]:
+    """Generate strategy adjustment lines for the noon briefing."""
+    if not eval_rows:
+        return ["暂无晨报验证点，无法自动修正策略。参考当前盘面自行判断。"]
+    hits = sum(1 for r in eval_rows if r[-1] == "✅")
+    total = len(eval_rows)
+    lines: List[str] = []
+    if prior_headline:
+        lines.append(f"晨报主线: {prior_headline}")
+    if hits == total:
+        lines.append(f"上午验证 {hits}/{total} 全部兑现，主线逻辑延续，下午可沿用晨报策略。")
+    elif hits >= total / 2:
+        lines.append(f"上午验证 {hits}/{total} 部分兑现，主线大体有效，但需留意未兑现验证点对应方向的风险。")
+    else:
+        lines.append(f"上午验证仅 {hits}/{total} 兑现，晨报主线可能需要修正。")
+        failed = [r[0] for r in eval_rows if r[-1] == "❌"]
+        if failed:
+            lines.append(f"未兑现: {'、'.join(failed[:3])}。下午注意规避相关方向。")
+    if snapshots:
+        strongest = max(snapshots, key=lambda s: s.return_1d)
+        weakest = min(snapshots, key=lambda s: s.return_1d)
+        lines.append(f"上午最强: {strongest.name}({format_pct(strongest.return_1d)})，最弱: {weakest.name}({format_pct(weakest.return_1d)})。")
+    return lines[:5]
+
+
+def _noon_action_lines(
+    eval_rows: List[List[str]],
+    snapshots: List[BriefingSnapshot],
+    narrative: Dict[str, Any],
+    monitor_rows: List[Dict[str, Any]],
+) -> List[str]:
+    """Generate afternoon action recommendations for noon briefing."""
+    hits = sum(1 for r in eval_rows if r[-1] == "✅") if eval_rows else 0
+    total = len(eval_rows) if eval_rows else 0
+    lines: List[str] = []
+    if total > 0 and hits == total:
+        lines.append("下午延续晨报策略，顺势持有不追高。关注尾盘是否出现获利盘压力。")
+    elif total > 0 and hits < total / 2:
+        lines.append("下午偏防守，减少追高操作。若持仓方向与未兑现验证点一致，考虑减仓。")
+    else:
+        lines.append("下午保持灵活，验证与观察并行。")
+    if snapshots:
+        strongest = max(snapshots, key=lambda s: s.signal_score)
+        lines.append(f"下午重点关注 {strongest.name}，它当前信号最强，可作为主线验证器。")
+    lines.append("执行节奏: 13:00 开盘后先观察 15 分钟延续性，确认后再执行。")
+    return lines[:4]
+
+
+def _noon_verification_rows(
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+) -> List[List[str]]:
+    """Generate afternoon verification points for noon briefing."""
+    rows: List[List[str]] = []
+    if snapshots:
+        strongest = max(snapshots, key=lambda s: s.return_1d)
+        rows.append(["1", f"{strongest.name}延续", f"{strongest.name} 下午涨幅不回吐超过一半", "主线确认，可持有过夜", "可能尾盘跳水，谨慎持有"])
+    monitor = _monitor_map(monitor_rows)
+    if monitor.get("VIX波动率"):
+        vix_val = _to_float(monitor["VIX波动率"].get("latest"))
+        rows.append(["2", "VIX 趋势", f"VIX 维持在 {vix_val:.0f} 附近不突破", "波动率稳定，可正常操作", "波动率放大，降低仓位"])
+    if snapshots:
+        weakest = min(snapshots, key=lambda s: s.return_1d)
+        rows.append(["3", f"{weakest.name}止跌", f"{weakest.name} 下午不再创新低", "最弱环节企稳", "弱势延续，回避该方向"])
+    return rows[:3]
+
+
+def _evening_hit_rate_summary(eval_rows: List[List[str]]) -> List[str]:
+    """Generate hit rate summary lines for evening verification review."""
+    if not eval_rows:
+        return ["暂无验证点可回顾。"]
+    hits = sum(1 for r in eval_rows if r[-1] == "✅")
+    total = len(eval_rows)
+    rate = hits / total if total else 0
+    verdict = "框架精准" if rate >= 0.8 else "框架大体有效" if rate >= 0.5 else "需要系统修正"
+    lines = [f"全日验证命中率: {hits}/{total} ({rate:.0%})。{verdict}。"]
+    if rate < 0.5:
+        failed_directions = [r[0] for r in eval_rows if r[-1] == "❌"]
+        lines.append(f"未命中方向: {'、'.join(failed_directions[:3])}。建议降低相关主线权重。")
+    return lines
+
+
+def _evening_narrative_review(
+    prior_headline: str,
+    eval_rows: List[List[str]],
+    snapshots: List[BriefingSnapshot],
+    narrative: Dict[str, Any],
+) -> List[str]:
+    """Generate narrative review lines for evening briefing."""
+    lines: List[str] = []
+    if prior_headline:
+        lines.append(f"晨报主线: {prior_headline}")
+    today_theme = str(narrative.get("label", "未识别"))
+    lines.append(f"实际驱动: {today_theme}")
+    if eval_rows:
+        hits = sum(1 for r in eval_rows if r[-1] == "✅")
+        total = len(eval_rows)
+        if hits == total:
+            lines.append("晨报判断全部兑现，主线叙事逻辑得到验证。")
+        elif hits > total / 2:
+            lines.append("晨报判断部分兑现，大方向正确但细节需调整。")
+        else:
+            lines.append("晨报判断多数未兑现，市场实际走势偏离预期，需反思框架假设。")
+    if snapshots:
+        strongest = max(snapshots, key=lambda s: s.return_1d)
+        weakest = min(snapshots, key=lambda s: s.return_1d)
+        lines.append(f"今日最强: {strongest.name}({format_pct(strongest.return_1d)})，最弱: {weakest.name}({format_pct(weakest.return_1d)})。")
+    return lines[:5]
+
+
+def _tomorrow_outlook_lines(
+    narrative: Dict[str, Any],
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+    overnight_rows: List[List[str]],
+) -> List[str]:
+    """Generate tomorrow outlook lines for evening briefing."""
+    lines: List[str] = []
+    theme = str(narrative.get("label", "未识别"))
+    lines.append(f"今日主线 `{theme}` 的延续性需要明天开盘验证。")
+    if overnight_rows:
+        lines.append("关注隔夜外盘走势，尤其是美股和大宗商品对 A 股情绪的传导。")
+    monitor = _monitor_map(monitor_rows)
+    vix = monitor.get("VIX波动率", {})
+    vix_val = _to_float(vix.get("latest"))
+    if vix_val > 20:
+        lines.append(f"VIX 仍在 {vix_val:.1f}，波动率环境偏高，明天操作需留安全边际。")
+    if snapshots:
+        trending = [s for s in snapshots if s.trend == "多头" and s.return_1d > 0]
+        if trending:
+            names = "、".join(s.name for s in trending[:3])
+            lines.append(f"多头趋势延续标的: {names}，明天可优先跟踪。")
+    return lines[:5]
+
+
+def _tomorrow_verification_rows(
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+    narrative: Dict[str, Any],
+) -> List[List[str]]:
+    """Generate preliminary verification points for tomorrow."""
+    rows: List[List[str]] = []
+    if snapshots:
+        strongest = max(snapshots, key=lambda s: s.return_1d)
+        rows.append(["1", f"{strongest.name}延续", f"明日{strongest.name}涨幅 > 0", "主线持续，可持有", "考虑止盈或减仓"])
+    monitor = _monitor_map(monitor_rows)
+    if monitor.get("布伦特原油"):
+        rows.append(["2", "原油动向", "布伦特波动 < 2%", "宏观平稳", "能源冲击再起，需调整框架"])
+    if monitor.get("VIX波动率"):
+        rows.append(["3", "VIX 趋势", "VIX 不显著上升", "风险偏好维持", "避险升温，减仓弹性品种"])
+    return rows[:3]
+
+
+def _tomorrow_action_lines(
+    eval_rows: List[List[str]],
+    snapshots: List[BriefingSnapshot],
+    narrative: Dict[str, Any],
+) -> List[str]:
+    """Generate action recommendations for tomorrow."""
+    lines: List[str] = []
+    if eval_rows:
+        hits = sum(1 for r in eval_rows if r[-1] == "✅")
+        total = len(eval_rows)
+        if hits >= total * 0.8:
+            lines.append("今日框架有效，明天可延续策略方向，适度加大置信度。")
+        elif hits >= total * 0.5:
+            lines.append("今日框架部分有效，明天维持方向但仓位不宜激进。")
+        else:
+            lines.append("今日框架偏差较大，明天先观望为主，等开盘数据重新定性。")
+    else:
+        lines.append("无今日验证数据，明天以观察为主。")
+    if snapshots:
+        strongest = max(snapshots, key=lambda s: s.signal_score)
+        lines.append(f"明日优先方向: {strongest.name}，当前信号评分最高。")
+    lines.append("执行节奏: 明天开盘前先看外盘和早报更新，再决定是否调整。")
+    return lines[:4]
+
+
+def _build_noon_payload(
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+    overview: Dict[str, Any],
+    pulse: Dict[str, Any],
+    drivers: Dict[str, Any],
+    narrative: Dict[str, Any],
+    watchlist_rows: List[List[str]],
+    events: Dict[str, Any],
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build payload for noon briefing."""
+    morning_md = _load_same_day_briefing("daily")
+    prior_rows = _parse_prior_verification_rows(morning_md)
+    prior_headline = _parse_prior_headline(morning_md)
+    eval_rows = _evaluate_prior_verification(prior_rows, snapshots, monitor_rows)
+    domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
+    style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
+    industry_rows = _industry_rank_rows(drivers, narrative, {})
+
+    return {
+        "title": "午间盘中简报",
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "morning_eval_rows": eval_rows,
+        "morning_eval_fallback": "暂无今日晨报，跳过策略验证。" if not morning_md else "",
+        "domestic_index_rows": domestic_index_rows,
+        "domestic_market_lines": domestic_market_lines,
+        "style_rows": style_rows,
+        "industry_rows": industry_rows,
+        "watchlist_rows": watchlist_rows,
+        "strategy_adjustment_lines": _noon_strategy_adjustment(prior_headline, eval_rows, snapshots, narrative),
+        "afternoon_action_lines": _noon_action_lines(eval_rows, snapshots, narrative, monitor_rows),
+        "afternoon_verification_rows": _noon_verification_rows(snapshots, monitor_rows),
+        "afternoon_event_rows": _workflow_event_rows(events),
+        "portfolio_lines": _portfolio_lines(config),
+        "portfolio_table_rows": _portfolio_table_rows(config),
+    }
+
+
+def _build_evening_payload(
+    snapshots: List[BriefingSnapshot],
+    monitor_rows: List[Dict[str, Any]],
+    overview: Dict[str, Any],
+    pulse: Dict[str, Any],
+    drivers: Dict[str, Any],
+    narrative: Dict[str, Any],
+    news_report: Dict[str, Any],
+    watchlist_rows: List[List[str]],
+    config: Dict[str, Any],
+    anomaly_report: Dict[str, Any],
+    overnight_rows: List[List[str]],
+    liquidity_lines: List[str],
+) -> Dict[str, Any]:
+    """Build payload for evening briefing."""
+    morning_md = _load_same_day_briefing("daily")
+    prior_rows = _parse_prior_verification_rows(morning_md)
+    prior_headline = _parse_prior_headline(morning_md)
+    eval_rows = _evaluate_prior_verification(prior_rows, snapshots, monitor_rows)
+    domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
+    style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
+    industry_rows = _industry_rank_rows(drivers, narrative, news_report)
+    macro_asset_rows = _macro_asset_rows(monitor_rows, anomaly_report)
+    catalyst_rows = _catalyst_rows(news_report, narrative)
+    capital_flow_lines = _capital_flow_lines(pulse, drivers, liquidity_lines, snapshots)
+
+    return {
+        "title": "收盘晚报",
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "full_day_eval_rows": eval_rows,
+        "full_day_eval_fallback": "暂无今日晨报，跳过全日验证。" if not morning_md else "",
+        "hit_rate_lines": _evening_hit_rate_summary(eval_rows),
+        "domestic_index_rows": domestic_index_rows,
+        "domestic_market_lines": domestic_market_lines,
+        "style_rows": style_rows,
+        "industry_rows": industry_rows,
+        "macro_asset_rows": macro_asset_rows,
+        "watchlist_rows": watchlist_rows,
+        "narrative_review_lines": _evening_narrative_review(prior_headline, eval_rows, snapshots, narrative),
+        "core_event_lines": _core_event_lines(news_report, catalyst_rows),
+        "capital_flow_lines": capital_flow_lines,
+        "overnight_rows": overnight_rows,
+        "tomorrow_outlook_lines": _tomorrow_outlook_lines(narrative, snapshots, monitor_rows, overnight_rows),
+        "tomorrow_verification_rows": _tomorrow_verification_rows(snapshots, monitor_rows, narrative),
+        "tomorrow_action_lines": _tomorrow_action_lines(eval_rows, snapshots, narrative),
+        "portfolio_lines": _portfolio_lines(config),
+        "portfolio_table_rows": _portfolio_table_rows(config),
+        "appendix_technical_rows": _appendix_technical_rows(snapshots),
+        "appendix_lhb_lines": _lhb_lines(pulse),
+        "appendix_flow_lines": _flow_lines(snapshots, config) + _sentiment_lines(snapshots, config),
+        "charts": _render_briefing_charts(snapshots),
+    }
+
+
 def _persist_briefing(markdown: str, mode: str) -> None:
     reports_dir = resolve_project_path("reports")
     reports_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{mode}_briefing_{datetime.now().strftime('%Y-%m-%d')}.md"
-    (reports_dir / filename).write_text(markdown, encoding="utf-8")
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    filename = f"{mode}_briefing_{date_str}.md"
+    md_path = reports_dir / filename
+    md_path.write_text(markdown, encoding="utf-8")
+
+    pdf_path = reports_dir / f"{mode}_briefing_{date_str}.pdf"
+    _export_pdf(markdown, pdf_path)
+
+
+def _export_pdf(markdown_text: str, pdf_path: Path) -> None:
+    """Convert briefing markdown to styled PDF."""
+    try:
+        from src.output.briefing_pdf import render_briefing_pdf
+        render_briefing_pdf(markdown_text, pdf_path)
+    except Exception:
+        pass
+
+
+def _render_briefing_charts(snapshots: List[BriefingSnapshot]) -> Dict[str, Dict[str, str]]:
+    """Generate windows and indicators charts for each watchlist item."""
+    from src.output.analysis_charts import AnalysisChartRenderer
+
+    renderer = AnalysisChartRenderer()
+    if not renderer.enabled:
+        return {}
+
+    charts: Dict[str, Dict[str, str]] = {}
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    for snap in snapshots:
+        if snap.history.empty:
+            continue
+        analysis = {
+            "symbol": snap.symbol,
+            "name": snap.name,
+            "generated_at": stamp,
+            "history": snap.history,
+            "technical_raw": snap.technical,
+        }
+        base = f"{snap.symbol}_{stamp}"
+        windows_path = renderer.output_dir / f"{base}_windows.png"
+        indicators_path = renderer.output_dir / f"{base}_indicators.png"
+        renderer._render_windows(analysis, snap.history.copy(), windows_path)
+        renderer._render_indicators(analysis, snap.history.copy(), indicators_path)
+        label = f"{snap.name} ({snap.symbol})"
+        paths: Dict[str, str] = {}
+        if windows_path.exists():
+            paths["windows"] = str(windows_path.resolve())
+        if indicators_path.exists():
+            paths["indicators"] = str(indicators_path.resolve())
+        if paths:
+            charts[label] = paths
+    return charts
 
 
 def main() -> None:
@@ -2864,61 +3308,78 @@ def main() -> None:
     if global_proxy_note:
         macro_items.append(global_proxy_note)
 
-    yesterday_rows = _yesterday_review_rows(snapshots, monitor_rows)
-    yesterday_lines = _yesterday_review_summary_lines(yesterday_rows)
-    domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
-    style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
-    industry_rows = _industry_rank_rows(drivers, narrative, news_report)
-    macro_asset_rows = _macro_asset_rows(monitor_rows, anomaly_report)
     overnight_rows = _overnight_rows(overview)
-    catalyst_rows = _catalyst_rows(news_report, narrative)
-    theme_tracking_rows = _theme_tracking_rows(narrative, drivers)
-    theme_tracking_lines = _theme_tracking_lines(narrative, theme_tracking_rows, args.mode)
-    capital_flow_lines = _capital_flow_lines(pulse, drivers, liquidity_lines, snapshots)
-    quality_lines = _quality_lines(news_report, anomaly_report)
-    verification_rows = _verification_rows_v4(snapshots, monitor_rows)
-    portfolio_lines = _portfolio_lines(config)
-    portfolio_table_rows = _portfolio_table_rows(config)
 
-    payload = {
-        "title": "每日晨报" if args.mode == "daily" else "每周周报",
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "data_coverage": data_coverage,
-        "missing_sources": missing_sources,
-        "headline_lines": _compact_headline_lines(narrative, china_macro, monitor_rows, pulse)
-        + _compact_validation_lines(narrative, monitor_rows, pulse),
-        "yesterday_review_rows": yesterday_rows,
-        "yesterday_review_lines": yesterday_lines,
-        "domestic_index_rows": domestic_index_rows,
-        "domestic_market_lines": domestic_market_lines,
-        "style_rows": style_rows,
-        "industry_rows": industry_rows,
-        "macro_asset_rows": macro_asset_rows,
-        "overnight_rows": overnight_rows,
-        "watchlist_rows": watchlist_rows,
-        "core_event_lines": _core_event_lines(news_report, catalyst_rows),
-        "theme_tracking_rows": theme_tracking_rows,
-        "theme_tracking_lines": theme_tracking_lines,
-        "market_event_rows": _market_event_rows(news_report, narrative),
-        "workflow_event_rows": _workflow_event_rows(events),
-        "capital_flow_lines": capital_flow_lines,
-        "quality_lines": quality_lines,
-        "verification_rows": verification_rows,
-        "portfolio_lines": portfolio_lines,
-        "portfolio_table_rows": portfolio_table_rows,
-        "appendix_technical_rows": _appendix_technical_rows(snapshots),
-        "appendix_lhb_lines": _lhb_lines(pulse),
-        "appendix_flow_lines": _flow_lines(snapshots, config) + _sentiment_lines(snapshots, config),
-        "appendix_derivative_lines": _appendix_derivative_lines(narrative, monitor_rows),
-        "appendix_earnings_rows": _appendix_earnings_rows(news_report),
-        "appendix_allocation_rows": _appendix_allocation_rows(narrative, monitor_rows),
-        "flow_lines": _flow_lines(snapshots, config),
-        "watchlist_technical_lines": _watchlist_technical_lines(snapshots),
-        "sentiment_lines": _sentiment_lines(snapshots, config),
-        "alerts": alerts or ["当前没有触发强提醒，但仍需关注强弱方向是否在盘中发生切换。"],
-        "action_lines": _action_lines(snapshots, narrative, monitor_rows),
-    }
-    rendered = BriefingRenderer().render(payload)
+    if args.mode == "noon":
+        payload = _build_noon_payload(
+            snapshots, monitor_rows, overview, pulse, drivers,
+            narrative, watchlist_rows, events, config,
+        )
+        rendered = BriefingRenderer().render_noon(payload)
+    elif args.mode == "evening":
+        payload = _build_evening_payload(
+            snapshots, monitor_rows, overview, pulse, drivers,
+            narrative, news_report, watchlist_rows, config,
+            anomaly_report, overnight_rows, liquidity_lines,
+        )
+        rendered = BriefingRenderer().render_evening(payload)
+    else:
+        yesterday_rows = _yesterday_review_rows(snapshots, monitor_rows)
+        yesterday_lines = _yesterday_review_summary_lines(yesterday_rows)
+        domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
+        style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
+        industry_rows = _industry_rank_rows(drivers, narrative, news_report)
+        macro_asset_rows = _macro_asset_rows(monitor_rows, anomaly_report)
+        catalyst_rows = _catalyst_rows(news_report, narrative)
+        theme_tracking_rows = _theme_tracking_rows(narrative, drivers)
+        theme_tracking_lines = _theme_tracking_lines(narrative, theme_tracking_rows, args.mode)
+        capital_flow_lines = _capital_flow_lines(pulse, drivers, liquidity_lines, snapshots)
+        quality_lines = _quality_lines(news_report, anomaly_report)
+        verification_rows = _verification_rows_v4(snapshots, monitor_rows)
+        portfolio_lines = _portfolio_lines(config)
+        portfolio_table_rows = _portfolio_table_rows(config)
+        briefing_charts = _render_briefing_charts(snapshots)
+
+        payload = {
+            "title": "每日晨报" if args.mode == "daily" else "每周周报",
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "data_coverage": data_coverage,
+            "missing_sources": missing_sources,
+            "headline_lines": _compact_headline_lines(narrative, china_macro, monitor_rows, pulse)
+            + _compact_validation_lines(narrative, monitor_rows, pulse),
+            "yesterday_review_rows": yesterday_rows,
+            "yesterday_review_lines": yesterday_lines,
+            "domestic_index_rows": domestic_index_rows,
+            "domestic_market_lines": domestic_market_lines,
+            "style_rows": style_rows,
+            "industry_rows": industry_rows,
+            "macro_asset_rows": macro_asset_rows,
+            "overnight_rows": overnight_rows,
+            "watchlist_rows": watchlist_rows,
+            "core_event_lines": _core_event_lines(news_report, catalyst_rows),
+            "theme_tracking_rows": theme_tracking_rows,
+            "theme_tracking_lines": theme_tracking_lines,
+            "market_event_rows": _market_event_rows(news_report, narrative),
+            "workflow_event_rows": _workflow_event_rows(events),
+            "capital_flow_lines": capital_flow_lines,
+            "quality_lines": quality_lines,
+            "verification_rows": verification_rows,
+            "portfolio_lines": portfolio_lines,
+            "portfolio_table_rows": portfolio_table_rows,
+            "appendix_technical_rows": _appendix_technical_rows(snapshots),
+            "appendix_lhb_lines": _lhb_lines(pulse),
+            "appendix_flow_lines": _flow_lines(snapshots, config) + _sentiment_lines(snapshots, config),
+            "appendix_derivative_lines": _appendix_derivative_lines(narrative, monitor_rows),
+            "appendix_earnings_rows": _appendix_earnings_rows(news_report),
+            "appendix_allocation_rows": _appendix_allocation_rows(narrative, monitor_rows),
+            "flow_lines": _flow_lines(snapshots, config),
+            "watchlist_technical_lines": _watchlist_technical_lines(snapshots),
+            "sentiment_lines": _sentiment_lines(snapshots, config),
+            "alerts": alerts or ["当前没有触发强提醒，但仍需关注强弱方向是否在盘中发生切换。"],
+            "action_lines": _action_lines(snapshots, narrative, monitor_rows),
+            "charts": briefing_charts,
+        }
+        rendered = BriefingRenderer().render(payload)
     _persist_briefing(rendered, args.mode)
     print(rendered)
 

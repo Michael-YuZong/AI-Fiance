@@ -46,6 +46,10 @@ def route_request(
     if any(keyword in text for keyword in ["代码", "编号", "哪只ETF", "对应ETF", "对应代码", "是什么ETF"]) and symbols:
         return RoutedCommand("lookup", [text], "识别为标的代码/编号查询。")
 
+    if any(keyword in text for keyword in ["午报", "午间", "盘中简报"]):
+        return RoutedCommand("briefing", ["noon"], "识别为午报/盘中简报需求。")
+    if any(keyword in text for keyword in ["晚报", "收盘总结", "今日总结", "收盘"]):
+        return RoutedCommand("briefing", ["evening"], "识别为晚报/收盘总结需求。")
     if any(keyword in text for keyword in ["晨报", "早报", "今天的财经", "今日财经", "日报"]):
         return RoutedCommand("briefing", ["daily"], "识别为晨报/日度简报需求。")
     if any(keyword in text for keyword in ["周报", "周度简报"]):

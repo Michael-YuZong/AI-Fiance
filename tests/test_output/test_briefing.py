@@ -67,3 +67,87 @@ def test_briefing_renderer_outputs_core_sections():
     assert "<details>" in rendered
     assert "561380" in rendered
     assert "组合市值 100000。" in rendered
+
+
+def test_noon_renderer_outputs_core_sections():
+    payload = {
+        "title": "午间盘中简报",
+        "generated_at": "2026-03-10 11:45:00",
+        "morning_eval_rows": [["原油冲高回落", "布伦特收盘 < 开盘价", "收 81.23 +0.4%", "❌"]],
+        "morning_eval_fallback": "",
+        "domestic_index_rows": [["上证指数", "3300.00", "+0.10%", "4000", "—", "偏强"]],
+        "domestic_market_lines": ["全市场成交额: 12000亿。"],
+        "style_rows": [["大盘 vs 小盘", "中证1000 +1.0%", "沪深300 -0.2%", "偏小盘"]],
+        "industry_rows": [["1", "半导体", "+2.50%", "AI算力催化"]],
+        "watchlist_rows": [["561380", "2.234", "+1.00%", "+2.00%", "+3.00%", "多头", "66"]],
+        "strategy_adjustment_lines": ["晨报主线: 偏防守", "上午验证 1/1 未兑现，需修正。"],
+        "afternoon_action_lines": ["下午偏防守，减少追高操作。"],
+        "afternoon_verification_rows": [["1", "561380延续", "下午涨幅不回吐超过一半", "主线确认", "谨慎持有"]],
+        "afternoon_event_rows": [["14:00", "盘中检查", "关注资金流向"]],
+        "portfolio_lines": ["组合市值 100000。"],
+        "portfolio_table_rows": [["561380", "多", "2.10", "2.23", "+6.0%", "电网投资", "持有"]],
+    }
+    rendered = BriefingRenderer().render_noon(payload)
+    assert "# 午间盘中简报" in rendered
+    assert "## 0. 晨报策略验证" in rendered
+    assert "## 1. 上午盘面回顾" in rendered
+    assert "### 1.1 指数与成交" in rendered
+    assert "### 1.2 风格与行业" in rendered
+    assert "### 1.3 Watchlist 表现" in rendered
+    assert "## 2. 策略修正" in rendered
+    assert "### 2.1 主线修正" in rendered
+    assert "### 2.2 下午怎么做" in rendered
+    assert "## 3. 下午看点" in rendered
+    assert "### 3.1 下午验证点" in rendered
+    assert "### 3.2 操作提醒" in rendered
+    assert "## 4. 组合与持仓" in rendered
+    assert "561380" in rendered
+
+
+def test_evening_renderer_outputs_core_sections():
+    payload = {
+        "title": "收盘晚报",
+        "generated_at": "2026-03-10 16:00:00",
+        "full_day_eval_rows": [["原油冲高回落", "布伦特收盘 < 开盘价", "收 80.50 -0.5%", "✅"]],
+        "full_day_eval_fallback": "",
+        "hit_rate_lines": ["全日验证命中率: 1/1 (100%)。框架精准。"],
+        "domestic_index_rows": [["上证指数", "3310.00", "+0.30%", "5000", "+25%", "偏强"]],
+        "domestic_market_lines": ["全市场成交额: 15000亿。"],
+        "style_rows": [["大盘 vs 小盘", "沪深300 +0.5%", "中证1000 -0.1%", "偏大盘"]],
+        "industry_rows": [["1", "人工智能", "+3.80%", "算力催化"]],
+        "macro_asset_rows": [["布伦特原油", "80.50", "-0.50%", "+2.00%", "+8.00%", "正常", "—"]],
+        "watchlist_rows": [["515070", "1.234", "+2.00%", "+5.00%", "+8.00%", "多头", "72"]],
+        "narrative_review_lines": ["晨报主线: 偏防守", "实际驱动: AI算力"],
+        "core_event_lines": ["**AI算力政策**\n  → 半导体利好"],
+        "capital_flow_lines": ["主力资金净流入 8.50 亿。"],
+        "overnight_rows": [["美股", "标普500", "5100.00", "+0.50%", "偏强"]],
+        "tomorrow_outlook_lines": ["今日主线 AI算力 的延续性需要明天开盘验证。"],
+        "tomorrow_verification_rows": [["1", "人工智能ETF延续", "明日涨幅 > 0", "主线持续", "考虑止盈"]],
+        "tomorrow_action_lines": ["今日框架有效，明天可延续策略方向。"],
+        "portfolio_lines": ["组合市值 105000。"],
+        "portfolio_table_rows": [["515070", "多", "1.15", "1.23", "+7.0%", "AI投资", "持有"]],
+        "appendix_technical_rows": [["515070", "多头", "金叉", "72.0", "上轨", "均线上", "28.0", "高位区"]],
+        "appendix_lhb_lines": ["机构净买额靠前: 中芯国际(3.20亿)。"],
+        "appendix_flow_lines": ["国内 vs 海外: 国内偏强。"],
+        "charts": {},
+    }
+    rendered = BriefingRenderer().render_evening(payload)
+    assert "# 收盘晚报" in rendered
+    assert "## 0. 全日验证回顾" in rendered
+    assert "## 1. 全日市场总结" in rendered
+    assert "### 1.1 指数与成交" in rendered
+    assert "### 1.2 风格与行业" in rendered
+    assert "### 1.3 宏观资产" in rendered
+    assert "### 1.4 Watchlist 表现" in rendered
+    assert "## 2. 主线复盘" in rendered
+    assert "### 2.1 今日主线回顾" in rendered
+    assert "### 2.2 核心事件复盘" in rendered
+    assert "### 2.3 盘面与资金" in rendered
+    assert "## 3. 明日展望" in rendered
+    assert "### 3.1 隔夜外盘" in rendered
+    assert "### 3.2 明日主线预判" in rendered
+    assert "### 3.3 明日验证点（预设）" in rendered
+    assert "### 3.4 明日操作建议" in rendered
+    assert "## 4. 组合与持仓" in rendered
+    assert "## 附录（折叠，按需展开）" in rendered
+    assert "515070" in rendered
