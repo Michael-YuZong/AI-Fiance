@@ -69,6 +69,15 @@ def _hard_check_rows(analysis: Dict[str, Any]) -> List[List[str]]:
     return [[item["name"], item["status"], item["detail"]] for item in analysis["hard_checks"]]
 
 
+def _hard_check_inline(analysis: Dict[str, Any]) -> str:
+    items = []
+    for item in analysis.get("hard_checks", []) or []:
+        name = str(item.get("name", "—"))
+        status = str(item.get("status", "—"))
+        items.append(f"`{name} {status}`")
+    return " · ".join(items) if items else "—"
+
+
 def _factor_rows(dimension: Dict[str, Any]) -> List[List[str]]:
     rows: List[List[str]] = []
     for factor in dimension.get("factors", []):
@@ -83,16 +92,100 @@ def _factor_rows(dimension: Dict[str, Any]) -> List[List[str]]:
     return rows
 
 
+def _catalyst_layer(name: str) -> str:
+    return {
+        "政策催化": "市场/政策",
+        "龙头公告/业绩": "个股/产业链",
+        "个股公告/事件": "个股直连",
+        "负面事件": "个股风险",
+        "海外映射": "海外映射",
+        "研报/新闻密度": "个股热度",
+        "新闻热度": "传播热度",
+        "前瞻催化": "事件日历",
+    }.get(name, "其他")
+
+
+def _catalyst_factor_rows(dimension: Dict[str, Any]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for factor in dimension.get("factors", []):
+        rows.append(
+            [
+                factor.get("name", "—"),
+                _catalyst_layer(str(factor.get("name", ""))),
+                factor.get("signal", "—"),
+                factor.get("display_score", "—"),
+            ]
+        )
+    return rows
+
+
+def _watch_positive_reason_rows(analyses: Sequence[Dict[str, Any]]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for analysis in analyses:
+        dims = analysis.get("dimensions", {})
+        tech = dims.get("technical", {}).get("score") or 0
+        fund = dims.get("fundamental", {}).get("score") or 0
+        catalyst = dims.get("catalyst", {}).get("score") or 0
+        relative = dims.get("relative_strength", {}).get("score") or 0
+        risk = dims.get("risk", {}).get("score") or 0
+
+        positives: List[str] = []
+        if fund >= 60:
+            positives.append(f"基本面 `{fund}`")
+        if catalyst >= 50:
+            positives.append(f"催化 `{catalyst}`")
+        if relative >= 70:
+            positives.append(f"相对强弱 `{relative}`")
+        if risk >= 70:
+            positives.append(f"风险收益比 `{risk}`")
+        if not positives:
+            positives.append("至少有一项维度明显不差")
+
+        blockers: List[str] = []
+        if fund < 60:
+            blockers.append("基本面未过线")
+        if tech < 40:
+            blockers.append("技术确认不足")
+        if catalyst < 50 and relative < 60:
+            blockers.append("催化和相对强弱都不够")
+        if not blockers:
+            blockers.append("综合共振还差一脚")
+
+        rows.append(
+            [
+                f"{analysis.get('name', '—')} ({analysis.get('symbol', '—')})",
+                " / ".join(positives[:2]),
+                " / ".join(blockers[:2]),
+            ]
+        )
+    return rows
+
+
+def _score_change_rows(analysis: Dict[str, Any]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for item in analysis.get("score_changes", []) or []:
+        delta = int(item.get("delta", 0))
+        delta_text = f"{delta:+d}"
+        rows.append(
+            [
+                str(item.get("label", "—")),
+                f"{item.get('previous', '—')} -> {item.get('current', '—')} ({delta_text})",
+                str(item.get("reason", "主因是子项重算。")),
+            ]
+        )
+    return rows
+
+
 def _data_sources(analysis: Dict[str, Any]) -> str:
-    sources: List[str] = ["行情/技术: AKShare + Yahoo 回退"]
+    sources: List[str] = ["行情/技术: Tushare 优先，AKShare / Yahoo 回退"]
     if analysis["dimensions"]["fundamental"].get("valuation_snapshot"):
-        sources.append("估值: 指数估值快照")
+        sources.append("估值/基本面: Tushare + 指数估值快照/财务代理")
     else:
         sources.append("估值: 价格位置代理")
     sources.append("催化: RSS + 动态关键词检索")
     sources.append("事件: 本地事件日历")
     if analysis.get("asset_type") == "cn_fund":
-        sources.append("基金画像: 天天基金 + 雪球")
+        sources.append("基金画像: Tushare + 天天基金/雪球")
     if analysis.get("day_theme", {}).get("label"):
         sources.append("上下文: 晨报主线/Regime")
     return "；".join(sources)
@@ -716,8 +809,28 @@ class OpportunityReportRenderer:
             market_parts.append(f"美股 {us_count} 只")
         if market_parts:
             lines.append(f"> 入选分布: {' / '.join(market_parts)}")
+        if payload.get("model_version"):
+            lines.append(f"> 模型版本: `{payload['model_version']}`")
+        if payload.get("baseline_snapshot_at"):
+            lines.append(f"> 当日基准版: `{payload['baseline_snapshot_at']}`")
+        if payload.get("is_daily_baseline"):
+            lines.append("> 当前输出角色: 当日基准版")
+        elif payload.get("comparison_basis_at"):
+            basis_label = payload.get("comparison_basis_label", "对比基准")
+            lines.append(f"> 当前输出角色: 当日修正版（相对{basis_label}显示差异）")
+        if payload.get("comparison_basis_at"):
+            basis_label = payload.get("comparison_basis_label", "对比基准")
+            lines.append(f"> 分数变动对比基准: {basis_label} `{payload['comparison_basis_at']}`")
+        if payload.get("model_version_warning"):
+            lines.append(f"> 口径变更提示: {payload['model_version_warning']}")
 
         lines.append("")
+
+        if payload.get("model_changelog"):
+            lines.append("## 本版口径变更")
+            for item in payload["model_changelog"]:
+                lines.append(f"- {item}")
+            lines.append("")
 
         if not top:
             lines.append("当前没有达到输出阈值的个股。")
@@ -734,6 +847,37 @@ class OpportunityReportRenderer:
                 ]
             )
             lines.extend(_table(["维度", "得分", "核心信号"], _dimension_rows(analysis)))
+            if analysis.get("score_changes"):
+                lines.extend(
+                    [
+                        "",
+                        f"**分数变化：** 相比 {analysis.get('comparison_basis_label', payload.get('comparison_basis_label', '对比基准'))} `{analysis.get('comparison_snapshot_at', payload.get('comparison_basis_at', '上次快照'))}`，以下维度变化超过 10 分。",
+                    ]
+                )
+                lines.extend(_table(["维度", "分数变化", "主要原因"], _score_change_rows(analysis)))
+            catalyst_dimension = analysis["dimensions"].get("catalyst", {})
+            lines.extend(
+                [
+                    "",
+                    f"**催化拆解：** 当前催化分 `{catalyst_dimension.get('score', '缺失')}/{catalyst_dimension.get('max_score', 100)}`。",
+                ]
+            )
+            lines.extend(_table(["催化子项", "层级", "当前信号", "得分"], _catalyst_factor_rows(catalyst_dimension)))
+            lines.extend(
+                [
+                    "",
+                    f"**硬排除检查：** {_hard_check_inline(analysis)}",
+                ]
+            )
+            lines.extend(_table(["检查项", "状态", "说明"], _hard_check_rows(analysis)))
+            risk_dimension = analysis["dimensions"].get("risk", {})
+            lines.extend(
+                [
+                    "",
+                    f"**风险拆解：** 当前风险分 `{risk_dimension.get('score', '缺失')}/{risk_dimension.get('max_score', 100)}`。分数越低，说明波动/窗口/相关性压力越大。",
+                ]
+            )
+            lines.extend(_table(["风险子项", "当前信号", "说明", "得分"], _factor_rows(risk_dimension)))
             lines.extend(
                 [
                     "",
@@ -759,6 +903,16 @@ class OpportunityReportRenderer:
             if action.get("correlated_warning"):
                 lines.append(f"- ⚠️ 相关性：{action['correlated_warning']}")
             lines.extend(["", "---"])
+
+        if payload.get("watch_positive"):
+            lines.extend(
+                [
+                    "",
+                    "## 看好但暂不推荐",
+                    "这些标的当前没有进入正式推荐，但至少有一块是明显成立的，适合作为下一轮观察池。",
+                ]
+            )
+            lines.extend(_table(["标的", "看好的地方", "暂不推荐原因"], _watch_positive_reason_rows(payload.get("watch_positive", []))))
 
         if payload.get("blind_spots"):
             lines.extend(["", "## 数据盲区与降级说明"])

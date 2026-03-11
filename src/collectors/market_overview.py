@@ -99,38 +99,55 @@ class MarketOverviewCollector(BaseCollector):
             code = str(item.get("symbol", "")).strip()
             if not code:
                 continue
-            ts_code = self._to_ts_code(code)
-            try:
-                end = datetime.now().strftime("%Y%m%d")
-                start = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
-                raw = self._ts_call("index_daily", ts_code=ts_code, start_date=start, end_date=end)
-                if raw is None or raw.empty:
+            for ts_code in self._ts_index_code_candidates(code):
+                try:
+                    end = datetime.now().strftime("%Y%m%d")
+                    start = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
+                    raw = self._ts_call("index_daily", ts_code=ts_code, start_date=start, end_date=end)
+                    if raw is None or raw.empty:
+                        continue
+                    raw = raw.sort_values("trade_date", ascending=False)
+                    latest_row = raw.iloc[0]
+                    prev_row = raw.iloc[1] if len(raw) > 1 else latest_row
+                    close = float(latest_row["close"])
+                    prev_close = float(prev_row["close"])
+                    change_pct = (close / prev_close - 1) if prev_close else None
+                    amount = float(latest_row.get("amount", 0)) / 1e4  # 千元→亿
+                    rows.append(
+                        {
+                            "name": str(item.get("name", code)),
+                            "symbol": code,
+                            "latest": close,
+                            "change_pct": change_pct,
+                            "amount": amount if amount else None,
+                            "amount_delta": None,
+                            "open": float(latest_row.get("open", close)),
+                            "prev_close": prev_close,
+                            "proxy_note": str(item.get("proxy_note", "")).strip(),
+                        }
+                    )
+                    break
+                except Exception:
                     continue
-                raw = raw.sort_values("trade_date", ascending=False)
-                latest_row = raw.iloc[0]
-                prev_row = raw.iloc[1] if len(raw) > 1 else latest_row
-                close = float(latest_row["close"])
-                prev_close = float(prev_row["close"])
-                change_pct = (close / prev_close - 1) if prev_close else None
-                amount = float(latest_row.get("amount", 0)) / 1e4  # 千元→亿
-                rows.append(
-                    {
-                        "name": str(item.get("name", code)),
-                        "symbol": code,
-                        "latest": close,
-                        "change_pct": change_pct,
-                        "amount": amount if amount else None,
-                        "amount_delta": None,
-                        "open": float(latest_row.get("open", close)),
-                        "prev_close": prev_close,
-                        "proxy_note": str(item.get("proxy_note", "")).strip(),
-                    }
-                )
-            except Exception:
-                continue
         return rows
 
     def _collect_breadth(self) -> Dict[str, Any]:
+        trade_date = self._latest_open_trade_date() or datetime.now().strftime("%Y%m%d")
+        try:
+            raw = self._ts_call("daily", trade_date=trade_date)
+            if raw is not None and not raw.empty:
+                change = pd.to_numeric(raw["pct_chg"], errors="coerce").dropna()
+                amount = pd.to_numeric(raw["amount"], errors="coerce").dropna()
+                return {
+                    "up_count": int((change > 0).sum()),
+                    "down_count": int((change < 0).sum()),
+                    "flat_count": int((change == 0).sum()),
+                    "turnover": float(amount.sum()) / 1e5 if not amount.empty else None,  # 千元→亿
+                    "trade_date": trade_date,
+                    "source": "tushare_daily",
+                }
+        except Exception:
+            pass
         if ak is None:
             return {}
         frame = self.cached_call(
@@ -148,6 +165,7 @@ class MarketOverviewCollector(BaseCollector):
             "down_count": int((change < 0).sum()),
             "flat_count": int((change == 0).sum()),
             "turnover": float(amount.sum()) / 1e8 if not amount.empty else None,
+            "source": "akshare_spot",
         }
 
     def _collect_global(self, indices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

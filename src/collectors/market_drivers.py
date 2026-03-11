@@ -10,6 +10,7 @@ from typing import Any, Dict, Mapping, Optional
 import pandas as pd
 
 from .base import BaseCollector
+from .market_cn import ChinaMarketCollector
 
 try:
     import akshare as ak
@@ -28,12 +29,13 @@ class MarketDriversCollector(BaseCollector):
 
     def collect(self, reference_date: Optional[datetime] = None) -> Dict[str, Any]:
         as_of = reference_date or datetime.now()
+        cn_market = ChinaMarketCollector(self.config)
 
         result: Dict[str, Any] = {
             "market_flow": self._market_flow(as_of),
-            "northbound_flow": self._ts_northbound_flow(),
+            "northbound_flow": cn_market.get_north_south_flow(),
             "northbound_top10": self._ts_northbound_top10(),
-            "margin_summary": self._ts_margin_summary(),
+            "margin_summary": cn_market.get_margin_trading(),
             "pledge_stat": self._ts_pledge_stat(),
         }
 
@@ -57,7 +59,7 @@ class MarketDriversCollector(BaseCollector):
 
     def _ts_northbound_flow(self) -> pd.DataFrame:
         """Tushare moneyflow_hsgt — 北向/南向每日资金流向。"""
-        cache_key = "market_drivers:ts_northbound_flow"
+        cache_key = "market_drivers:ts_northbound_flow:v2"
         cached = self._load_cache(cache_key, ttl_hours=2)
         if cached is not None:
             return cached
@@ -65,13 +67,15 @@ class MarketDriversCollector(BaseCollector):
         end = datetime.now().strftime("%Y%m%d")
         raw = self._ts_call("moneyflow_hsgt", start_date=start, end_date=end)
         if raw is not None and not raw.empty:
-            self._save_cache(cache_key, raw)
-            return raw
+            normalized = self._normalize_north_south_flow_frame(raw, source="tushare")
+            if not normalized.empty:
+                self._save_cache(cache_key, normalized)
+                return normalized
         return pd.DataFrame()
 
     def _ts_northbound_top10(self) -> pd.DataFrame:
         """Tushare hsgt_top10 — 沪深港通十大成交股。"""
-        cache_key = "market_drivers:ts_northbound_top10"
+        cache_key = "market_drivers:ts_northbound_top10:v2"
         cached = self._load_cache(cache_key, ttl_hours=4)
         if cached is not None:
             return cached
@@ -79,15 +83,18 @@ class MarketDriversCollector(BaseCollector):
             trade_date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
             raw = self._ts_call("hsgt_top10", trade_date=trade_date)
             if raw is not None and not raw.empty:
-                self._save_cache(cache_key, raw)
-                return raw
+                normalized = self._normalize_hsgt_top10_frame(raw)
+                if normalized.empty:
+                    continue
+                self._save_cache(cache_key, normalized)
+                return normalized
         return pd.DataFrame()
 
     # ── Tushare: 融资融券 ─────────────────────────────────────
 
     def _ts_margin_summary(self) -> pd.DataFrame:
         """Tushare margin — 全市场融资融券汇总。"""
-        cache_key = "market_drivers:ts_margin_summary"
+        cache_key = "market_drivers:ts_margin_summary:v2"
         cached = self._load_cache(cache_key, ttl_hours=4)
         if cached is not None:
             return cached
@@ -95,25 +102,34 @@ class MarketDriversCollector(BaseCollector):
             trade_date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
             raw = self._ts_call("margin", trade_date=trade_date)
             if raw is not None and not raw.empty:
-                self._save_cache(cache_key, raw)
-                return raw
+                normalized = self._normalize_margin_summary_frame(raw, source="tushare")
+                if normalized.empty:
+                    continue
+                self._save_cache(cache_key, normalized)
+                return normalized
         return pd.DataFrame()
 
     # ── Tushare: 股权质押 ─────────────────────────────────────
 
     def _ts_pledge_stat(self) -> pd.DataFrame:
         """Tushare pledge_stat — 大股东股权质押统计。"""
-        cache_key = "market_drivers:ts_pledge_stat"
+        cache_key = "market_drivers:ts_pledge_stat:v2"
         cached = self._load_cache(cache_key, ttl_hours=12)
         if cached is not None:
             return cached
         raw = self._ts_call("pledge_stat", end_date=datetime.now().strftime("%Y%m%d"))
         if raw is not None and not raw.empty:
-            self._save_cache(cache_key, raw)
-            return raw
+            normalized = self._normalize_pledge_stat_frame(raw)
+            if not normalized.empty:
+                self._save_cache(cache_key, normalized)
+                return normalized
         return pd.DataFrame()
 
     def _market_flow(self, reference_date: datetime) -> Dict[str, Any]:
+        ts_report = self._ts_market_flow(reference_date)
+        if not ts_report["frame"].empty:
+            return ts_report
+
         fetcher = getattr(ak, "stock_market_fund_flow", None)
         if not callable(fetcher):
             return {"frame": pd.DataFrame(), "is_fresh": False, "latest_date": ""}
@@ -132,6 +148,77 @@ class MarketDriversCollector(BaseCollector):
             "latest_date": latest_date,
             "is_fresh": self._is_fresh(latest_date, reference_date),
         }
+
+    def _ts_market_flow(self, reference_date: datetime) -> Dict[str, Any]:
+        """Aggregate Tushare moneyflow into the market-flow shape used by briefing."""
+        cache_key = "market_drivers:ts_market_flow"
+        cached = self._load_cache(cache_key, ttl_hours=2)
+        if cached is not None and not cached.empty:
+            latest_date = self._extract_latest_date(cached, "日期")
+            return {
+                "frame": cached.reset_index(drop=True),
+                "latest_date": latest_date,
+                "is_fresh": self._is_fresh(latest_date, reference_date),
+            }
+
+        for offset in range(0, 8):
+            trade_date = self._latest_open_trade_date(lookback_days=14) if offset == 0 else ""
+            if not trade_date:
+                trade_date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
+            elif offset > 0:
+                trade_date = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=offset)).strftime("%Y%m%d")
+
+            raw = self._ts_call("moneyflow", trade_date=trade_date)
+            if raw is None or raw.empty:
+                continue
+
+            numeric_cols = [
+                "buy_sm_amount", "sell_sm_amount", "buy_md_amount", "sell_md_amount",
+                "buy_lg_amount", "sell_lg_amount", "buy_elg_amount", "sell_elg_amount",
+            ]
+            frame = raw.copy()
+            for col in numeric_cols:
+                if col in frame.columns:
+                    frame[col] = pd.to_numeric(frame[col], errors="coerce").fillna(0.0)
+
+            small_amt = float((frame["buy_sm_amount"] - frame["sell_sm_amount"]).sum()) * 10_000.0
+            medium_amt = float((frame["buy_md_amount"] - frame["sell_md_amount"]).sum()) * 10_000.0
+            big_amt = float((frame["buy_lg_amount"] - frame["sell_lg_amount"]).sum()) * 10_000.0
+            super_amt = float((frame["buy_elg_amount"] - frame["sell_elg_amount"]).sum()) * 10_000.0
+            main_amt = big_amt + super_amt
+
+            daily = self._ts_call("daily", trade_date=trade_date)
+            total_turnover = 0.0
+            if daily is not None and not daily.empty and "amount" in daily.columns:
+                total_turnover = float(pd.to_numeric(daily["amount"], errors="coerce").fillna(0.0).sum()) * 1000.0
+            if total_turnover <= 0:
+                total_turnover = sum(
+                    float(frame[col].sum()) for col in numeric_cols if col in frame.columns
+                ) * 10_000.0 / 2.0
+
+            row = pd.DataFrame(
+                [
+                    {
+                        "日期": datetime.strptime(trade_date, "%Y%m%d").strftime("%Y-%m-%d"),
+                        "主力净流入-净额": main_amt,
+                        "主力净流入-净占比": (main_amt / total_turnover * 100.0) if total_turnover else None,
+                        "超大单净流入-净额": super_amt,
+                        "大单净流入-净额": big_amt,
+                        "中单净流入-净额": medium_amt,
+                        "小单净流入-净额": small_amt,
+                        "成交额": total_turnover if total_turnover else None,
+                    }
+                ]
+            )
+            self._save_cache(cache_key, row)
+            latest_date = str(row.iloc[0]["日期"])
+            return {
+                "frame": row,
+                "latest_date": latest_date,
+                "is_fresh": self._is_fresh(latest_date, reference_date),
+            }
+
+        return {"frame": pd.DataFrame(), "is_fresh": False, "latest_date": ""}
 
     def _northbound_rank(self, symbol: str, reference_date: datetime) -> Dict[str, Any]:
         fetcher = getattr(ak, "stock_hsgt_board_rank_em", None)

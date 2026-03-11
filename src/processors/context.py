@@ -18,22 +18,47 @@ def _last_valid_value(frame: pd.DataFrame, column: str) -> float:
     return float(series.iloc[-1])
 
 
+def _sort_latest_first(frame: pd.DataFrame) -> pd.DataFrame:
+    order_candidates = ("month", "MONTH", "date", "日期", "月份")
+    for column in order_candidates:
+        if column not in frame.columns:
+            continue
+        ordering = pd.to_numeric(frame[column].astype(str).str.replace(r"\D", "", regex=True), errors="coerce")
+        if ordering.notna().any():
+            ranked = frame.assign(_order=ordering)
+            ranked = ranked.sort_values("_order", ascending=False, kind="stable")
+            return ranked.drop(columns="_order")
+    return frame
+
+
+def _first_existing_column(frame: pd.DataFrame, candidates: Sequence[str]) -> str:
+    for column in candidates:
+        if column in frame.columns:
+            return column
+    available = ", ".join(map(str, frame.columns.tolist()))
+    expected = ", ".join(candidates)
+    raise KeyError(f"Expected one of [{expected}], got columns [{available}]")
+
+
 def load_china_macro_snapshot(config: Dict[str, Any]) -> Dict[str, float]:
     collector = ChinaMacroCollector(config)
-    pmi_frame = collector.get_pmi()
-    pmi_series = pd.to_numeric(pmi_frame["制造业-指数"], errors="coerce").dropna()
+    pmi_frame = _sort_latest_first(collector.get_pmi())
+    pmi_column = _first_existing_column(pmi_frame, ("制造业-指数", "PMI010000", "PMI", "制造业PMI"))
+    pmi_series = pd.to_numeric(pmi_frame[pmi_column], errors="coerce").dropna()
     pmi = float(pmi_series.iloc[0])
     pmi_prev = float(pmi_series.iloc[1]) if len(pmi_series) > 1 else pmi
 
-    cpi_frame = collector.get_cpi()
-    cpi_series = pd.to_numeric(cpi_frame["今值"], errors="coerce").dropna()
-    cpi = float(cpi_series.iloc[-1])
-    cpi_prev = float(cpi_series.iloc[-2]) if len(cpi_series) > 1 else cpi
+    cpi_frame = _sort_latest_first(collector.get_cpi())
+    cpi_column = _first_existing_column(cpi_frame, ("今值", "nt_yoy", "CPI同比", "全国同比"))
+    cpi_series = pd.to_numeric(cpi_frame[cpi_column], errors="coerce").dropna()
+    cpi = float(cpi_series.iloc[0])
+    cpi_prev = float(cpi_series.iloc[1]) if len(cpi_series) > 1 else cpi
 
-    lpr_frame = collector.get_lpr()
-    lpr_series = pd.to_numeric(lpr_frame["LPR1Y"], errors="coerce").dropna()
-    lpr = float(lpr_series.iloc[-1])
-    lpr_prev = float(lpr_series.iloc[-2]) if len(lpr_series) >= 2 else lpr
+    lpr_frame = _sort_latest_first(collector.get_lpr())
+    lpr_column = _first_existing_column(lpr_frame, ("LPR1Y", "1y"))
+    lpr_series = pd.to_numeric(lpr_frame[lpr_column], errors="coerce").dropna()
+    lpr = float(lpr_series.iloc[0])
+    lpr_prev = float(lpr_series.iloc[1]) if len(lpr_series) >= 2 else lpr
 
     return {
         "pmi": pmi,

@@ -1572,28 +1572,22 @@ def _liquidity_lines(config: Dict[str, Any]) -> List[str]:
     except Exception:
         flow = pd.DataFrame()
 
-    if not flow.empty and {"资金方向", "板块", "成交净买额"}.issubset(flow.columns):
-        frame = flow.copy()
-        frame["成交净买额"] = pd.to_numeric(frame["成交净买额"], errors="coerce").fillna(0.0)
-        north = frame[frame["资金方向"].astype(str) == "北向"]["成交净买额"].sum()
-        south = frame[frame["资金方向"].astype(str) == "南向"]["成交净买额"].sum()
-
-        def _fmt_hsgt_amount(amount: float) -> str:
-            if abs(amount) >= 1_000_000:
-                return _fmt_yi(amount)
-            return f"{amount:.2f}亿"
-
+    if not flow.empty and {"日期", "北向资金净流入", "南向资金净流入"}.issubset(flow.columns):
+        frame = flow.copy().sort_values("日期")
+        latest = frame.iloc[-1]
+        north = _to_float(latest.get("北向资金净流入"))
+        south = _to_float(latest.get("南向资金净流入"))
         if abs(north) > 1e-6:
             direction = "净流入" if north >= 0 else "净流出"
-            lines.append(f"北向资金当日{direction}约 {_fmt_hsgt_amount(north)}。")
+            lines.append(f"北向资金当日{direction}约 {_fmt_yi(north)}。")
         else:
             lines.append("北向资金当日净买额尚未更新（盘中或收盘前通常为 0），今日改用南向资金、全市场主力流向和龙虎榜活跃度做代理。")
         if abs(south) > 1e-6:
             direction = "净流入" if south >= 0 else "净流出"
-            lines.append(f"南向资金当日{direction}约 {_fmt_hsgt_amount(south)}，可作为 HSTECH 情绪承接的辅助观察。")
-            if abs(south) >= 200:
+            lines.append(f"南向资金当日{direction}约 {_fmt_yi(south)}，可作为 HSTECH 情绪承接的辅助观察。")
+            if abs(south) >= 200 * 1e8:
                 lines.append("⚠️ 南向资金读数偏大，请复核是否为单日口径、分市场合计口径或极端风险偏好切换。")
-        if abs(north) >= 200:
+        if abs(north) >= 200 * 1e8:
             lines.append("⚠️ 北向资金读数偏大，请复核是否为单日口径或极端风险偏好切换。")
 
     try:
@@ -1604,13 +1598,15 @@ def _liquidity_lines(config: Dict[str, Any]) -> List[str]:
     if margin.empty:
         lines.append("融资融券明细接口今日异常或为空，短线情绪改看昨日涨停承接、龙虎榜净买额和主力资金方向。")
     else:
-        # Summarise margin balance from the latest available date
         fin_bal_col = "融资余额"
-        if fin_bal_col in margin.columns:
-            total_bal = pd.to_numeric(margin[fin_bal_col], errors="coerce").sum()
+        latest_frame = margin
+        if "日期" in margin.columns:
+            latest_date = margin["日期"].dropna().astype(str).max()
+            latest_frame = margin[margin["日期"].astype(str) == str(latest_date)]
+        if fin_bal_col in latest_frame.columns:
+            total_bal = pd.to_numeric(latest_frame[fin_bal_col], errors="coerce").sum()
             if total_bal > 0:
-                bal_yi = total_bal / 1e8 if total_bal > 1e6 else total_bal
-                lines.append(f"融资余额约 {bal_yi:.0f} 亿元。")
+                lines.append(f"融资余额约 {total_bal / 1e8:.0f} 亿元。")
     return lines[:4] or ["资金与流动性明细暂不可用。"]
 
 

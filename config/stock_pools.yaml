@@ -3,14 +3,14 @@
 
 hk_stocks:
   # 恒生科技 & 蓝筹
-  - {symbol: "00700.HK", name: "腾讯控股", sector: "科技"}
+  - {symbol: "00700.HK", name: "腾讯控股", sector: "科技", aliases: ["Tencent"]}
   - {symbol: "09988.HK", name: "阿里巴巴-W", sector: "科技"}
   - {symbol: "03690.HK", name: "美团-W", sector: "消费"}
   - {symbol: "09999.HK", name: "网易-S", sector: "科技"}
-  - {symbol: "01024.HK", name: "快手-W", sector: "科技"}
+  - {symbol: "01024.HK", name: "快手-W", sector: "科技", aliases: ["Kuaishou"]}
   - {symbol: "09618.HK", name: "京东集团-SW", sector: "消费"}
   - {symbol: "09888.HK", name: "百度集团-SW", sector: "科技"}
-  - {symbol: "01810.HK", name: "小米集团-W", sector: "科技"}
+  - {symbol: "01810.HK", name: "小米集团-W", sector: "科技", aliases: ["Xiaomi"]}
   - {symbol: "09626.HK", name: "哔哩哔哩-SW", sector: "科技"}
   - {symbol: "02015.HK", name: "理想汽车-W", sector: "消费"}
   - {symbol: "09866.HK", name: "蔚来-SW", sector: "消费"}

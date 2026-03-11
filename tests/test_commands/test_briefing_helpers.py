@@ -10,12 +10,14 @@ from src.commands.briefing import (
     _anomaly_report,
     _catalyst_rows,
     _important_event_lines,
+    _liquidity_lines,
     _narrative_validation_lines,
     _primary_narrative,
     _source_quality_lines,
     _verification_rows,
     _yesterday_review_lines,
 )
+from src.collectors.market_cn import ChinaMarketCollector
 from src.processors.context import derive_regime_inputs
 from src.processors.regime import RegimeDetector
 
@@ -183,6 +185,30 @@ def test_source_quality_warns_on_single_source() -> None:
     lines = _source_quality_lines(report)
 
     assert any("当前新闻源不足 2 类" in line for line in lines)
+
+
+def test_liquidity_lines_use_normalized_cn_flow_and_margin(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_north_south_flow",
+        lambda self: pd.DataFrame([{"日期": "2026-03-10", "北向资金净流入": 1_500_000_000.0, "南向资金净流入": -800_000_000.0}]),
+    )
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_margin_trading",
+        lambda self: pd.DataFrame(
+            [
+                {"日期": "2026-03-10", "交易所": "上交所", "融资余额": 1_000_000_000.0},
+                {"日期": "2026-03-10", "交易所": "深交所", "融资余额": 2_000_000_000.0},
+            ]
+        ),
+    )
+
+    lines = _liquidity_lines({})
+
+    assert any("北向资金当日净流入约 15.00亿" in line for line in lines)
+    assert any("融资余额约 30 亿元。" in line for line in lines)
+    assert not any("⚠️ 北向资金读数偏大" in line for line in lines)
 
 
 def test_yesterday_review_falls_back_without_archive(tmp_path, monkeypatch) -> None:
