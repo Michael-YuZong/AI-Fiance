@@ -42,14 +42,18 @@ class ValuationCollector(BaseCollector):
         """ETF 净值历史。Tushare fund_nav 优先。"""
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+        ts_code = self._resolve_tushare_fund_code(symbol, preferred_markets=("E", "O", "L"))
 
         # Tushare
         try:
-            raw = self._ts_call("fund_nav", ts_code=symbol)
+            raw = self._ts_call("fund_nav", ts_code=ts_code)
             if raw is not None and not raw.empty:
-                raw["end_date"] = pd.to_datetime(raw["end_date"], format="%Y%m%d", errors="coerce")
-                mask = raw["end_date"] >= pd.to_datetime(start_date, format="%Y%m%d")
-                filtered = raw[mask].sort_values("end_date").reset_index(drop=True)
+                date_col = "nav_date" if "nav_date" in raw.columns else "end_date"
+                if date_col not in raw.columns:
+                    raise ValueError("fund_nav missing nav_date/end_date")
+                raw[date_col] = pd.to_datetime(raw[date_col], format="%Y%m%d", errors="coerce")
+                mask = raw[date_col] >= pd.to_datetime(start_date, format="%Y%m%d")
+                filtered = raw[mask].sort_values(date_col).reset_index(drop=True)
                 if not filtered.empty:
                     return filtered
         except Exception:
@@ -188,32 +192,33 @@ class ValuationCollector(BaseCollector):
 
     def _ts_index_weight(self, index_code: str, top_n: int) -> pd.DataFrame | None:
         """Tushare index_weight — 指数成分权重。"""
-        ts_code = self._to_ts_code(index_code)
-        cache_key = f"valuation:ts_index_weight:{ts_code}"
-        cached = self._load_cache(cache_key, ttl_hours=24)
-        if cached is not None:
-            return cached
+        for ts_code in self._ts_index_code_candidates(index_code):
+            cache_key = f"valuation:ts_index_weight:{ts_code}"
+            cached = self._load_cache(cache_key, ttl_hours=24)
+            if cached is not None:
+                return cached
 
-        raw = self._ts_call("index_weight", index_code=ts_code)
-        if raw is None or raw.empty:
-            return None
+            raw = self._ts_call("index_weight", index_code=ts_code)
+            if raw is None or raw.empty:
+                continue
 
-        # 取最新一期
-        if "trade_date" in raw.columns:
-            latest_date = raw["trade_date"].max()
-            raw = raw[raw["trade_date"] == latest_date]
+            # 取最新一期
+            if "trade_date" in raw.columns:
+                latest_date = raw["trade_date"].max()
+                raw = raw[raw["trade_date"] == latest_date]
 
-        frame = pd.DataFrame({
-            "symbol": raw["con_code"].apply(self._from_ts_code),
-            "name": raw.get("con_name", raw["con_code"].apply(self._from_ts_code)),
-            "weight": pd.to_numeric(raw["weight"], errors="coerce"),
-        })
-        frame = frame.dropna(subset=["weight"]).sort_values("weight", ascending=False)
-        if top_n > 0:
-            frame = frame.head(top_n)
-        result = frame.reset_index(drop=True)
-        self._save_cache(cache_key, result)
-        return result
+            frame = pd.DataFrame({
+                "symbol": raw["con_code"].apply(self._from_ts_code),
+                "name": raw.get("con_name", raw["con_code"].apply(self._from_ts_code)),
+                "weight": pd.to_numeric(raw["weight"], errors="coerce"),
+            })
+            frame = frame.dropna(subset=["weight"]).sort_values("weight", ascending=False)
+            if top_n > 0:
+                frame = frame.head(top_n)
+            result = frame.reset_index(drop=True)
+            self._save_cache(cache_key, result)
+            return result
+        return None
 
     # ── 个股财务代理指标 ─────────────────────────────────────
 
@@ -222,19 +227,21 @@ class ValuationCollector(BaseCollector):
 
         Tushare fina_indicator 优先 → AKShare THS/EM 兜底。
         """
-        # ── Tushare fina_indicator (primary) ──
-        try:
-            result = self._tushare_stock_financial(symbol)
-            if result:
-                return result
-        except Exception:
-            pass
-
         # ── Tushare daily_basic (补充 PE/PB) ──
         try:
             basic = self._ts_daily_basic_for_stock(symbol)
         except Exception:
             basic = {}
+
+        # ── Tushare fina_indicator (primary) ──
+        try:
+            result = self._tushare_stock_financial(symbol)
+            if result:
+                merged = dict(basic)
+                merged.update(result)
+                return merged
+        except Exception:
+            pass
 
         # ── AKShare THS/EM (fallback) ──
         if ak is not None:
@@ -369,7 +376,7 @@ class ValuationCollector(BaseCollector):
             result["dv_ratio"] = dv
         mv = _sf(latest.get("total_mv"))
         if mv is not None:
-            result["total_mv"] = mv
+            result["total_mv"] = mv * 10_000.0
         turnover = _sf(latest.get("turnover_rate_f"))
         if turnover is not None:
             result["turnover_rate"] = turnover

@@ -69,3 +69,268 @@ def test_market_cn_index_daily_falls_back_to_proxy_etf(monkeypatch):
     monkeypatch.setattr(collector, "get_etf_daily", lambda symbol, **_: pd.DataFrame({"date": ["2026-03-08"], "open": [1], "high": [1], "low": [1], "close": [1], "volume": [0], "amount": [0]}))
     frame = collector.get_index_daily("000300", proxy_symbol="510330")
     assert not frame.empty
+
+
+def test_market_cn_index_daily_uses_index_code_candidates(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "index_daily"
+        if kwargs.get("ts_code") == "000300.SH":
+            return pd.DataFrame(
+                [
+                    {"trade_date": "20260310", "open": 10.0, "high": 10.5, "low": 9.8, "close": 10.2, "vol": 1000, "amount": 10000},
+                    {"trade_date": "20260309", "open": 9.8, "high": 10.1, "low": 9.7, "close": 10.0, "vol": 900, "amount": 9000},
+                ]
+            )
+        return pd.DataFrame()
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    frame = collector.get_index_daily("000300")
+    assert not frame.empty
+    assert float(frame["收盘"].iloc[-1]) == 10.2
+
+
+def test_market_cn_ts_stock_daily_scales_amount_to_yuan(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        if api_name == "daily":
+            assert kwargs.get("ts_code") == "300750.SZ"
+            return pd.DataFrame(
+                [
+                    {"trade_date": "20260310", "open": 250.0, "high": 255.0, "low": 248.0, "close": 252.0, "vol": 1000, "amount": 1234.5},
+                    {"trade_date": "20260309", "open": 245.0, "high": 250.0, "low": 243.0, "close": 248.0, "vol": 900, "amount": 1000.0},
+                ]
+            )
+        if api_name == "adj_factor":
+            return pd.DataFrame(
+                [
+                    {"trade_date": "20260310", "adj_factor": 1.0},
+                    {"trade_date": "20260309", "adj_factor": 1.0},
+                ]
+            )
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    frame = collector.get_stock_daily("300750")
+    assert not frame.empty
+    assert float(frame["成交额"].iloc[-1]) == 1_234_500.0
+
+
+def test_market_cn_ts_etf_daily_scales_amount_to_yuan(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        if api_name == "fund_daily":
+            assert kwargs.get("ts_code") == "510300.SH"
+            return pd.DataFrame(
+                [
+                    {"trade_date": "20260310", "open": 4.0, "high": 4.1, "low": 3.9, "close": 4.05, "vol": 2000, "amount": 567.8},
+                    {"trade_date": "20260309", "open": 3.9, "high": 4.0, "low": 3.8, "close": 3.95, "vol": 1800, "amount": 500.0},
+                ]
+            )
+        if api_name == "adj_factor":
+            return pd.DataFrame(
+                [
+                    {"trade_date": "20260310", "adj_factor": 1.0},
+                    {"trade_date": "20260309", "adj_factor": 1.0},
+                ]
+            )
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    frame = collector.get_etf_daily("510300")
+    assert not frame.empty
+    assert float(frame["成交额"].iloc[-1]) == 567_800.0
+
+
+def test_ts_daily_basic_snapshot_merges_name_industry_and_amount(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    daily_basic = pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20260310",
+                "close": 10.81,
+                "turnover_rate": 0.4647,
+                "turnover_rate_f": 0.7,
+                "volume_ratio": 1.1,
+                "pe": 5.6,
+                "pe_ttm": 5.4,
+                "pb": 0.7,
+                "ps": 1.0,
+                "ps_ttm": 1.0,
+                "dv_ratio": 4.2,
+                "dv_ttm": 4.1,
+                "total_share": 100.0,
+                "float_share": 80.0,
+                "free_share": 60.0,
+                "total_mv": 120_000.0,
+                "circ_mv": 96_000.0,
+            }
+        ]
+    )
+    stock_basic = pd.DataFrame([{"ts_code": "000001.SZ", "name": "平安银行", "industry": "银行"}])
+    daily = pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20260310", "amount": 850_573.536}])
+
+    def fake_ts_call(api_name: str, **_: object) -> pd.DataFrame | None:
+        if api_name == "daily_basic":
+            return daily_basic
+        if api_name == "stock_basic":
+            return stock_basic
+        if api_name == "daily":
+            return daily
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    monkeypatch.setattr(collector, "_latest_open_trade_date", lambda *args, **kwargs: "20260310")
+    frame = collector._ts_daily_basic_snapshot()
+    assert frame is not None
+    assert frame.loc[0, "代码"] == "000001"
+    assert frame.loc[0, "名称"] == "平安银行"
+    assert frame.loc[0, "行业"] == "银行"
+    assert frame.loc[0, "成交额"] == 850_573_536.0
+    assert frame.loc[0, "总市值"] == 1_200_000_000.0
+
+
+def test_ts_daily_basic_snapshot_estimates_amount_when_daily_missing(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    daily_basic = pd.DataFrame(
+        [
+            {
+                "ts_code": "600001.SH",
+                "trade_date": "20260310",
+                "close": 12.0,
+                "turnover_rate": 2.5,
+                "turnover_rate_f": 3.0,
+                "volume_ratio": 1.2,
+                "pe": 18.0,
+                "pe_ttm": 17.5,
+                "pb": 1.8,
+                "ps": 2.0,
+                "ps_ttm": 1.9,
+                "dv_ratio": 2.0,
+                "dv_ttm": 2.0,
+                "total_share": 100.0,
+                "float_share": 80.0,
+                "free_share": 60.0,
+                "total_mv": 120_000.0,
+                "circ_mv": 50_000.0,
+            }
+        ]
+    )
+    stock_basic = pd.DataFrame([{"ts_code": "600001.SH", "name": "示例股份", "industry": "电力"}])
+
+    def fake_ts_call(api_name: str, **_: object) -> pd.DataFrame | None:
+        if api_name == "daily_basic":
+            return daily_basic
+        if api_name == "stock_basic":
+            return stock_basic
+        if api_name == "daily":
+            return pd.DataFrame()
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    monkeypatch.setattr(collector, "_latest_open_trade_date", lambda *args, **kwargs: "20260310")
+    frame = collector._ts_daily_basic_snapshot()
+    assert frame is not None
+    assert frame.loc[0, "成交额"] == 12_500_000.0
+
+
+def test_market_cn_open_fund_daily_resolves_tushare_fund_code(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        if api_name == "fund_basic":
+            return pd.DataFrame([{"ts_code": "022365.OF", "name": "永赢科技智选C"}])
+        if api_name == "fund_nav":
+            assert kwargs.get("ts_code") == "022365.OF"
+            return pd.DataFrame([{"end_date": "20260310", "unit_nav": 1.234}])
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    frame = collector.get_open_fund_daily("022365")
+    assert not frame.empty
+    assert float(frame["close"].iloc[-1]) == 1.234
+
+
+def test_market_cn_tushare_north_south_flow_normalizes_to_yuan(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **_: object) -> pd.DataFrame | None:
+        if api_name == "moneyflow_hsgt":
+            return pd.DataFrame(
+                [
+                    {
+                        "trade_date": "20260310",
+                        "hgt": 800.0,
+                        "sgt": 700.0,
+                        "north_money": 1500.0,
+                        "ggt_ss": 200.0,
+                        "ggt_sz": 100.0,
+                        "south_money": 300.0,
+                    }
+                ]
+            )
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    frame = collector.get_north_south_flow()
+    assert list(frame.columns) == [
+        "日期",
+        "沪股通净流入",
+        "深股通净流入",
+        "北向资金净流入",
+        "港股通(沪)净流入",
+        "港股通(深)净流入",
+        "南向资金净流入",
+    ]
+    assert frame.loc[0, "日期"] == "2026-03-10"
+    assert float(frame.loc[0, "北向资金净流入"]) == 1_500_000_000.0
+    assert float(frame.loc[0, "南向资金净流入"]) == 300_000_000.0
+
+
+def test_market_cn_margin_fallback_combines_ak_summaries(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    monkeypatch.setattr(collector, "_ts_margin", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "cached_call", lambda _cache_key, fetcher, *args, **kwargs: fetcher(*args, **kwargs))
+
+    def fake_ak_function(name: str):
+        if name == "stock_margin_sse":
+            return lambda **_: pd.DataFrame(
+                [
+                    {
+                        "信用交易日期": "20260309",
+                        "融资余额": 1_333_276_798_688.0,
+                        "融资买入额": 120_266_698_867.0,
+                        "融券余量金额": 12_372_384_331.0,
+                        "融资融券余额": 1_345_649_183_019.0,
+                    }
+                ]
+            )
+        if name == "stock_margin_szse":
+            return lambda **_: pd.DataFrame(
+                [
+                    {
+                        "融资买入额": 1178.67,
+                        "融资余额": 12857.72,
+                        "融券余额": 57.47,
+                        "融资融券余额": 12915.20,
+                    }
+                ]
+            )
+        raise AssertionError(name)
+
+    monkeypatch.setattr(collector, "_ak_function", fake_ak_function)
+    frame = collector.get_margin_trading()
+    assert set(frame["交易所"]) == {"上交所", "深交所"}
+    sse_row = frame[frame["交易所"] == "上交所"].iloc[0]
+    szse_row = frame[frame["交易所"] == "深交所"].iloc[0]
+    assert sse_row["日期"] == "2026-03-09"
+    assert float(sse_row["融资余额"]) == 1_333_276_798_688.0
+    assert float(szse_row["融资余额"]) == 1_285_772_000_000.0
+    assert float(szse_row["融资买入额"]) == 117_867_000_000.0

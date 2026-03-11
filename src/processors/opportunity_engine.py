@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
@@ -32,6 +33,11 @@ from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.utils.config import detect_asset_type, resolve_project_path
 from src.utils.data import load_watchlist, load_yaml
 from src.utils.market import compute_history_metrics, fetch_asset_history, format_pct, get_asset_context
+
+try:
+    import yfinance as yf
+except ImportError:  # pragma: no cover
+    yf = None
 
 
 SECTOR_RULES = [
@@ -69,6 +75,126 @@ MONTHLY_SEASONAL_WINDOWS = {
     "军工": {7, 8, 9},
     "有色": {2, 3, 4},
 }
+
+NEGATIVE_DILUTION_KEYS = (
+    "配股",
+    "配售",
+    "增发",
+    "定增",
+    "减持",
+    "减持计划",
+    "再融资",
+    "募资",
+    "placing",
+    "placement",
+    "secondary offering",
+    "share sale",
+    "follow-on offering",
+    "top-up placing",
+    "convertible bond",
+)
+
+NEGATIVE_REGULATORY_KEYS = (
+    "审查",
+    "调查",
+    "处罚",
+    "罚款",
+    "禁令",
+    "限制",
+    "反垄断",
+    "诉讼",
+    "review",
+    "probe",
+    "investigation",
+    "antitrust",
+    "ban",
+    "restriction",
+    "lawsuit",
+    "sanction",
+    "cfius",
+    "security review",
+    "security risk",
+    "forced sale",
+    "forced divestiture",
+    "divest",
+    "divestiture",
+    "blacklist",
+    "national security",
+    "gaming stake",
+    "gaming stakes",
+    "gaming investment",
+    "gaming investments",
+)
+
+NEGATIVE_EVENT_LOOKBACK_DAYS = 30
+FORWARD_EVENT_LOOKAHEAD_DAYS = 14
+DIRECT_COMPANY_NEWS_LOOKBACK_DAYS = 45
+
+DISCLOSURE_WINDOW_KEYS = (
+    "年报",
+    "半年报",
+    "一季报",
+    "三季报",
+    "财报",
+    "业绩快报",
+    "业绩预告",
+    "results",
+    "earnings",
+    "guidance",
+)
+
+DISCLOSURE_RESULT_KEYS = (
+    "净利润",
+    "营收",
+    "收入",
+    "利润",
+    "分红",
+    "派现",
+    "现金红利",
+    "股息",
+    "dividend",
+    "revenue",
+    "profit",
+    "results",
+)
+
+DISCLOSURE_PERIOD_KEYS = (
+    "全年",
+    "年度",
+    "四季度",
+    "三季度",
+    "半年",
+    "q1",
+    "q2",
+    "q3",
+    "q4",
+    "quarter",
+    "full year",
+    "annual",
+)
+
+HIGH_CONFIDENCE_COMPANY_SOURCES = (
+    "reuters",
+    "bloomberg",
+    "financial times",
+    "ft",
+    "business wire",
+    "pr newswire",
+    "globenewswire",
+    "investor relations",
+    "hkexnews",
+    "sec filing",
+    "sec",
+)
+
+WEAK_COMPANY_PAGE_TITLE_KEYS = (
+    "stock price & latest news",
+    "stock quote price and forecast",
+    "| stock price",
+    "quote price and forecast",
+    "historical prices and data",
+    "stock historical prices",
+)
 
 SENSITIVITY_MAP = {
     "宽基": {"rate": -1, "usd": -1, "oil": -1, "cny": 1},
@@ -417,6 +543,39 @@ def _top_positive_signals(factors: Sequence[Dict[str, str]], limit: int = 3) -> 
     return " · ".join(positives[:limit]) if positives else "当前没有明确亮点"
 
 
+def _unique_news_titles(items: Sequence[Mapping[str, Any]], limit: int = 2) -> List[str]:
+    titles: List[str] = []
+    for item in items:
+        title = str(item.get("title", "")).strip()
+        if title and title not in titles:
+            titles.append(title)
+        if len(titles) >= limit:
+            break
+    return titles
+
+
+def _catalyst_core_signal(
+    factors: Sequence[Dict[str, Any]],
+    stock_specific_pool: Sequence[Mapping[str, Any]],
+    company_positive_pool: Sequence[Mapping[str, Any]],
+    is_individual_stock: bool,
+    asset_type: str,
+) -> str:
+    if is_individual_stock:
+        title_pool = company_positive_pool if asset_type in {"hk", "us"} else stock_specific_pool
+        positive_specific = [
+            item
+            for item in title_pool
+            if not _contains_any(_headline_text(item), [*NEGATIVE_DILUTION_KEYS, *NEGATIVE_REGULATORY_KEYS, *DISCLOSURE_WINDOW_KEYS])
+        ]
+        company_titles = _unique_news_titles(positive_specific or title_pool, limit=2)
+        if company_titles:
+            density_signal = next((str(item.get("signal", "")).strip() for item in factors if item.get("name") == "研报/新闻密度"), "")
+            extras = [density_signal] if density_signal else []
+            return " · ".join([*company_titles, *extras[:1]])
+    return _top_positive_signals(factors)
+
+
 def _factor_row(
     name: str,
     signal: str,
@@ -544,6 +703,7 @@ def build_market_context(
             benchmark_returns[asset_type] = history["close"].pct_change().dropna()
 
     return {
+        "as_of": datetime.now(),
         "china_macro": china_macro,
         "global_proxy": global_proxy,
         "monitor_rows": monitor_rows,
@@ -810,6 +970,13 @@ def _catalyst_profile(
     lowered_name = name.lower()
     lowered_nodes = [item.lower() for item in chain_nodes]
     derived = _derived_catalyst_profile(metadata)
+    exact_sector_profile = dict(profiles.get(sector, {}))
+    if exact_sector_profile:
+        matched = dict(exact_sector_profile)
+        if fund_profile:
+            matched = _merge_catalyst_profiles(matched, _fund_specific_catalyst_profile(metadata, fund_profile))
+        matched["profile_name"] = sector
+        return matched
     if fund_profile:
         derived = _merge_catalyst_profiles(derived, _fund_specific_catalyst_profile(metadata, fund_profile))
     for profile_name, payload in profiles.items():
@@ -818,10 +985,6 @@ def _catalyst_profile(
             matched = _merge_catalyst_profiles(derived, dict(payload))
             matched["profile_name"] = profile_name
             return matched
-    profile = _merge_catalyst_profiles(derived, dict(profiles.get(sector, {})))
-    if profile:
-        profile.setdefault("profile_name", sector)
-        return profile
     return derived
 
 
@@ -1010,6 +1173,9 @@ def _catalyst_search_terms(metadata: Mapping[str, Any], profile: Mapping[str, An
             continue
         if item not in cleaned:
             cleaned.append(item)
+    profile_name = str(profile.get("profile_name", "")).strip()
+    if profile_name not in {"科技", "半导体", "纳斯达克", "港股科技"}:
+        cleaned = _strict_relevance_tokens(profile, cleaned)
     return cleaned[:8]
 
 
@@ -1019,38 +1185,82 @@ def _strict_relevance_tokens(profile: Mapping[str, Any], tokens: Sequence[str]) 
         explicit = [str(token).strip() for token in profile.get("strict_keywords", []) if str(token).strip()]
         if explicit:
             return explicit
-    if profile_name not in {"纳斯达克", "港股科技"}:
-        return [str(token).strip() for token in tokens if str(token).strip()]
-
-    noisy = {
+    generic_ai_noise = {
         "ai",
+        "artificial intelligence",
+        "gpu",
+        "model",
+        "llm",
+        "算力",
+        "人工智能",
         "科技",
+        "软件",
+        "数字经济",
+        "云计算",
         "technology",
         "cloud",
         "software",
-        "算力",
         "big tech",
         "growth",
         "成长股估值修复",
-        "人工智能",
     }
+    if profile_name not in {"科技", "半导体", "纳斯达克", "港股科技"}:
+        cleaned: List[str] = []
+        for token in tokens:
+            value = str(token).strip()
+            lowered = value.lower()
+            if not value or any(noise in lowered for noise in generic_ai_noise):
+                continue
+            if value not in cleaned:
+                cleaned.append(value)
+        return cleaned
+    if profile_name not in {"纳斯达克", "港股科技"}:
+        return [str(token).strip() for token in tokens if str(token).strip()]
+
     cleaned: List[str] = []
     for token in tokens:
         value = str(token).strip()
-        if not value or value.lower() in noisy:
+        lowered = value.lower()
+        if not value or any(noise in lowered for noise in generic_ai_noise):
             continue
         if value not in cleaned:
             cleaned.append(value)
     return cleaned
 
 
+def _fundamental_proxy_labels(asset_type: str) -> Dict[str, str]:
+    if asset_type == "cn_fund":
+        return {
+            "growth": "前五大重仓股加权增速代理",
+            "growth_scope": "当前优先用前五大重仓股财报做加权代理",
+            "roe": "前五大重仓股加权 ROE",
+            "margin": "前五大重仓股加权毛利率",
+            "peg_base": "前五大重仓股",
+        }
+    if asset_type in {"cn_stock", "hk", "us"}:
+        return {
+            "growth": "个股增速",
+            "growth_scope": "当前用个股最新财报数据",
+            "roe": "个股 ROE",
+            "margin": "个股毛利率",
+            "peg_base": "个股",
+        }
+    return {
+        "growth": "前五大成分股加权增速代理",
+        "growth_scope": "当前优先用前五大成分股营收同比",
+        "roe": "前五大成分股加权 ROE",
+        "margin": "前五大成分股加权毛利率",
+        "peg_base": "前五大成分股",
+    }
+
+
 def _preferred_catalyst_sources(metadata: Mapping[str, Any], profile: Mapping[str, Any]) -> List[str]:
     region = str(metadata.get("region", "")).upper().strip()
     profile_name = str(profile.get("profile_name", "")).strip()
     if region == "US" or profile_name == "纳斯达克":
-        return ["Reuters", "Bloomberg", "Financial Times"]
+        return ["Reuters", "Bloomberg", "Financial Times", "Business Wire", "PR Newswire", "GlobeNewswire"]
     if region == "HK" or profile_name == "港股科技":
-        return ["Reuters", "Bloomberg", "Financial Times", "财联社", "证券时报"]
+        return ["Reuters", "Bloomberg", "Financial Times", "HKEXnews", "财联社", "证券时报"]
     return ["财联社", "证券时报", "Reuters", "Bloomberg"]
 
 
@@ -1094,11 +1304,354 @@ def _headline_text(item: Mapping[str, Any]) -> str:
 
 def _contains_any(text: str, keywords: Sequence[str]) -> bool:
     lowered = text.lower()
-    return any(str(keyword).lower() in lowered for keyword in keywords if str(keyword).strip())
+    for keyword in keywords:
+        value = str(keyword).strip().lower()
+        if not value:
+            continue
+        if value.isascii() and value.replace(".", "").replace("-", "").isalnum() and len(value) <= 4:
+            pattern = rf"(?<![a-z0-9]){re.escape(value)}(?![a-z0-9])"
+            if re.search(pattern, lowered):
+                return True
+            continue
+        if value in lowered:
+            return True
+    return False
 
 
 def _title_source_text(item: Mapping[str, Any]) -> str:
     return " ".join([str(item.get("title", "")), str(item.get("source", ""))]).lower()
+
+
+def _is_low_signal_company_page(item: Mapping[str, Any]) -> bool:
+    title = str(item.get("title", "")).strip().lower()
+    return any(key in title for key in WEAK_COMPANY_PAGE_TITLE_KEYS)
+
+
+def _is_high_confidence_company_news(item: Mapping[str, Any]) -> bool:
+    if _is_low_signal_company_page(item):
+        return False
+    source_text = " ".join(
+        [
+            str(item.get("source", "")),
+            str(item.get("configured_source", "")),
+        ]
+    ).lower()
+    if any(source in source_text for source in HIGH_CONFIDENCE_COMPANY_SOURCES):
+        return True
+    link = str(item.get("link", "")).strip().lower()
+    parsed = urlparse(link)
+    host = parsed.netloc.lower()
+    return any(
+        (
+            domain in host
+            or (domain == ".gov" and (host.endswith(".gov") or ".gov." in host))
+            or (domain == "investor." and host.startswith("investor."))
+        )
+        for domain in (
+            "reuters.com",
+            "bloomberg.com",
+            "ft.com",
+            "businesswire.com",
+            "prnewswire.com",
+            "globenewswire.com",
+            "hkexnews.hk",
+            "sec.gov",
+            ".gov",
+            "investor.",
+        )
+    )
+
+
+def _stock_name_tokens(metadata: Mapping[str, Any]) -> List[str]:
+    asset_type_str = str(metadata.get("asset_type", ""))
+    if asset_type_str not in {"cn_stock", "hk", "us"}:
+        return []
+    stock_name = str(metadata.get("name", ""))
+    symbol_str = str(metadata.get("symbol", ""))
+    if not stock_name or stock_name == symbol_str:
+        return []
+    tokens: List[str] = [stock_name]
+    clean_name = stock_name.split("-")[0].strip()
+    if clean_name and clean_name != stock_name:
+        tokens.append(clean_name)
+    has_cjk = any("\u4e00" <= char <= "\u9fff" for char in clean_name)
+    if has_cjk and len(clean_name) >= 4:
+        tokens.append(clean_name[:2])
+    elif has_cjk and len(stock_name) >= 4:
+        tokens.append(stock_name[:2])
+    name_en = str(metadata.get("name_en", "")).strip()
+    if name_en:
+        tokens.append(name_en)
+    aliases = metadata.get("aliases") or []
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    for alias in aliases:
+        alias_text = str(alias).strip()
+        if alias_text:
+            tokens.append(alias_text)
+    if asset_type_str == "us" and symbol_str and not symbol_str.startswith("0"):
+        tokens.append(symbol_str.upper())
+    return list(dict.fromkeys([token for token in tokens if token]))
+
+
+def _context_now(context: Mapping[str, Any]) -> datetime:
+    candidate = context.get("as_of")
+    if isinstance(candidate, datetime):
+        return candidate
+    if candidate not in (None, ""):
+        parsed = pd.to_datetime(candidate, errors="coerce")
+        if not pd.isna(parsed):
+            return parsed.to_pydatetime()
+    return datetime.now()
+
+
+def _is_disclosure_like_item(item: Mapping[str, Any], stock_name_tokens: Sequence[str] = ()) -> bool:
+    text = _headline_text(item)
+    if stock_name_tokens and not _contains_any(text, stock_name_tokens):
+        return False
+    if _contains_any(text, DISCLOSURE_WINDOW_KEYS):
+        return True
+    has_period_marker = bool(re.search(r"20\d{2}年", text)) or _contains_any(text, DISCLOSURE_PERIOD_KEYS)
+    has_result_marker = _contains_any(text, DISCLOSURE_RESULT_KEYS)
+    return has_period_marker and has_result_marker
+
+
+def _extract_event_date_from_text(text: str, reference: datetime) -> Optional[datetime]:
+    value = str(text).strip()
+    patterns = [
+        re.compile(r"(?P<year>20\d{2})[-/.年](?P<month>\d{1,2})[-/.月](?P<day>\d{1,2})日?"),
+        re.compile(r"(?P<month>\d{1,2})月(?P<day>\d{1,2})日"),
+    ]
+    for pattern in patterns:
+        match = pattern.search(value)
+        if not match:
+            continue
+        try:
+            year = int(match.groupdict().get("year") or reference.year)
+            month = int(match.group("month"))
+            day = int(match.group("day"))
+            candidate = datetime(year, month, day)
+        except (TypeError, ValueError):
+            continue
+        if "year" not in match.groupdict() or match.groupdict().get("year") is None:
+            for offset in (0, 1):
+                try:
+                    guess = datetime(reference.year + offset, month, day)
+                except ValueError:
+                    continue
+                delta = (guess.date() - reference.date()).days
+                if 0 <= delta <= 31:
+                    return guess
+        return candidate
+    return None
+
+
+def _coerce_datetime_list(value: Any) -> List[datetime]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, Mapping):
+        candidates = list(value.values())
+    elif isinstance(value, (str, datetime, pd.Timestamp)):
+        candidates = [value]
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        candidates = list(value)
+    elif hasattr(value, "tolist"):
+        candidates = list(value.tolist())
+    else:
+        candidates = [value]
+
+    parsed_values: List[datetime] = []
+    for candidate in candidates:
+        parsed = pd.to_datetime(candidate, errors="coerce")
+        if pd.isna(parsed):
+            continue
+        timestamp = pd.Timestamp(parsed)
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_convert(None)
+        parsed_values.append(timestamp.to_pydatetime())
+    return parsed_values
+
+
+def _yfinance_calendar_symbol(symbol: str, asset_type: str) -> Optional[str]:
+    if asset_type == "hk":
+        code = symbol.upper().replace(".HK", "").lstrip("0") or "0"
+        return f"{code.zfill(4)}.HK"
+    if asset_type == "us":
+        return symbol.upper()
+    return None
+
+
+@lru_cache(maxsize=256)
+def _company_calendar_event_dates(symbol: str, asset_type: str) -> tuple[str, ...]:
+    if yf is None:
+        return ()
+    ticker_symbol = _yfinance_calendar_symbol(symbol, asset_type)
+    if not ticker_symbol:
+        return ()
+
+    dates: List[datetime] = []
+    try:
+        calendar = yf.Ticker(ticker_symbol).calendar
+    except Exception:
+        calendar = None
+
+    calendar_map: Mapping[str, Any] = {}
+    if isinstance(calendar, Mapping):
+        calendar_map = calendar
+    elif hasattr(calendar, "to_dict"):
+        try:
+            calendar_map = calendar.to_dict()
+        except Exception:
+            calendar_map = {}
+
+    earnings_field = None
+    for key in ("Earnings Date", "EarningsDate"):
+        if key in calendar_map:
+            earnings_field = calendar_map[key]
+            break
+    dates.extend(_coerce_datetime_list(earnings_field))
+
+    if not dates:
+        try:
+            earnings_dates = yf.Ticker(ticker_symbol).earnings_dates
+        except Exception:
+            earnings_dates = None
+        if earnings_dates is not None and not getattr(earnings_dates, "empty", True):
+            dates.extend(_coerce_datetime_list(list(getattr(earnings_dates, "index", []))[:4]))
+
+    unique = sorted({item.date().isoformat() for item in dates})
+    return tuple(unique)
+
+
+def _item_datetime(item: Mapping[str, Any], reference: datetime) -> Optional[datetime]:
+    for key in ("published_at", "published", "date", "datetime"):
+        value = item.get(key)
+        if value in (None, ""):
+            continue
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            continue
+        timestamp = pd.Timestamp(parsed)
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_convert(None)
+        return timestamp.to_pydatetime()
+    title = str(item.get("title", "")).strip()
+    return _extract_event_date_from_text(title, reference) if title else None
+
+
+def _negative_event_penalty(item: Mapping[str, Any], reference: datetime) -> tuple[int, str]:
+    event_date = _item_datetime(item, reference)
+    if event_date is None:
+        detail = f"未提取到明确日期，按 `{NEGATIVE_EVENT_LOOKBACK_DAYS}` 日窗口的中等惩罚处理。"
+        return 10, detail
+    age_days = max((reference.date() - event_date.date()).days, 0)
+    if age_days > NEGATIVE_EVENT_LOOKBACK_DAYS:
+        return 0, f"事件已过去 {age_days} 天，超出 `{NEGATIVE_EVENT_LOOKBACK_DAYS}` 日负面事件窗口。"
+    if age_days <= 7:
+        penalty = 15
+    elif age_days <= 14:
+        penalty = 12
+    else:
+        penalty = 8
+    detail = f"事件发生于 {event_date.strftime('%Y-%m-%d')}，距今 {age_days} 天，按 `{NEGATIVE_EVENT_LOOKBACK_DAYS}` 日衰减窗口处理。"
+    return penalty, detail
+
+
+def _disclosure_window_signal(items: Sequence[Mapping[str, Any]], reference: datetime) -> Optional[Dict[str, Any]]:
+    disclosure_items = [item for item in items if _is_disclosure_like_item(item)]
+    best_signal: Optional[Dict[str, Any]] = None
+    best_rank: tuple[int, int] | None = None
+    for item in disclosure_items:
+        title = str(item.get("title", "")).strip()
+        event_date = _item_datetime(item, reference)
+        if event_date is None:
+            continue
+        days = (event_date.date() - reference.date()).days
+        if 0 <= days <= 7:
+            detail = f"{days} 天后有财报/年报类披露事件，短线波动和预期差风险都会放大。"
+            candidate = {"penalty": 15, "signal": title, "detail": detail}
+            rank = (15, -abs(days))
+        elif 7 < days <= FORWARD_EVENT_LOOKAHEAD_DAYS:
+            detail = f"{days} 天后有财报/年报类披露事件，窗口已进入 `{FORWARD_EVENT_LOOKAHEAD_DAYS}` 日观察区间。"
+            candidate = {"penalty": 8, "signal": title, "detail": detail}
+            rank = (8, -abs(days))
+        elif -3 <= days < 0:
+            detail = f"{abs(days)} 天前刚披露财报/年报类结果，市场仍处在典型事件波动窗口。"
+            candidate = {"penalty": 15, "signal": title, "detail": detail}
+            rank = (15, -abs(days))
+        elif -FORWARD_EVENT_LOOKAHEAD_DAYS <= days < -3:
+            detail = f"{abs(days)} 天前已披露财报/年报类结果，事件余波通常仍会影响短线风险偏好。"
+            candidate = {"penalty": 8, "signal": title, "detail": detail}
+            rank = (8, -abs(days))
+        else:
+            continue
+        if best_rank is None or rank > best_rank:
+            best_rank = rank
+            best_signal = candidate
+    if best_signal:
+        return best_signal
+    if disclosure_items:
+        detail = f"近期公告/新闻命中财报或业绩披露关键词 ({len(disclosure_items)} 条)，处在典型事件窗口。"
+        return {"penalty": 8, "signal": str(disclosure_items[0].get("title", "")).strip(), "detail": detail}
+    return None
+
+
+def _company_forward_events(
+    metadata: Mapping[str, Any],
+    context: Mapping[str, Any],
+    news_items: Optional[Sequence[Mapping[str, Any]]] = None,
+    extra_items: Optional[Sequence[Mapping[str, Any]]] = None,
+    horizon_days: int = FORWARD_EVENT_LOOKAHEAD_DAYS,
+) -> List[Dict[str, Any]]:
+    reference = _context_now(context)
+    asset_type = str(metadata.get("asset_type", ""))
+    symbol = str(metadata.get("symbol", ""))
+    display_name = str(metadata.get("name", symbol)).strip() or symbol
+    stock_name_tokens = _stock_name_tokens(metadata)
+    forward_hits: List[Dict[str, Any]] = []
+
+    combined_items = _dedupe_news_items([*(news_items or []), *(extra_items or [])])
+    for item in combined_items:
+        if not _is_disclosure_like_item(item, stock_name_tokens):
+            continue
+        event_date = _item_datetime(item, reference)
+        if event_date is None:
+            continue
+        days = (event_date.date() - reference.date()).days
+        if 0 <= days <= horizon_days:
+            record = dict(item)
+            record.setdefault("date", event_date.date().isoformat())
+            record.setdefault("published_at", event_date.date().isoformat())
+            forward_hits.append(record)
+
+    if asset_type in {"hk", "us"}:
+        for iso_date in _company_calendar_event_dates(symbol, asset_type):
+            event_date = pd.to_datetime(iso_date, errors="coerce")
+            if pd.isna(event_date):
+                continue
+            days = (event_date.date() - reference.date()).days
+            if 0 <= days <= horizon_days:
+                forward_hits.append(
+                    {
+                        "title": f"{display_name} 预计于 {event_date.date().isoformat()} 披露业绩/财报",
+                        "category": "earnings_calendar",
+                        "source": "yfinance",
+                        "configured_source": "yfinance",
+                        "published_at": event_date.date().isoformat(),
+                        "date": event_date.date().isoformat(),
+                        "link": "",
+                    }
+                )
+
+    ordered: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in sorted(forward_hits, key=lambda row: (str(row.get("date", "")), str(row.get("title", "")))):
+        key = (str(item.get("date", "")), str(item.get("title", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(item)
+    return ordered
 
 
 def _pick_best_news_item(
@@ -1216,7 +1769,11 @@ def _hard_checks(
         if is_st:
             exclusion_reasons.append("ST / *ST 股票，退市风险较高")
 
-    checks.append({"name": "基本面底线", "status": "ℹ️", "detail": "当前以 ETF / 行业代理为主，利润同比底线暂未接入原始财报数据"})
+    if asset_type in {"cn_etf", "cn_index", "cn_fund"}:
+        fundamental_floor_detail = "当前以 ETF / 行业代理为主，利润同比底线暂未接入原始财报数据"
+    else:
+        fundamental_floor_detail = "当前已接入个股真实估值/财务快照；利润同比底线暂未单独作为硬排除项"
+    checks.append({"name": "基本面底线", "status": "ℹ️", "detail": fundamental_floor_detail})
     valuation_snapshot = dict(fundamental_dimension.get("valuation_snapshot") or {})
     valuation_extreme = bool(fundamental_dimension.get("valuation_extreme"))
     pe_ttm = valuation_snapshot.get("pe_ttm")
@@ -1225,7 +1782,10 @@ def _hard_checks(
             {
                 "name": "估值极端",
                 "status": "⚠️",
-                "detail": f"{valuation_snapshot.get('index_name', '相关指数')} 滚动PE {float(pe_ttm):.1f}x，已进入极高估值区",
+                "detail": (
+                    f"{valuation_snapshot.get('index_name', '相关指数')} "
+                    f"{valuation_snapshot.get('metric_label', '滚动PE')} {float(pe_ttm):.1f}x，已进入极高估值区"
+                ),
             }
         )
         exclusion_reasons.append("真实指数估值处于极高区间")
@@ -1420,14 +1980,26 @@ def _fundamental_dimension(
             financial_proxy = collector.get_cn_stock_financial_proxy(symbol)
         except Exception:
             financial_proxy = {}
-        stock_pe = metadata.get("pe_ttm")
-        stock_pb = metadata.get("pb")
+        stock_pe = financial_proxy.get("pe_ttm")
+        if stock_pe is None:
+            stock_pe = metadata.get("pe_ttm")
         if stock_pe is not None:
             try:
                 pe_ttm = float(stock_pe)
-                valuation_snapshot = {"index_name": str(metadata.get("name", symbol)), "pe_ttm": pe_ttm}
+                valuation_snapshot = {
+                    "index_name": str(metadata.get("name", symbol)),
+                    "pe_ttm": pe_ttm,
+                    "metric_label": "滚动PE",
+                }
             except (ValueError, TypeError):
                 pass
+        else:
+            stock_dynamic_pe = metadata.get("pe_dynamic")
+            if stock_dynamic_pe is not None:
+                try:
+                    valuation_note += f" 当前实时行情仅拿到动态 PE {float(stock_dynamic_pe):.1f}x，未将其当作滚动 PE 使用。"
+                except (ValueError, TypeError):
+                    pass
         try:
             sector_flow = _sector_flow_snapshot(metadata, MarketDriversCollector(config).collect())
         except Exception:
@@ -1441,10 +2013,16 @@ def _fundamental_dimension(
         except Exception:
             yf_data = {}
         if yf_data.get("pe_ttm") is not None:
-            valuation_snapshot = {"index_name": str(metadata.get("name", symbol)), "pe_ttm": yf_data["pe_ttm"]}
+            valuation_snapshot = {
+                "index_name": str(metadata.get("name", symbol)),
+                "pe_ttm": yf_data["pe_ttm"],
+                "metric_label": "滚动PE",
+            }
         # Merge yfinance data into financial_proxy (roe, revenue_yoy, gross_margin)
         if yf_data:
             financial_proxy = {**financial_proxy, **{k: v for k, v in yf_data.items() if v is not None and k != "pe_ttm"}}
+
+    proxy_labels = _fundamental_proxy_labels(asset_type)
 
     pe_ttm = None if not valuation_snapshot else valuation_snapshot.get("pe_ttm")
     pe_percentile = None
@@ -1524,8 +2102,8 @@ def _fundamental_dimension(
     revenue_yoy = financial_proxy.get("revenue_yoy")
     if revenue_yoy is None:
         revenue_yoy = financial_proxy.get("profit_yoy")
-    revenue_label = "前五大重仓股加权增速代理" if asset_type == "cn_fund" else "个股增速" if asset_type == "cn_stock" else "前五大成分股加权增速代理"
-    proxy_scope_detail = "当前优先用前五大重仓股财报做加权代理" if asset_type == "cn_fund" else "当前用个股最新财报数据" if asset_type == "cn_stock" else "当前优先用前五大成分股营收同比"
+    revenue_label = proxy_labels["growth"]
+    proxy_scope_detail = proxy_labels["growth_scope"]
     if revenue_yoy is not None:
         revenue_award = 20 if float(revenue_yoy) >= 20 else 15 if float(revenue_yoy) >= 10 else 8 if float(revenue_yoy) >= 5 else 0
         raw += revenue_award
@@ -1550,7 +2128,7 @@ def _fundamental_dimension(
         factors.append(
             _factor_row(
                 "ROE",
-                f"{'前五大重仓股' if asset_type == 'cn_fund' else '个股' if asset_type == 'cn_stock' else '前五大成分股'}加权 ROE {float(roe_value):.1f}%",
+                f"{proxy_labels['roe']} {float(roe_value):.1f}%",
                 roe_award,
                 20,
                 f"财务代理最新报告期 {financial_proxy.get('report_date') or '未知'}。",
@@ -1567,7 +2145,7 @@ def _fundamental_dimension(
         factors.append(
             _factor_row(
                 "毛利率",
-                f"{'前五大重仓股' if asset_type == 'cn_fund' else '个股' if asset_type == 'cn_stock' else '前五大成分股'}加权毛利率 {float(gross_margin):.1f}%",
+                f"{proxy_labels['margin']} {float(gross_margin):.1f}%",
                 margin_award,
                 15,
                 "用重仓股/成分股加权毛利率代理行业定价权和成本结构。",
@@ -1593,7 +2171,7 @@ def _fundamental_dimension(
                 f"PEG 约 {peg_value:.2f}",
                 peg_award,
                 10,
-                f"用真实指数 PE 除以{'前五大重仓股' if asset_type == 'cn_fund' else '个股' if asset_type == 'cn_stock' else '前五大成分股'}加权增速代理，回答'增长是否已经被定价'。",
+                f"用真实指数 PE 除以{proxy_labels['peg_base']}增速代理，回答'增长是否已经被定价'。",
             )
         )
     else:
@@ -1636,17 +2214,21 @@ def _fundamental_dimension(
     # fundamental" threshold used in rating logic.
     if score is not None and available < 35:
         score = min(score, 55)
+    is_single_stock = asset_type in {"cn_stock", "hk", "us"}
     summary = _dimension_summary(
         score,
-        "估值/资金承接代理偏正面，但当前仍是 ETF/行业代理视角。",
-        "基本面代理没有明显便宜或显著昂贵结论。",
-        "估值代理偏高，基本面安全边际不足。",
-        "ℹ️ 基本面数据缺失，本次评级未纳入完整基本面维度",
+        "个股估值/财务快照偏正面，基本面支撑存在。" if is_single_stock else "估值/资金承接代理偏正面，但当前仍是 ETF/行业代理视角。",
+        "个股基本面暂无明显低估或高估结论。" if is_single_stock else "基本面代理没有明显便宜或显著昂贵结论。",
+        "个股估值偏高或财务安全边际不足。" if is_single_stock else "估值代理偏高，基本面安全边际不足。",
+        "ℹ️ 个股基本面数据缺失，本次评级未纳入完整基本面维度" if is_single_stock else "ℹ️ 基本面数据缺失，本次评级未纳入完整基本面维度",
     )
     if score is not None and available < 35:
         summary += " 当前仅基于代理因子归一化评分。"
     if valuation_snapshot and pe_ttm is not None:
-        summary += f" 当前已接入 `{valuation_snapshot.get('index_name', '')}` 滚动 PE {float(pe_ttm):.1f}x；{valuation_note}"
+        summary += (
+            f" 当前已接入 `{valuation_snapshot.get('index_name', '')}` "
+            f"{valuation_snapshot.get('metric_label', '滚动PE')} {float(pe_ttm):.1f}x；{valuation_note}"
+        )
     else:
         summary += f" {valuation_note}"
     return {
@@ -1677,6 +2259,7 @@ def _catalyst_dimension(
     raw = 0
     available = 0
     config = dict(context.get("config", {}))
+    reference_now = _context_now(context)
     profile = _catalyst_profile(metadata, config, fund_profile)
     news_items = context.get("news_report", {}).get("all_items") or context.get("news_report", {}).get("items", [])
     sector = str(metadata.get("sector", ""))
@@ -1735,25 +2318,7 @@ def _catalyst_dimension(
     # Applies to cn_stock, hk, and us — ETFs/indexes/funds stay sector-level scoring.
     _individual_asset_types = {"cn_stock", "hk", "us"}
     is_individual_stock = str(metadata.get("asset_type", "")) in _individual_asset_types
-    stock_name = str(metadata.get("name", ""))
-    symbol_str = str(metadata.get("symbol", ""))
-    # Build stock-name tokens: full name + first 2 chars (for 4+ char Chinese names).
-    # For HK stocks: also strip common suffixes like "-W", "-S", "-SW", "集团" etc.
-    # For US stocks: use the ticker symbol as well (e.g. COIN, SNOW, MSFT).
-    stock_name_tokens: List[str] = []
-    if is_individual_stock and stock_name and stock_name != symbol_str:
-        # Clean HK name variants: 快手-W → 快手, 小米集团-W → 小米集团 / 小米
-        clean_name = stock_name.split("-")[0].strip()
-        stock_name_tokens.append(stock_name)
-        if clean_name and clean_name != stock_name:
-            stock_name_tokens.append(clean_name)
-        if len(clean_name) >= 4:
-            stock_name_tokens.append(clean_name[:2])
-        elif len(stock_name) >= 4:
-            stock_name_tokens.append(stock_name[:2])
-        # For US stocks: add ticker symbol (e.g. MSFT, COIN)
-        if str(metadata.get("asset_type", "")) == "us" and symbol_str and not symbol_str.startswith("0"):
-            stock_name_tokens.append(symbol_str.upper())
+    stock_name_tokens = _stock_name_tokens(metadata) if is_individual_stock else []
     stock_specific_pool = (
         [item for item in news_pool if _contains_any(_headline_text(item), stock_name_tokens)]
         if stock_name_tokens else news_pool
@@ -1767,13 +2332,17 @@ def _catalyst_dimension(
                 search_terms,
                 preferred_sources=_preferred_catalyst_sources(metadata, profile),
                 limit=6,
-                recent_days=7,
+                recent_days=DIRECT_COMPANY_NEWS_LOOKBACK_DAYS,
             )
             if hk_us_news:
                 news_pool = _dedupe_news_items([*news_pool, *hk_us_news])
                 stock_specific_pool = [item for item in news_pool if _contains_any(_headline_text(item), stock_name_tokens)]
         except Exception:
             pass
+    company_positive_pool = stock_specific_pool
+    if asset_type_str in {"hk", "us"} and stock_name_tokens:
+        company_positive_pool = [item for item in stock_specific_pool if _is_high_confidence_company_news(item)]
+    company_specific_news_available = bool(company_positive_pool) if asset_type_str in {"hk", "us"} and stock_name_tokens else True
 
     policy_items = [
         item
@@ -1786,19 +2355,32 @@ def _catalyst_dimension(
         and _contains_any(_headline_text(item), strict_tokens)
     ]
     policy_pick = _pick_best_news_item(policy_items, policy_keys, keyword_keys)
-    if is_individual_stock and stock_name_tokens:
+    if asset_type_str in {"hk", "us"} and stock_name_tokens:
+        specific_policy_items = [item for item in policy_items if item in company_positive_pool]
+        policy_pick = _pick_best_news_item(specific_policy_items, policy_keys, stock_name_tokens or keyword_keys)
+        policy_award = 10 if specific_policy_items else 0
+    elif is_individual_stock and stock_name_tokens:
         # cn_stock: full 30pts only when the policy news names the company directly;
         # sector-level policy (e.g. industry-wide AI/tech support) gets only 10pts.
         specific_policy_items = [item for item in policy_items if _contains_any(_headline_text(item), stock_name_tokens)]
         policy_award = 30 if specific_policy_items else (10 if policy_items else 0)
     else:
         policy_award = 30 if policy_items else 0
+    if asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available:
+        policy_pick = None
+        policy_award = 0
     # For cn_stock with per-stock news: redistribute weights (policy 25, leader 15, new factor 15)
     _policy_max = 25 if (asset_type_str == "cn_stock" and stock_name_tokens) else 30
     policy_award = min(policy_award, _policy_max)
     raw += policy_award
     available += _policy_max
-    factors.append(_factor_row("政策催化", policy_pick["title"] if policy_pick else "近 7 日未命中直接政策催化", policy_award, _policy_max, "政策原文和一级媒体优先"))
+    policy_signal = (
+        "未命中高置信个股直连新闻，个股催化暂不计分"
+        if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available)
+        else (policy_pick["title"] if policy_award > 0 and policy_pick else "近 7 日未命中直接政策催化")
+    )
+    policy_detail = "当前未命中 Reuters/Bloomberg/FT/公司公告 这类高置信个股直连标题，避免把市场级新闻误记成个股催化。" if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available) else "政策原文和一级媒体优先"
+    factors.append(_factor_row("政策催化", policy_signal, policy_award, _policy_max, policy_detail))
 
     leader_items = [
         item
@@ -1813,12 +2395,60 @@ def _catalyst_dimension(
             and _contains_any(_headline_text(item), [*strict_tokens, *strict_event_keys, "订单", "扩产", "投产", "回购", "并购", "重组", "指引", "扩建", "量产", "涨价"])
         )
     ]
+    stock_specific_leader_items: List[Mapping[str, Any]] = []
     leader_pick = _pick_best_news_item(leader_items, [*domestic_leaders, *strict_event_keys], keyword_keys)
+    if is_individual_stock and company_positive_pool:
+        stock_specific_leader_items = [
+            item
+            for item in company_positive_pool
+            if _contains_any(
+                _headline_text(item),
+                [
+                    *strict_event_keys,
+                    "订单",
+                    "扩产",
+                    "投产",
+                    "回购",
+                    "并购",
+                    "重组",
+                    "指引",
+                    "扩建",
+                    "量产",
+                    "涨价",
+                    "业绩",
+                    "财报",
+                    "earnings",
+                    "guidance",
+                    "buyback",
+                    "outlook",
+                    "financial outlook",
+                    "results",
+                    "quarterly results",
+                    "forecast",
+                    "partnership",
+                    "collaboration",
+                    "expansion",
+                ],
+            )
+        ]
+        if stock_specific_leader_items:
+            leader_pick = _pick_best_news_item(stock_specific_leader_items, [*keyword_keys, *strict_event_keys], stock_name_tokens or keyword_keys)
     _leader_max = 15 if (asset_type_str == "cn_stock" and stock_name_tokens) else 25
-    leader_award = _leader_max if leader_items else 0
+    if asset_type_str in {"hk", "us"} and stock_name_tokens:
+        leader_award = _leader_max if stock_specific_leader_items else 0
+        if not company_specific_news_available:
+            leader_pick = None
+    else:
+        leader_award = _leader_max if (leader_items or stock_specific_leader_items) else 0
     raw += leader_award
     available += _leader_max
-    factors.append(_factor_row("龙头公告/业绩", leader_pick["title"] if leader_pick else "未命中直接龙头公告", leader_award, _leader_max, "优先看订单、扩产、回购、并购或超预期业绩"))
+    leader_signal = (
+        "未命中高置信个股直连新闻，个股催化暂不计分"
+        if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available)
+        else (leader_pick["title"] if leader_award > 0 and leader_pick else "未命中直接龙头公告")
+    )
+    leader_detail = "当前未命中 Reuters/Bloomberg/FT/公司公告 这类高置信业绩/公告标题，避免把行业级消息误映射到单一个股。" if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available) else "优先看订单、扩产、回购、并购或超预期业绩"
+    factors.append(_factor_row("龙头公告/业绩", leader_signal, leader_award, _leader_max, leader_detail))
 
     # --- New factor: per-stock announcement/event (cn_stock only, 15pts max) ---
     if asset_type_str == "cn_stock" and stock_name_tokens:
@@ -1840,6 +2470,83 @@ def _catalyst_dimension(
         raw += ann_award
         available += 15
         factors.append(_factor_row("个股公告/事件", ann_pick["title"] if ann_pick else "无个股公告", ann_award, 15, ann_detail))
+
+    if is_individual_stock:
+        negative_pool = list(stock_specific_pool) if stock_name_tokens else []
+        if asset_type_str == "cn_stock" and stock_news_items:
+            stock_scoped_negatives = [
+                item
+                for item in stock_news_items
+                if _contains_any(_headline_text(item), NEGATIVE_DILUTION_KEYS)
+                or (stock_name_tokens and _contains_any(_headline_text(item), stock_name_tokens))
+            ]
+            negative_pool = _dedupe_news_items([*negative_pool, *stock_scoped_negatives])
+        negative_items = [
+            item
+            for item in negative_pool
+            if _contains_any(_headline_text(item), [*NEGATIVE_DILUTION_KEYS, *NEGATIVE_REGULATORY_KEYS])
+        ]
+        if not negative_items and stock_name_tokens and asset_type_str in {"hk", "us"}:
+            try:
+                older_company_news = NewsCollector(config).search_by_keywords(
+                    [token for token in stock_name_tokens if len(token) >= 2][:3],
+                    preferred_sources=_preferred_catalyst_sources(metadata, profile),
+                    limit=8,
+                    recent_days=NEGATIVE_EVENT_LOOKBACK_DAYS,
+                )
+            except Exception:
+                older_company_news = []
+            if older_company_news:
+                negative_pool = _dedupe_news_items([*negative_pool, *older_company_news])
+                negative_items = [
+                    item
+                    for item in negative_pool
+                    if _contains_any(_headline_text(item), [*NEGATIVE_DILUTION_KEYS, *NEGATIVE_REGULATORY_KEYS])
+                ]
+
+        negative_signals = []
+        for item in negative_items:
+            penalty, date_detail = _negative_event_penalty(item, reference_now)
+            if penalty <= 0:
+                continue
+            negative_signals.append((item, penalty, date_detail))
+
+        if negative_signals:
+            strongest_penalty = max(signal[1] for signal in negative_signals)
+            strongest_items = [signal for signal in negative_signals if signal[1] == strongest_penalty]
+            negative_pick_candidate = _pick_best_news_item(
+                [signal[0] for signal in strongest_items],
+                [*NEGATIVE_DILUTION_KEYS, *NEGATIVE_REGULATORY_KEYS],
+                keyword_keys,
+            )
+            negative_pick, penalty, date_detail = next(
+                (signal for signal in strongest_items if signal[0] == negative_pick_candidate),
+                strongest_items[0],
+            )
+            negative_text = _headline_text(negative_pick)
+            label = "稀释事件" if _contains_any(negative_text, NEGATIVE_DILUTION_KEYS) else "监管/合规风险"
+            raw -= penalty
+            factors.append(
+                _factor_row(
+                    "负面事件",
+                    str(negative_pick.get("title", "")).strip(),
+                    0,
+                    15,
+                    f"{date_detail} 命中 `{label}` 关键词，容易直接压制催化兑现和风险偏好。",
+                    display_score=f"-{penalty}",
+                )
+            )
+        else:
+            factors.append(
+                _factor_row(
+                    "负面事件",
+                    f"近 {NEGATIVE_EVENT_LOOKBACK_DAYS} 日未命中明确稀释/监管负面",
+                    0,
+                    15,
+                    "当前未识别到会直接压制催化兑现的个股负面事件。",
+                    display_score="信息项",
+                )
+            )
 
     overseas_keyword_map = {
         "科技": ["tsmc", "台积电", "nvidia", "英伟达", "micron", "美光", "hynix", "海力士", "asml", "broadcom", "amd", "gpu", "semiconductor", "foundry", "fab", "capex"],
@@ -1866,13 +2573,22 @@ def _catalyst_dimension(
     ]
     overseas_pick = _pick_best_news_item(overseas_items, [*overseas_leaders, *earnings_keys, *strict_event_keys], [*keyword_keys, *overseas_keyword_map.get(sector, [])])
     overseas_award = 20 if overseas_items else 0
+    if asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available:
+        overseas_pick = None
+        overseas_award = 0
     raw += overseas_award
     available += 20
-    factors.append(_factor_row("海外映射", overseas_pick["title"] if overseas_pick else "未命中直接海外映射", overseas_award, 20, "重点看海外龙头财报/指引或模型产品催化"))
+    overseas_signal = (
+        "未命中高置信个股直连新闻，海外映射暂不计分"
+        if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available)
+        else (overseas_pick["title"] if overseas_award > 0 and overseas_pick else "未命中直接海外映射")
+    )
+    overseas_detail = "当前未命中与公司直接相关的高置信海外映射新闻，避免把行业级海外消息直接算成个股催化。" if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available) else "重点看海外龙头财报/指引或模型产品催化"
+    factors.append(_factor_row("海外映射", overseas_signal, overseas_award, 20, overseas_detail))
 
     # For individual stocks: density and heat only count articles that directly mention the stock.
     # This prevents sector-level news (e.g. broad AI/tech news) from inflating density scores.
-    density_pool = stock_specific_pool if (is_individual_stock and stock_name_tokens) else news_pool
+    density_pool = company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool if (is_individual_stock and stock_name_tokens) else news_pool)
     density_count = len(density_pool)
     density_label = f"个股相关头条 {density_count} 条（行业头条 {len(news_pool)} 条）" if (is_individual_stock and stock_name_tokens) else f"相关头条 {len(news_pool)} 条"
     density_award = 10 if density_count >= 2 else (5 if density_count >= 1 else 0)
@@ -1880,17 +2596,35 @@ def _catalyst_dimension(
     available += 10
     factors.append(_factor_row("研报/新闻密度", density_label, density_award, 10, "个股直接提及的一级媒体头条密度"))
 
-    heat_pool = stock_specific_pool if (is_individual_stock and stock_name_tokens) else news_pool
+    heat_pool = company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool if (is_individual_stock and stock_name_tokens) else news_pool)
     source_count = len({str(item.get("source", "")) for item in heat_pool if item.get("source")})
     heat_award = 10 if source_count >= 2 else 0
     raw += heat_award
     available += 10
     factors.append(_factor_row("新闻热度", f"覆盖源 {source_count} 个", heat_award, 10, "从少量提及到多源同步，是热度拐点的代理"))
 
-    forward_award = 5 if related_events else 0
+    forward_events = _dedupe_news_items(
+        [
+            *related_events,
+            *_company_forward_events(
+                metadata,
+                context,
+                news_items=stock_specific_pool if stock_specific_pool else news_pool,
+            ),
+        ]
+    )
+    forward_award = 5 if forward_events else 0
     raw += forward_award
     available += 5
-    factors.append(_factor_row("前瞻催化", related_events[0]["title"] if related_events else "未来 14 日未命中直接催化事件", forward_award, 5, "当前用本地事件日历代理"))
+    factors.append(
+        _factor_row(
+            "前瞻催化",
+            forward_events[0]["title"] if forward_events else f"未来 {FORWARD_EVENT_LOOKAHEAD_DAYS} 日未命中直接催化事件",
+            forward_award,
+            5,
+            "未来财报/发布会/事件窗口已纳入；HK/US 个股优先读取公司级财报日历。",
+        )
+    )
 
     score = _normalize_dimension(raw, available, 100)
     return {
@@ -1899,7 +2633,7 @@ def _catalyst_dimension(
         "max_score": 100,
         "summary": _dimension_summary(score, "催化明确，市场有理由重新定价。", "有催化苗头，但强度还不够形成一致预期。", "催化不足，当前更像静态博弈。", "ℹ️ 催化面数据缺失，本次评级未纳入该维度"),
         "factors": factors,
-        "core_signal": _top_positive_signals(factors),
+        "core_signal": _catalyst_core_signal(factors, stock_specific_pool, company_positive_pool, is_individual_stock, asset_type_str),
         "missing": score is None,
         "profile_name": profile.get("profile_name", sector),
     }
@@ -2088,12 +2822,24 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
         else:
             try:
                 flow = ChinaMarketCollector(config).get_north_south_flow()
-                north = flow[flow["资金方向"].astype(str).str.contains("北向", na=False)] if "资金方向" in flow.columns else pd.DataFrame()
-                value = float(pd.to_numeric(north.get("成交净买额", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not north.empty else 0.0
+                value = 0.0
+                if not flow.empty and {"日期", "北向资金净流入"}.issubset(flow.columns):
+                    latest = flow.sort_values("日期").iloc[-1]
+                    value = float(
+                        pd.to_numeric(pd.Series([latest.get("北向资金净流入")]), errors="coerce").fillna(0.0).iloc[0]
+                    )
                 north_award = 20 if value > 0 else 0
                 raw += north_award
                 available += 20
-                factors.append(_factor_row("北向/南向", f"北向净买额约 {value:.2f} 亿", north_award, 20, "行业北向缺失，回退到全市场方向代理"))
+                factors.append(
+                    _factor_row(
+                        "北向/南向",
+                        f"北向净买额约 {_fmt_yi_number(value)}",
+                        north_award,
+                        20,
+                        "行业北向缺失，回退到全市场方向代理",
+                    )
+                )
             except Exception as exc:
                 factors.append(_factor_row("北向/南向", "缺失", None, 20, f"北向/南向数据缺失: {exc}"))
     elif asset_type in {"hk", "hk_index"}:
@@ -2195,6 +2941,49 @@ def _volatility_percentile(close: pd.Series) -> tuple[float, float]:
     return current, percentile
 
 
+def _recent_high_recovery_signal(close: pd.Series, lookback: int = 252) -> tuple[Optional[int], Optional[float], int, str, str]:
+    if len(close) < 80:
+        return None, None, 0, "近一年修复样本不足", "历史样本不足，未计算近一年高点后的修复速度。"
+
+    trailing = close.tail(min(len(close), lookback)).reset_index(drop=True).astype(float)
+    running_peak = trailing.cummax()
+    drawdown = trailing / running_peak - 1
+    trough_idx = int(drawdown.idxmin())
+    if trough_idx <= 0 or trough_idx >= len(trailing) - 1:
+        return None, None, 0, "近一年未形成有效回撤样本", "近一年没有形成可用于评估恢复速度的完整回撤。"
+
+    peak_level = float(running_peak.iloc[trough_idx])
+    trough_level = float(trailing.iloc[trough_idx])
+    drawdown_gap = peak_level - trough_level
+    if peak_level <= 0 or drawdown_gap <= 0:
+        return None, None, 0, "近一年未形成有效回撤样本", "近一年没有形成可用于评估恢复速度的完整回撤。"
+
+    recovery_target = trough_level + drawdown_gap * 0.5
+    recover = trailing.iloc[trough_idx:]
+    recovered = recover[recover >= recovery_target]
+    recovery_days = int(recovered.index[0] - trough_idx) if not recovered.empty else 999
+    recovery_ratio = max(0.0, min(1.0, (float(trailing.iloc[-1]) - trough_level) / drawdown_gap))
+
+    if recovery_days != 999 and recovery_days < 60:
+        award = 15
+        signal = f"近一年高点后 {recovery_days} 日修复过半"
+        detail = "相对近一年高点形成的主要回撤，恢复越快说明趋势韧性越强。"
+    elif recovery_days != 999:
+        award = 10
+        signal = f"近一年高点后 {recovery_days} 日修复过半"
+        detail = "已经完成至少一半修复，但速度不算快。"
+    elif recovery_ratio >= 0.35:
+        award = 5
+        signal = f"近一年高点后已修复 {recovery_ratio:.0%}"
+        detail = "虽然还没修复过半，但相对近一年主要回撤已经有一定恢复。"
+    else:
+        award = 0
+        signal = f"近一年高点后已修复 {recovery_ratio:.0%}"
+        detail = "相对近一年主要回撤，修复仍偏弱。"
+
+    return recovery_days, recovery_ratio, award, signal, detail
+
+
 def _downside_beta(asset_returns: pd.Series, benchmark_returns: Optional[pd.Series]) -> Optional[float]:
     if benchmark_returns is None or benchmark_returns.empty:
         return None
@@ -2211,7 +3000,15 @@ def _downside_beta(asset_returns: pd.Series, benchmark_returns: Optional[pd.Seri
     return covariance / variance
 
 
-def _risk_dimension(symbol: str, asset_type: str, history: pd.DataFrame, asset_returns: pd.Series, context: Mapping[str, Any], correlation_pair: Optional[tuple[str, float]]) -> Dict[str, Any]:
+def _risk_dimension(
+    symbol: str,
+    asset_type: str,
+    metadata: Mapping[str, Any],
+    history: pd.DataFrame,
+    asset_returns: pd.Series,
+    context: Mapping[str, Any],
+    correlation_pair: Optional[tuple[str, float]],
+) -> Dict[str, Any]:
     close = history["close"].astype(float)
     factors: List[Dict[str, Any]] = []
     raw = 0
@@ -2238,19 +3035,10 @@ def _risk_dimension(symbol: str, asset_type: str, history: pd.DataFrame, asset_r
         available += 20
         factors.append(_factor_row("下行 beta", f"下行 beta {beta:.2f}", beta_award, 20, "大盘跌时它跌得少，风控价值更高"))
 
-    recovery_days = 0
-    if len(close) >= 120:
-        trailing = close.tail(120).reset_index(drop=True)
-        peak = float(trailing.cummax().iloc[-1])
-        trough_idx = int((trailing / trailing.cummax() - 1).idxmin())
-        if trough_idx < len(trailing) - 1:
-            recover = trailing.iloc[trough_idx:]
-            recovered = recover[recover >= peak * 0.95]
-            recovery_days = int(recovered.index[0] - trough_idx) if not recovered.empty else 999
-    recovery_award = 15 if recovery_days and recovery_days < 60 else 0
+    _, _, recovery_award, recovery_signal, recovery_detail = _recent_high_recovery_signal(close)
     raw += recovery_award
     available += 15
-    factors.append(_factor_row("回撤恢复", f"近似恢复速度 {recovery_days if recovery_days else '未知'} 日", recovery_award, 15, "恢复越快，韧性越好"))
+    factors.append(_factor_row("回撤恢复", recovery_signal, recovery_award, 15, recovery_detail))
 
     if correlation_pair is None:
         factors.append(_factor_row("组合分散", "缺失", None, 10, "watchlist 相关性序列不足"))
@@ -2260,6 +3048,56 @@ def _risk_dimension(symbol: str, asset_type: str, history: pd.DataFrame, asset_r
         raw += div_award
         available += 10
         factors.append(_factor_row("组合分散", f"与 {peer} 相关性 {corr:.2f}", div_award, 10, "相关性越低，越有真正分散价值"))
+
+    if asset_type in {"cn_stock", "hk", "us"}:
+        stock_name_tokens = _stock_name_tokens(metadata)
+        disclosure_pool: List[Mapping[str, Any]] = []
+        news_items = context.get("news_report", {}).get("all_items") or context.get("news_report", {}).get("items", [])
+        if stock_name_tokens:
+            disclosure_pool.extend([item for item in news_items if _is_disclosure_like_item(item, stock_name_tokens)])
+        stock_news_items: List[Mapping[str, Any]] = []
+        if asset_type == "cn_stock":
+            try:
+                stock_news_items = NewsCollector(dict(context.get("config", {}))).get_stock_news(symbol)
+                stock_disclosure_items = [
+                    item
+                    for item in stock_news_items
+                    if _is_disclosure_like_item(item, stock_name_tokens)
+                ]
+                disclosure_pool = _dedupe_news_items([*disclosure_pool, *stock_disclosure_items])
+            except Exception:
+                pass
+        disclosure_pool = _dedupe_news_items(
+            [
+                *disclosure_pool,
+                *_company_forward_events(metadata, context, news_items=disclosure_pool, extra_items=stock_news_items),
+            ]
+        )
+        disclosure_signal = _disclosure_window_signal(disclosure_pool, _context_now(context))
+        if disclosure_signal:
+            penalty = int(disclosure_signal["penalty"])
+            raw -= penalty
+            factors.append(
+                _factor_row(
+                    "披露窗口",
+                    str(disclosure_signal["signal"]),
+                    0,
+                    penalty,
+                    str(disclosure_signal["detail"]),
+                    display_score=f"-{penalty}",
+                )
+            )
+        else:
+            factors.append(
+                _factor_row(
+                    "披露窗口",
+                    f"近 {FORWARD_EVENT_LOOKAHEAD_DAYS} 日未命中明确财报/年报事件窗口",
+                    0,
+                    10,
+                    "当前未识别到会明显放大波动的披露窗口。",
+                    display_score="信息项",
+                )
+            )
 
     score = _normalize_dimension(raw, available, 100)
     return {
@@ -2677,7 +3515,8 @@ def _build_narrative(
     risk_points = {
         "fundamental": f"真正的基本面风险不在 {metadata.get('name', analysis_seed.get('symbol'))} 本身，而在其所暴露的 `{sector}` 景气如果不及预期，估值支撑会继续下移。",
         "valuation": (
-            f"当前真实估值参考为 `{valuation_snapshot.get('index_name', '相关指数')}` 滚动PE `{float(valuation_pe):.1f}x`，"
+            f"当前真实估值参考为 `{valuation_snapshot.get('index_name', '相关指数')}` "
+            f"{valuation_snapshot.get('metric_label', '滚动PE')} `{float(valuation_pe):.1f}x`，"
             f"同时价格位置在近一年 `{price_percentile:.0%}` 分位；高估值和高位置是两层风险，不是一回事。"
             if valuation_pe is not None
             else f"当前价格位置大约在近一年 `{price_percentile:.0%}` 分位。{valuation_note}"
@@ -2810,6 +3649,7 @@ def _action_plan(
     metrics: Optional[Mapping[str, float]] = None,
 ) -> Dict[str, str]:
     rating = analysis["rating"]["rank"]
+    asset_type = str(analysis.get("asset_type", ""))
     tech = analysis["dimensions"]["technical"]["score"]
     risk_score = analysis["dimensions"]["risk"]["score"] or 0
     relative_score = analysis["dimensions"]["relative_strength"]["score"] or 0
@@ -2817,10 +3657,12 @@ def _action_plan(
     macro_reverse = analysis["dimensions"]["macro"].get("macro_reverse", False)
     rsi = float(technical.get("rsi", {}).get("RSI", 50.0))
     fib_levels = technical.get("fibonacci", {}).get("levels", {})
+    ma20 = float(technical.get("ma_system", {}).get("mas", {}).get("MA20", history["close"].iloc[-1]))
     ma60 = float(technical.get("ma_system", {}).get("mas", {}).get("MA60", history["close"].iloc[-1]))
-    stop_ref = max(float(fib_levels.get("0.382", 0.0)), float(fib_levels.get("0.500", 0.0)), ma60)
-    target_ref = float(history["high"].tail(60).max())
+    close_now = float(history["close"].iloc[-1])
+    ma20_gap = ((close_now / ma20) - 1.0) if ma20 else 0.0
     vol_percentile = float((metrics or {}).get("volatility_percentile_1y", 0.5))
+    return_5d = float((metrics or {}).get("return_5d", 0.0))
 
     if rating >= 3 and not macro_reverse:
         direction = "做多"
@@ -2834,6 +3676,14 @@ def _action_plan(
     # --- Entry conditions: incorporate risk and relative strength ---
     if rsi > 70:
         entry = "等 RSI 回落到 60 附近且 MACD 不死叉，再考虑分批介入"
+    elif tech is not None and tech >= 55 and ma20_gap >= 0.05 and return_5d >= 0.05:
+        entry = "短线已明显抬离 MA20，优先等回踩 MA20 附近企稳后再分批，不追高"
+    elif tech is not None and tech >= 55 and return_5d >= 0.07:
+        entry = "近 5 日拉升较快，优先等回踩 MA20 附近消化后再分批，不追高"
+    elif tech is not None and tech >= 55 and abs(ma20_gap) <= 0.03 and return_5d <= 0.03:
+        entry = "当前已接近 MA20，可在 MACD 继续走强时小仓位关注，确认后再分批"
+    elif tech is not None and tech >= 55 and ma20_gap < -0.03:
+        entry = "先看价格能否重新站回 MA20，确认支撑有效后再考虑介入"
     elif tech is not None and tech >= 70:
         entry = "等回踩 MA20 / MA60 或关键斐波那契支撑后企稳，再做首次试探"
     elif tech is not None and tech >= 55:
@@ -2842,8 +3692,10 @@ def _action_plan(
         entry = "风险收益比占优且轮动信号到位，可在技术企稳（如 MACD 转强或站上 MA20）时小仓位介入"
     elif risk_score >= 70 and tech is not None and tech >= 40:
         entry = "下行空间有限，等技术面配合（MACD 走强或 MA20 企稳）时可低吸"
+    elif relative_score >= 70 and return_5d >= 0.05:
+        entry = "短线轮动偏快，优先等回踩 MA20 / 前低企稳后再介入，避免在加速段追价"
     elif relative_score >= 70:
-        entry = "板块轮动信号明确，可在回踩 MA20 附近时介入，但需严控仓位"
+        entry = "板块轮动信号明确，若回踩 MA20 附近出现承接可分批介入，但需严控仓位"
     elif tech is not None and tech >= 40:
         entry = "先等 MACD 再次转强或站回 MA20，避免在弱趋势里提前出手"
     else:
@@ -2868,6 +3720,52 @@ def _action_plan(
     else:
         position = "暂不出手"
 
+    if vol_percentile < 0.30:
+        stop_loss_pct = "-5%"
+    elif vol_percentile <= 0.60:
+        stop_loss_pct = "-8%"
+    else:
+        stop_loss_pct = "-10%"
+
+    stop_buffer = abs(float(stop_loss_pct.strip("%"))) / 100.0
+    support_candidates = [
+        candidate
+        for candidate in [
+            ma20,
+            ma60,
+            float(fib_levels.get("0.382", 0.0)),
+            float(fib_levels.get("0.500", 0.0)),
+            float(fib_levels.get("0.618", 0.0)),
+            float(history["low"].tail(20).min()),
+        ]
+        if candidate and candidate < close_now
+    ]
+    structural_stop = max(support_candidates) * 0.995 if support_candidates else 0.0
+    stop_floor = close_now * (1.0 - stop_buffer)
+    stop_ref = max(structural_stop, stop_floor) if structural_stop else stop_floor
+    if stop_ref >= close_now:
+        stop_ref = stop_floor
+    min_validation_gap = 0.02 if asset_type in {"hk", "us"} else 0.01
+    if stop_ref >= close_now * (1.0 - min_validation_gap):
+        stop_ref = close_now * (1.0 - max(stop_buffer, min_validation_gap))
+
+    target_floor = close_now * (1.12 if rating >= 3 else 1.08)
+    resistance_candidates = [
+        candidate
+        for candidate in [
+            float(history["high"].tail(60).max()),
+            float(fib_levels.get("1.000", 0.0)),
+        ]
+        if candidate and candidate > close_now
+    ]
+    target_ref = max([target_floor, *resistance_candidates]) if resistance_candidates else target_floor
+    if target_ref <= close_now:
+        target_ref = target_floor
+    if stop_ref >= close_now:
+        stop_ref = close_now * (1.0 - max(stop_buffer, min_validation_gap))
+    if target_ref <= close_now:
+        target_ref = close_now * 1.05
+
     timeframe = "中线配置(1-3月)" if rating >= 3 else "短线交易(1-2周)" if rating >= 2 or (risk_score >= 70 and relative_score >= 60) else "等待更好窗口"
     target = f"先看前高/近 60 日高点 {target_ref:.3f} 附近的承压与突破情况"
     stop = f"跌破 {stop_ref:.3f} 或主线/催化失效时重新评估"
@@ -2886,13 +3784,6 @@ def _action_plan(
         scaling = "一次性小仓位，不加仓"
     else:
         scaling = "仅观察仓，不加仓"
-
-    if vol_percentile < 0.30:
-        stop_loss_pct = "-5%"
-    elif vol_percentile <= 0.60:
-        stop_loss_pct = "-8%"
-    else:
-        stop_loss_pct = "-10%"
 
     corr_warning = ""
     if correlation_pair and len(correlation_pair) >= 2:
@@ -2946,7 +3837,7 @@ def analyze_opportunity(
         "catalyst": _catalyst_dimension(metadata, runtime_context, fund_profile),
         "relative_strength": _relative_strength_dimension(symbol, asset_type, metadata, metrics, asset_returns, runtime_context),
         "chips": _chips_dimension(symbol, asset_type, metadata, runtime_context, config),
-        "risk": _risk_dimension(symbol, asset_type, history, asset_returns, runtime_context, correlation_pair),
+        "risk": _risk_dimension(symbol, asset_type, metadata, history, asset_returns, runtime_context, correlation_pair),
         "seasonality": _seasonality_dimension(metadata, history, runtime_context),
         "macro": _macro_dimension(metadata, runtime_context),
     }
@@ -3237,7 +4128,9 @@ def build_stock_pool(
             name_col = "名称" if "名称" in realtime.columns else None
             amount_col = "成交额" if "成交额" in realtime.columns else None
             cap_col = "总市值" if "总市值" in realtime.columns else None
-            pe_col = next((c for c in realtime.columns if "市盈率" in c), None)
+            pe_ttm_col = next((c for c in ("市盈率TTM", "滚动市盈率", "PE滚动", "PE_TTM") if c in realtime.columns), None)
+            pe_dynamic_col = next((c for c in ("市盈率(动态)", "动态市盈率") if c in realtime.columns), None)
+            pe_raw_col = next((c for c in ("市盈率",) if c in realtime.columns), None)
             pb_col = next((c for c in realtime.columns if "市净率" in c), None)
             industry_col = next((c for c in realtime.columns if c in ("行业", "所属行业")), None)
 
@@ -3279,8 +4172,13 @@ def build_stock_pool(
                             industry = ""
                     sector, chain_nodes = _map_industry_to_sector(industry, name)
                     meta: Dict[str, Any] = {"industry": industry}
-                    if pe_col and pd.notna(row.get(pe_col)):
-                        meta["pe_ttm"] = float(row[pe_col])
+                    if pe_ttm_col and pd.notna(row.get(pe_ttm_col)):
+                        meta["pe_ttm"] = float(row[pe_ttm_col])
+                    if pe_dynamic_col and pd.notna(row.get(pe_dynamic_col)):
+                        meta["pe_dynamic"] = float(row[pe_dynamic_col])
+                    if pe_raw_col and pd.notna(row.get(pe_raw_col)):
+                        meta["pe_raw"] = float(row[pe_raw_col])
+                        meta["pe_raw_label"] = pe_raw_col
                     if pb_col and pd.notna(row.get(pb_col)):
                         meta["pb"] = float(row[pb_col])
                     pool.append(
@@ -3298,6 +4196,9 @@ def build_stock_pool(
                         )
                     )
                     seen.add(symbol)
+            else:
+                missing = [label for label, column in {"代码": code_col, "名称": name_col, "成交额": amount_col}.items() if not column]
+                warnings.append(f"A 股实时快照缺少必要列: {', '.join(missing)}")
         except Exception as exc:
             warnings.append(f"A 股全市场个股池拉取失败: {exc}")
 
@@ -3313,6 +4214,7 @@ def build_stock_pool(
             if lowered_filter and lowered_filter not in str(item.get("name", "")).lower() and lowered_filter not in str(item.get("sector", "")).lower():
                 continue
             sector, chain_nodes = _normalize_sector(str(item.get("name", symbol)), str(item.get("sector", "综合")))
+            meta = {key: value for key, value in dict(item).items() if key not in {"symbol", "name", "sector"} and value not in (None, "", [], {})}
             pool.append(
                 PoolItem(
                     symbol=symbol,
@@ -3323,6 +4225,7 @@ def build_stock_pool(
                     chain_nodes=chain_nodes,
                     source="curated_hk",
                     in_watchlist=False,
+                    metadata=meta or None,
                 )
             )
             seen.add(symbol)
@@ -3335,6 +4238,7 @@ def build_stock_pool(
             if lowered_filter and lowered_filter not in str(item.get("name", "")).lower() and lowered_filter not in str(item.get("sector", "")).lower():
                 continue
             sector, chain_nodes = _normalize_sector(str(item.get("name", symbol)), str(item.get("sector", "综合")))
+            meta = {key: value for key, value in dict(item).items() if key not in {"symbol", "name", "sector"} and value not in (None, "", [], {})}
             pool.append(
                 PoolItem(
                     symbol=symbol,
@@ -3345,6 +4249,7 @@ def build_stock_pool(
                     chain_nodes=chain_nodes,
                     source="curated_us",
                     in_watchlist=False,
+                    metadata=meta or None,
                 )
             )
             seen.add(symbol)
@@ -3402,6 +4307,17 @@ def discover_stock_opportunities(
         ),
         reverse=True,
     )
+    watch_positive = [
+        analysis
+        for analysis in analyses
+        if int(analysis.get("rating", {}).get("rank", 0) or 0) < 3
+        and (
+            (analysis["dimensions"]["fundamental"].get("score") or 0) >= 60
+            or (analysis["dimensions"]["catalyst"].get("score") or 0) >= 50
+            or (analysis["dimensions"]["relative_strength"].get("score") or 0) >= 70
+            or (analysis["dimensions"]["risk"].get("score") or 0) >= 70
+        )
+    ]
     market_labels = {"cn": "A 股", "hk": "港股", "us": "美股", "all": "全市场"}
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -3412,6 +4328,7 @@ def discover_stock_opportunities(
         "regime": context.get("regime", {}),
         "day_theme": context.get("day_theme", {}),
         "top": analyses[:top_n],
+        "watch_positive": watch_positive[:6],
         "blind_spots": blind_spots[:10],
         "sector_filter": sector_filter,
     }

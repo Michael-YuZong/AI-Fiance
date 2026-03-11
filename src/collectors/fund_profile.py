@@ -62,11 +62,12 @@ class FundProfileCollector(BaseCollector):
 
     def get_fund_nav_ts(self, symbol: str) -> pd.DataFrame:
         """Tushare fund_nav — 基金历史净值。"""
-        cache_key = f"fund_profile:ts_fund_nav:{symbol}"
+        ts_code = self._resolve_tushare_fund_code(symbol, preferred_markets=("O", "L", "E"))
+        cache_key = f"fund_profile:ts_fund_nav:{ts_code}"
         cached = self._load_cache(cache_key, ttl_hours=12)
         if cached is not None:
             return cached
-        raw = self._ts_call("fund_nav", ts_code=symbol)
+        raw = self._ts_call("fund_nav", ts_code=ts_code)
         if raw is not None and not raw.empty:
             self._save_cache(cache_key, raw)
             return raw

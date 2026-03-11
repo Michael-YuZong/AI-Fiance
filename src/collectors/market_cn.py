@@ -98,7 +98,7 @@ class ChinaMarketCollector(BaseCollector):
     def _ts_stock_daily(self, symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame | None:
         """Tushare daily + adj_factor → 前/后复权 OHLCV。"""
         ts_code = self._to_ts_code(symbol)
-        cache_key = f"cn_market:ts_stock_daily:{ts_code}:{start}:{end}:{adjust}"
+        cache_key = f"cn_market:ts_stock_daily:v2:{ts_code}:{start}:{end}:{adjust}"
         cached = self._load_cache(cache_key)
         if cached is not None:
             return cached
@@ -106,6 +106,9 @@ class ChinaMarketCollector(BaseCollector):
         raw = self._ts_call("daily", ts_code=ts_code, start_date=start, end_date=end)
         if raw is None or raw.empty:
             return None
+
+        if "amount" in raw.columns:
+            raw["amount"] = pd.to_numeric(raw["amount"], errors="coerce") * 1000.0
 
         if adjust in ("qfq", "hfq"):
             adj = self._ts_call("adj_factor", ts_code=ts_code, start_date=start, end_date=end)
@@ -183,7 +186,7 @@ class ChinaMarketCollector(BaseCollector):
     def _ts_etf_daily(self, symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame | None:
         """Tushare fund_daily → ETF OHLCV。"""
         ts_code = self._to_ts_code(symbol)
-        cache_key = f"cn_market:ts_etf_daily:{ts_code}:{start}:{end}:{adjust}"
+        cache_key = f"cn_market:ts_etf_daily:v2:{ts_code}:{start}:{end}:{adjust}"
         cached = self._load_cache(cache_key)
         if cached is not None:
             return cached
@@ -191,6 +194,9 @@ class ChinaMarketCollector(BaseCollector):
         raw = self._ts_call("fund_daily", ts_code=ts_code, start_date=start, end_date=end)
         if raw is None or raw.empty:
             return None
+
+        if "amount" in raw.columns:
+            raw["amount"] = pd.to_numeric(raw["amount"], errors="coerce") * 1000.0
 
         if adjust in ("qfq", "hfq"):
             adj = self._ts_call("adj_factor", ts_code=ts_code, start_date=start, end_date=end)
@@ -227,11 +233,6 @@ class ChinaMarketCollector(BaseCollector):
         """A 股指数历史行情。Tushare index_daily 优先。"""
         start = start_date or self._date_str(-365 * 3)
         end = end_date or self._date_str()
-        if proxy_symbol and proxy_symbol != symbol:
-            try:
-                return self.get_etf_daily(proxy_symbol, period="daily", adjust="qfq", start_date=start, end_date=end)
-            except Exception:
-                pass
 
         # ── Tushare (primary) ──
         try:
@@ -261,25 +262,26 @@ class ChinaMarketCollector(BaseCollector):
             raise primary_exc
 
     def _ts_index_daily(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
-        """Tushare index_daily。指数代码需要 SH/SZ 后缀。"""
-        ts_code = self._to_ts_code(symbol)
-        cache_key = f"cn_market:ts_index_daily:{ts_code}:{start}:{end}"
-        cached = self._load_cache(cache_key)
-        if cached is not None:
-            return cached
+        """Tushare index_daily。指数代码需要按指数规则尝试 SH/SZ 后缀。"""
+        for ts_code in self._ts_index_code_candidates(symbol):
+            cache_key = f"cn_market:ts_index_daily:{ts_code}:{start}:{end}"
+            cached = self._load_cache(cache_key)
+            if cached is not None:
+                return cached
 
-        raw = self._ts_call("index_daily", ts_code=ts_code, start_date=start, end_date=end)
-        if raw is None or raw.empty:
-            return None
+            raw = self._ts_call("index_daily", ts_code=ts_code, start_date=start, end_date=end)
+            if raw is None or raw.empty:
+                continue
 
-        frame = raw.rename(columns={
-            "trade_date": "日期", "open": "开盘", "high": "最高",
-            "low": "最低", "close": "收盘", "vol": "成交量", "amount": "成交额",
-        })
-        frame["日期"] = pd.to_datetime(frame["日期"], format="%Y%m%d")
-        frame = frame.sort_values("日期").reset_index(drop=True)
-        self._save_cache(cache_key, frame)
-        return frame
+            frame = raw.rename(columns={
+                "trade_date": "日期", "open": "开盘", "high": "最高",
+                "low": "最低", "close": "收盘", "vol": "成交量", "amount": "成交额",
+            })
+            frame["日期"] = pd.to_datetime(frame["日期"], format="%Y%m%d")
+            frame = frame.sort_values("日期").reset_index(drop=True)
+            self._save_cache(cache_key, frame)
+            return frame
+        return None
 
     # ── 开放式基金净值 ────────────────────────────────────────
 
@@ -320,16 +322,20 @@ class ChinaMarketCollector(BaseCollector):
 
     def _ts_fund_nav(self, symbol: str) -> pd.DataFrame | None:
         """Tushare fund_nav → 基金净值历史。"""
-        cache_key = f"cn_market:ts_fund_nav:{symbol}"
+        ts_code = self._resolve_tushare_fund_code(symbol, preferred_markets=("O", "L", "E"))
+        cache_key = f"cn_market:ts_fund_nav:{ts_code}"
         cached = self._load_cache(cache_key)
         if cached is not None:
             return cached
 
-        raw = self._ts_call("fund_nav", ts_code=symbol)
+        raw = self._ts_call("fund_nav", ts_code=ts_code)
         if raw is None or raw.empty:
             return None
 
-        nav = raw[["end_date", "unit_nav"]].copy()
+        date_col = "nav_date" if "nav_date" in raw.columns else "end_date"
+        if date_col not in raw.columns or "unit_nav" not in raw.columns:
+            return None
+        nav = raw[[date_col, "unit_nav"]].copy()
         nav.columns = ["date", "close"]
         nav["date"] = pd.to_datetime(nav["date"], format="%Y%m%d", errors="coerce")
         nav["close"] = pd.to_numeric(nav["close"], errors="coerce")
@@ -378,13 +384,20 @@ class ChinaMarketCollector(BaseCollector):
                 raise primary_exc
 
     def _ts_daily_basic_snapshot(self) -> pd.DataFrame | None:
-        """Tushare daily_basic 全市场快照 — 提供 PE/PB/PS/换手率/市值。"""
-        cache_key = "cn_market:ts_daily_basic_snapshot"
+        """Tushare 全市场快照。
+
+        ``daily_basic`` 只提供估值/换手/市值等收盘后字段，不包含 ``名称``、``行业``、
+        ``成交额``。为了让机会池可以直接用这份快照做 A 股选股，需要额外补齐：
+
+        - ``stock_basic``: ``name`` / ``industry``
+        - ``daily``: ``amount``（Tushare 单位为千元，这里统一换算成元）
+        """
+        cache_key = "cn_market:ts_daily_basic_snapshot:v3"
         cached = self._load_cache(cache_key, ttl_hours=1)
         if cached is not None:
             return cached
 
-        trade_date = self._date_str()
+        trade_date = self._latest_open_trade_date() or self._date_str()
         raw = self._ts_call("daily_basic", trade_date=trade_date)
         if raw is None or raw.empty:
             # 可能还没收盘，尝试前一个交易日
@@ -412,6 +425,53 @@ class ChinaMarketCollector(BaseCollector):
             "circ_mv": "流通市值",
         })
         frame["代码"] = frame["ts_code_raw"].apply(self._from_ts_code)
+        for column in ("总市值", "流通市值"):
+            if column in frame.columns:
+                # Tushare daily_basic uses 万元; normalize to 元 so downstream
+                # liquidity / market-cap filters are comparable across sources.
+                frame[column] = pd.to_numeric(frame[column], errors="coerce") * 10_000.0
+
+        snapshot_trade_date = str(raw["trade_date"].iloc[0])
+
+        stock_basic_cache_key = "cn_market:ts_stock_basic_snapshot:v1"
+        stock_basic = self._load_cache(stock_basic_cache_key, ttl_hours=24)
+        if stock_basic is None:
+            stock_basic = self._ts_call(
+                "stock_basic",
+                exchange="",
+                list_status="L",
+                fields="ts_code,name,industry",
+            )
+            if stock_basic is not None and not stock_basic.empty:
+                self._save_cache(stock_basic_cache_key, stock_basic)
+        if stock_basic is not None and not stock_basic.empty:
+            basics = stock_basic.rename(columns={"name": "名称", "industry": "行业"})
+            frame = frame.merge(basics[["ts_code", "名称", "行业"]], left_on="ts_code_raw", right_on="ts_code", how="left")
+            frame = frame.drop(columns=["ts_code"])
+        if "名称" not in frame.columns:
+            frame["名称"] = frame["代码"]
+        if "行业" not in frame.columns:
+            frame["行业"] = ""
+
+        daily_cache_key = f"cn_market:ts_daily_snapshot:{snapshot_trade_date}:v1"
+        daily = self._load_cache(daily_cache_key, ttl_hours=1)
+        if daily is None:
+            daily = self._ts_call("daily", trade_date=snapshot_trade_date)
+            if daily is not None and not daily.empty:
+                self._save_cache(daily_cache_key, daily)
+        if daily is not None and not daily.empty:
+            daily_view = daily[["ts_code", "amount"]].copy()
+            # Tushare daily.amount unit is 千元; normalize to 元 to align with the
+            # rest of the codebase and liquidity thresholds.
+            daily_view["成交额"] = pd.to_numeric(daily_view["amount"], errors="coerce") * 1000.0
+            frame = frame.merge(daily_view[["ts_code", "成交额"]], left_on="ts_code_raw", right_on="ts_code", how="left")
+            frame = frame.drop(columns=["ts_code"])
+
+        if "成交额" not in frame.columns or frame["成交额"].isna().all():
+            circ_mv = pd.to_numeric(frame.get("流通市值"), errors="coerce")
+            turnover = pd.to_numeric(frame.get("换手率"), errors="coerce")
+            frame["成交额"] = circ_mv * (turnover / 100.0)
+
         self._save_cache(cache_key, frame)
         return frame
 
@@ -483,11 +543,12 @@ class ChinaMarketCollector(BaseCollector):
 
         # ── AKShare (fallback) ──
         fetcher = self._ak_function("stock_hsgt_fund_flow_summary_em")
-        return self.cached_call("cn_market:north_south_flow", fetcher, ttl_hours=0)
+        raw = self.cached_call("cn_market:north_south_flow:v2", fetcher, ttl_hours=0)
+        return self._normalize_north_south_flow_frame(raw, source="akshare")
 
     def _ts_north_south_flow(self) -> pd.DataFrame | None:
         """Tushare moneyflow_hsgt — 沪深港通资金流向。"""
-        cache_key = "cn_market:ts_north_south_flow"
+        cache_key = "cn_market:ts_north_south_flow:v2"
         cached = self._load_cache(cache_key, ttl_hours=1)
         if cached is not None:
             return cached
@@ -497,11 +558,14 @@ class ChinaMarketCollector(BaseCollector):
         raw = self._ts_call("moneyflow_hsgt", start_date=start, end_date=end)
         if raw is None or raw.empty:
             return None
-        self._save_cache(cache_key, raw)
-        return raw
+        normalized = self._normalize_north_south_flow_frame(raw, source="tushare")
+        if normalized.empty:
+            return None
+        self._save_cache(cache_key, normalized)
+        return normalized
 
     def get_margin_trading(self) -> pd.DataFrame:
-        """融资融券数据。Tushare margin_detail 优先。"""
+        """融资融券汇总数据。Tushare margin 优先。"""
         # ── Tushare (primary) ──
         try:
             frame = self._ts_margin()
@@ -511,24 +575,17 @@ class ChinaMarketCollector(BaseCollector):
             pass
 
         # ── AKShare (fallback) ──
-        fetcher = self._ak_function("stock_margin_detail_sse")
-        for offset in range(0, 6):
-            date_str = self._date_str(offset_days=-offset)
-            try:
-                df = self.cached_call(
-                    f"cn_market:margin:{date_str}",
-                    fetcher,
-                    date=date_str,
-                )
-                if not df.empty:
-                    return df
-            except Exception:
-                continue
+        try:
+            frame = self._ak_margin_summary()
+            if frame is not None and not frame.empty:
+                return frame
+        except Exception:
+            pass
         return pd.DataFrame()
 
     def _ts_margin(self) -> pd.DataFrame | None:
         """Tushare margin — 融资融券汇总。"""
-        cache_key = "cn_market:ts_margin"
+        cache_key = "cn_market:ts_margin:v2"
         cached = self._load_cache(cache_key, ttl_hours=2)
         if cached is not None:
             return cached
@@ -537,8 +594,49 @@ class ChinaMarketCollector(BaseCollector):
             trade_date = self._date_str(-offset)
             raw = self._ts_call("margin", trade_date=trade_date)
             if raw is not None and not raw.empty:
-                self._save_cache(cache_key, raw)
-                return raw
+                normalized = self._normalize_margin_summary_frame(raw, source="tushare")
+                if normalized.empty:
+                    continue
+                self._save_cache(cache_key, normalized)
+                return normalized
+        return None
+
+    def _ak_margin_summary(self) -> pd.DataFrame | None:
+        """AKShare 融资融券汇总兜底，统一为与 Tushare 一致的汇总列。"""
+        sse_fetcher = self._ak_function("stock_margin_sse")
+        szse_fetcher = self._ak_function("stock_margin_szse")
+
+        for offset in range(0, 6):
+            date_str = self._date_str(offset_days=-offset)
+            frames: list[pd.DataFrame] = []
+
+            try:
+                sse_raw = self.cached_call(
+                    f"cn_market:margin_sse:v2:{date_str}",
+                    sse_fetcher,
+                    start_date=date_str,
+                    end_date=date_str,
+                )
+                sse_frame = self._normalize_margin_summary_frame(sse_raw, source="akshare_sse", default_date=date_str)
+                if not sse_frame.empty:
+                    frames.append(sse_frame)
+            except Exception:
+                pass
+
+            try:
+                szse_raw = self.cached_call(
+                    f"cn_market:margin_szse:v2:{date_str}",
+                    szse_fetcher,
+                    date=date_str,
+                )
+                szse_frame = self._normalize_margin_summary_frame(szse_raw, source="akshare_szse", default_date=date_str)
+                if not szse_frame.empty:
+                    frames.append(szse_frame)
+            except Exception:
+                pass
+
+            if frames:
+                return pd.concat(frames, ignore_index=True)
         return None
 
     def get_sector_pe(self, sector: str) -> pd.DataFrame:

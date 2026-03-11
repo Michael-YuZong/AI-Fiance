@@ -50,9 +50,21 @@ SOURCE_DOMAIN_HINTS = {
     "Reuters": "site:reuters.com",
     "Bloomberg": "site:bloomberg.com",
     "Financial Times": "site:ft.com",
+    "Business Wire": "site:businesswire.com",
+    "PR Newswire": "site:prnewswire.com",
+    "GlobeNewswire": "site:globenewswire.com",
+    "HKEXnews": "site:hkexnews.hk",
     "财联社": "site:cls.cn",
     "证券时报": "site:stcn.com",
 }
+
+
+def _contains_cjk(value: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in value)
+
+
+def _contains_ascii_alpha(value: str) -> bool:
+    return any(char.isascii() and char.isalpha() for char in value)
 
 
 class NewsCollector(BaseCollector):
@@ -119,6 +131,7 @@ class NewsCollector(BaseCollector):
                         ),
                         "configured_source": configured_source,
                         "must_include": bool(feed.get("must_include", False)),
+                        "published_at": str(getattr(entry, "published", "") or getattr(entry, "updated", "")).strip(),
                         "link": str(getattr(entry, "link", "")).strip(),
                     }
                 )
@@ -198,6 +211,7 @@ class NewsCollector(BaseCollector):
                         "source": source_name or label,
                         "configured_source": source_name or label,
                         "must_include": False,
+                        "published_at": str(getattr(entry, "published", "") or getattr(entry, "updated", "")).strip(),
                         "link": str(getattr(entry, "link", "")).strip(),
                     }
                 )
@@ -239,6 +253,7 @@ class NewsCollector(BaseCollector):
                 "source": str(row.get(source_col, "东方财富")).strip() if source_col else "东方财富",
                 "configured_source": "东方财富",
                 "must_include": False,
+                "published_at": self._normalize_date_text(row.get(time_col)) if time_col else "",
                 "link": str(row.get("新闻链接", "")).strip() if "新闻链接" in frame.columns else "",
             })
         return items
@@ -346,22 +361,46 @@ class NewsCollector(BaseCollector):
         recent_days: int,
     ) -> List[tuple[str, str]]:
         base_terms = list(keywords[:4])
-        broad_query = " ".join(base_terms) + f" when:{recent_days}d"
-        queries = [("topic_search", self._google_news_search_url(broad_query))]
+        zh_terms = [term for term in base_terms if _contains_cjk(term)]
+        en_terms = [term for term in base_terms if _contains_ascii_alpha(term)]
 
-        for source in preferred_sources[:3]:
-            domain = SOURCE_DOMAIN_HINTS.get(source)
-            if not domain:
+        locales: List[tuple[str, str, str, List[str]]] = []
+        if zh_terms or not en_terms:
+            locales.append(("zh-CN", "CN", "CN:zh-Hans", zh_terms or base_terms[:2]))
+        if en_terms or any(source in {"Reuters", "Bloomberg", "Financial Times"} for source in preferred_sources):
+            locales.append(("en-US", "US", "US:en", en_terms or base_terms[:2]))
+
+        queries: List[tuple[str, str]] = []
+        seen: set[str] = set()
+        for hl, gl, ceid, terms in locales:
+            cleaned_terms = [term for term in terms if term][:2]
+            if not cleaned_terms:
                 continue
-            scoped_query = f"{domain} " + " ".join(base_terms[:3]) + f" when:{recent_days}d"
-            queries.append((source, self._google_news_search_url(scoped_query)))
+            broad_query = " ".join(cleaned_terms) + f" when:{recent_days}d"
+            url = self._google_news_search_url(broad_query, hl=hl, gl=gl, ceid=ceid)
+            if url not in seen:
+                queries.append(("topic_search", url))
+                seen.add(url)
+
+            anchor_terms = cleaned_terms[:2]
+            for source in preferred_sources[:3]:
+                domain = SOURCE_DOMAIN_HINTS.get(source)
+                if not domain:
+                    continue
+                for anchor in anchor_terms:
+                    scoped_query = f"{domain} {anchor} when:{recent_days}d"
+                    scoped_url = self._google_news_search_url(scoped_query, hl=hl, gl=gl, ceid=ceid)
+                    if scoped_url in seen:
+                        continue
+                    queries.append((source, scoped_url))
+                    seen.add(scoped_url)
         return queries
 
-    def _google_news_search_url(self, query: str) -> str:
+    def _google_news_search_url(self, query: str, hl: str = "zh-CN", gl: str = "CN", ceid: str = "CN:zh-Hans") -> str:
         return (
             "https://news.google.com/rss/search?q="
             + quote_plus(query)
-            + "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+            + f"&hl={hl}&gl={gl}&ceid={ceid}"
         )
 
     def _fallback_lines(

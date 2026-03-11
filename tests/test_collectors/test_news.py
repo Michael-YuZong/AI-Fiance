@@ -89,3 +89,27 @@ feeds: []
     items = collector.search_by_keywords(["军工", "订单"], preferred_sources=["Reuters"], limit=4)
     assert items
     assert any("Defense orders rise" in item["title"] for item in items)
+
+
+def test_news_collector_search_by_keywords_uses_english_alias_queries_for_foreign_sources(tmp_path, monkeypatch):
+    config_path = tmp_path / "news.yaml"
+    config_path.write_text(
+        """
+preferences:
+  preferred_sources: ["Reuters"]
+  required_sources: []
+  max_items_per_feed: 2
+feeds: []
+""".strip(),
+        encoding="utf-8",
+    )
+    collector = NewsCollector({"news_feeds_file": str(config_path)})
+    cache_keys = []
+
+    def fake_cached_call(cache_key, fetcher, *args, **kwargs):  # noqa: ANN001
+        cache_keys.append(cache_key)
+        return feedparser.parse("<rss><channel></channel></rss>")
+
+    monkeypatch.setattr(collector, "cached_call", fake_cached_call)
+    collector.search_by_keywords(["腾讯控股", "Tencent"], preferred_sources=["Reuters"], limit=4, recent_days=30)
+    assert any("hl=en-US" in cache_key and "Tencent" in cache_key for cache_key in cache_keys)

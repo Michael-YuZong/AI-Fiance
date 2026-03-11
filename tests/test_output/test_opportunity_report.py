@@ -191,6 +191,71 @@ def test_opportunity_renderer_discovery_and_compare():
     assert "## 场景化建议" in compare
 
 
+def test_opportunity_renderer_stock_picks_includes_explainability_sections():
+    analysis = _sample_analysis("00700.HK", "腾讯控股")
+    analysis["asset_type"] = "hk"
+    analysis["previous_snapshot_at"] = "2026-03-09 20:00:00"
+    analysis["score_changes"] = [
+        {
+            "dimension": "catalyst",
+            "label": "催化面",
+            "previous": 55,
+            "current": 75,
+            "delta": 20,
+            "reason": "海外映射 `0/20` -> `20/20`；负面事件 从 `-15` 变为 `信息项`",
+        }
+    ]
+    payload = {
+        "generated_at": "2026-03-10 08:00:00",
+        "scan_pool": 20,
+        "passed_pool": 8,
+        "market_label": "港股",
+        "regime": {"current_regime": "stagflation"},
+        "day_theme": {"label": "AI / 半导体催化"},
+        "top": [analysis],
+        "model_version": "stock-pick-2026-03-10-daily-baseline-v1",
+        "baseline_snapshot_at": "2026-03-10 08:00:00",
+        "is_daily_baseline": False,
+        "comparison_basis_label": "当日基准版",
+        "comparison_basis_at": "2026-03-10 08:00:00",
+        "model_changelog": ["A 股估值口径统一为 `PE_TTM`。"],
+        "watch_positive": [
+            {
+                **analysis,
+                "symbol": "300750",
+                "name": "宁德时代",
+                "asset_type": "cn_stock",
+                "rating": {"rank": 0, "label": "无信号", "stars": "—"},
+                "dimensions": {
+                    **analysis["dimensions"],
+                    "technical": {**analysis["dimensions"]["technical"], "score": 38},
+                    "fundamental": {**analysis["dimensions"]["fundamental"], "score": 75},
+                    "catalyst": {**analysis["dimensions"]["catalyst"], "score": 35},
+                    "relative_strength": {**analysis["dimensions"]["relative_strength"], "score": 55},
+                    "risk": {**analysis["dimensions"]["risk"], "score": 65},
+                },
+            }
+        ],
+    }
+    rendered = OpportunityReportRenderer().render_stock_picks(payload)
+    assert "# 个股精选 TOP 1 | 2026-03-10" in rendered
+    assert "模型版本" in rendered
+    assert "当日基准版" in rendered
+    assert "当前输出角色: 当日修正版" in rendered
+    assert "## 本版口径变更" in rendered
+    assert "分数变动对比基准" in rendered
+    assert "**分数变化：**" in rendered
+    assert "**催化拆解：**" in rendered
+    assert "| 催化子项 | 层级 | 当前信号 | 得分 |" in rendered
+    assert "## 看好但暂不推荐" in rendered
+    assert "宁德时代 (300750)" in rendered
+    assert "| 维度 | 分数变化 | 主要原因 |" in rendered
+    assert "**硬排除检查：**" in rendered
+    assert "| 检查项 | 状态 | 说明 |" in rendered
+    assert "**风险拆解：** 当前风险分 `58/100`" in rendered
+    assert "| 风险子项 | 当前信号 | 说明 | 得分 |" in rendered
+
+
 def test_opportunity_renderer_compare_uses_total_score_when_rank_ties():
     analysis_a = _sample_analysis("561380", "电网ETF")
     analysis_b = _sample_analysis("512400", "有色ETF")
