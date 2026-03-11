@@ -13,6 +13,30 @@
 3. 关键事实仍缺失时允许联网补查
 4. 默认先给结论和动作，再按需展开证据和附录
 
+## Markdown 成稿闭环
+
+- 任何会产出独立 `Markdown` 报告的任务，都不要把第一版当终稿
+- 典型场景包括：
+  - `stock_pick`
+  - `briefing`
+  - `ETF / 场外基金分析`（通常走 `scan` 或 `assistant`）
+- 当用户一次要多份互相独立的报告时，例如 `stock_pick / briefing / fund / etf`，可以并发开始
+- 但每一份 `Markdown` 成稿都必须单独走一轮“外部金融专家审稿 -> 修正 -> 再审”的闭环后，才算可交付
+- 这套闭环规则和外部审稿 prompt，见 [Markdown 审稿闭环](references/markdown-review-loop.md)
+
+## A股数据优先级
+
+- A 股相关数据默认先走 `Tushare`
+- 只有在 `Tushare` 确认无数据、权限不足、或字段/单位不匹配修正后仍不可用时，才降级到 `AKShare / efinance / Yahoo`
+- 不要把 `daily_basic` 当成完整行情快照；先按数据需求选接口，再决定是否需要拼表
+- 如果 Tushare 返回“没数据”或结果明显异常，先校验：
+  - `ts_code`/交易所后缀是否正确
+  - `trade_date` 是否是交易日，必要时先查 `trade_cal`
+  - 请求的字段是否属于该接口
+  - 单位是否被误读，例如 `amount`、`total_mv`
+  - 当前积分/权限是否覆盖该接口
+- 常用 A 股接口分工和字段/单位校验，见 [Tushare A股参考](references/tushare-a-share.md)
+
 ## 最小命令集
 
 | 命令 | 什么时候用 | 示例 |
