@@ -23,6 +23,7 @@ venv/
 *.sqlite3
 data/cache/
 data/investment.db
+data/stock_pick_score_history.json
 
 # Secrets
 .env
