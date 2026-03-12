@@ -83,9 +83,10 @@ class ChinaMacroCollector(BaseCollector):
     def get_social_financing(self) -> pd.DataFrame:
         """社会融资规模。Tushare cn_sf 优先。"""
         try:
-            raw = self._ts_call("cn_sf")
-            if raw is not None and not raw.empty:
-                return raw
+            for api_name in ("sf_month", "cn_sf"):
+                raw = self._ts_call(api_name)
+                if raw is not None and not raw.empty:
+                    return raw
         except Exception:
             pass
         fetcher = self._ak_function("macro_china_shrzgm")

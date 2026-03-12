@@ -3487,6 +3487,7 @@ def main() -> None:
             "missing_sources": missing_sources,
             "headline_lines": _compact_headline_lines(narrative, china_macro, monitor_rows, pulse)
             + _compact_validation_lines(narrative, monitor_rows, pulse),
+            "macro_items": macro_items,
             "yesterday_review_rows": yesterday_rows,
             "yesterday_review_lines": yesterday_lines,
             "domestic_index_rows": domestic_index_rows,

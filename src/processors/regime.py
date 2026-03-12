@@ -34,6 +34,9 @@ class RegimeDetector:
         if self.data.get("pmi", 0) > 50 and self.data.get("pmi_trend") == "rising":
             scores["recovery"] += 2
             reasoning["recovery"].append("PMI 站上 50 且处于回升趋势。")
+        if self.data.get("demand_state") == "improving":
+            scores["recovery"] += 1
+            reasoning["recovery"].append("新订单和生产分项在改善，景气领先指标偏正面。")
         if self.data.get("cpi", 0) < 3 and self.data.get("cpi_trend") != "rising":
             scores["recovery"] += 1
             reasoning["recovery"].append("CPI 压力可控，没有明显走高。")
@@ -45,12 +48,21 @@ class RegimeDetector:
         if self.data.get("credit_impulse") == "expanding":
             scores["recovery"] += 2
             reasoning["recovery"].append("信用脉冲处于扩张。")
+        if self.data.get("ppi_trend") == "rising" and self.data.get("ppi", -99) > -1.0:
+            scores["recovery"] += 1
+            reasoning["recovery"].append("PPI 从底部回升，价格链条和工业利润预期在修复。")
         if self.data.get("pmi", 0) > 52 and self.data.get("cpi_trend") == "rising":
             scores["overheating"] += 2
             reasoning["overheating"].append("PMI 高位且 CPI 继续上行。")
+        if self.data.get("ppi", 0) > 1.0 and self.data.get("ppi_trend") == "rising":
+            scores["overheating"] += 1
+            reasoning["overheating"].append("PPI 已明显转正并继续上行，价格链条偏热。")
         if self.data.get("pmi", 0) < 50 and self.data.get("cpi", 0) > 2.5:
             scores["stagflation"] += 2
             reasoning["stagflation"].append("增长偏弱但价格压力仍高。")
+        if self.data.get("pmi", 0) < 50 and (self.data.get("ppi_trend") == "rising" or self.data.get("ppi", 0) > 0):
+            scores["stagflation"] += 1
+            reasoning["stagflation"].append("PMI 偏弱但 PPI/上游价格没有同步回落，存在成本端压力。")
         if self.data.get("pmi", 0) < 50 and self.data.get("dxy_state") == "strengthening":
             scores["stagflation"] += 1
             reasoning["stagflation"].append("PMI 低于 50 且美元偏强，说明增长承压、外部流动性偏紧。")
@@ -60,6 +72,12 @@ class RegimeDetector:
         if self.data.get("pmi", 0) < 50 and self.data.get("cpi_trend") == "falling":
             scores["deflation"] += 2
             reasoning["deflation"].append("PMI 低于 50 且 CPI 走弱。")
+        if self.data.get("ppi", 0) < 0 and self.data.get("ppi_trend") == "falling":
+            scores["deflation"] += 1
+            reasoning["deflation"].append("PPI 继续走弱，说明工业价格链条仍在通缩区间。")
+        if self.data.get("credit_impulse") == "contracting":
+            scores["deflation"] += 1
+            reasoning["deflation"].append("信用脉冲收缩，内需修复力度不足。")
         if self.data.get("dxy_state") == "strengthening":
             scores["stagflation"] += 1
             reasoning["stagflation"].append("美元走强通常对应全球流动性偏紧。")
@@ -78,10 +96,14 @@ class RegimeDetector:
     def _explicit_regime(self) -> tuple[str, List[str]] | None:
         pmi = float(self.data.get("pmi", 50.0))
         cpi = float(self.data.get("cpi", 0.0))
+        ppi = float(self.data.get("ppi", 0.0))
         pmi_trend = str(self.data.get("pmi_trend", "stable"))
         cpi_trend = str(self.data.get("cpi_trend", "stable"))
+        ppi_trend = str(self.data.get("ppi_trend", "stable"))
         policy_stance = str(self.data.get("policy_stance", "neutral"))
         credit_impulse = str(self.data.get("credit_impulse", "stable"))
+        demand_state = str(self.data.get("demand_state", "stable"))
+        m1_m2_spread = float(self.data.get("m1_m2_spread", 0.0))
         oil_5d = float(self.data.get("oil_5d_change", 0.0))
         oil_20d = float(self.data.get("oil_20d_change", 0.0))
 
@@ -95,12 +117,12 @@ class RegimeDetector:
                 ],
             )
 
-        if pmi < 50 and cpi < 2.0 and policy_stance == "easing":
+        if pmi < 50 and cpi < 2.0 and ppi <= 0 and policy_stance == "easing":
             return (
                 "deflation",
                 [
                     f"PMI {pmi:.1f} 低于 50，需求端仍偏弱。",
-                    f"CPI {cpi:.1f}% 处在低位，价格压力不强。",
+                    f"CPI {cpi:.1f}%、PPI {ppi:.1f}% 都处在偏弱区间，价格压力不强。",
                     "政策偏宽松，更接近通缩/偏弱环境而不是过热。",
                 ],
             )
@@ -110,17 +132,27 @@ class RegimeDetector:
                 "recovery",
                 [
                     f"PMI {pmi:.1f} 站上 50 且延续回升。",
-                    "信用脉冲扩张，说明内需和融资环境在改善。",
+                    f"信用脉冲扩张，M1-M2 剪刀差约 {m1_m2_spread:+.1f} 个百分点，融资环境在改善。",
+                    "新订单/生产等领先指标偏正面，更接近温和复苏。",
+                ],
+            )
+
+        if pmi >= 50 and demand_state == "improving" and ppi_trend == "rising":
+            return (
+                "recovery",
+                [
+                    f"PMI {pmi:.1f} 站上 50，新订单领先分项也在改善。",
+                    f"PPI {ppi:.1f}% 呈回升趋势，说明工业利润链条开始修复。",
                     "当前更接近温和复苏，而不是滞涨或通缩。",
                 ],
             )
 
-        if pmi >= 52 and cpi_trend == "rising":
+        if pmi >= 52 and cpi_trend == "rising" and ppi >= 0:
             return (
                 "overheating",
                 [
                     f"PMI {pmi:.1f} 处在高位。",
-                    "CPI 趋势继续上行，价格压力开始抬头。",
+                    f"CPI 趋势继续上行，PPI {ppi:.1f}% 也不弱，价格压力开始抬头。",
                     "景气与通胀共振，更接近过热环境。",
                 ],
             )
@@ -147,6 +179,7 @@ class RegimeDetector:
         def distance(row: pd.Series) -> float:
             score = abs(float(row.get("pmi", self.data.get("pmi", 50.0))) - float(self.data.get("pmi", 50.0)))
             score += abs(float(row.get("cpi_monthly", self.data.get("cpi", 0.0))) - float(self.data.get("cpi", 0.0)))
+            score += abs(float(row.get("ppi", self.data.get("ppi", 0.0))) - float(self.data.get("ppi", 0.0))) * 0.5
             score += 0 if row.get("policy_stance") == self.data.get("policy_stance") else 1
             score += 0 if row.get("credit_impulse") == self.data.get("credit_impulse") else 1
             score += 0 if row.get("dxy_state") == self.data.get("dxy_state") else 0.5

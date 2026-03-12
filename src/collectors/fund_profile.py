@@ -209,10 +209,8 @@ class FundProfileCollector(BaseCollector):
         issue_date = self._normalize_compact_date(basic.get("issue_date"))
         list_date = self._normalize_compact_date(basic.get("list_date"))
         issue_amount = self._to_float(basic.get("issue_amount"))
-        if found_date and issue_amount is not None and pd.notna(issue_amount):
-            founding_text = f"{found_date} / {issue_amount:.4f}亿份"
-        else:
-            founding_text = found_date or ""
+        founding_text = found_date or ""
+        launch_scale_text = f"{issue_amount:.4f}亿份" if issue_amount is not None and pd.notna(issue_amount) else ""
 
         if str(basic.get("name", "")).strip():
             overview["基金简称"] = str(basic.get("name", "")).strip()
@@ -229,7 +227,10 @@ class FundProfileCollector(BaseCollector):
         if issue_date:
             overview["发行日期"] = issue_date
         if founding_text:
-            overview["成立日期/规模"] = founding_text
+            overview["成立日期"] = founding_text
+            overview["成立日期/规模"] = f"{founding_text} / {launch_scale_text}" if launch_scale_text else founding_text
+        if launch_scale_text:
+            overview["首发规模"] = launch_scale_text
         benchmark = str(basic.get("benchmark", "")).strip()
         if benchmark:
             overview["业绩比较基准"] = benchmark
@@ -373,10 +374,19 @@ class FundProfileCollector(BaseCollector):
             return []
         result: List[Dict[str, Any]] = []
         for _, row in frame.iterrows():
+            ratio = (
+                self._to_float(row.get("仓位占比"))
+                if "仓位占比" in row
+                else None
+            )
+            if ratio is None:
+                ratio = self._to_float(row.get("占总资产比例"))
+            if ratio is None:
+                ratio = self._to_float(row.get("占净值比例"))
             result.append(
                 {
                     "资产类型": str(row.get("资产类型", "")).strip(),
-                    "仓位占比": self._to_float(row.get("仓位占比")),
+                    "仓位占比": ratio,
                 }
             )
         return result
@@ -431,6 +441,7 @@ class FundProfileCollector(BaseCollector):
         tracking_target = str(overview.get("跟踪标的", "")).strip()
         passive_text = f"{fund_name} {fund_type}".lower()
         is_passive = any(token in passive_text for token in ("指数", "etf", "联接"))
+        commodity_like = any(token in f"{fund_type} {benchmark_note} {tracking_target}".lower() for token in ("商品", "期货", "原油", "黄金", "贵金属", "能源化工", "现货"))
         core_text_parts = [
             fund_name,
             fund_type,
@@ -455,6 +466,8 @@ class FundProfileCollector(BaseCollector):
             tags.append(f"{sector}主题")
         if is_passive:
             tags.append("被动跟踪")
+            if commodity_like:
+                tags.append("商品/期货跟踪")
         elif stock_ratio >= 80:
             tags.append("高仓位主动")
         elif stock_ratio >= 60:
@@ -462,7 +475,7 @@ class FundProfileCollector(BaseCollector):
         elif stock_ratio > 0:
             tags.append("仓位灵活")
         if cash_ratio >= 15:
-            tags.append("保留机动仓位")
+            tags.append("保证金/备付结构" if commodity_like else "保留机动仓位")
         if not is_passive and top5 >= 40:
             tags.append("高集中选股")
         elif not is_passive and top5 >= 25:
@@ -470,7 +483,9 @@ class FundProfileCollector(BaseCollector):
         if not is_passive and self._manager_style_consistent(manager.get("peer_funds", []), sector):
             tags.append("风格稳定")
 
-        if is_passive:
+        if is_passive and commodity_like:
+            positioning = "这类商品/期货 ETF 更看跟踪合约、展期损益、保证金与申赎效率，不以基金经理主观择时择股为核心。"
+        elif is_passive:
             positioning = "这类基金更看跟踪标的暴露、跟踪误差和申赎效率，不以基金经理主观择时择股为核心。"
         elif stock_ratio >= 80:
             positioning = f"股票仓位约 {stock_ratio:.1f}% ，整体是高仓位进攻框架。"
@@ -479,9 +494,14 @@ class FundProfileCollector(BaseCollector):
         else:
             positioning = "当前仓位信息不足，无法稳定判断进攻/防守倾向。"
         if cash_ratio >= 15:
-            positioning += f" 同时保留约 {cash_ratio:.1f}% 现金，机动性不低。"
+            if commodity_like:
+                positioning += f" 当前约 {cash_ratio:.1f}% 的现金/保证金更多反映合约保证金与备付结构，不等于主观空仓。"
+            else:
+                positioning += f" 同时保留约 {cash_ratio:.1f}% 现金，机动性不低。"
 
-        if is_passive:
+        if is_passive and commodity_like:
+            selection = "核心不是基金经理主动选股，而是跟踪对应商品/期货指数及其合约结构、展期和保证金安排。"
+        elif is_passive:
             if sector != "综合":
                 selection = f"核心不是基金经理主动选股，而是跟踪 `{sector}` 暴露及其对应基准。"
             else:
@@ -493,7 +513,9 @@ class FundProfileCollector(BaseCollector):
         else:
             selection = "当前没有拿到稳定的前十大持仓，选股风格暂时无法下强结论。"
 
-        if is_passive:
+        if is_passive and commodity_like:
+            consistency = "这类产品更重要的是跟踪误差、展期成本、保证金结构和流动性，基金经理风格漂移不是核心变量。"
+        elif is_passive:
             consistency = "这类产品更重要的是跟踪误差、费率和标的暴露是否清晰，基金经理风格漂移不是核心变量。"
         elif manager:
             consistency = (

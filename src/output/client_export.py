@@ -55,6 +55,13 @@ h3 {
   font-size: 15px;
 }
 
+h4 {
+  font-size: 13px;
+  color: #374151;
+  margin-top: 0.9em;
+  margin-bottom: 0.3em;
+}
+
 p, li, td, th, blockquote {
   font-family: "Songti SC", "STSong", "Noto Serif CJK SC", "PingFang SC", serif;
 }
@@ -149,6 +156,10 @@ def markdown_to_html(markdown_text: str, title: str) -> str:
             parts.append(_render_table(table_lines))
             continue
 
+        if stripped.startswith("#### "):
+            parts.append(f"<h4>{_format_inline(stripped[5:])}</h4>")
+            index += 1
+            continue
         if stripped.startswith("### "):
             parts.append(f"<h3>{_format_inline(stripped[4:])}</h3>")
             index += 1

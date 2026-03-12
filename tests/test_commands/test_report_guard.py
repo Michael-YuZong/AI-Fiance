@@ -210,3 +210,99 @@ def test_report_guard_accepts_detailed_retrospect_markdown(isolated_reports: Pat
         release_findings=[],
     )
     assert bundle["markdown"] == target
+
+
+def test_report_guard_accepts_stock_analysis_markdown(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/stock_analysis/final/stock_analysis_META_2026-03-12_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        "\n".join(
+            [
+                "## 一句话总评",
+                "可发",
+                "## 主要问题",
+                "- 无新的实质问题",
+                "## 独立答案",
+                "- 结论一致",
+                "## 收敛结论",
+                "- 状态：PASS",
+                "- 无新的 P0/P1：是",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    markdown = "\n".join(
+        [
+            "# Meta (META) | 个股详细分析 | 2026-03-12",
+            "",
+            "## 为什么这么判断",
+            "- 理由一",
+            "",
+            "## 硬检查",
+            "| 项目 | 状态 | 说明 |",
+            "| --- | --- | --- |",
+            "| 流动性 | ✅ | 充足 |",
+            "",
+            "## 分维度详解",
+            "",
+            "### 技术面 55/100",
+        ]
+    )
+    bundle = export_reviewed_markdown_bundle(
+        report_type="stock_analysis",
+        markdown_text=markdown,
+        markdown_path=target,
+        release_findings=[],
+    )
+    assert bundle["markdown"] == target
+
+
+def test_report_guard_accepts_etf_pick_markdown(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/etf_picks/final/etf_pick_2026-03-12_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        "\n".join(
+            [
+                "## 一句话总评",
+                "可发",
+                "## 主要问题",
+                "- 无新的实质问题",
+                "## 独立答案",
+                "- 结论一致",
+                "## 收敛结论",
+                "- 状态：PASS",
+                "- 无新的 P0/P1：是",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    markdown = "\n".join(
+        [
+            "# 今日ETF推荐 | 2026-03-12",
+            "",
+            "## 为什么推荐它",
+            "- 理由一",
+            "- 理由二",
+            "- 理由三",
+            "",
+            "## 这只ETF为什么是这个分",
+            "| 维度 | 分数 | 为什么是这个分 |",
+            "| --- | --- | --- |",
+            "| 技术面 | 52/100 | 不适合追高 |",
+            "",
+            "## 为什么不是另外几只",
+            "### 1. 红利ETF (510880)",
+            "- 今天弹性更弱。",
+        ]
+    )
+    bundle = export_reviewed_markdown_bundle(
+        report_type="etf_pick",
+        markdown_text=markdown,
+        markdown_path=target,
+        release_findings=[],
+    )
+    assert bundle["markdown"] == target

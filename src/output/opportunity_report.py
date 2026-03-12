@@ -261,6 +261,46 @@ def _fmt_pct_point(value: Any) -> str:
         return str(value)
 
 
+def _fmt_ratio(value: Any) -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        return f"{float(value):.0%}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_return(value: Any) -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        return f"{float(value):+.1%}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _signal_confidence_rows(analysis: Dict[str, Any]) -> List[List[str]]:
+    confidence = dict(analysis.get("signal_confidence") or {})
+    if not confidence:
+        return [["状态", "当前未输出历史相似样本统计"]]
+    if not confidence.get("available"):
+        return [
+            ["状态", "当前不给这层置信度"],
+            ["原因", str(confidence.get("reason", "样本或数据置信度不足"))],
+        ]
+    return [
+        ["样本范围", str(confidence.get("scope", "同标的日线相似场景"))],
+        ["相似样本数", str(confidence.get("sample_count", "—"))],
+        ["20日胜率", _fmt_ratio(confidence.get("win_rate_20d"))],
+        ["20日平均收益", _fmt_return(confidence.get("avg_return_20d"))],
+        ["20日中位收益", _fmt_return(confidence.get("median_return_20d"))],
+        ["20日平均最大回撤", _fmt_return(confidence.get("avg_mae_20d"))],
+        ["止损触发率", _fmt_ratio(confidence.get("stop_hit_rate"))],
+        ["目标触达率", _fmt_ratio(confidence.get("target_hit_rate"))],
+        ["样本置信度", f"{confidence.get('confidence_label', '—')} ({confidence.get('confidence_score', '—')}/100)"],
+    ]
+
+
 def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
     if analysis.get("asset_type") not in {"cn_fund", "cn_etf"}:
         return []
@@ -902,6 +942,8 @@ class OpportunityReportRenderer:
                 ]
             )
             lines.extend(_table(["催化子项", "层级", "当前信号", "得分"], _catalyst_factor_rows(catalyst_dimension)))
+            if any(str(factor.get("display_score", "")).startswith("-") for factor in catalyst_dimension.get("factors", [])):
+                lines.extend(["", "> 注：催化总分按 0 封底；负面事件会先体现在子项扣分和正文风险提示里。"])
             lines.extend(
                 [
                     "",
@@ -917,6 +959,18 @@ class OpportunityReportRenderer:
                 ]
             )
             lines.extend(_table(["风险子项", "当前信号", "说明", "得分"], _factor_rows(risk_dimension)))
+            lines.extend(
+                [
+                    "",
+                    "**历史相似样本：**",
+                ]
+            )
+            lines.extend(_table(["指标", "结果"], _signal_confidence_rows(analysis)))
+            confidence = dict(analysis.get("signal_confidence") or {})
+            if confidence.get("available"):
+                lines.append(
+                    f"> 方法说明：{confidence.get('reason', '仅使用同标的当时可见的日线量价和技术状态，不重建历史新闻与财报快照。')}"
+                )
             lines.extend(
                 [
                     "",

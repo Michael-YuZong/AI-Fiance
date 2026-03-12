@@ -90,6 +90,7 @@ def _winner_reason_lines(analysis: Dict[str, Any], defensive_mode: bool) -> List
     catalyst_reason = str(dict(analysis.get("dimensions", {}).get("catalyst") or {}).get("summary", "")).strip()
     risk_reason = str(dict(analysis.get("dimensions", {}).get("risk") or {}).get("summary", "")).strip()
     technical_reason = str(dict(analysis.get("dimensions", {}).get("technical") or {}).get("summary", "")).strip()
+    macro_reason = str(dict(analysis.get("dimensions", {}).get("macro") or {}).get("summary", "")).strip()
 
     if defensive_mode and sector == "黄金":
         lines.append("今天更适合先做防守而不是继续追高贝塔，黄金联接更符合地缘和风险偏好下行时的配置方向。")
@@ -101,7 +102,7 @@ def _winner_reason_lines(analysis: Dict[str, Any], defensive_mode: bool) -> List
     if risk >= 70:
         lines.append(f"风险特征 `{int(risk)}` 分，意味着它更适合放进今天的组合框架里做防守或平衡。{risk_reason}".strip())
     if macro >= 20:
-        lines.append("宏观环境没有明显逆风，这点比单纯看净值涨跌更重要。")
+        lines.append(f"宏观敏感度 `{int(macro)}` 分。{macro_reason or '宏观环境没有明显逆风，这点比单纯看净值涨跌更重要。'}".strip())
     if technical < 50 or trade_state:
         lines.append(
             f"但这不是追涨型机会，当前更适合按 `{trade_state or action.get('direction', '持有优于追高')}` 去做，而不是直接重仓。"

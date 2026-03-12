@@ -13,7 +13,7 @@ from src.reporting.review_lessons import active_lesson_ids
 from src.utils.config import resolve_project_path
 
 
-REPORT_TYPES = {"stock_pick", "briefing", "fund_pick", "scan", "retrospect"}
+REPORT_TYPES = {"stock_pick", "stock_analysis", "briefing", "fund_pick", "etf_pick", "scan", "retrospect"}
 REQUIRED_REVIEW_HEADINGS = (
     "## 一句话总评",
     "## 主要问题",
@@ -21,9 +21,11 @@ REQUIRED_REVIEW_HEADINGS = (
     "## 收敛结论",
 )
 DETAILED_FINAL_MARKERS = {
-    "stock_pick": ("八维雷达", "催化拆解", "硬排除检查", "风险拆解"),
+    "stock_pick": ("八维雷达", "催化拆解", "硬排除检查", "风险拆解", "历史相似样本"),
+    "stock_analysis": ("## 为什么这么判断", "## 硬检查", "## 分维度详解"),
     "briefing": ("## 为什么今天这么判断", "## 今天怎么做", "## 重点观察"),
     "fund_pick": ("## 为什么推荐它", "## 这只基金为什么是这个分", "## 为什么不是另外几只"),
+    "etf_pick": ("## 为什么推荐它", "## 这只ETF为什么是这个分", "## 为什么不是另外几只"),
     "scan": ("## 为什么这么判断", "## 硬检查", "## 分维度详解"),
     "retrospect": ("## 原始决策", "## 为什么当时会做这个决定", "## 后验路径", "## 复盘结论"),
 }

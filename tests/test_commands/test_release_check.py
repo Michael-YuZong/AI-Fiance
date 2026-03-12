@@ -37,7 +37,8 @@ def test_release_check_passes_clean_stock_pick_client_report() -> None:
     client = """# 今日个股推荐
 
 **数据完整度：** 本轮新闻/事件覆盖基本正常。
-- A股 结构化事件覆盖 50% / 高置信公司新闻覆盖 100%
+- A股 结构化事件覆盖 50%（1/2） / 高置信公司新闻覆盖 100%（2/2）
+- 覆盖率的分母是当前纳入详细分析的各市场标的，不是全市场扫描池。
 
 ## A股
 
@@ -65,6 +66,10 @@ def test_release_check_passes_clean_stock_pick_client_report() -> None:
 **催化证据来源：**
 
 - `结构化事件`：[新易盛：公司将出席2026年OFC大会](https://example.com/xys)（证券时报 / 2026-03-11）
+
+**历史相似样本：** 同标的近似样本 `16` 个，20 日胜率 `69%`，20 日中位收益 `+8.1%`。
+
+- 这层只反映历史相似量价/技术场景的样本置信度，不等于本次总推荐置信度。
 
 ### 中际旭创 (300308)
 
@@ -111,7 +116,8 @@ def test_release_check_passes_detailed_stock_pick_client_report() -> None:
     client = """# 今日个股推荐（详细版）
 
 **数据完整度：** 本轮新闻/事件覆盖基本正常。
-- A股 结构化事件覆盖 50% / 高置信公司新闻覆盖 100%
+- A股 结构化事件覆盖 50%（1/2） / 高置信公司新闻覆盖 100%（2/2）
+- 覆盖率的分母是当前纳入详细分析的各市场标的，不是全市场扫描池。
 
 为什么今天先看这些票：因为今天不是全面追高环境，更适合抓少数还具备胜率和赔率的标的。
 为什么 A 股还能做：因为景气和相对强弱还在。
@@ -140,6 +146,8 @@ def test_release_check_passes_detailed_stock_pick_client_report() -> None:
 
 **催化证据来源：**
 - `结构化事件`：[新易盛：公司将出席2026年OFC大会](https://example.com/xys)（证券时报 / 2026-03-11）
+
+**历史相似样本：** 同标的近似样本 `16` 个，20 日胜率 `69%`，20 日中位收益 `+8.1%`。
 
 ### 2. [A] 中际旭创 (300308)  — 无信号
 
@@ -238,6 +246,44 @@ def test_release_check_flags_intraday_language_without_supporting_factors() -> N
 """
     findings = check_generic_client_report(client, "scan")
     assert any("盘中/开盘执行语言" in item for item in findings)
+
+
+def test_release_check_flags_briefing_without_macro_leading_section() -> None:
+    client = """# 今日晨报
+
+## 为什么今天这么判断
+
+- 今天更像结构性行情。
+- 风险偏好没有全面回暖。
+- 更适合先看主线确认。
+
+## 今天怎么做
+
+- 先小仓。
+"""
+    findings = check_generic_client_report(client, "briefing")
+    assert any("宏观领先指标" in item for item in findings)
+
+
+def test_release_check_flags_medium_term_macro_claim_without_indicator_roles() -> None:
+    client = """# 今日 ETF 分析
+
+## 为什么这么判断
+
+- 我们更看未来 3-6 个月的中期判断。
+- 当前方向更偏顺风。
+
+## 值得继续看的地方
+
+- 主题方向没有坏。
+
+## 现在不适合激进的地方
+
+- 波动仍然偏高。
+- 不适合满仓。
+"""
+    findings = check_generic_client_report(client, "scan")
+    assert any("PMI/PPI/CPI/信用脉冲" in item for item in findings)
 
 
 def test_release_check_passes_retro_spect_report() -> None:
@@ -399,3 +445,114 @@ def test_release_check_allows_blank_line_before_fund_profile_table() -> None:
 """
     findings = check_generic_client_report(client, "scan")
     assert not any("基金画像章节存在，但未找到标准画像表" in item for item in findings)
+
+
+def test_release_check_flags_raw_exception_strings_in_client_report() -> None:
+    client = """# 今日 ETF 分析
+
+## 为什么这么判断
+
+- 主线没有完全破坏。
+
+## 基金画像
+
+| 项目 | 内容 |
+| --- | --- |
+| 基金类型 | 商品型 |
+| 基金公司 | 建信基金 |
+| 基金经理 | 某经理 |
+| 成立日期 | 2019-12-13 |
+| 业绩比较基准 | 易盛郑商所能源化工指数A收益率 |
+
+## 值得继续看的地方
+
+- 相对强弱还在。
+
+## 现在不适合激进的地方
+
+- 高位波动更大。
+- 追高盈亏比一般。
+
+## 当前更合适的动作
+
+- 等回撤或确认后分批。
+
+## 数据限制与说明
+
+- 全球代理数据缺失: Too Many Requests. Rate limited. Try after a while.
+"""
+    findings = check_generic_client_report(client, "scan")
+    assert any("原始异常/系统报错信息" in item for item in findings)
+
+
+def test_release_check_passes_stock_analysis_report() -> None:
+    client = """# Meta (META) | 个股详细分析 | 2026-03-12
+
+## 为什么这么判断
+
+- 基本面没有坏。
+
+## 值得继续看的地方
+
+- 相对强弱仍占优。
+
+## 现在不适合激进的地方
+
+- 事件窗口仍在。
+- 不适合直接追高。
+
+## 当前更合适的动作
+
+- 等回踩确认后再做。
+
+## 硬检查
+
+| 检查项 | 状态 | 说明 |
+| --- | --- | --- |
+| 流动性 | ✅ | 充足 |
+
+## 分维度详解
+
+### 技术面 55/100
+"""
+    findings = check_generic_client_report(client, "stock_analysis")
+    assert findings == []
+
+
+def test_release_check_passes_etf_pick_report() -> None:
+    client = """# 今日ETF推荐 | 2026-03-12
+
+## 为什么推荐它
+
+- 方向没坏。
+- 相对强弱仍在。
+- 当前更适合小仓分批。
+
+## 这只ETF为什么是这个分
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 52/100 | 方向没坏但不适合追高 |
+
+## 基金画像
+
+| 项目 | 内容 |
+| --- | --- |
+| 基金类型 | 商品型 |
+| 基金公司 | 建信基金 |
+| 基金经理 | 朱金钰、亢豆 |
+| 成立日期 | 2019-12-13 |
+| 业绩比较基准 | 易盛郑商所能源化工指数A收益率 |
+
+## 为什么不是另外几只
+
+### 1. 红利ETF (510880)
+
+- 今天弹性更弱。
+
+### 2. 黄金ETF (518880)
+
+- 今天主线不是纯避险配置。
+"""
+    findings = check_generic_client_report(client, "etf_pick")
+    assert findings == []

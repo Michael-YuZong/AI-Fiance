@@ -23,6 +23,17 @@ BANNED_CLIENT_PHRASES = [
     "当前输出角色",
 ]
 
+RAW_EXCEPTION_PATTERNS = (
+    "Too Many Requests",
+    "Traceback",
+    "ProxyError",
+    "ConnectionError",
+    "RemoteDisconnected",
+    "SSLError",
+    "ReadTimeout",
+    "HTTPError",
+)
+
 INTRADAY_CLAIM_TERMS = ("盘中", "首30分钟", "集合竞价", "竞价", "VWAP", "开盘缺口", "相对今开", "相对昨收", "日内位置")
 INTRADAY_EVIDENCE_TERMS = (
     "VWAP",
@@ -53,7 +64,7 @@ GENERIC_OPERATION_PREFIXES = (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run pre-release consistency checks for client Markdown reports.")
-    parser.add_argument("report_type", choices=["stock_pick", "briefing", "fund_pick", "scan", "retrospect"], help="Report type to validate")
+    parser.add_argument("report_type", choices=["stock_pick", "stock_analysis", "briefing", "fund_pick", "etf_pick", "scan", "retrospect"], help="Report type to validate")
     parser.add_argument("--client", required=True, help="Path to client-facing Markdown")
     parser.add_argument("--source", default="", help="Path to source/detail Markdown")
     return parser
@@ -213,8 +224,20 @@ def check_stock_pick_client_report(client_text: str, source_text: str) -> List[s
         findings.append(format_lesson_finding("L002", "[P2] 客户稿解释性不足：'为什么' 类型说明明显不够"))
     if "数据完整度" not in client_text:
         findings.append(format_lesson_finding("L013", "[P1] 个股成稿缺少数据完整度/覆盖率说明"))
+    if "当前置信度" in client_text:
+        findings.append(format_lesson_finding("L023", "[P1] 个股成稿仍把样本置信度写成“当前置信度”，容易被误读成总推荐置信度"))
+    if "估值偏高或财务安全边际不足" in client_text:
+        findings.append(format_lesson_finding("L025", "[P2] 个股成稿仍使用“估值偏高或财务安全边际不足”模板句，未拆开真实原因"))
+    if "结构化事件覆盖" in client_text and "分母" not in client_text:
+        findings.append(format_lesson_finding("L024", "[P2] 个股成稿披露了覆盖率，但没有说明分母定义"))
+    for line in client_text.splitlines():
+        if "北向增持估计" in line and all(token not in line for token in ("行业", "板块", "代理")):
+            findings.append(format_lesson_finding("L012", "[P1] 个股成稿把板块/行业北向代理写成了像个股专属信号"))
+            break
     if "催化证据来源" not in client_text:
         findings.append(format_lesson_finding("L014", "[P1] 个股成稿缺少可直接复核的催化证据来源"))
+    if "历史相似样本" not in client_text:
+        findings.append(format_lesson_finding("L017", "[P1] 个股成稿缺少历史相似样本/置信度章节"))
     findings.extend(_duplicate_explanation_findings(client_text, max_repeat=2))
     if len(_explanation_bullets(client_text)) < 8:
         findings.append(format_lesson_finding("L002", "[P2] 客户稿解释性不足：实质性解释条目太少"))
@@ -274,11 +297,16 @@ def check_generic_client_report(client_text: str, report_type: str) -> List[str]
     for phrase in BANNED_CLIENT_PHRASES:
         if phrase in client_text:
             findings.append(format_lesson_finding("L001", f"[P1] 客户稿出现内部过程词: {phrase}"))
+    for token in RAW_EXCEPTION_PATTERNS:
+        if token in client_text:
+            findings.append(format_lesson_finding("L029", f"[P1] 客户稿暴露了原始异常/系统报错信息: {token}"))
 
     minimum_why = {
         "briefing": 1,
         "fund_pick": 2,
+        "etf_pick": 2,
         "scan": 1,
+        "stock_analysis": 1,
         "retrospect": 1,
     }.get(report_type, 1)
     if client_text.count("为什么") < minimum_why:
@@ -289,7 +317,9 @@ def check_generic_client_report(client_text: str, report_type: str) -> List[str]
     required_headings = {
         "briefing": ["## 为什么今天这么判断", "## 今天怎么做"],
         "fund_pick": ["## 为什么推荐它", "## 这只基金为什么是这个分"],
+        "etf_pick": ["## 为什么推荐它", "## 这只ETF为什么是这个分"],
         "scan": ["## 为什么这么判断", "## 当前更合适的动作"],
+        "stock_analysis": ["## 为什么这么判断", "## 当前更合适的动作"],
         "retrospect": ["## 原始决策", "## 为什么当时会做这个决定", "## 后验路径", "## 复盘结论"],
     }.get(report_type, [])
     for heading in required_headings:
@@ -299,22 +329,43 @@ def check_generic_client_report(client_text: str, report_type: str) -> List[str]
     if report_type == "briefing":
         if len(_bullets_in_section(client_text, "## 为什么今天这么判断")) < 3:
             findings.append(format_lesson_finding("L002", "[P2] briefing 客户稿解释性不足：'为什么今天这么判断' 至少需要 3 条理由"))
+        if "## 宏观领先指标" not in client_text:
+            findings.append(format_lesson_finding("L027", "[P2] briefing 客户稿缺少“宏观领先指标”章节，未来 3-6 个月判断不够透明"))
+        elif len(_bullets_in_section(client_text, "## 宏观领先指标")) < 3:
+            findings.append(format_lesson_finding("L027", "[P2] briefing 宏观领先指标解释不足：至少要讲清景气、价格链条和信用脉冲中的 3 条。"))
     elif report_type == "fund_pick":
         if len(_bullets_in_section(client_text, "## 为什么推荐它")) < 3:
             findings.append(format_lesson_finding("L002", "[P2] fund_pick 客户稿解释性不足：'为什么推荐它' 至少需要 3 条理由"))
         if client_text.count("### ") < 2:
             findings.append(format_lesson_finding("L002", "[P2] fund_pick 客户稿解释性不足：需要明确写出至少两只备选/未推荐对象的原因"))
+    elif report_type == "etf_pick":
+        if len(_bullets_in_section(client_text, "## 为什么推荐它")) < 3:
+            findings.append(format_lesson_finding("L002", "[P2] etf_pick 客户稿解释性不足：'为什么推荐它' 至少需要 3 条理由"))
+        if client_text.count("### ") < 2:
+            findings.append(format_lesson_finding("L002", "[P2] etf_pick 客户稿解释性不足：需要明确写出至少两只备选/未推荐对象的原因"))
+        findings.extend(_fund_profile_findings(client_text))
     elif report_type == "scan":
         if len(_bullets_in_section(client_text, "## 值得继续看的地方")) < 1:
             findings.append(format_lesson_finding("L002", "[P2] scan 客户稿缺少正向理由：'值得继续看的地方' 至少要有 1 条"))
         if len(_bullets_in_section(client_text, "## 现在不适合激进的地方")) < 2:
             findings.append(format_lesson_finding("L002", "[P2] scan 客户稿缺少反向理由：'现在不适合激进的地方' 至少要有 2 条"))
         findings.extend(_fund_profile_findings(client_text))
+    elif report_type == "stock_analysis":
+        if len(_bullets_in_section(client_text, "## 值得继续看的地方")) < 1:
+            findings.append(format_lesson_finding("L002", "[P2] stock_analysis 客户稿缺少正向理由：'值得继续看的地方' 至少要有 1 条"))
+        if len(_bullets_in_section(client_text, "## 现在不适合激进的地方")) < 2:
+            findings.append(format_lesson_finding("L002", "[P2] stock_analysis 客户稿缺少反向理由：'现在不适合激进的地方' 至少要有 2 条"))
     elif report_type == "retrospect":
         if client_text.count("### ") < 1:
             findings.append(format_lesson_finding("L002", "[P2] retrospect 客户稿至少要展开 1 笔具体决策。"))
         if len(_explanation_bullets(client_text)) < 6:
             findings.append(format_lesson_finding("L002", "[P2] retrospect 客户稿解释性不足：复盘理由和结论太少。"))
+
+    if any(token in client_text for token in ("3-6个月", "未来3-6个月", "未来 3-6 个月", "中期判断")):
+        macro_tokens = ("PMI", "PPI", "CPI", "社融", "M1-M2", "剪刀差")
+        hits = sum(1 for token in macro_tokens if token in client_text)
+        if hits < 3:
+            findings.append(format_lesson_finding("L027", "[P2] 报告使用了中期宏观判断语气，但没有把 PMI/PPI/CPI/信用脉冲 的角色讲清楚。"))
     return findings
 
 

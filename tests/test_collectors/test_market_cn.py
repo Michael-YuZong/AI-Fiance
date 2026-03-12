@@ -150,6 +150,61 @@ def test_market_cn_ts_etf_daily_scales_amount_to_yuan(monkeypatch, tmp_path):
     assert float(frame["成交额"].iloc[-1]) == 567_800.0
 
 
+def test_market_cn_etf_universe_snapshot_merges_basic_and_daily(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_latest_open_trade_date", lambda *args, **kwargs: "20260312")
+    monkeypatch.setattr(
+        collector,
+        "_ts_fund_basic_snapshot",
+        lambda market="E": pd.DataFrame(
+            [
+                {
+                    "ts_code": "510880.SH",
+                    "name": "红利ETF",
+                    "management": "华泰柏瑞基金",
+                    "fund_type": "股票型",
+                    "found_date": "20061117",
+                    "list_date": "20070118",
+                    "benchmark": "上证红利指数收益率",
+                    "status": "L",
+                    "invest_type": "被动指数型",
+                    "delist_date": None,
+                }
+            ]
+        ),
+    )
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "fund_daily"
+        assert kwargs.get("trade_date") == "20260312"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "510880.SH",
+                    "trade_date": "20260312",
+                    "pre_close": 3.25,
+                    "open": 3.26,
+                    "high": 3.29,
+                    "low": 3.24,
+                    "close": 3.28,
+                    "change": 0.03,
+                    "pct_chg": 0.92,
+                    "vol": 756432.0,
+                    "amount": 238000.0,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    frame = collector.get_etf_universe_snapshot()
+    assert not frame.empty
+    row = frame.iloc[0]
+    assert row["symbol"] == "510880"
+    assert row["trade_date"] == "2026-03-12"
+    assert float(row["amount"]) == 238_000_000.0
+    assert row["benchmark"] == "上证红利指数收益率"
+
+
 def test_market_cn_unlock_pressure_flags_large_near_term_share_float(monkeypatch, tmp_path):
     collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
 

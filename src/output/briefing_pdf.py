@@ -91,6 +91,12 @@ def render_briefing_pdf(markdown: str, output_path: Path) -> None:
             idx += 1
             continue
 
+        # H4
+        if stripped.startswith("#### "):
+            _render_h4(pdf, stripped[5:])
+            idx += 1
+            continue
+
         # H3
         if stripped.startswith("### "):
             _render_h3(pdf, stripped[4:])
@@ -196,6 +202,15 @@ def _render_h3(pdf: BriefingPDF, text: str) -> None:
     pdf.set_text_color(17, 24, 39)
     pdf.ln(3)
     pdf.cell(0, 6, _clean(text), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(1)
+
+
+def _render_h4(pdf: BriefingPDF, text: str) -> None:
+    _ensure_space(pdf, 10)
+    pdf.set_font("Songti", "", 10.5)
+    pdf.set_text_color(55, 65, 81)
+    pdf.ln(2)
+    pdf.cell(0, 5, _clean(text), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(1)
 
 

@@ -147,7 +147,27 @@ def test_verification_rows_include_core_checks() -> None:
 
 def test_regime_detector_is_stable_with_oil_shock() -> None:
     inputs = derive_regime_inputs(
-        {"pmi": 49.0, "pmi_trend": "falling", "cpi_monthly": 0.4, "cpi_trend": "rising", "lpr_1y": 3.0, "lpr_prev": 3.0},
+        {
+            "pmi": 49.0,
+            "pmi_trend": "falling",
+            "pmi_new_orders": 48.5,
+            "pmi_production": 49.1,
+            "demand_state": "weakening",
+            "inventory_state": "destocking_pressure",
+            "cpi_monthly": 0.4,
+            "cpi_trend": "rising",
+            "ppi_yoy": 0.3,
+            "ppi_trend": "rising",
+            "price_state": "reflation",
+            "m1_m2_spread": -4.2,
+            "m1_m2_spread_trend": "falling",
+            "social_financing_3m_avg": 18000.0,
+            "social_financing_prev_3m_avg": 22000.0,
+            "social_financing_trend": "falling",
+            "credit_impulse": "contracting",
+            "lpr_1y": 3.0,
+            "lpr_prev": 3.0,
+        },
         {"dxy_20d_change": 0.01},
         [{"name": "布伦特原油", "return_5d": 0.39, "return_20d": 0.25}],
     )
@@ -156,6 +176,8 @@ def test_regime_detector_is_stable_with_oil_shock() -> None:
 
     assert result["current_regime"] == "stagflation"
     assert any("油价" in line for line in result["reasoning"])
+    assert inputs["price_state"] == "reflation"
+    assert inputs["credit_impulse"] == "contracting"
 
 
 def test_anomaly_report_flags_extreme_oil_and_etf_moves() -> None:

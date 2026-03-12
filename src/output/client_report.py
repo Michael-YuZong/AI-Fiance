@@ -26,6 +26,72 @@ GENERIC_FACTOR_SIGNALS = {
 }
 
 
+def _fmt_pct(value: Any) -> str:
+    try:
+        return f"{float(value):+.1%}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_ratio(value: Any) -> str:
+    try:
+        return f"{float(value):.0%}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _signal_confidence_lines(analysis: Mapping[str, Any]) -> List[str]:
+    confidence = dict(analysis.get("signal_confidence") or {})
+    if not confidence:
+        return [
+            "**历史相似样本：** 当前还没有输出这层统计。",
+            "",
+            "- 当前稿件未产出历史相似样本结论，先不要把它当成已有历史命中率验证的建议。",
+        ]
+    if not confidence.get("available"):
+        return [
+            "**历史相似样本：** 当前不给这层置信度。",
+            "",
+            f"- 原因：{confidence.get('reason', '样本或数据置信度不足。')}",
+            "- 处理原则：宁可不报，也不拿低置信历史样本给当前建议背书。",
+        ]
+
+    lines = [
+        (
+            f"**历史相似样本：** {confidence.get('summary', '')}"
+            or f"同标的近似样本 `{confidence.get('sample_count', '—')}` 个。"
+        ),
+        "",
+    ]
+    rows = [
+        ["样本范围", str(confidence.get("scope", "同标的日线相似场景"))],
+        ["相似样本数", str(confidence.get("sample_count", "—"))],
+        ["20日胜率", _fmt_ratio(confidence.get("win_rate_20d"))],
+        ["20日平均收益", _fmt_pct(confidence.get("avg_return_20d"))],
+        ["20日中位收益", _fmt_pct(confidence.get("median_return_20d"))],
+        ["20日平均最大回撤", _fmt_pct(confidence.get("avg_mae_20d"))],
+        ["止损触发率", _fmt_ratio(confidence.get("stop_hit_rate"))],
+        ["目标触达率", _fmt_ratio(confidence.get("target_hit_rate"))],
+        ["样本置信度", f"{confidence.get('confidence_label', '—')} ({confidence.get('confidence_score', '—')}/100)"],
+    ]
+    lines.extend(_table(["指标", "结果"], rows))
+    sample_dates = list(confidence.get("sample_dates") or [])
+    lines.extend(
+        [
+            "",
+            "- 这层只反映历史相似量价/技术场景的样本置信度，不等于本次总推荐置信度。",
+        ]
+    )
+    if sample_dates:
+        lines.extend(
+            [
+                f"最近可比样本日期：`{' / '.join(sample_dates[:5])}`",
+                f"注：{confidence.get('reason', '仅使用同标的当时可见的日线量价和技术状态，不重建历史新闻与财报快照。')}",
+            ]
+        )
+    return lines
+
+
 def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> List[str]:
     def _escape(value: Any) -> str:
         return str(value).replace("|", "\\|").replace("\n", "<br>")
@@ -196,6 +262,7 @@ def _evidence_lines(items: Sequence[Mapping[str, Any]], *, max_items: int = 3) -
 def _dimension_reason_text(dimension: Mapping[str, Any], *, positive: bool) -> str:
     factors = list(dimension.get("factors") or [])
     candidates: List[Tuple[float, str]] = []
+    zero_count_signals: List[str] = []
     for factor in factors:
         signal = str(factor.get("signal", "")).strip()
         if not signal:
@@ -203,6 +270,7 @@ def _dimension_reason_text(dimension: Mapping[str, Any], *, positive: bool) -> s
         if signal in GENERIC_FACTOR_SIGNALS:
             continue
         if signal.startswith("个股相关头条 0 条") or signal.startswith("覆盖源 0 个"):
+            zero_count_signals.append(signal)
             continue
         display = str(factor.get("display_score", "")).strip()
         if display in {"缺失", "不适用", "信息项"}:
@@ -221,6 +289,9 @@ def _dimension_reason_text(dimension: Mapping[str, Any], *, positive: bool) -> s
     if candidates:
         candidates.sort(key=lambda item: item[0], reverse=positive)
         return candidates[0][1]
+
+    if not positive and zero_count_signals:
+        return zero_count_signals[0]
 
     core_signal = str(dimension.get("core_signal", "")).strip()
     if core_signal and core_signal not in GENERIC_DIMENSION_SUMMARIES:
@@ -410,7 +481,8 @@ def _fund_profile_sections(analysis: Mapping[str, Any]) -> List[str]:
         ["基金类型", overview.get("基金类型", "—")],
         ["基金公司", overview.get("基金管理人", "—")],
         ["基金经理", overview.get("基金经理人", "—")],
-        ["成立日期", overview.get("成立日期/规模", "—")],
+        ["成立日期", overview.get("成立日期", overview.get("成立日期/规模", "—"))],
+        ["首发规模", overview.get("首发规模", "—")],
         ["净资产规模", overview.get("净资产规模", "—")],
         ["业绩比较基准", overview.get("业绩比较基准", "—")],
     ]
@@ -521,6 +593,9 @@ class ClientReportRenderer:
             lines.append(f"**数据完整度：** {coverage.get('note', '未标注')}")
             for item in coverage_lines[:3]:
                 lines.append(f"- {item}")
+            lines.append("- 覆盖率的分母是当前纳入详细分析的各市场标的，不是全市场扫描池。")
+            lines.append("- 新闻热度更看多源共振；单一来源只算提及，不等于热度确认。")
+            lines.append("- 相关性/分散度按各市场观察池基准代理，不同市场之间只适合看相对高低，不适合直接横向比较绝对值。")
             lines.append("")
 
         for market_name in ("A股", "港股", "美股"):
@@ -596,6 +671,8 @@ class ClientReportRenderer:
                     ]
                 )
                 lines.extend(_table(["催化子项", "层级", "当前信号", "得分"], _catalyst_factor_rows(catalyst_dimension)))
+                if any(str(factor.get("display_score", "")).startswith("-") for factor in catalyst_dimension.get("factors", [])):
+                    lines.extend(["", "- 注：催化总分按 0 封底；负面事件会先体现在子项扣分和正文风险提示里。"])
                 evidence = list(catalyst_dimension.get("evidence") or [])
                 evidence_lines = _evidence_lines(evidence, max_items=2)
                 if evidence_lines:
@@ -618,6 +695,7 @@ class ClientReportRenderer:
                     ]
                 )
                 lines.extend(_table(["风险子项", "当前信号", "说明", "得分"], _factor_rows(risk_dimension)))
+                lines.extend(["", *_signal_confidence_lines(item)])
 
             watch_items = [item for item in ranked if _recommendation_bucket(item, watch_symbols) != "正式推荐"]
             if watch_items:
@@ -864,6 +942,17 @@ class ClientReportRenderer:
         )
         for item in cautions[:3]:
             lines.append(f"- {item}")
+        catalyst_dimension = dict(analysis.get("dimensions", {}).get("catalyst") or {})
+        evidence_lines = _evidence_lines(list(catalyst_dimension.get("evidence") or []), max_items=3)
+        if evidence_lines:
+            lines.extend(
+                [
+                    "",
+                    "## 关键证据",
+                    "",
+                ]
+            )
+            lines.extend(evidence_lines)
         lines.extend(
             [
                 "",
@@ -924,6 +1013,16 @@ class ClientReportRenderer:
                 lines.append(f"- {item}")
         return "\n".join(lines).rstrip()
 
+    def render_stock_analysis(self, analysis: Dict[str, Any]) -> str:
+        rendered = self.render_scan(analysis)
+        generated_at = str(analysis.get("generated_at", ""))[:10]
+        name = str(analysis.get("name", ""))
+        symbol = str(analysis.get("symbol", ""))
+        lines = rendered.splitlines()
+        if lines:
+            lines[0] = f"# {name} ({symbol}) | 个股详细分析 | {generated_at}"
+        return "\n".join(lines).rstrip()
+
     def render_briefing(self, payload: Dict[str, Any]) -> str:
         generated_at = str(payload.get("generated_at", ""))[:10]
         headline_lines = list(payload.get("headline_lines") or [])
@@ -931,6 +1030,7 @@ class ClientReportRenderer:
         theme_rows = list(payload.get("theme_tracking_rows") or [])
         verification_rows = list(payload.get("verification_rows") or [])
         macro_asset_rows = list(payload.get("macro_asset_rows") or [])
+        macro_items = list(payload.get("macro_items") or [])
         lines = [
             f"# 今日晨报 | {generated_at}",
             "",
@@ -951,6 +1051,10 @@ class ClientReportRenderer:
                 lines.append(f"- {item}")
         else:
             lines.append("- 今天的判断不是看单一涨跌，而是看波动、主线和资金是否真正共振。")
+        if macro_items:
+            lines.extend(["", "## 宏观领先指标", ""])
+            for item in macro_items[:5]:
+                lines.append(f"- {item}")
         lines.extend(["", "## 今天怎么做", ""])
         for item in action_lines[:4]:
             lines.append(f"- {item}")
@@ -1048,4 +1152,72 @@ class ClientReportRenderer:
         )
         for item in winner.get("positioning_lines", []):
             lines.append(f"- {item}")
+        return "\n".join(lines).rstrip()
+
+    def render_etf_pick(self, payload: Dict[str, Any]) -> str:
+        generated_at = str(payload.get("generated_at", ""))[:10]
+        winner = dict(payload.get("winner") or {})
+        alternatives = list(payload.get("alternatives") or [])
+        lines = [
+            f"# 今日ETF推荐 | {generated_at}",
+            "",
+            "## 今日结论",
+            "",
+            f"今天如果只推荐一只 ETF，我给：**`{winner.get('name', '')} ({winner.get('symbol', '')})`**",
+            "",
+            f"这不是无脑追高型推荐，而是：**`{winner.get('trade_state', '持有优于追高')}`**",
+            "",
+            "## 为什么推荐它",
+            "",
+        ]
+        for item in winner.get("positives", [])[:4]:
+            lines.append(f"- {item}")
+        lines.extend(["", "## 这只ETF为什么是这个分", ""])
+        lines.extend(
+            _table(
+                ["维度", "分数", "为什么是这个分"],
+                winner.get("dimension_rows", []),
+            )
+        )
+        evidence_lines = _evidence_lines(list(winner.get("evidence") or []), max_items=3)
+        if evidence_lines:
+            lines.extend(["", "## 关键证据", ""])
+            lines.extend(evidence_lines)
+        lines.extend(["", "## 怎么做", ""])
+        lines.extend(
+            _table(
+                ["项目", "建议"],
+                [
+                    ["当前动作", winner.get("action", {}).get("direction", "观察为主")],
+                    ["介入条件", winner.get("action", {}).get("entry", "等回撤再看")],
+                    ["首次仓位", winner.get("action", {}).get("position", "计划仓位的 1/3 - 1/2")],
+                    ["加仓节奏", winner.get("action", {}).get("scaling_plan", "确认后再考虑第二笔")],
+                    ["止损参考", winner.get("action", {}).get("stop", "重新跌破关键支撑就处理")],
+                    ["目标参考", winner.get("action", {}).get("target", "先看前高压力位")],
+                ],
+            )
+        )
+        fund_sections = winner.get("fund_sections") or []
+        if fund_sections:
+            lines.extend(["", *fund_sections])
+        if alternatives:
+            lines.extend(["", "## 为什么不是另外几只", ""])
+            for index, item in enumerate(alternatives[:2], start=1):
+                lines.extend(
+                    [
+                        f"### {index}. {item.get('name', '')} ({item.get('symbol', '')})",
+                        "",
+                    ]
+                )
+                for reason in item.get("cautions", [])[:3]:
+                    lines.append(f"- {reason}")
+                lines.append("")
+        lines.extend(["## 仓位管理", ""])
+        for item in winner.get("positioning_lines", []):
+            lines.append(f"- {item}")
+        notes = [str(item).strip() for item in (payload.get("notes") or []) if str(item).strip()]
+        if notes:
+            lines.extend(["", "## 数据限制与说明", ""])
+            for item in notes[:3]:
+                lines.append(f"- {item}")
         return "\n".join(lines).rstrip()

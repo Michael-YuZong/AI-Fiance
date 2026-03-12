@@ -29,6 +29,7 @@ from src.collectors import (
 )
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot
 from src.processors.regime import RegimeDetector
+from src.processors.signal_confidence import build_signal_confidence
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.utils.config import detect_asset_type, resolve_project_path
 from src.utils.data import load_watchlist, load_yaml
@@ -138,6 +139,9 @@ FORWARD_EVENT_LOOKAHEAD_DAYS = 14
 DIRECT_COMPANY_NEWS_LOOKBACK_DAYS = 45
 HOLDER_TRADE_LOOKBACK_DAYS = 90
 CAPITAL_RETURN_LOOKBACK_DAYS = 365
+STRUCTURED_EVENT_FULL_SCORE_DAYS = 45
+STRUCTURED_EVENT_DECAY_DAYS = 120
+SIGNAL_CONFIDENCE_TOP_LIMIT = 8
 
 DISCLOSURE_WINDOW_KEYS = (
     "年报",
@@ -271,6 +275,19 @@ SENSITIVITY_MAP = {
     "消费": {"rate": -1, "usd": -1, "oil": -1, "cny": 1},
     "军工": {"rate": 0, "usd": 1, "oil": 1, "cny": -1},
     "有色": {"rate": -1, "usd": -1, "oil": 1, "cny": 1},
+}
+
+MACRO_LEADING_MAP = {
+    "宽基": {"recovery": 1, "credit": 1, "reflation": 0, "defensive": 0},
+    "电网": {"recovery": 1, "credit": 1, "reflation": 0, "defensive": 1},
+    "科技": {"recovery": 1, "credit": 1, "reflation": -1, "defensive": -1},
+    "黄金": {"recovery": -1, "credit": -1, "reflation": 1, "defensive": 1},
+    "能源": {"recovery": -1, "credit": -1, "reflation": 1, "defensive": -1},
+    "高股息": {"recovery": -1, "credit": -1, "reflation": 0, "defensive": 1},
+    "医药": {"recovery": 0, "credit": 0, "reflation": -1, "defensive": 1},
+    "消费": {"recovery": 1, "credit": 1, "reflation": -1, "defensive": 0},
+    "军工": {"recovery": 1, "credit": 0, "reflation": 1, "defensive": 0},
+    "有色": {"recovery": 1, "credit": 1, "reflation": 1, "defensive": -1},
 }
 
 NEWS_KEYWORD_ALIASES = {
@@ -681,6 +698,79 @@ def _normalize_dimension(raw_score: int, available_max: int, target_max: int) ->
     return max(0, min(target_max, normalized))
 
 
+def _structured_source_priority(item: Mapping[str, Any]) -> int:
+    source = str(item.get("source") or item.get("configured_source") or "").strip().lower()
+    if source.startswith("tushare"):
+        return 3
+    if any(token in source for token in ("investor relations", "hkex", "sec", "cninfo")):
+        return 3
+    if source in {"business wire", "pr newswire", "globenewswire"}:
+        return 2
+    if source in {"reuters", "bloomberg", "financial times", "ft", "财联社", "证券时报"}:
+        return 2
+    return 1 if source else 0
+
+
+def _structured_event_award(
+    item: Mapping[str, Any],
+    reference: datetime,
+    *,
+    strong_event: bool,
+) -> tuple[int, str]:
+    event_date = _item_datetime(item, reference)
+    if event_date is None:
+        fallback = 15 if strong_event else 8
+        return fallback, "未提取到明确事件日期；若属于直接公司公告/事件，先按高置信结构化事件处理。"
+    delta_days = (reference.date() - event_date.date()).days
+    if delta_days < 0:
+        days_ahead = abs(delta_days)
+        return (8 if strong_event else 5), f"事件发生在未来 {days_ahead} 天，先按前瞻结构化事件处理。"
+    if delta_days <= STRUCTURED_EVENT_FULL_SCORE_DAYS:
+        return (15 if strong_event else 8), f"事件距今 {delta_days} 天，仍在结构化事件高权重窗口内。"
+    if delta_days <= STRUCTURED_EVENT_DECAY_DAYS:
+        return (8 if strong_event else 5), f"事件距今 {delta_days} 天，已进入结构化事件衰减窗口。"
+    return 0, f"事件距今 {delta_days} 天，已超出结构化事件有效窗口，不再作为当前催化加分。"
+
+
+def _pick_best_structured_item(
+    items: Sequence[Mapping[str, Any]],
+    primary_keywords: Sequence[str],
+    bonus_keywords: Sequence[str],
+    reference: datetime,
+) -> Optional[Mapping[str, Any]]:
+    if not items:
+        return None
+
+    def _freshness_rank(item: Mapping[str, Any]) -> tuple[int, int]:
+        event_date = _item_datetime(item, reference)
+        if event_date is None:
+            return (0, -9999)
+        delta_days = (reference.date() - event_date.date()).days
+        abs_days = abs(delta_days)
+        if delta_days < 0:
+            return (2, -abs_days)
+        if delta_days <= STRUCTURED_EVENT_FULL_SCORE_DAYS:
+            return (3, -delta_days)
+        if delta_days <= STRUCTURED_EVENT_DECAY_DAYS:
+            return (1, -delta_days)
+        return (0, -delta_days)
+
+    def _score(item: Mapping[str, Any]) -> tuple[int, int, int, int, int]:
+        text = _headline_text(item)
+        primary = sum(1 for keyword in primary_keywords if str(keyword).strip() and str(keyword).lower() in text)
+        bonus = sum(1 for keyword in bonus_keywords if str(keyword).strip() and str(keyword).lower() in text)
+        freshness_bucket, freshness_days = _freshness_rank(item)
+        return (
+            freshness_bucket,
+            _structured_source_priority(item),
+            primary,
+            bonus,
+            freshness_days,
+        )
+
+    return max(items, key=_score)
+
+
 def _top_positive_signals(factors: Sequence[Dict[str, str]], limit: int = 3) -> str:
     positives = [item["signal"] for item in factors if item.get("awarded", 0) > 0]
     return " · ".join(positives[:limit]) if positives else "当前没有明确亮点"
@@ -823,21 +913,21 @@ def build_market_context(
     try:
         china_macro = load_china_macro_snapshot(dict(config))
     except Exception as exc:
-        notes.append(f"中国宏观数据缺失: {exc}")
+        notes.append(_client_safe_issue("中国宏观数据缺失", exc))
     try:
         with redirect_stderr(io.StringIO()):
             global_proxy = load_global_proxy_snapshot()
     except Exception as exc:
-        notes.append(f"全球代理数据缺失: {exc}")
+        notes.append(_client_safe_issue("全球代理数据缺失", exc))
     try:
         monitor_rows = MarketMonitorCollector(config).collect()
     except Exception as exc:
-        notes.append(f"宏观监控数据缺失: {exc}")
+        notes.append(_client_safe_issue("宏观监控数据缺失", exc))
     try:
         regime_inputs = derive_regime_inputs(china_macro, global_proxy, monitor_rows)
         regime = RegimeDetector(regime_inputs).detect_regime()
     except Exception as exc:
-        notes.append(f"regime 判断失败: {exc}")
+        notes.append(_client_safe_issue("市场环境判断降级", exc))
     try:
         news_report = NewsCollector(config).collect(
             snapshots=watchlist,
@@ -847,7 +937,7 @@ def build_market_context(
             limit=20,
         )
     except Exception as exc:
-        notes.append(f"新闻源缺失: {exc}")
+        notes.append(_client_safe_issue("新闻源缺失", exc))
     try:
         events = EventsCollector(config).collect(mode="daily")
     except Exception as exc:
@@ -2123,9 +2213,13 @@ def _cn_capital_return_items(metadata: Mapping[str, Any], context: Mapping[str, 
         if age_days < 0 or age_days > CAPITAL_RETURN_LOOKBACK_DAYS:
             continue
         div_proc = str(row.get("div_proc", "")).strip() or "进展"
+        cash_div = pd.to_numeric(pd.Series([row.get("cash_div")]), errors="coerce").iloc[0]
+        cash_div_tax = pd.to_numeric(pd.Series([row.get("cash_div_tax")]), errors="coerce").iloc[0]
+        per_ten = cash_div_tax if not pd.isna(cash_div_tax) and float(cash_div_tax) > 0 else cash_div
+        ratio_text = f"（每10股派现 {float(per_ten):.2f} 元）" if not pd.isna(per_ten) and float(per_ten) > 0 else ""
         items.append(
             {
-                "title": f"{display_name} 披露现金分红{div_proc}",
+                "title": f"{display_name} 披露现金分红{div_proc}{ratio_text}",
                 "category": "dividend",
                 "source": "Tushare dividend",
                 "configured_source": "Tushare dividend",
@@ -3150,11 +3244,21 @@ def _fundamental_dimension(
     if score is not None and available < 35:
         score = min(score, 55)
     is_single_stock = asset_type in {"cn_stock", "hk", "us"}
+    negative_summary = "当前估值与财务质量都未形成明显优势。"
+    if is_single_stock:
+        if pe_ttm is None and available < 35:
+            negative_summary = "当前财务覆盖不足，先不下明确估值结论。"
+        elif pe_ttm is not None and float(pe_ttm) <= 15:
+            negative_summary = "估值不贵，但财务质量或盈利确认还不足以支撑更高基本面分。"
+        elif pe_ttm is not None and float(pe_ttm) >= 30:
+            negative_summary = "当前估值不便宜，且财务质量安全边际不够厚。"
+        else:
+            negative_summary = "当前估值与财务质量都未形成明显优势。"
     summary = _dimension_summary(
         score,
         "个股估值/财务快照偏正面，基本面支撑存在。" if is_single_stock else "估值/资金承接代理偏正面，但当前仍是 ETF/行业代理视角。",
         "个股基本面暂无明显低估或高估结论。" if is_single_stock else "基本面代理没有明显便宜或显著昂贵结论。",
-        "个股估值偏高或财务安全边际不足。" if is_single_stock else "估值代理偏高，基本面安全边际不足。",
+        negative_summary if is_single_stock else "估值代理偏高，基本面安全边际不足。",
         "ℹ️ 个股基本面数据缺失，本次评级未纳入完整基本面维度" if is_single_stock else "ℹ️ 基本面数据缺失，本次评级未纳入完整基本面维度",
     )
     if score is not None and available < 35:
@@ -3424,17 +3528,32 @@ def _catalyst_dimension(
         for item in structured_event_pool
         if str(item.get("category", "")).lower() != "earnings_calendar" and not _is_non_positive_company_statement(item)
     ]
-    structured_pick = _pick_best_news_item(
+    structured_pick = _pick_best_structured_item(
         structured_direct_pool or structured_event_pool,
         [*earnings_keys, *event_keys, *STRUCTURED_COMPANY_EVENT_KEYS],
         stock_name_tokens or keyword_keys,
+        reference_now,
     )
-    if structured_direct_pool:
-        structured_award = 15
-        structured_detail = "先看公告、财报、订单、回购、合作这类结构化公司事件；这类证据比泛行业新闻更接近可执行催化。"
-    elif structured_event_pool:
-        structured_award = 8
-        structured_detail = f"当前只命中财报日历/披露窗口等结构化事件，属于催化线索已出现，但还没到强催化共识。"
+    structured_direct_keys = {
+        (str(item.get("title", "")).strip(), str(item.get("source", "")).strip())
+        for item in structured_direct_pool
+    }
+    is_direct_structured = bool(
+        structured_pick
+        and (str(structured_pick.get("title", "")).strip(), str(structured_pick.get("source", "")).strip()) in structured_direct_keys
+    )
+    if structured_pick:
+        structured_award, freshness_detail = _structured_event_award(
+            structured_pick,
+            reference_now,
+            strong_event=is_direct_structured,
+        )
+        if structured_award > 0 and is_direct_structured:
+            structured_detail = f"先看公告、财报、订单、回购、合作这类结构化公司事件；这类证据比泛行业新闻更接近可执行催化。{freshness_detail}"
+        elif structured_award > 0:
+            structured_detail = f"当前只命中财报日历/披露窗口等结构化事件，属于催化线索已出现，但还没到强催化共识。{freshness_detail}"
+        else:
+            structured_detail = freshness_detail
     else:
         structured_award = 0
         structured_detail = "当前未命中结构化公司事件；这里按信息不足处理，不直接等于个股没有催化。"
@@ -3604,6 +3723,14 @@ def _catalyst_dimension(
     raw += heat_award
     available += 10
     factors.append(_factor_row("新闻热度", f"覆盖源 {source_count} 个", heat_award, 10, "从少量提及到多源同步，是热度拐点的代理"))
+    if density_award > 0 or heat_award > 0:
+        existing_titles = {str(item.get("title", "")).strip() for item in evidence_rows if str(item.get("title", "")).strip()}
+        for item in _dedupe_news_items(list(heat_pool))[:2]:
+            title = str(item.get("title", "")).strip()
+            if not title or title in existing_titles:
+                continue
+            evidence_rows.append(_evidence_row(layer="新闻热度", item=item))
+            existing_titles.add(title)
 
     forward_events = _dedupe_news_items([*related_events, *existing_forward_events])
     forward_award = 5 if forward_events else 0
@@ -3831,7 +3958,7 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
         factors.append(
             _factor_row(
                 "公募/热度代理",
-                f"{sector_flow.get('name') or metadata.get('sector', '行业')} 主力净{'流入' if (sector_flow.get('main_flow') or 0) > 0 else '流出'} {_fmt_yi_number(sector_flow.get('main_flow'))}",
+                f"所属行业/概念代理：{sector_flow.get('name') or metadata.get('sector', '行业')} 主力净{'流入' if (sector_flow.get('main_flow') or 0) > 0 else '流出'} {_fmt_yi_number(sector_flow.get('main_flow'))}",
                 crowding_award,
                 30,
                 "热门榜缺失时，改用行业主力资金流方向代理当前拥挤度与配置方向。",
@@ -3910,10 +4037,10 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
             factors.append(
                 _factor_row(
                     "北向/南向",
-                    f"{northbound.get('name') or metadata.get('sector', '板块')} 北向增持估计 {_fmt_yi_number(north_value)}",
+                    f"所属行业/概念代理：{northbound.get('name') or metadata.get('sector', '板块')} 北向增持估计 {_fmt_yi_number(north_value)}",
                     north_award,
                     20,
-                    "优先用行业/概念板块北向增持排行，而不是全市场总量。",
+                    "这里使用行业/概念板块北向增持排行，不是单一个股的北向持仓变动。",
                 )
             )
         else:
@@ -4298,11 +4425,18 @@ def _seasonality_dimension(metadata: Mapping[str, Any], history: pd.DataFrame, c
 
 
 def _macro_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+    china_macro = dict(context.get("china_macro") or {})
+    regime = dict(context.get("regime") or {})
+    sector = str(metadata.get("sector", "综合"))
     vector = SENSITIVITY_MAP.get(str(metadata.get("sector", "综合")), {"rate": 0, "usd": 0, "oil": 0, "cny": 0})
+    leading_profile = MACRO_LEADING_MAP.get(sector, {"recovery": 0, "credit": 0, "reflation": 0, "defensive": 0})
     states = _current_factor_state(context)
     match_count = 0
     active = 0
     details: List[str] = []
+    factors: List[Dict[str, Any]] = []
+    raw = 0
+    available = 0
     for factor in ("rate", "usd", "oil", "cny"):
         direction = int(vector.get(factor, 0))
         if direction == 0:
@@ -4311,30 +4445,113 @@ def _macro_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) ->
         same = direction == states.get(factor)
         match_count += 1 if same else 0
         details.append(f"{factor} {'顺风' if same else '逆风'}")
-
     if active == 0:
-        score = 20
+        sensitivity_award = 20
     elif match_count >= 3:
-        score = 40
+        sensitivity_award = 40
     elif match_count == 2:
-        score = 30
+        sensitivity_award = 30
     elif match_count == 1:
-        score = 10
+        sensitivity_award = 10
     else:
-        score = 0
-    factors = [
-        _factor_row("敏感度向量", " / ".join(details) if details else "当前定义为中性敏感度", score, 40, "利率 / 美元 / 油价 / 人民币 四因子匹配"),
-        _factor_row("当前 regime", context.get("regime", {}).get("current_regime", "unknown"), 0, 0, "宏观敏感度是修正因子，不单独决定方向"),
-    ]
+        sensitivity_award = 0
+    raw += sensitivity_award
+    available += 40
+    factors.append(
+        _factor_row(
+            "敏感度向量",
+            " / ".join(details) if details else "当前定义为中性敏感度",
+            sensitivity_award,
+            40,
+            "利率 / 美元 / 油价 / 人民币 四因子匹配。",
+        )
+    )
+
+    demand_state = str(china_macro.get("demand_state", "stable"))
+    pmi = float(china_macro.get("pmi", 50.0))
+    new_orders = float(china_macro.get("pmi_new_orders", pmi))
+    production = float(china_macro.get("pmi_production", pmi))
+    recovery_preference = int(leading_profile.get("recovery", 0))
+    if demand_state == "improving":
+        demand_award = 20 if recovery_preference >= 1 else 10 if recovery_preference == 0 else 0
+        demand_signal = f"PMI {pmi:.1f} / 新订单 {new_orders:.1f} / 生产 {production:.1f}，景气领先指标改善"
+    elif demand_state == "weakening":
+        demand_award = 20 if recovery_preference <= -1 else 0 if recovery_preference >= 1 else 8
+        demand_signal = f"PMI {pmi:.1f} / 新订单 {new_orders:.1f}，景气领先指标偏弱"
+    else:
+        demand_award = 12 if recovery_preference == 0 else 8
+        demand_signal = f"PMI {pmi:.1f} / 新订单 {new_orders:.1f}，景气方向暂时中性"
+    raw += demand_award
+    available += 20
+    factors.append(_factor_row("景气方向", demand_signal, demand_award, 20, "优先看 PMI、新订单和生产分项，而不是只看一个 PMI 总量。"))
+
+    ppi = float(china_macro.get("ppi_yoy", 0.0))
+    price_state = str(china_macro.get("price_state", "stable"))
+    reflation_preference = int(leading_profile.get("reflation", 0))
+    if price_state == "reflation":
+        price_award = 15 if reflation_preference >= 1 else 8 if reflation_preference == 0 else 0
+        price_signal = f"PPI {ppi:.1f}% 且趋势回升，价格链条偏修复"
+    elif price_state == "disinflation":
+        price_award = 15 if reflation_preference <= -1 else 0 if reflation_preference >= 1 else 8
+        price_signal = f"PPI {ppi:.1f}% 且趋势走弱，价格链条偏通缩"
+    else:
+        price_award = 8 if reflation_preference == 0 else 5
+        price_signal = f"PPI {ppi:.1f}% ，价格链条暂时中性"
+    raw += price_award
+    available += 15
+    factors.append(_factor_row("价格链条", price_signal, price_award, 15, "PPI 更适合判断未来 3-6 个月的上游价格与利润链条，不直接替代个股基本面。"))
+
+    credit_impulse = str(china_macro.get("credit_impulse", "stable"))
+    spread = float(china_macro.get("m1_m2_spread", 0.0))
+    sf_avg_text = str(china_macro.get("social_financing_3m_avg_text", "—"))
+    credit_preference = int(leading_profile.get("credit", 0))
+    if credit_impulse == "expanding":
+        credit_award = 15 if credit_preference >= 1 else 8 if credit_preference == 0 else 0
+        credit_signal = f"M1-M2 剪刀差 {spread:+.1f}pct，社融近3月均值 {sf_avg_text}，信用脉冲扩张"
+    elif credit_impulse == "contracting":
+        credit_award = 15 if credit_preference <= -1 else 0 if credit_preference >= 1 else 8
+        credit_signal = f"M1-M2 剪刀差 {spread:+.1f}pct，信用脉冲收缩"
+    else:
+        credit_award = 8 if credit_preference == 0 else 5
+        credit_signal = f"M1-M2 剪刀差 {spread:+.1f}pct，信用脉冲暂时中性"
+    raw += credit_award
+    available += 15
+    factors.append(_factor_row("信用脉冲", credit_signal, credit_award, 15, "更偏中期环境因子，主要影响资金扩张、订单兑现和风险偏好。"))
+
+    regime_name = str(regime.get("current_regime", "unknown"))
+    defensive_preference = int(leading_profile.get("defensive", 0))
+    if regime_name in {"stagflation", "deflation"}:
+        regime_award = 10 if defensive_preference >= 1 else 4 if defensive_preference == 0 else 0
+        regime_signal = f"当前背景 `{regime_name}`，偏防守/避险"
+    elif regime_name == "recovery":
+        regime_award = 10 if recovery_preference >= 1 else 4 if recovery_preference == 0 else 0
+        regime_signal = "当前背景 `recovery`，偏景气修复"
+    elif regime_name == "overheating":
+        regime_award = 10 if reflation_preference >= 1 else 4 if reflation_preference == 0 else 0
+        regime_signal = "当前背景 `overheating`，更利于资源/通胀受益方向"
+    else:
+        regime_award = 4
+        regime_signal = f"当前背景 `{regime_name}`，暂按中性处理"
+    raw += regime_award
+    available += 10
+    factors.append(_factor_row("当前 regime", regime_signal, regime_award, 10, "把中期宏观环境映射到当前板块/标的，不单独决定方向。"))
+
+    score = _normalize_dimension(raw, available, 40)
     return {
         "name": "宏观敏感度",
         "score": score,
         "max_score": 40,
-        "summary": "大环境明显配合。" if score >= 30 else "宏观中性。" if score >= 20 else "宏观逆风明显。",
+        "summary": _dimension_summary(
+            score,
+            "宏观领先指标和当前风格都偏顺风。",
+            "宏观没有明显顺风，但也不是决定性逆风。",
+            "宏观领先指标和当前风格都偏逆风，更适合保守处理。",
+            "ℹ️ 宏观领先指标缺失，本次评级未纳入该维度",
+        ),
         "factors": factors,
-        "core_signal": " · ".join(details[:3]) if details else "宏观中性",
+        "core_signal": _top_positive_signals(factors),
         "missing": False,
-        "macro_reverse": score == 0,
+        "macro_reverse": (score or 0) <= 5,
     }
 
 
@@ -4461,6 +4678,20 @@ def _trade_state_label(
     return "风险释放前不宜激进"
 
 
+def _client_safe_issue(label: str, exc: Any | None = None) -> str:
+    text = str(exc or "").strip()
+    lowered = text.lower()
+    if any(token in lowered for token in ("too many requests", "rate limit", "429")):
+        reason = "当前数据源限流，已按可用数据降级处理。"
+    elif any(token in lowered for token in ("proxyerror", "connection", "timeout", "remote disconnected", "dns")):
+        reason = "当前数据源连接不稳定，已按可用数据降级处理。"
+    elif text:
+        reason = "当前数据源暂不可用，已按可用数据降级处理。"
+    else:
+        reason = "当前数据暂不可用，已按可用数据降级处理。"
+    return f"{label}: {reason}"
+
+
 def _headline_core(
     dimensions: Mapping[str, Mapping[str, Any]],
     metrics: Mapping[str, float],
@@ -4552,6 +4783,7 @@ def _build_narrative(
     valuation_pe = valuation_snapshot.get("pe_ttm")
     valuation_note = str(fundamental_dimension.get("valuation_note", ""))
     price_percentile = float(metrics.get("price_percentile_1y", 0.5))
+    commodity_like_fund = _is_commodity_like_fund(asset_type, metadata, fund_profile)
     support_signal = _find_factor(dimensions["technical"], "支撑位").get("signal", "关键支撑未明确")
     macd_signal = _find_factor(dimensions["technical"], "MACD 金叉").get("signal", "MACD 方向一般")
     rsi = float(technical.get("rsi", {}).get("RSI", 50.0))
@@ -4569,6 +4801,8 @@ def _build_narrative(
         style_summary = str(dict(fund_profile.get("style") or {}).get("summary", "")).strip()
         if style_summary:
             macro_driver += f" {style_summary}"
+    if commodity_like_fund:
+        macro_driver += " 这类产品更接近商品/期货价格与期限结构的暴露，油价、库存、展期和保证金约束会比传统股票财报更重要。"
 
     if chips_score is None:
         flow_driver = "增量资金数据目前不完整，所以暂时看不到很强的机构加仓确认；当前更像配置属性或相对强弱在支撑。"
@@ -4627,6 +4861,8 @@ def _build_narrative(
         cautions.append("估值/基本面安全边际并不突出，当前价格已经提前反映一部分预期。")
     if catalyst_score < 30:
         cautions.append("缺少新的催化去推动下一段行情，短线更难靠故事继续推升。")
+    if commodity_like_fund:
+        cautions.append("商品/期货 ETF 还要额外防展期损益和期限结构变化，方向看对也不等于净值会完全同步现货。")
     if tech_score < 50:
         cautions.append("短线动能不足，趋势确认仍欠缺。")
     if rsi > 70:
@@ -4653,6 +4889,14 @@ def _build_narrative(
         "crowding": "如果这条线继续成为市场共识，短线资金拥挤会放大波动；如果共识撤退，回撤也会更陡。" if (relative_score >= 60 or rsi > 65) else "当前拥挤风险不算极端，但一旦没有增量资金确认，走势容易反复。",
         "external": external_risk_map.get(sector, "还要继续盯利率、美元、商品价格和市场风格切换，这类外部变量往往会比基本面更快改写短线定价。"),
     }
+    if commodity_like_fund:
+        risk_points["fundamental"] = (
+            f"真正的基本面风险不在 {metadata.get('name', analysis_seed.get('symbol'))} 本身，而在其跟踪的商品/期货指数方向、"
+            "合约展期损益、保证金约束和跟踪误差。"
+        )
+        risk_points["external"] = (
+            "除了油价、地缘和政策调控，还要继续盯期限结构、库存预期和展期损益；方向看对时，净值也可能因为期货曲线和保证金结构而弱于现货直觉。"
+        )
 
     watch_points = [
         f"短线动能是否重新修复：重点看 `{macd_signal}` 能否扭转，或价格重新站上关键均线。",
@@ -4792,9 +5036,10 @@ def _action_plan(
     ma20_gap = ((close_now / ma20) - 1.0) if ma20 else 0.0
     vol_percentile = float((metrics or {}).get("volatility_percentile_1y", 0.5))
     return_5d = float((metrics or {}).get("return_5d", 0.0))
+    trade_state = _trade_state_label(analysis["dimensions"], metrics or {}, technical)
 
     if rating >= 3 and not macro_reverse:
-        direction = "做多"
+        direction = "观望偏多" if trade_state in {"持有优于追高", "等右侧确认", "风险释放前不宜激进"} else "做多"
     elif rating == 2:
         direction = "观望"
     elif risk_score >= 70 and relative_score >= 60:
@@ -4926,6 +5171,9 @@ def _action_plan(
         "position": position,
         "stop": stop,
         "target": target,
+        "stop_ref": stop_ref,
+        "target_ref": target_ref,
+        "target_pct": float(target_ref / close_now - 1) if close_now else 0.0,
         "timeframe": timeframe,
         "max_portfolio_exposure": max_exposure,
         "scaling_plan": scaling,
@@ -5072,10 +5320,35 @@ def analyze_opportunity(
         "notes": notes,
         "intraday": intraday,
         "narrative": narrative,
+        "history_fallback_mode": history_fallback_mode,
         "excluded": bool(exclusion_reasons),
         "exclusion_reasons": exclusion_reasons,
         "correlation_pair": correlation_pair,
     }
+
+
+def _attach_signal_confidence(
+    analyses: Sequence[Dict[str, Any]],
+    config: Mapping[str, Any],
+    *,
+    limit: int = SIGNAL_CONFIDENCE_TOP_LIMIT,
+) -> None:
+    if not analyses:
+        return
+    technical_config = dict(config).get("technical", {})
+    for analysis in list(analyses)[: max(int(limit), 0)]:
+        history = analysis.get("history")
+        if history is None:
+            continue
+        action = dict(analysis.get("action") or {})
+        analysis["signal_confidence"] = build_signal_confidence(
+            history,
+            asset_type=str(analysis.get("asset_type", "")),
+            technical_config=technical_config,
+            stop_loss_pct=action.get("stop_loss_pct", "-8%"),
+            target_pct=action.get("target_pct", 0.12),
+            history_fallback=bool(analysis.get("history_fallback_mode")),
+        )
 
 
 def build_default_pool(config: Mapping[str, Any], theme_filter: str = "") -> tuple[List[PoolItem], List[str]]:
@@ -5088,44 +5361,91 @@ def build_default_pool(config: Mapping[str, Any], theme_filter: str = "") -> tup
     max_candidates = int(opportunity_cfg.get("max_scan_candidates", 30))
     lowered_filter = theme_filter.lower().strip()
 
+    tushare_universe_loaded = False
     try:
-        realtime = ChinaMarketCollector(config).get_etf_realtime()
-        code_col = "代码" if "代码" in realtime.columns else "基金代码" if "基金代码" in realtime.columns else None
-        name_col = "名称" if "名称" in realtime.columns else "基金简称" if "基金简称" in realtime.columns else None
-        amount_col = "成交额" if "成交额" in realtime.columns else None
-        if code_col and name_col and amount_col:
-            frame = realtime.copy()
-            frame[amount_col] = pd.to_numeric(frame[amount_col], errors="coerce").fillna(0.0)
-            frame = frame[frame[amount_col] >= min_turnover]
-            if lowered_filter:
-                frame = frame[frame[name_col].astype(str).str.lower().str.contains(lowered_filter, na=False)]
-            excluded_keywords = ("债", "货币", "国债", "政金", "现金", "利率", "短融")
-            frame = frame[~frame[name_col].astype(str).str.contains("|".join(excluded_keywords), na=False)]
-            frame = frame.sort_values(amount_col, ascending=False).head(max_candidates)
-            for _, row in frame.iterrows():
-                symbol = str(row[code_col])
-                if symbol in seen:
-                    continue
-                name = str(row[name_col])
-                sector, chain_nodes = _normalize_sector(name)
-                pool.append(
-                    PoolItem(
-                        symbol=symbol,
-                        name=name,
-                        asset_type="cn_etf",
-                        region="CN",
-                        sector=sector,
-                        chain_nodes=chain_nodes,
-                        source="all_market_etf",
-                        turnover=float(row[amount_col]),
-                        in_watchlist=any(item["symbol"] == symbol for item in watchlist),
-                    )
-                )
-                seen.add(symbol)
-    except Exception as exc:
-        warnings.append(f"全市场 ETF 扫描池拉取失败，已回退到 watchlist: {exc}")
+        universe = ChinaMarketCollector(config).get_etf_universe_snapshot()
+        if universe is not None and not universe.empty:
+            tushare_universe_loaded = True
+            frame = universe.copy()
+            amount_col = "amount" if "amount" in frame.columns else None
+            name_col = "name" if "name" in frame.columns else None
+            symbol_col = "symbol" if "symbol" in frame.columns else None
+            benchmark_col = "benchmark" if "benchmark" in frame.columns else None
+            if amount_col and name_col and symbol_col:
+                frame[amount_col] = pd.to_numeric(frame[amount_col], errors="coerce").fillna(0.0)
+                frame = frame[frame[amount_col] >= min_turnover]
 
-    for item in watchlist:
+                if "list_date" in frame.columns:
+                    latest_trade_date = str(frame["trade_date"].iloc[0]).replace("-", "") if "trade_date" in frame.columns and not frame.empty else ""
+                    if latest_trade_date:
+                        frame = frame[
+                            frame["list_date"].fillna("").astype(str).str.replace("-", "").le(latest_trade_date)
+                        ]
+                if "delist_date" in frame.columns:
+                    frame = frame[
+                        frame["delist_date"].fillna("").astype(str).eq("")
+                        | frame["delist_date"].fillna("").astype(str).str.lower().eq("nan")
+                    ]
+
+                is_etf_like = (
+                    frame[name_col].astype(str).str.contains("ETF", case=False, na=False)
+                    | frame.get("benchmark", pd.Series("", index=frame.index)).fillna("").astype(str).str.contains("指数|收益率|商品|期货", na=False)
+                    | frame.get("invest_type", pd.Series("", index=frame.index)).fillna("").astype(str).str.contains("指数|被动|增强|QDII", na=False)
+                )
+                frame = frame[is_etf_like]
+
+                composite_text = frame[name_col].astype(str)
+                if benchmark_col:
+                    composite_text = composite_text + " " + frame[benchmark_col].fillna("").astype(str)
+                if "invest_type" in frame.columns:
+                    composite_text = composite_text + " " + frame["invest_type"].fillna("").astype(str)
+
+                excluded_keywords = ("债", "货币", "国债", "政金", "现金", "利率", "短融", "同业存单", "信用债", "可转债")
+                frame = frame[~composite_text.str.contains("|".join(excluded_keywords), na=False)]
+                if lowered_filter:
+                    composite_text = frame[name_col].astype(str)
+                    if benchmark_col:
+                        composite_text = composite_text + " " + frame[benchmark_col].fillna("").astype(str)
+                    if "invest_type" in frame.columns:
+                        composite_text = composite_text + " " + frame["invest_type"].fillna("").astype(str)
+                    frame = frame[composite_text.str.lower().str.contains(lowered_filter, na=False)]
+
+                frame = frame.sort_values(amount_col, ascending=False).head(max_candidates)
+                for _, row in frame.iterrows():
+                    symbol = str(row[symbol_col])
+                    if symbol in seen:
+                        continue
+                    name = str(row[name_col])
+                    sector, chain_nodes = _normalize_sector(name)
+                    pool.append(
+                        PoolItem(
+                            symbol=symbol,
+                            name=name,
+                            asset_type="cn_etf",
+                            region="CN",
+                            sector=sector,
+                            chain_nodes=chain_nodes,
+                            source="tushare_etf_universe",
+                            turnover=float(row[amount_col]),
+                            in_watchlist=any(item["symbol"] == symbol for item in watchlist),
+                            metadata={
+                                "benchmark": str(row.get("benchmark", "") or ""),
+                                "fund_type": str(row.get("fund_type", "") or ""),
+                                "invest_type": str(row.get("invest_type", "") or ""),
+                                "management": str(row.get("management", "") or ""),
+                                "trade_date": str(row.get("trade_date", "") or ""),
+                            },
+                        )
+                    )
+                    seen.add(symbol)
+    except Exception as exc:
+        warnings.append(f"Tushare ETF 全市场快照拉取失败，已回退到 watchlist: {exc}")
+
+    if not tushare_universe_loaded:
+        warnings.append("当前 ETF 扫描池回退到 watchlist；后续推荐可信度低于 Tushare 全市场快照模式。")
+
+    fallback_watchlist = watchlist if not tushare_universe_loaded else []
+    for item in fallback_watchlist:
         if lowered_filter and lowered_filter not in str(item.get("name", "")).lower() and lowered_filter not in str(item.get("sector", "")).lower():
             continue
         if item["symbol"] in seen:
@@ -5170,7 +5490,7 @@ def discover_opportunities(config: Mapping[str, Any], top_n: int = 5, theme_filt
                 },
             )
         except Exception as exc:
-            blind_spots.append(f"{item.symbol} 扫描失败: {exc}")
+            blind_spots.append(_client_safe_issue(f"{item.symbol} 扫描失败", exc))
             continue
         if analysis["excluded"]:
             continue
@@ -5498,7 +5818,7 @@ def discover_stock_opportunities(
                 metadata_override=override,
             )
         except Exception as exc:
-            blind_spots.append(f"{item.symbol} ({item.name}) 扫描失败: {exc}")
+            blind_spots.append(_client_safe_issue(f"{item.symbol} ({item.name}) 扫描失败", exc))
             continue
         if analysis["excluded"]:
             continue
@@ -5527,6 +5847,16 @@ def discover_stock_opportunities(
             or (analysis["dimensions"]["risk"].get("score") or 0) >= 70
         )
     ]
+    confidence_targets: List[Dict[str, Any]] = []
+    seen_symbols: set[str] = set()
+    for bucket in (analyses[:top_n], watch_positive[:6]):
+        for analysis in bucket:
+            symbol = str(analysis.get("symbol", "")).strip()
+            if not symbol or symbol in seen_symbols:
+                continue
+            confidence_targets.append(analysis)
+            seen_symbols.add(symbol)
+    _attach_signal_confidence(confidence_targets, config, limit=len(confidence_targets))
     market_labels = {"cn": "A 股", "hk": "港股", "us": "美股", "all": "全市场"}
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
