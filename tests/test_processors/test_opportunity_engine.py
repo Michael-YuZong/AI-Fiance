@@ -944,6 +944,72 @@ def test_catalyst_dimension_cn_stock_includes_structured_event_factor(monkeypatc
     assert policy_factor["display_score"].endswith("/25")
 
 
+def test_company_forward_events_for_cn_stock_use_tushare_disclosure_date(monkeypatch):
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_stock_disclosure_dates",
+        lambda self, symbol: [  # noqa: ARG005
+            {"end_date": "20251231", "pre_date": "2026-03-18", "actual_date": ""},
+        ],
+    )
+    context = {"config": {}, "news_report": {"all_items": []}, "events": [], "now": "2026-03-12"}
+    events = _company_forward_events(
+        {"symbol": "300502", "name": "新易盛", "asset_type": "cn_stock"},
+        context,
+    )
+    assert events
+    assert "预计于 2026-03-18 披露 2025年年报" in events[0]["title"]
+    assert events[0]["source"] == "Tushare disclosure_date"
+
+
+def test_catalyst_dimension_cn_stock_uses_tushare_capital_return_events(monkeypatch):
+    monkeypatch.setattr(NewsCollector, "get_stock_news", lambda self, symbol, limit=10: [])  # noqa: ARG005
+    monkeypatch.setattr(NewsCollector, "search_by_keywords", lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_disclosure_dates", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_holder_trades", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_stock_repurchase",
+        lambda self, symbol: [  # noqa: ARG005
+            {"ann_date": "2026-03-04", "proc": "实施"},
+        ],
+    )
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_stock_dividend",
+        lambda self, symbol: [  # noqa: ARG005
+            {"ann_date": "2026-03-11", "div_proc": "预案"},
+        ],
+    )
+    context = {"config": {}, "news_report": {"all_items": [], "mode": "live"}, "events": [], "now": "2026-03-12"}
+    dimension = _catalyst_dimension(
+        {"symbol": "601138", "name": "工业富联", "asset_type": "cn_stock", "sector": "科技", "chain_nodes": ["AI算力"]},
+        context,
+    )
+    structured_factor = next(f for f in dimension["factors"] if f["name"] == "结构化事件")
+    assert "披露股份回购" in structured_factor["signal"] or "披露现金分红" in structured_factor["signal"]
+    assert any(item["source"] in {"Tushare repurchase", "Tushare dividend"} for item in dimension["evidence"])
+
+
+def test_chips_dimension_cn_stock_uses_holdertrade_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_stock_holder_trades",
+        lambda self, symbol: [  # noqa: ARG005
+            {"ann_date": "2026-03-05", "in_de": "IN", "change_ratio": 0.18},
+        ],
+    )
+    dimension = _chips_dimension(
+        "300502",
+        "cn_stock",
+        {"symbol": "300502", "name": "新易盛", "asset_type": "cn_stock", "sector": "科技"},
+        {"config": {}},
+        {},
+    )
+    signals = {factor["name"]: factor["signal"] for factor in dimension["factors"]}
+    assert "净增持约 0.18%" in signals["高管增持"]
+
+
 def test_catalyst_dimension_hk_us_searches_google_news_when_empty(monkeypatch):
     """HK/US stocks should proactively search Google News RSS when stock_specific_pool is empty."""
     search_called = []

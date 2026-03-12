@@ -119,3 +119,61 @@ def test_build_snapshot_fallback_history_uses_realtime_row_for_cn_stock(monkeypa
     assert frame.iloc[-1]["close"] == pytest.approx(376.3)
     assert frame.iloc[-1]["amount"] == pytest.approx(19_049_080_512.74)
     assert frame.iloc[0]["close"] == pytest.approx(357.5)
+
+
+def test_build_intraday_snapshot_for_cn_stock_includes_auction_metrics(monkeypatch):
+    history = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-03-10", "2026-03-11"]),
+            "open": [393.23, 401.0],
+            "high": [410.0, 405.0],
+            "low": [390.0, 398.0],
+            "close": [393.23, 400.5],
+            "volume": [1_000_000, 900_000],
+            "amount": [3_000_000_000.0, 2_800_000_000.0],
+        }
+    )
+    intraday = pd.DataFrame(
+        {
+            "时间": pd.to_datetime(["2026-03-12 09:30:00", "2026-03-12 10:00:00"]),
+            "开盘": [400.01, 402.0],
+            "收盘": [400.01, 403.0],
+            "最高": [401.0, 404.0],
+            "最低": [399.0, 400.0],
+            "成交量": [285300, 500000],
+            "成交额": [114122853.0, 200000000.0],
+            "均价": [400.0, 401.5],
+        }
+    )
+
+    monkeypatch.setattr(market, "fetch_intraday_history", lambda *args, **kwargs: intraday)
+    monkeypatch.setattr(
+        market,
+        "fetch_cn_stock_realtime_row",
+        lambda *args, **kwargs: {
+            "current": 403.0,
+            "open": 400.01,
+            "high": 404.0,
+            "low": 399.0,
+            "prev_close": 393.23,
+            "volume": 785300.0,
+            "updated_at": pd.Timestamp("2026-03-12 10:00:00"),
+        },
+    )
+    monkeypatch.setattr(
+        market,
+        "fetch_cn_stock_auction_row",
+        lambda *args, **kwargs: {
+            "auction_price": 400.01,
+            "auction_amount": 114122853.0,
+            "auction_volume_ratio": 1.35,
+            "auction_turnover_rate": 0.0322,
+            "auction_gap": 400.01 / 393.23 - 1,
+        },
+    )
+
+    snapshot = market.build_intraday_snapshot("300502", "cn_stock", {}, history)
+    assert snapshot["auction_price"] == pytest.approx(400.01)
+    assert snapshot["auction_volume_ratio"] == pytest.approx(1.35)
+    assert snapshot["auction_gap"] == pytest.approx(400.01 / 393.23 - 1)
+    assert "抢筹" in snapshot["auction_commentary"]

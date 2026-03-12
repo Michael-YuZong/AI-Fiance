@@ -178,6 +178,28 @@ def fetch_cn_stock_realtime_row(symbol: str, config: Mapping[str, Any]) -> Dict[
     }
 
 
+def fetch_cn_stock_auction_row(symbol: str, config: Mapping[str, Any]) -> Dict[str, Any]:
+    try:
+        frame = ChinaMarketCollector(dict(config)).get_stock_auction(symbol)
+    except Exception:
+        return {}
+    if frame is None or frame.empty:
+        return {}
+    row = frame.iloc[0]
+    price = _to_float(row.get("price"))
+    prev_close = _to_float(row.get("pre_close"))
+    return {
+        "auction_price": price,
+        "auction_volume": _to_float(row.get("vol")),
+        "auction_amount": _to_float(row.get("amount")),
+        "auction_turnover_rate": _to_float(row.get("turnover_rate")),
+        "auction_volume_ratio": _to_float(row.get("volume_ratio")),
+        "prev_close": prev_close,
+        "trade_date": _to_timestamp(row.get("trade_date")),
+        "auction_gap": (float(price / prev_close - 1) if price is not None and prev_close else None),
+    }
+
+
 def build_snapshot_fallback_history(
     symbol: str,
     asset_type: str,
@@ -365,7 +387,13 @@ def build_intraday_snapshot(
         if not history_frame.empty:
             snapshot_time = _to_timestamp(history_frame["date"].iloc[-1])
 
-    realtime = fetch_cn_etf_realtime_row(symbol, config) if asset_type == "cn_etf" else {}
+    realtime = (
+        fetch_cn_etf_realtime_row(symbol, config)
+        if asset_type == "cn_etf"
+        else fetch_cn_stock_realtime_row(symbol, config)
+        if asset_type == "cn_stock"
+        else {}
+    )
     if realtime:
         for key in ("current", "open", "high", "low", "volume"):
             if realtime.get(key) is not None:
@@ -376,6 +404,8 @@ def build_intraday_snapshot(
         low = float(metrics["low"])
         metrics["range_position"] = 0.5 if high == low else float((float(metrics["current"]) - low) / (high - low))
         snapshot_time = realtime.get("updated_at") or realtime.get("data_date") or snapshot_time
+
+    auction = fetch_cn_stock_auction_row(symbol, config) if asset_type == "cn_stock" else {}
 
     prev_close = realtime.get("prev_close")
     if prev_close is None:
@@ -409,6 +439,11 @@ def build_intraday_snapshot(
             "first_30m_change": float(metrics.get("first_30m_change_pct", 0.0)),
             "first_30m_volume_share": float(metrics.get("first_30m_volume_share", 0.0)),
             "trend": trend,
+            "auction_price": _to_float(auction.get("auction_price")),
+            "auction_gap": _to_float(auction.get("auction_gap")),
+            "auction_amount": _to_float(auction.get("auction_amount")),
+            "auction_volume_ratio": _to_float(auction.get("auction_volume_ratio")),
+            "auction_turnover_rate": _to_float(auction.get("auction_turnover_rate")),
             "commentary": (
                 "盘中价格站上 VWAP 且处于日内高位区域，更接近强势承接。"
                 if trend == "偏强"
@@ -418,6 +453,14 @@ def build_intraday_snapshot(
             ),
         }
     )
+    if auction:
+        snapshot["auction_commentary"] = (
+            "集合竞价高开且量比放大，开盘更像主动抢筹。"
+            if (snapshot.get("auction_gap") or 0.0) > 0.01 and (snapshot.get("auction_volume_ratio") or 0.0) >= 1.2
+            else "集合竞价低开且量比放大，开盘更像主动兑现。"
+            if (snapshot.get("auction_gap") or 0.0) < -0.01 and (snapshot.get("auction_volume_ratio") or 0.0) >= 1.2
+            else "集合竞价没有出现特别强的方向性信号，更适合等开盘后确认。"
+        )
     return snapshot
 
 

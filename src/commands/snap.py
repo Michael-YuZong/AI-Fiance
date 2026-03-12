@@ -31,6 +31,11 @@ def main() -> None:
     print(f"- 日内高低: `{snapshot['low']:.3f} / {snapshot['high']:.3f}`")
     print(f"- VWAP: `{snapshot['vwap']:.3f}`")
     print(f"- 日内位置: `{snapshot['range_position']:.0%}`")
+    if snapshot.get("auction_price") is not None:
+        print(f"- 集合竞价价: `{snapshot['auction_price']:.3f}`")
+        print(f"- 竞价高低开: `{format_pct(snapshot.get('auction_gap') or 0.0)}`")
+        if snapshot.get("auction_volume_ratio") is not None:
+            print(f"- 竞价量比: `{snapshot['auction_volume_ratio']:.2f}`")
     print("")
     print("## 观察")
     print(f"- 日内状态判断：{snapshot['trend']}。")
@@ -38,6 +43,8 @@ def main() -> None:
         f"- 当前价格 {'站上' if snapshot['current'] >= snapshot['vwap'] else '跌破'} VWAP，"
         f"说明日内平均成本 {'暂时占优' if snapshot['current'] >= snapshot['vwap'] else '暂时承压'}。"
     )
+    if snapshot.get("auction_commentary"):
+        print(f"- {snapshot['auction_commentary']}")
     if snapshot.get("fallback_mode"):
         print("- 分钟线获取失败，当前结果已退化为最近一根日 K 快照。")
     print("- 当前版本基于 Level 1 分钟线和成交量，五档盘口与大单拆分后续再补。")

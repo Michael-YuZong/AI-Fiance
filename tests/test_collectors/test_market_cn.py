@@ -196,6 +196,35 @@ def test_market_cn_unlock_pressure_passes_when_no_upcoming_share_float(monkeypat
     assert "未来 90 日未见明确限售股解禁安排" in snapshot["detail"]
 
 
+def test_market_cn_stock_auction_normalizes_tushare_fields(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "stk_auction"
+        assert kwargs.get("ts_code") == "300502.SZ"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "300502.SZ",
+                    "trade_date": "20260312",
+                    "vol": 285300,
+                    "price": 400.01,
+                    "amount": 114122853.0,
+                    "pre_close": 393.23,
+                    "turnover_rate": 0.032222,
+                    "volume_ratio": 0.618598,
+                    "float_share": 88541.9,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    frame = collector.get_stock_auction("300502", trade_date="20260312")
+    assert not frame.empty
+    assert frame.iloc[0]["trade_date"] == "2026-03-12"
+    assert float(frame.iloc[0]["price"]) == 400.01
+
+
 def test_ts_daily_basic_snapshot_merges_name_industry_and_amount(monkeypatch, tmp_path):
     collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
 

@@ -95,6 +95,16 @@ class ChinaMarketCollector(BaseCollector):
             except Exception:
                 raise primary_exc
 
+    def get_stock_auction(self, symbol: str, trade_date: str = "") -> pd.DataFrame:
+        """A股集合竞价快照。Tushare stk_auction 优先。"""
+        try:
+            frame = self._ts_stock_auction(symbol, trade_date=trade_date or self._latest_open_trade_date())
+            if frame is not None:
+                return frame
+        except Exception:
+            pass
+        return pd.DataFrame()
+
     def _ts_stock_daily(self, symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame | None:
         """Tushare daily + adj_factor → 前/后复权 OHLCV。"""
         ts_code = self._to_ts_code(symbol)
@@ -131,6 +141,30 @@ class ChinaMarketCollector(BaseCollector):
         })
         frame["日期"] = pd.to_datetime(frame["日期"], format="%Y%m%d")
         frame = frame.sort_values("日期").reset_index(drop=True)
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def _ts_stock_auction(self, symbol: str, trade_date: str) -> pd.DataFrame | None:
+        """Tushare stk_auction — 集合竞价量价快照。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"cn_market:ts_stock_auction:v1:{ts_code}:{trade_date}"
+        cached = self._load_cache(cache_key, ttl_hours=4)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("stk_auction", ts_code=ts_code, trade_date=str(trade_date).replace("-", ""))
+        if raw is None:
+            return None
+        if raw.empty:
+            empty = pd.DataFrame(columns=["ts_code", "trade_date", "vol", "price", "amount", "pre_close", "turnover_rate", "volume_ratio", "float_share"])
+            self._save_cache(cache_key, empty)
+            return empty
+        frame = raw.copy()
+        if "trade_date" in frame.columns:
+            frame["trade_date"] = frame["trade_date"].map(self._normalize_date_text)
+        for column in ("vol", "price", "amount", "pre_close", "turnover_rate", "volume_ratio", "float_share"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
         self._save_cache(cache_key, frame)
         return frame
 

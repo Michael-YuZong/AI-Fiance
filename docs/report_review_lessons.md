@@ -29,6 +29,7 @@
 | `L012` | 市场级筹码数据不能伪装成个股级筹码优势 | `opportunity_engine` / `external_review` |
 | `L013` | 合并稿必须披露数据完整度 | `release_check` / `renderer` |
 | `L014` | 催化证据要能在成稿中直接复核 | `renderer` / `external_review` |
+| `L015` | A股结构化公司事件应优先使用 Tushare 而不是新闻标题猜测 | `opportunity_engine` / `external_review` |
 
 ## 处理规则
 

@@ -88,3 +88,55 @@ def test_cn_stock_financial_proxy_merges_daily_basic_into_fina_indicator(monkeyp
     assert result["roe"] == 15.0
     assert result["pe_ttm"] == 24.5
     assert result["pb"] == 3.1
+
+
+def test_valuation_disclosure_date_normalizes_dates(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame:
+        assert api_name == "disclosure_date"
+        assert kwargs.get("ts_code") == "300502.SZ"
+        return pd.DataFrame(
+            [
+                {"ts_code": "300502.SZ", "ann_date": "20260101", "end_date": "20251231", "pre_date": "20260424", "actual_date": None},
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    rows = collector.get_cn_stock_disclosure_dates("300502")
+    assert rows[0]["pre_date"] == "2026-04-24"
+    assert rows[0]["end_date"] == "2025-12-31"
+
+
+def test_valuation_holdertrade_and_capital_return_normalize_fields(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame:
+        if api_name == "stk_holdertrade":
+            return pd.DataFrame(
+                [
+                    {"ts_code": "300502.SZ", "ann_date": "20260305", "holder_name": "张三", "holder_type": "G", "in_de": "IN", "change_vol": "100000", "change_ratio": "0.12"},
+                ]
+            )
+        if api_name == "repurchase":
+            return pd.DataFrame(
+                [
+                    {"ts_code": "300502.SZ", "ann_date": "20260304", "proc": "实施", "amount": "1000000000"},
+                ]
+            )
+        if api_name == "dividend":
+            return pd.DataFrame(
+                [
+                    {"ts_code": "300502.SZ", "ann_date": "20260311", "end_date": "20251231", "div_proc": "预案", "cash_div_tax": "0.65"},
+                ]
+            )
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    holder_rows = collector.get_cn_stock_holder_trades("300502")
+    repurchase_rows = collector.get_cn_stock_repurchase("300502")
+    dividend_rows = collector.get_cn_stock_dividend("300502")
+    assert holder_rows[0]["ann_date"] == "2026-03-05"
+    assert holder_rows[0]["change_ratio"] == 0.12
+    assert repurchase_rows[0]["proc"] == "实施"
+    assert dividend_rows[0]["div_proc"] == "预案"
