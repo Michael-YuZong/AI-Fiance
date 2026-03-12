@@ -200,6 +200,21 @@ def fetch_cn_stock_auction_row(symbol: str, config: Mapping[str, Any]) -> Dict[s
     }
 
 
+def fetch_cn_stock_limit_row(symbol: str, config: Mapping[str, Any]) -> Dict[str, Any]:
+    try:
+        frame = ChinaMarketCollector(dict(config)).get_stock_limit(symbol)
+    except Exception:
+        return {}
+    if frame is None or frame.empty:
+        return {}
+    row = frame.iloc[0]
+    return {
+        "up_limit": _to_float(row.get("up_limit")),
+        "down_limit": _to_float(row.get("down_limit")),
+        "trade_date": _to_timestamp(row.get("trade_date")),
+    }
+
+
 def build_snapshot_fallback_history(
     symbol: str,
     asset_type: str,
@@ -406,6 +421,7 @@ def build_intraday_snapshot(
         snapshot_time = realtime.get("updated_at") or realtime.get("data_date") or snapshot_time
 
     auction = fetch_cn_stock_auction_row(symbol, config) if asset_type == "cn_stock" else {}
+    limit_row = fetch_cn_stock_limit_row(symbol, config) if asset_type == "cn_stock" else {}
 
     prev_close = realtime.get("prev_close")
     if prev_close is None:
@@ -444,6 +460,8 @@ def build_intraday_snapshot(
             "auction_amount": _to_float(auction.get("auction_amount")),
             "auction_volume_ratio": _to_float(auction.get("auction_volume_ratio")),
             "auction_turnover_rate": _to_float(auction.get("auction_turnover_rate")),
+            "up_limit": _to_float(limit_row.get("up_limit")),
+            "down_limit": _to_float(limit_row.get("down_limit")),
             "commentary": (
                 "盘中价格站上 VWAP 且处于日内高位区域，更接近强势承接。"
                 if trend == "偏强"
@@ -461,6 +479,18 @@ def build_intraday_snapshot(
             if (snapshot.get("auction_gap") or 0.0) < -0.01 and (snapshot.get("auction_volume_ratio") or 0.0) >= 1.2
             else "集合竞价没有出现特别强的方向性信号，更适合等开盘后确认。"
         )
+    if snapshot.get("up_limit") is not None and snapshot.get("down_limit") is not None:
+        current = float(snapshot["current"])
+        up_limit = float(snapshot["up_limit"])
+        down_limit = float(snapshot["down_limit"])
+        snapshot["limit_distance_up"] = float(up_limit / current - 1) if current and up_limit else None
+        snapshot["limit_distance_down"] = float(current / down_limit - 1) if current and down_limit else None
+        if current >= up_limit * 0.995:
+            snapshot["limit_commentary"] = "当前价格已经非常接近涨停边界，追价更要考虑次日溢价能否延续。"
+        elif current <= down_limit * 1.005:
+            snapshot["limit_commentary"] = "当前价格已经非常接近跌停边界，短线更多要先看流动性和承接。"
+        else:
+            snapshot["limit_commentary"] = "涨跌停边界仍有空间，当前更需要结合 VWAP、量价和竞价状态判断执行节奏。"
     return snapshot
 
 

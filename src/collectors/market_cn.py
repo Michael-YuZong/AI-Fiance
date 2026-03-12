@@ -105,6 +105,16 @@ class ChinaMarketCollector(BaseCollector):
             pass
         return pd.DataFrame()
 
+    def get_stock_limit(self, symbol: str, trade_date: str = "") -> pd.DataFrame:
+        """A股涨跌停边界。Tushare stk_limit 优先。"""
+        try:
+            frame = self._ts_stock_limit(symbol, trade_date=trade_date or self._latest_open_trade_date())
+            if frame is not None:
+                return frame
+        except Exception:
+            pass
+        return pd.DataFrame()
+
     def _ts_stock_daily(self, symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame | None:
         """Tushare daily + adj_factor → 前/后复权 OHLCV。"""
         ts_code = self._to_ts_code(symbol)
@@ -163,6 +173,30 @@ class ChinaMarketCollector(BaseCollector):
         if "trade_date" in frame.columns:
             frame["trade_date"] = frame["trade_date"].map(self._normalize_date_text)
         for column in ("vol", "price", "amount", "pre_close", "turnover_rate", "volume_ratio", "float_share"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def _ts_stock_limit(self, symbol: str, trade_date: str) -> pd.DataFrame | None:
+        """Tushare stk_limit — A股涨跌停边界。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"cn_market:ts_stock_limit:v1:{ts_code}:{trade_date}"
+        cached = self._load_cache(cache_key, ttl_hours=4)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("stk_limit", ts_code=ts_code, trade_date=str(trade_date).replace("-", ""))
+        if raw is None:
+            return None
+        if raw.empty:
+            empty = pd.DataFrame(columns=["trade_date", "ts_code", "up_limit", "down_limit"])
+            self._save_cache(cache_key, empty)
+            return empty
+        frame = raw.copy()
+        if "trade_date" in frame.columns:
+            frame["trade_date"] = frame["trade_date"].map(self._normalize_date_text)
+        for column in ("up_limit", "down_limit"):
             if column in frame.columns:
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
         self._save_cache(cache_key, frame)
@@ -489,6 +523,63 @@ class ChinaMarketCollector(BaseCollector):
         if "行业" not in frame.columns:
             frame["行业"] = ""
 
+        bak_daily = self._ts_bak_daily_snapshot(snapshot_trade_date)
+        if bak_daily is not None and not bak_daily.empty:
+            bak_view = bak_daily.rename(
+                columns={
+                    "ts_code": "ts_code_bak",
+                    "name": "名称(bak)",
+                    "industry": "行业(bak)",
+                    "vol_ratio": "量比(bak)",
+                    "turn_over": "换手率(bak)",
+                    "swing": "振幅",
+                    "avg_price": "均价",
+                    "strength": "强弱度",
+                    "activity": "活跃度",
+                    "attack": "攻击度",
+                    "area": "地域",
+                }
+            ).copy()
+            if "amount" in bak_view.columns:
+                bak_view["成交额(bak)"] = pd.to_numeric(bak_view["amount"], errors="coerce") * 10_000.0
+            frame = frame.merge(
+                bak_view[
+                    [
+                        "ts_code_bak",
+                        *[
+                            column
+                            for column in (
+                                "名称(bak)",
+                                "行业(bak)",
+                                "量比(bak)",
+                                "换手率(bak)",
+                                "振幅",
+                                "均价",
+                                "强弱度",
+                                "活跃度",
+                                "攻击度",
+                                "地域",
+                                "成交额(bak)",
+                            )
+                            if column in bak_view.columns
+                        ],
+                    ]
+                ],
+                left_on="ts_code_raw",
+                right_on="ts_code_bak",
+                how="left",
+            )
+            if "ts_code_bak" in frame.columns:
+                frame = frame.drop(columns=["ts_code_bak"])
+            if "名称(bak)" in frame.columns:
+                bak_name = frame["名称(bak)"]
+                frame["名称"] = frame["名称"].where(
+                    frame["名称"].astype(str).str.strip().ne("") & (frame["名称"].astype(str) != frame["代码"].astype(str)),
+                    bak_name,
+                )
+            if "行业(bak)" in frame.columns:
+                frame["行业"] = frame["行业"].replace("", pd.NA).fillna(frame["行业(bak)"]).fillna("")
+
         daily_cache_key = f"cn_market:ts_daily_snapshot:{snapshot_trade_date}:v1"
         daily = self._load_cache(daily_cache_key, ttl_hours=1)
         if daily is None:
@@ -504,9 +595,12 @@ class ChinaMarketCollector(BaseCollector):
             frame = frame.drop(columns=["ts_code"])
 
         if "成交额" not in frame.columns or frame["成交额"].isna().all():
-            circ_mv = pd.to_numeric(frame.get("流通市值"), errors="coerce")
-            turnover = pd.to_numeric(frame.get("换手率"), errors="coerce")
-            frame["成交额"] = circ_mv * (turnover / 100.0)
+            if "成交额(bak)" in frame.columns and not frame["成交额(bak)"].isna().all():
+                frame["成交额"] = pd.to_numeric(frame["成交额(bak)"], errors="coerce")
+            else:
+                circ_mv = pd.to_numeric(frame.get("流通市值"), errors="coerce")
+                turnover = pd.to_numeric(frame.get("换手率"), errors="coerce")
+                frame["成交额"] = circ_mv * (turnover / 100.0)
 
         self._save_cache(cache_key, frame)
         return frame
@@ -786,6 +880,52 @@ class ChinaMarketCollector(BaseCollector):
             if column in frame.columns:
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
         frame = frame.sort_values(["float_date", "float_ratio"], ascending=[True, False]).reset_index(drop=True)
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def _ts_bak_daily_snapshot(self, trade_date: str) -> pd.DataFrame | None:
+        """Tushare bak_daily — 带增强字段的全市场日度快照。"""
+        cache_key = f"cn_market:ts_bak_daily_snapshot:v1:{trade_date}"
+        cached = self._load_cache(cache_key, ttl_hours=6)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("bak_daily", trade_date=str(trade_date).replace("-", ""))
+        if raw is None:
+            return None
+        if raw.empty:
+            empty = pd.DataFrame()
+            self._save_cache(cache_key, empty)
+            return empty
+
+        frame = raw.copy()
+        numeric_columns = (
+            "pct_change",
+            "close",
+            "change",
+            "open",
+            "high",
+            "low",
+            "pre_close",
+            "vol_ratio",
+            "turn_over",
+            "swing",
+            "vol",
+            "amount",
+            "total_share",
+            "float_share",
+            "pe",
+            "float_mv",
+            "total_mv",
+            "avg_price",
+            "strength",
+            "activity",
+            "avg_turnover",
+            "attack",
+        )
+        for column in numeric_columns:
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
         self._save_cache(cache_key, frame)
         return frame
 

@@ -1951,6 +1951,130 @@ def _cn_holdertrade_snapshot(metadata: Mapping[str, Any], context: Mapping[str, 
     }
 
 
+def _cn_holder_concentration_snapshot(metadata: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return {}
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return {}
+    collector = ValuationCollector(dict(context.get("config", {})))
+    try:
+        total_rows = collector.get_cn_stock_top10_holders(symbol)
+    except Exception:
+        total_rows = []
+    try:
+        float_rows = collector.get_cn_stock_top10_floatholders(symbol)
+    except Exception:
+        float_rows = []
+
+    def _latest_block(rows: Sequence[Mapping[str, Any]], ratio_key: str) -> tuple[float, str, int]:
+        if not rows:
+            return 0.0, "", 0
+        frame = pd.DataFrame(rows)
+        if frame.empty or "end_date" not in frame.columns:
+            return 0.0, "", 0
+        frame["end_date"] = pd.to_datetime(frame["end_date"], errors="coerce")
+        frame = frame.dropna(subset=["end_date"])
+        if frame.empty:
+            return 0.0, "", 0
+        latest_date = frame["end_date"].max()
+        latest = frame[frame["end_date"] == latest_date].copy()
+        ratio_series = pd.to_numeric(latest.get(ratio_key), errors="coerce").fillna(0.0)
+        return float(ratio_series.sum()), latest_date.date().isoformat(), len(latest)
+
+    total_ratio, total_end_date, total_count = _latest_block(total_rows, "hold_ratio")
+    float_ratio, float_end_date, float_count = _latest_block(float_rows, "hold_float_ratio")
+    latest_date = total_end_date or float_end_date
+    if latest_date == "":
+        return {}
+
+    display_name = str(metadata.get("name", symbol)).strip() or symbol
+    title = (
+        f"{display_name} 最新前十大股东合计约 {total_ratio:.1f}%，"
+        f"前十大流通股东合计约 {float_ratio:.1f}%"
+    )
+    detail = (
+        f"最近披露期 {latest_date}；前十大股东 {total_count} 个席位、"
+        f"前十大流通股东 {float_count} 个席位。该项只作为筹码稳定性辅助，不直接等同于机构加仓。"
+    )
+    return {
+        "total_ratio": round(total_ratio, 4),
+        "float_ratio": round(float_ratio, 4),
+        "report_date": latest_date,
+        "title": title,
+        "detail": detail,
+    }
+
+
+def _cn_pledge_risk_snapshot(metadata: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return {}
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return {}
+    collector = ValuationCollector(dict(context.get("config", {})))
+    try:
+        stat_rows = collector.get_cn_stock_pledge_stat(symbol)
+    except Exception:
+        stat_rows = []
+    try:
+        detail_rows = collector.get_cn_stock_pledge_detail(symbol)
+    except Exception:
+        detail_rows = []
+
+    pledge_ratio = 0.0
+    end_date = ""
+    if stat_rows:
+        stat_frame = pd.DataFrame(stat_rows)
+        if not stat_frame.empty and "end_date" in stat_frame.columns:
+            stat_frame["end_date"] = pd.to_datetime(stat_frame["end_date"], errors="coerce")
+            stat_frame = stat_frame.dropna(subset=["end_date"]).sort_values("end_date", ascending=False)
+            if not stat_frame.empty:
+                latest = stat_frame.iloc[0]
+                pledge_ratio = float(pd.to_numeric(pd.Series([latest.get("pledge_ratio")]), errors="coerce").fillna(0.0).iloc[0])
+                end_date = latest["end_date"].date().isoformat()
+
+    active_holder_ratio = 0.0
+    active_count = 0
+    if detail_rows:
+        detail_frame = pd.DataFrame(detail_rows)
+        if not detail_frame.empty:
+            if "is_release" in detail_frame.columns:
+                active_mask = detail_frame["is_release"].astype(str) != "1"
+                active_frame = detail_frame[active_mask].copy()
+            else:
+                active_frame = detail_frame.copy()
+            if not active_frame.empty:
+                active_count = int(len(active_frame))
+                active_holder_ratio = float(pd.to_numeric(active_frame.get("h_total_ratio"), errors="coerce").fillna(0.0).max())
+
+    if pledge_ratio >= 15.0 or (pledge_ratio >= 5.0 and active_holder_ratio >= 70.0):
+        status = "❌"
+    elif pledge_ratio >= 5.0 or active_holder_ratio >= 50.0:
+        status = "⚠️"
+    elif stat_rows or detail_rows:
+        status = "✅"
+    else:
+        status = "ℹ️"
+
+    if status == "ℹ️":
+        detail = "Tushare pledge_stat / pledge_detail 当前不可用，质押风险暂未纳入本轮硬检查。"
+    else:
+        date_text = end_date or "最近一期"
+        detail = f"{date_text} 质押比例约 {pledge_ratio:.2f}%"
+        if active_count:
+            detail += f"，仍有 {active_count} 条未释放质押，单一股东最高质押占其持股约 {active_holder_ratio:.1f}%"
+        else:
+            detail += "，当前未见明显未释放质押明细"
+    return {
+        "status": status,
+        "detail": detail,
+        "pledge_ratio": round(pledge_ratio, 4),
+        "active_holder_ratio": round(active_holder_ratio, 4),
+        "active_count": active_count,
+    }
+
+
 def _cn_capital_return_items(metadata: Mapping[str, Any], context: Mapping[str, Any]) -> List[Dict[str, Any]]:
     if str(metadata.get("asset_type", "")) != "cn_stock":
         return []
@@ -2378,8 +2502,26 @@ def _hard_checks(
             warnings.append("⚠️ 未来 30 日存在大额限售股解禁，短线抛压风险明显上升")
         elif unlock_snapshot.get("status") == "⚠️":
             warnings.append("⚠️ 未来 30~90 日存在一定解禁压力，仓位与节奏需要更保守")
+
+        pledge_snapshot = _cn_pledge_risk_snapshot(metadata, context)
+        checks.append(
+            {
+                "name": "质押风险",
+                "status": str(pledge_snapshot.get("status", "ℹ️")),
+                "detail": str(pledge_snapshot.get("detail", "Tushare pledge_stat / pledge_detail 当前不可用，质押风险暂未纳入本轮检查")),
+            }
+        )
+        if pledge_snapshot.get("status") == "❌":
+            exclusion_reasons.append("股权质押风险较高")
+            warnings.append("⚠️ 股权质押比例偏高或股东质押集中度过大，遇到波动更容易放大筹码风险")
+        elif pledge_snapshot.get("status") == "⚠️":
+            warnings.append("⚠️ 当前存在一定股权质押压力，尤其在高波动或回撤阶段更需要保守看待")
     else:
         checks.append({"name": "解禁压力", "status": "ℹ️", "detail": "当前仅接入 A 股 Tushare 解禁日历"})
+        if asset_type in {"hk", "us"}:
+            checks.append({"name": "质押风险", "status": "ℹ️", "detail": "当前仅接入 A 股 Tushare 质押统计"})
+        else:
+            checks.append({"name": "质押风险", "status": "✅", "detail": "基金/指数产品不适用股权质押风险"})
 
     return_5d = float(metrics.get("return_5d", 0.0))
     close_returns = history["close"].pct_change().dropna()
@@ -3609,6 +3751,31 @@ def _relative_strength_dimension(
     available += 15
     factors.append(_factor_row("Regime 适配", "与当前 regime / 主线方向一致" if regime_award else "当前 regime 对它没有额外加分", regime_award, 15, "大环境顺风时，轮动更容易持续"))
 
+    bak_strength = metadata.get("bak_strength")
+    bak_attack = metadata.get("bak_attack")
+    bak_activity = metadata.get("bak_activity")
+    if asset_type == "cn_stock" and any(value is not None for value in (bak_strength, bak_attack, bak_activity)):
+        strength_value = float(bak_strength or 0.0)
+        attack_value = float(bak_attack or 0.0)
+        activity_value = float(bak_activity or 0.0)
+        if strength_value >= 2.0 or attack_value >= 2.0:
+            bak_award = 5
+        elif strength_value > 0 or attack_value > 0:
+            bak_award = 2
+        else:
+            bak_award = 0
+        raw += bak_award
+        available += 5
+        factors.append(
+            _factor_row(
+                "日度强弱代理",
+                f"Tushare bak_daily 强弱 {strength_value:.2f} / 攻击 {attack_value:.2f}",
+                bak_award,
+                5,
+                f"这是 A 股日度增强快照的轻量补充项，活跃度 {activity_value:.0f}；只做小权重辅助，不单独决定是否推荐。",
+            )
+        )
+
     ah_award = 10 if asset_type in {"hk", "hk_index"} and float(context.get("global_proxy", {}).get("dxy_20d_change", 0.0)) <= 0 else 0
     raw += ah_award
     available += 10
@@ -3704,8 +3871,33 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
                 )
         else:
             factors.append(_factor_row("高管增持", "近 90 日未命中明确高管/大股东增减持", 0, 10, "当前未识别到可明确归因的股东增减持信号。", display_score="信息项"))
+
+        holder_concentration = _cn_holder_concentration_snapshot(metadata, context)
+        if holder_concentration:
+            total_ratio = float(holder_concentration.get("total_ratio") or 0.0)
+            float_ratio = float(holder_concentration.get("float_ratio") or 0.0)
+            if total_ratio >= 50 or float_ratio >= 25:
+                concentration_award_stock = 10
+            elif total_ratio >= 35 or float_ratio >= 15:
+                concentration_award_stock = 5
+            else:
+                concentration_award_stock = 0
+            raw += concentration_award_stock
+            available += 10
+            factors.append(
+                _factor_row(
+                    "股东集中度",
+                    str(holder_concentration.get("title", "最新股东集中度已披露")),
+                    concentration_award_stock,
+                    10,
+                    str(holder_concentration.get("detail", "当前只把股东集中度当成筹码稳定性辅助，不直接等同于增量资金。")),
+                )
+            )
+        else:
+            factors.append(_factor_row("股东集中度", "前十大股东/流通股东数据缺失", 0, 10, "当前未识别到可稳定使用的前十大股东结构。", display_score="信息项"))
     else:
         factors.append(_factor_row("高管增持", "ETF / 指数产品不适用", 0, 0, "该因子主要适用于个股，不纳入 ETF 评分。", display_score="不适用"))
+        factors.append(_factor_row("股东集中度", "ETF / 基金 / 指数产品不适用", 0, 0, "股东集中度主要适用于单一个股。", display_score="不适用"))
 
     if asset_type == "cn_etf" and commodity_like_fund:
         factors.append(_factor_row("北向/南向", "商品/期货 ETF 不适用", 0, 0, "北向资金是股票市场口径，不用于商品/期货 ETF。", display_score="不适用"))
@@ -5109,6 +5301,11 @@ def build_stock_pool(
             pe_raw_col = next((c for c in ("市盈率",) if c in realtime.columns), None)
             pb_col = next((c for c in realtime.columns if "市净率" in c), None)
             industry_col = next((c for c in realtime.columns if c in ("行业", "所属行业")), None)
+            bak_strength_col = next((c for c in ("强弱度", "strength") if c in realtime.columns), None)
+            bak_activity_col = next((c for c in ("活跃度", "activity") if c in realtime.columns), None)
+            bak_attack_col = next((c for c in ("攻击度", "attack") if c in realtime.columns), None)
+            bak_swing_col = next((c for c in ("振幅", "swing") if c in realtime.columns), None)
+            area_col = next((c for c in ("地域", "area") if c in realtime.columns), None)
 
             if code_col and name_col and amount_col:
                 frame = realtime.copy()
@@ -5157,6 +5354,16 @@ def build_stock_pool(
                         meta["pe_raw_label"] = pe_raw_col
                     if pb_col and pd.notna(row.get(pb_col)):
                         meta["pb"] = float(row[pb_col])
+                    if bak_strength_col and pd.notna(row.get(bak_strength_col)):
+                        meta["bak_strength"] = float(row[bak_strength_col])
+                    if bak_activity_col and pd.notna(row.get(bak_activity_col)):
+                        meta["bak_activity"] = float(row[bak_activity_col])
+                    if bak_attack_col and pd.notna(row.get(bak_attack_col)):
+                        meta["bak_attack"] = float(row[bak_attack_col])
+                    if bak_swing_col and pd.notna(row.get(bak_swing_col)):
+                        meta["bak_swing"] = float(row[bak_swing_col])
+                    if area_col and pd.notna(row.get(area_col)):
+                        meta["area"] = str(row[area_col])
                     pool.append(
                         PoolItem(
                             symbol=symbol,

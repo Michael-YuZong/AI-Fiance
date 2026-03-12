@@ -427,11 +427,16 @@ def _intraday_lines(analysis: Dict[str, Any]) -> List[str]:
                 ["日内高低", f"{_fmt_number(intraday.get('low'), 3)} / {_fmt_number(intraday.get('high'), 3)}"],
                 ["VWAP", _fmt_number(intraday.get("vwap"), 3)],
                 ["日内位置", f"{float(intraday.get('range_position', 0.0)):.0%}"],
+                ["涨跌停边界", f"{_fmt_number(intraday.get('down_limit'), 3)} / {_fmt_number(intraday.get('up_limit'), 3)}" if intraday.get("up_limit") is not None and intraday.get("down_limit") is not None else "—"],
                 ["盘中状态", intraday.get("trend", "—")],
             ],
         )
     )
     lines.extend(["", f"- {intraday.get('commentary', '当前没有额外盘中结论。')}"])
+    if intraday.get("auction_commentary"):
+        lines.append(f"- {intraday.get('auction_commentary')}")
+    if intraday.get("limit_commentary"):
+        lines.append(f"- {intraday.get('limit_commentary')}")
     if intraday.get("fallback_mode"):
         lines.append("- 分钟线不可用，盘中视角已退化为最近一根日K快照。")
     return lines

@@ -36,6 +36,12 @@ def main() -> None:
         print(f"- 竞价高低开: `{format_pct(snapshot.get('auction_gap') or 0.0)}`")
         if snapshot.get("auction_volume_ratio") is not None:
             print(f"- 竞价量比: `{snapshot['auction_volume_ratio']:.2f}`")
+    if snapshot.get("up_limit") is not None and snapshot.get("down_limit") is not None:
+        print(f"- 涨跌停边界: `{snapshot['down_limit']:.3f} / {snapshot['up_limit']:.3f}`")
+        if snapshot.get("limit_distance_up") is not None:
+            print(f"- 距涨停: `{format_pct(snapshot['limit_distance_up'])}`")
+        if snapshot.get("limit_distance_down") is not None:
+            print(f"- 距跌停: `{format_pct(snapshot['limit_distance_down'])}`")
     print("")
     print("## 观察")
     print(f"- 日内状态判断：{snapshot['trend']}。")
@@ -45,6 +51,8 @@ def main() -> None:
     )
     if snapshot.get("auction_commentary"):
         print(f"- {snapshot['auction_commentary']}")
+    if snapshot.get("limit_commentary"):
+        print(f"- {snapshot['limit_commentary']}")
     if snapshot.get("fallback_mode"):
         print("- 分钟线获取失败，当前结果已退化为最近一根日 K 快照。")
     print("- 当前版本基于 Level 1 分钟线和成交量，五档盘口与大单拆分后续再补。")

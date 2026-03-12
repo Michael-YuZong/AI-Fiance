@@ -916,6 +916,58 @@ def test_hard_checks_for_cn_stock_use_unlock_pressure(monkeypatch) -> None:
     assert any("大额限售股解禁" in item for item in warnings)
 
 
+def test_hard_checks_for_cn_stock_use_pledge_risk(monkeypatch) -> None:
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=120, freq="B"),
+            "open": [100.0] * 120,
+            "high": [101.0] * 120,
+            "low": [99.0] * 120,
+            "close": [100.0 + 0.2 * i for i in range(120)],
+            "volume": [1_000_000] * 120,
+            "amount": [800_000_000.0] * 120,
+        }
+    )
+    metrics = {"avg_turnover_20d": 8e8, "price_percentile_1y": 0.43, "return_5d": -0.01}
+    technical = {"rsi": {"RSI": 50.0}}
+    context = {"config": {"opportunity": {}}}
+    fundamental_dimension = {"valuation_snapshot": {"index_name": "新易盛", "pe_ttm": 52.0}, "valuation_extreme": False}
+
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_unlock_pressure",
+        lambda self, symbol, as_of="", lookahead_days=90: {  # noqa: ARG005
+            "status": "✅",
+            "detail": "未来 90 日未见明确限售股解禁安排",
+        },
+    )
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine._cn_pledge_risk_snapshot",
+        lambda metadata, context: {  # noqa: ARG005
+            "status": "❌",
+            "detail": "2026-03-06 质押比例约 16.20%，仍有 3 条未释放质押，单一股东最高质押占其持股约 75.0%",
+        },
+    )
+
+    checks, exclusion_reasons, warnings = _hard_checks(
+        "cn_stock",
+        {"symbol": "300502", "name": "新易盛"},
+        history,
+        metrics,
+        technical,
+        context,
+        10,
+        None,
+        fundamental_dimension,
+        None,
+    )
+
+    check_map = {item["name"]: item for item in checks}
+    assert check_map["质押风险"]["status"] == "❌"
+    assert "股权质押风险较高" in exclusion_reasons
+    assert any("股权质押比例偏高" in item for item in warnings)
+
+
 def test_catalyst_dimension_cn_stock_includes_structured_event_factor(monkeypatch):
     """cn_stock catalyst should turn direct stock announcements into structured event evidence."""
     monkeypatch.setattr(
@@ -1008,6 +1060,28 @@ def test_chips_dimension_cn_stock_uses_holdertrade_snapshot(monkeypatch):
     )
     signals = {factor["name"]: factor["signal"] for factor in dimension["factors"]}
     assert "净增持约 0.18%" in signals["高管增持"]
+
+
+def test_chips_dimension_cn_stock_uses_holder_concentration_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine._cn_holder_concentration_snapshot",
+        lambda metadata, context: {  # noqa: ARG005
+            "title": "新易盛 最新前十大股东合计约 46.2%，前十大流通股东合计约 18.8%",
+            "detail": "最近披露期 2025-09-30；该项只作为筹码稳定性辅助。",
+            "total_ratio": 46.2,
+            "float_ratio": 18.8,
+        },
+    )
+    dimension = _chips_dimension(
+        "300502",
+        "cn_stock",
+        {"symbol": "300502", "name": "新易盛", "asset_type": "cn_stock", "sector": "科技"},
+        {"config": {}},
+        {},
+    )
+    factor = next(item for item in dimension["factors"] if item["name"] == "股东集中度")
+    assert factor["awarded"] == 5
+    assert "前十大股东合计约 46.2%" in factor["signal"]
 
 
 def test_catalyst_dimension_hk_us_searches_google_news_when_empty(monkeypatch):
@@ -1272,6 +1346,10 @@ def test_catalyst_dimension_us_accepts_high_confidence_company_news(monkeypatch)
 
 
 def test_catalyst_core_signal_hk_us_hides_weak_titles_without_high_confidence_company_news(monkeypatch):
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine._company_calendar_event_dates",
+        lambda symbol, asset_type: ["2026-03-24"],  # noqa: ARG005
+    )
     monkeypatch.setattr(
         NewsCollector,
         "search_by_keywords",
@@ -1979,6 +2057,41 @@ def test_build_stock_pool_prefers_cn_ttm_pe_column(monkeypatch):
     metadata = pool[0].metadata or {}
     assert metadata["pe_ttm"] == 64.8
     assert metadata["pe_dynamic"] == 204.1
+
+
+def test_build_stock_pool_carries_bak_daily_enrichment(monkeypatch):
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_stock_realtime",
+        lambda self: pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "代码": "300502",
+                    "名称": "新易盛",
+                    "成交额": 120_000_000.0,
+                    "总市值": 18_000_000_000.0,
+                    "行业": "通信设备",
+                    "市盈率(动态)": 137.7,
+                    "市盈率TTM": 52.0,
+                    "市净率": 26.9,
+                    "强弱度": 2.31,
+                    "活跃度": 3988.0,
+                    "攻击度": 3.42,
+                    "振幅": 4.79,
+                    "地域": "四川",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr("src.processors.opportunity_engine.detect_asset_type", lambda symbol, config: "cn_stock")
+    pool, warnings = build_stock_pool({}, market="cn", max_candidates=5)
+    assert warnings == []
+    metadata = pool[0].metadata or {}
+    assert metadata["bak_strength"] == 2.31
+    assert metadata["bak_activity"] == 3988.0
+    assert metadata["bak_attack"] == 3.42
+    assert metadata["bak_swing"] == 4.79
+    assert metadata["area"] == "四川"
 
 
 def test_discover_stock_opportunities_includes_watch_positive(monkeypatch):
