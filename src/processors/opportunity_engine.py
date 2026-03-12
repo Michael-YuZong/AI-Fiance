@@ -136,6 +136,8 @@ NEGATIVE_REGULATORY_KEYS = (
 NEGATIVE_EVENT_LOOKBACK_DAYS = 30
 FORWARD_EVENT_LOOKAHEAD_DAYS = 14
 DIRECT_COMPANY_NEWS_LOOKBACK_DAYS = 45
+HOLDER_TRADE_LOOKBACK_DAYS = 90
+CAPITAL_RETURN_LOOKBACK_DAYS = 365
 
 DISCLOSURE_WINDOW_KEYS = (
     "年报",
@@ -1828,6 +1830,195 @@ def _company_calendar_event_dates(symbol: str, asset_type: str) -> tuple[str, ..
     return tuple(unique)
 
 
+def _cn_report_period_label(end_date: str) -> str:
+    text = str(end_date or "").strip().replace("-", "")
+    if len(text) != 8 or not text.isdigit():
+        return "相关报告期"
+    mmdd = text[4:]
+    year = text[:4]
+    if mmdd == "1231":
+        return f"{year}年年报"
+    if mmdd == "0930":
+        return f"{year}年三季报"
+    if mmdd == "0630":
+        return f"{year}年半年报"
+    if mmdd == "0331":
+        return f"{year}年一季报"
+    return f"截至 {year}-{text[4:6]}-{text[6:8]} 报告期"
+
+
+def _cn_disclosure_calendar_items(metadata: Mapping[str, Any], context: Mapping[str, Any], horizon_days: int = FORWARD_EVENT_LOOKAHEAD_DAYS) -> List[Dict[str, Any]]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return []
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return []
+    collector = ValuationCollector(dict(context.get("config", {})))
+    reference = _context_now(context)
+    display_name = str(metadata.get("name", symbol)).strip() or symbol
+    items: List[Dict[str, Any]] = []
+    try:
+        rows = collector.get_cn_stock_disclosure_dates(symbol)
+    except Exception:
+        rows = []
+    for row in rows:
+        event_date_text = str(row.get("actual_date") or row.get("pre_date") or "").strip()
+        if not event_date_text:
+            continue
+        event_date = pd.to_datetime(event_date_text, errors="coerce")
+        if pd.isna(event_date):
+            continue
+        days = (event_date.date() - reference.date()).days
+        if days < -horizon_days or days > horizon_days:
+            continue
+        period_label = _cn_report_period_label(str(row.get("end_date", "")))
+        if str(row.get("actual_date") or "").strip():
+            title = f"{display_name} 已于 {event_date.date().isoformat()} 披露 {period_label}"
+        else:
+            title = f"{display_name} 预计于 {event_date.date().isoformat()} 披露 {period_label}"
+        items.append(
+            {
+                "title": title,
+                "category": "stock_disclosure_calendar",
+                "source": "Tushare disclosure_date",
+                "configured_source": "Tushare disclosure_date",
+                "published_at": event_date.date().isoformat(),
+                "date": event_date.date().isoformat(),
+                "link": "",
+            }
+        )
+    return items
+
+
+def _cn_holdertrade_snapshot(metadata: Mapping[str, Any], context: Mapping[str, Any], lookback_days: int = HOLDER_TRADE_LOOKBACK_DAYS) -> Dict[str, Any]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return {}
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return {}
+    collector = ValuationCollector(dict(context.get("config", {})))
+    reference = _context_now(context)
+    display_name = str(metadata.get("name", symbol)).strip() or symbol
+    try:
+        rows = collector.get_cn_stock_holder_trades(symbol)
+    except Exception:
+        rows = []
+    if not rows:
+        return {}
+    frame = pd.DataFrame(rows)
+    if frame.empty or "ann_date" not in frame.columns:
+        return {}
+    frame["ann_date"] = pd.to_datetime(frame["ann_date"], errors="coerce")
+    frame = frame.dropna(subset=["ann_date"])
+    if frame.empty:
+        return {}
+    frame = frame[(reference - frame["ann_date"]).dt.days.between(0, lookback_days)]
+    if frame.empty:
+        return {}
+    frame["change_ratio"] = pd.to_numeric(frame["change_ratio"] if "change_ratio" in frame.columns else 0.0, errors="coerce").fillna(0.0)
+    if "in_de" in frame.columns:
+        frame["in_de"] = frame["in_de"].astype(str).str.upper()
+    else:
+        frame["in_de"] = ""
+    increase_ratio = float(frame.loc[frame["in_de"] == "IN", "change_ratio"].sum())
+    decrease_ratio = float(frame.loc[frame["in_de"] == "DE", "change_ratio"].sum())
+    latest_date = frame["ann_date"].max().date().isoformat()
+    if increase_ratio <= 0 and decrease_ratio <= 0:
+        return {}
+    if increase_ratio > decrease_ratio:
+        net_ratio = round(increase_ratio - decrease_ratio, 4)
+        title = f"{display_name} 近 {lookback_days} 日高管/股东净增持约 {net_ratio:.2f}%"
+        direction = "increase"
+    else:
+        net_ratio = round(decrease_ratio - increase_ratio, 4)
+        title = f"{display_name} 近 {lookback_days} 日高管/股东净减持约 {net_ratio:.2f}%"
+        direction = "decrease"
+    return {
+        "direction": direction,
+        "net_ratio": net_ratio,
+        "increase_ratio": round(increase_ratio, 4),
+        "decrease_ratio": round(decrease_ratio, 4),
+        "latest_date": latest_date,
+        "item": {
+            "title": title,
+            "category": "holder_trade",
+            "source": "Tushare stk_holdertrade",
+            "configured_source": "Tushare stk_holdertrade",
+            "published_at": latest_date,
+            "date": latest_date,
+            "link": "",
+        },
+    }
+
+
+def _cn_capital_return_items(metadata: Mapping[str, Any], context: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return []
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return []
+    collector = ValuationCollector(dict(context.get("config", {})))
+    reference = _context_now(context)
+    display_name = str(metadata.get("name", symbol)).strip() or symbol
+    items: List[Dict[str, Any]] = []
+
+    try:
+        repurchases = collector.get_cn_stock_repurchase(symbol)
+    except Exception:
+        repurchases = []
+    for row in repurchases:
+        ann_date = pd.to_datetime(str(row.get("ann_date", "")), errors="coerce")
+        if pd.isna(ann_date):
+            continue
+        age_days = (reference.date() - ann_date.date()).days
+        if age_days < 0 or age_days > CAPITAL_RETURN_LOOKBACK_DAYS:
+            continue
+        proc = str(row.get("proc", "")).strip() or "进展"
+        items.append(
+            {
+                "title": f"{display_name} 披露股份回购{proc}",
+                "category": "repurchase",
+                "source": "Tushare repurchase",
+                "configured_source": "Tushare repurchase",
+                "published_at": ann_date.date().isoformat(),
+                "date": ann_date.date().isoformat(),
+                "link": "",
+            }
+        )
+        break
+
+    try:
+        dividends = collector.get_cn_stock_dividend(symbol)
+    except Exception:
+        dividends = []
+    for row in dividends:
+        ann_date = pd.to_datetime(str(row.get("ann_date", "")), errors="coerce")
+        if pd.isna(ann_date):
+            continue
+        age_days = (reference.date() - ann_date.date()).days
+        if age_days < 0 or age_days > CAPITAL_RETURN_LOOKBACK_DAYS:
+            continue
+        div_proc = str(row.get("div_proc", "")).strip() or "进展"
+        items.append(
+            {
+                "title": f"{display_name} 披露现金分红{div_proc}",
+                "category": "dividend",
+                "source": "Tushare dividend",
+                "configured_source": "Tushare dividend",
+                "published_at": ann_date.date().isoformat(),
+                "date": ann_date.date().isoformat(),
+                "link": "",
+            }
+        )
+        break
+
+    holdertrade = _cn_holdertrade_snapshot(metadata, context)
+    if holdertrade.get("item"):
+        items.append(dict(holdertrade["item"]))
+
+    return items
+
+
 def _item_datetime(item: Mapping[str, Any], reference: datetime) -> Optional[datetime]:
     for key in ("published_at", "published", "date", "datetime"):
         value = item.get(key)
@@ -1917,6 +2108,9 @@ def _company_forward_events(
     stock_name_tokens = _stock_name_tokens(metadata)
     forward_hits: List[Dict[str, Any]] = []
 
+    if asset_type == "cn_stock":
+        forward_hits.extend(_cn_disclosure_calendar_items(metadata, context, horizon_days=horizon_days))
+
     combined_items = _dedupe_news_items([*(news_items or []), *(extra_items or [])])
     for item in combined_items:
         if not _is_disclosure_like_item(item, stock_name_tokens):
@@ -1974,6 +2168,8 @@ def _structured_company_event_items(
     stock_name_tokens = _stock_name_tokens(metadata)
     combined_items = _dedupe_news_items([*(news_items or []), *(stock_news_items or [])])
     structured_hits: List[Dict[str, Any]] = []
+    if asset_type == "cn_stock":
+        structured_hits.extend(_cn_capital_return_items(metadata, context))
     for item in combined_items:
         if _is_structured_company_event_item(item, stock_name_tokens):
             structured_hits.append(dict(item))
@@ -3478,7 +3674,36 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
         factors.append(_factor_row("公募/热度代理", "缺失", None, 30, "公募低配/热度代理暂缺"))
 
     if asset_type == "cn_stock":
-        factors.append(_factor_row("高管增持", "个股高管增持数据暂未接入", None, 10, "后续可接入 akshare 高管增减持数据。"))
+        holdertrade = _cn_holdertrade_snapshot(metadata, context)
+        if holdertrade:
+            direction = str(holdertrade.get("direction", ""))
+            net_ratio = float(holdertrade.get("net_ratio") or 0.0)
+            if direction == "increase":
+                insider_award = 10 if net_ratio >= 0.1 else 5
+                raw += insider_award
+                available += 10
+                factors.append(
+                    _factor_row(
+                        "高管增持",
+                        str(holdertrade.get("item", {}).get("title", "近 90 日存在净增持")),
+                        insider_award,
+                        10,
+                        "高管/大股东净增持通常更接近管理层与重要股东的内部态度。",
+                    )
+                )
+            else:
+                factors.append(
+                    _factor_row(
+                        "高管增持",
+                        str(holdertrade.get("item", {}).get("title", "近 90 日存在净减持")),
+                        0,
+                        10,
+                        "近 90 日净减持更偏负面，不在筹码维度做正向加分。",
+                        display_score="信息项",
+                    )
+                )
+        else:
+            factors.append(_factor_row("高管增持", "近 90 日未命中明确高管/大股东增减持", 0, 10, "当前未识别到可明确归因的股东增减持信号。", display_score="信息项"))
     else:
         factors.append(_factor_row("高管增持", "ETF / 指数产品不适用", 0, 0, "该因子主要适用于个股，不纳入 ETF 评分。", display_score="不适用"))
 

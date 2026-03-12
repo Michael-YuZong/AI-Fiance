@@ -497,6 +497,102 @@ class ValuationCollector(BaseCollector):
         self._save_cache(cache_key, result)
         return result
 
+    def get_cn_stock_disclosure_dates(self, symbol: str) -> list[Dict[str, Any]]:
+        """Tushare disclosure_date — 财报披露计划。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"valuation:ts_disclosure_date:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("disclosure_date", ts_code=ts_code)
+        if raw is None or raw.empty:
+            return []
+
+        frame = raw.copy()
+        for column in ("ann_date", "end_date", "pre_date", "actual_date"):
+            if column in frame.columns:
+                frame[column] = frame[column].map(self._normalize_date_text)
+        frame = frame.sort_values(["end_date", "pre_date", "actual_date"], ascending=False).reset_index(drop=True)
+        records = frame.to_dict("records")
+        self._save_cache(cache_key, records)
+        return records
+
+    def get_cn_stock_holder_trades(self, symbol: str, start_date: str = "", end_date: str = "") -> list[Dict[str, Any]]:
+        """Tushare stk_holdertrade — 大股东/高管增减持。"""
+        ts_code = self._to_ts_code(symbol)
+        end = end_date or datetime.now().strftime("%Y%m%d")
+        start = start_date or (datetime.now() - timedelta(days=180)).strftime("%Y%m%d")
+        cache_key = f"valuation:ts_stk_holdertrade:{ts_code}:{start}:{end}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("stk_holdertrade", ts_code=ts_code, start_date=start, end_date=end)
+        if raw is None or raw.empty:
+            return []
+
+        frame = raw.copy()
+        if "ann_date" in frame.columns:
+            frame["ann_date"] = frame["ann_date"].map(self._normalize_date_text)
+        for column in ("change_vol", "change_ratio", "after_share", "after_ratio", "avg_price", "total_share"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.sort_values("ann_date", ascending=False).reset_index(drop=True)
+        records = frame.to_dict("records")
+        self._save_cache(cache_key, records)
+        return records
+
+    def get_cn_stock_dividend(self, symbol: str) -> list[Dict[str, Any]]:
+        """Tushare dividend — 分红送转。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"valuation:ts_dividend:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("dividend", ts_code=ts_code)
+        if raw is None or raw.empty:
+            return []
+
+        frame = raw.copy()
+        for column in ("end_date", "ann_date", "record_date", "ex_date", "pay_date", "div_listdate", "imp_ann_date"):
+            if column in frame.columns:
+                frame[column] = frame[column].map(self._normalize_date_text)
+        for column in ("cash_div", "cash_div_tax", "stk_div", "stk_bo_rate", "stk_co_rate"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.sort_values(["ann_date", "end_date"], ascending=False).reset_index(drop=True)
+        records = frame.to_dict("records")
+        self._save_cache(cache_key, records)
+        return records
+
+    def get_cn_stock_repurchase(self, symbol: str, start_date: str = "", end_date: str = "") -> list[Dict[str, Any]]:
+        """Tushare repurchase — 回购进展。"""
+        ts_code = self._to_ts_code(symbol)
+        end = end_date or datetime.now().strftime("%Y%m%d")
+        start = start_date or (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
+        cache_key = f"valuation:ts_repurchase:{ts_code}:{start}:{end}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("repurchase", ts_code=ts_code, start_date=start, end_date=end)
+        if raw is None or raw.empty:
+            return []
+
+        frame = raw.copy()
+        for column in ("ann_date", "end_date", "exp_date"):
+            if column in frame.columns:
+                frame[column] = frame[column].map(self._normalize_date_text)
+        for column in ("vol", "amount", "high_limit", "low_limit"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.sort_values("ann_date", ascending=False).reset_index(drop=True)
+        records = frame.to_dict("records")
+        self._save_cache(cache_key, records)
+        return records
+
     # ── 指数聚合财务 ─────────────────────────────────────────
 
     def get_cn_index_financial_proxies(self, index_code: str, top_n: int = 5) -> Dict[str, Any]:

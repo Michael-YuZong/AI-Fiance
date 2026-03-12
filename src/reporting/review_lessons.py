@@ -114,6 +114,13 @@ ACTIVE_REVIEW_LESSONS: List[ReviewLesson] = [
         owner_layer="renderer",
         rationale="如果催化分显著影响推荐，就不能只给“头条数量/覆盖源数量”，还应在成稿里给出关键催化的原始来源或链接。",
     ),
+    ReviewLesson(
+        lesson_id="L015",
+        title="A股结构化公司事件应优先使用 Tushare 而不是新闻标题猜测",
+        scope="cn_stock_reports",
+        owner_layer="opportunity_engine",
+        rationale="A股已有披露计划、增减持、回购、分红、解禁等结构化接口时，应优先用这些高置信事件构建催化和风险，而不是仅靠新闻标题推断。",
+    ),
 ]
 
 
