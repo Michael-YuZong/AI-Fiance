@@ -53,9 +53,60 @@ def normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
     for column in ("open", "high", "low", "close", "volume", "amount"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
+    # Defensively sanitize malformed OHLCV rows from mixed vendors.
+    frame[["open", "high", "low", "close"]] = frame[["open", "high", "low", "close"]].where(
+        frame[["open", "high", "low", "close"]] > 0
+    )
+    frame["high"] = frame[["open", "high", "low", "close"]].max(axis=1)
+    frame["low"] = frame[["open", "high", "low", "close"]].min(axis=1)
+    frame["volume"] = frame["volume"].clip(lower=0)
+    frame["amount"] = frame["amount"].clip(lower=0)
+
     frame = frame.dropna(subset=["date", "open", "high", "low", "close"])
     frame = frame.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True)
     return frame[["date", "open", "high", "low", "close", "volume", "amount"]]
+
+
+def _last_valid(
+    series: pd.Series,
+    default: float = 0.0,
+    *,
+    lower: float | None = None,
+    upper: float | None = None,
+) -> float:
+    value = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if value.empty:
+        return default
+    result = float(value.iloc[-1])
+    if lower is not None:
+        result = max(lower, result)
+    if upper is not None:
+        result = min(upper, result)
+    return result
+
+
+def _wilder_average(values: pd.Series, period: int, *, start: int = 0) -> pd.Series:
+    series = pd.to_numeric(values, errors="coerce").astype(float).fillna(0.0)
+    result = pd.Series(np.nan, index=series.index, dtype=float)
+    seed_end = start + period - 1
+    if period <= 0 or len(series) <= seed_end:
+        return result
+
+    result.iloc[seed_end] = float(series.iloc[start : seed_end + 1].mean())
+    for i in range(seed_end + 1, len(series)):
+        prev = float(result.iloc[i - 1])
+        result.iloc[i] = ((prev * (period - 1)) + float(series.iloc[i])) / period
+    return result
+
+
+def _seeded_recursive_average(values: pd.Series, alpha: float, seed: float) -> pd.Series:
+    series = pd.to_numeric(values, errors="coerce").astype(float).fillna(seed)
+    result = pd.Series(index=series.index, dtype=float)
+    prev = float(seed)
+    for idx, value in series.items():
+        prev = (1 - alpha) * prev + alpha * float(value)
+        result.loc[idx] = prev
+    return result
 
 
 class TechnicalAnalyzer:
@@ -66,29 +117,155 @@ class TechnicalAnalyzer:
         if len(self.df) < 30:
             raise ValueError("At least 30 rows are required for technical analysis")
 
-    def macd(self, fast: int = 12, slow: int = 26, signal: int = 9) -> Dict[str, float]:
+    def _macd_series(self, fast: int = 12, slow: int = 26, signal: int = 9) -> Dict[str, pd.Series]:
         close = self.df["close"]
         ema_fast = close.ewm(span=fast, adjust=False).mean()
         ema_slow = close.ewm(span=slow, adjust=False).mean()
         dif = ema_fast - ema_slow
         dea = dif.ewm(span=signal, adjust=False).mean()
         hist = 2 * (dif - dea)
+        return {"DIF": dif, "DEA": dea, "HIST": hist}
+
+    def _rsi_series(self, period: int = 14) -> pd.Series:
+        close = self.df["close"]
+        delta = close.diff()
+        gain = delta.clip(lower=0).fillna(0.0)
+        loss = (-delta.clip(upper=0)).fillna(0.0)
+        avg_gain = _wilder_average(gain, period, start=1)
+        avg_loss = _wilder_average(loss, period, start=1)
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        rsi = (100 - (100 / (1 + rs))).clip(lower=0, upper=100)
+        return rsi.fillna(50.0)
+
+    def _bollinger_series(self, period: int = 20, std: int = 2) -> Dict[str, pd.Series]:
+        close = self.df["close"]
+        mid = close.rolling(period).mean()
+        std_dev = close.rolling(period).std(ddof=0)
+        upper = mid + std * std_dev
+        lower = mid - std * std_dev
+        width = (upper - lower).replace(0, np.nan)
+        pct_b = ((close - lower) / width).replace([np.inf, -np.inf], np.nan)
         return {
-            "DIF": float(dif.iloc[-1]),
-            "DEA": float(dea.iloc[-1]),
-            "HIST": float(hist.iloc[-1]),
+            "MID": mid,
+            "UPPER": upper,
+            "LOWER": lower,
+            "%B": pct_b.fillna(0.5),
+        }
+
+    def _kdj_series(self, period: int = 9, smooth_k: int = 3, smooth_d: int = 3) -> Dict[str, pd.Series]:
+        high_n = self.df["high"].rolling(period).max()
+        low_n = self.df["low"].rolling(period).min()
+        denominator = (high_n - low_n).replace(0, np.nan)
+        rsv = ((self.df["close"] - low_n) / denominator * 100).clip(lower=0, upper=100).fillna(50)
+        k = _seeded_recursive_average(rsv, alpha=1 / max(smooth_k, 1), seed=50.0).clip(lower=0, upper=100)
+        d = _seeded_recursive_average(k, alpha=1 / max(smooth_d, 1), seed=50.0).clip(lower=0, upper=100)
+        j = 3 * k - 2 * d
+        return {"K": k, "D": d, "J": j}
+
+    def _dmi_series(self, period: int = 14) -> Dict[str, pd.Series]:
+        high = self.df["high"]
+        low = self.df["low"]
+        close = self.df["close"]
+
+        plus_move = high.diff()
+        minus_move = -low.diff()
+        plus_dm = plus_move.where((plus_move > minus_move) & (plus_move > 0), 0.0).fillna(0.0)
+        minus_dm = minus_move.where((minus_move > plus_move) & (minus_move > 0), 0.0).fillna(0.0)
+        tr_components = pd.concat(
+            [high - low, (high - close.shift()).abs(), (low - close.shift()).abs()],
+            axis=1,
+        )
+        tr = tr_components.max(axis=1).fillna(0.0)
+
+        atr = _wilder_average(tr, period)
+        plus_dm_smoothed = _wilder_average(plus_dm, period)
+        minus_dm_smoothed = _wilder_average(minus_dm, period)
+        plus_di = (100 * (plus_dm_smoothed / atr.replace(0, np.nan))).clip(lower=0, upper=100)
+        minus_di = (100 * (minus_dm_smoothed / atr.replace(0, np.nan))).clip(lower=0, upper=100)
+        dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)).clip(lower=0, upper=100)
+
+        adx = pd.Series(np.nan, index=dx.index, dtype=float)
+        first_dx = period - 1
+        adx_seed_end = first_dx + period - 1
+        if len(dx) > adx_seed_end:
+            adx.iloc[adx_seed_end] = float(dx.iloc[first_dx : adx_seed_end + 1].dropna().mean())
+            for i in range(adx_seed_end + 1, len(dx)):
+                prev = float(adx.iloc[i - 1])
+                current = float(dx.iloc[i]) if pd.notna(dx.iloc[i]) else prev
+                adx.iloc[i] = ((prev * (period - 1)) + current) / period
+        adx = adx.clip(lower=0, upper=100)
+        return {"DI+": plus_di.fillna(0.0), "DI-": minus_di.fillna(0.0), "ADX": adx.fillna(0.0)}
+
+    def _obv_series(self, period: int = 20) -> Dict[str, pd.Series]:
+        close = self.df["close"]
+        volume = self.df["volume"].fillna(0)
+        direction = np.sign(close.diff().fillna(0))
+        obv = (direction * volume).cumsum()
+        obv_ma = obv.rolling(period).mean()
+        slope_5d = obv.diff(5).fillna(0)
+        return {"OBV": obv, "MA": obv_ma, "slope_5d": slope_5d}
+
+    def _atr_series(self, period: int = 14) -> pd.Series:
+        high = self.df["high"]
+        low = self.df["low"]
+        close = self.df["close"]
+        tr_components = pd.concat(
+            [high - low, (high - close.shift()).abs(), (low - close.shift()).abs()],
+            axis=1,
+        )
+        tr = tr_components.max(axis=1).fillna(0.0)
+        return _wilder_average(tr, period).fillna(0.0)
+
+    def indicator_series(self, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        technical_config = config or {}
+        macd_cfg = technical_config.get("macd", {})
+        rsi_cfg = technical_config.get("rsi", {})
+        boll_cfg = technical_config.get("bollinger", {})
+        kdj_cfg = technical_config.get("kdj", {})
+        dmi_cfg = technical_config.get("dmi", {})
+        obv_cfg = technical_config.get("obv", {})
+        macd = self._macd_series(fast=macd_cfg.get("fast", 12), slow=macd_cfg.get("slow", 26), signal=macd_cfg.get("signal", 9))
+        kdj = self._kdj_series(period=kdj_cfg.get("period", 9), smooth_k=kdj_cfg.get("smooth_k", 3), smooth_d=kdj_cfg.get("smooth_d", 3))
+        dmi = self._dmi_series(period=dmi_cfg.get("period", 14))
+        boll = self._bollinger_series(period=boll_cfg.get("period", 20), std=boll_cfg.get("std", 2))
+        obv = self._obv_series(period=obv_cfg.get("period", 20))
+        atr = self._atr_series(period=technical_config.get("atr", {}).get("period", 14))
+        return {
+            "date": self.df["date"],
+            "close": self.df["close"],
+            "macd_dif": macd["DIF"],
+            "macd_dea": macd["DEA"],
+            "macd_hist": macd["HIST"],
+            "kdj_k": kdj["K"],
+            "kdj_d": kdj["D"],
+            "kdj_j": kdj["J"],
+            "rsi": self._rsi_series(period=rsi_cfg.get("period", 14)),
+            "adx": dmi["ADX"],
+            "plus_di": dmi["DI+"],
+            "minus_di": dmi["DI-"],
+            "boll_mid": boll["MID"],
+            "boll_upper": boll["UPPER"],
+            "boll_lower": boll["LOWER"],
+            "obv": obv["OBV"],
+            "obv_ma": obv["MA"],
+            "atr": atr,
+        }
+
+    def macd(self, fast: int = 12, slow: int = 26, signal: int = 9) -> Dict[str, float]:
+        series = self._macd_series(fast=fast, slow=slow, signal=signal)
+        dif = series["DIF"]
+        dea = series["DEA"]
+        hist = series["HIST"]
+        return {
+            "DIF": _last_valid(dif),
+            "DEA": _last_valid(dea),
+            "HIST": _last_valid(hist),
             "signal": "bullish" if dif.iloc[-1] > dea.iloc[-1] else "bearish",
         }
 
     def rsi(self, period: int = 14, overbought: int = 70, oversold: int = 30) -> Dict[str, float]:
-        delta = self.df["close"].diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-        rs = avg_gain / avg_loss.replace(0, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-        value = float(rsi.fillna(50).iloc[-1])
+        rsi = self._rsi_series(period=period)
+        value = _last_valid(rsi, default=50.0, lower=0.0, upper=100.0)
         if value > overbought:
             signal = "overbought"
         elif value < oversold:
@@ -98,18 +275,16 @@ class TechnicalAnalyzer:
         return {"RSI": value, "signal": signal}
 
     def bollinger(self, period: int = 20, std: int = 2) -> Dict[str, float]:
-        mid = self.df["close"].rolling(period).mean()
-        std_dev = self.df["close"].rolling(period).std(ddof=0)
-        upper = mid + std * std_dev
-        lower = mid - std * std_dev
-        price = self.df["close"].iloc[-1]
-        band_width = upper.iloc[-1] - lower.iloc[-1]
-        pct_b = 0.5 if band_width == 0 or pd.isna(band_width) else (price - lower.iloc[-1]) / band_width
+        boll = self._bollinger_series(period=period, std=std)
+        mid = boll["MID"]
+        upper = boll["UPPER"]
+        lower = boll["LOWER"]
+        pct_b = _last_valid(boll["%B"], default=0.5)
         signal = "near_upper" if pct_b > 0.8 else "near_lower" if pct_b < 0.2 else "neutral"
         return {
-            "MID": float(mid.iloc[-1]),
-            "UPPER": float(upper.iloc[-1]),
-            "LOWER": float(lower.iloc[-1]),
+            "MID": _last_valid(mid),
+            "UPPER": _last_valid(upper),
+            "LOWER": _last_valid(lower),
             "%B": float(pct_b),
             "signal": signal,
         }
@@ -122,17 +297,10 @@ class TechnicalAnalyzer:
         overbought: int = 80,
         oversold: int = 20,
     ) -> Dict[str, float]:
-        high_n = self.df["high"].rolling(period).max()
-        low_n = self.df["low"].rolling(period).min()
-        denominator = (high_n - low_n).replace(0, np.nan)
-        rsv = ((self.df["close"] - low_n) / denominator * 100).fillna(50)
-        k = rsv.ewm(alpha=1 / max(smooth_k, 1), adjust=False).mean()
-        d = k.ewm(alpha=1 / max(smooth_d, 1), adjust=False).mean()
-        j = 3 * k - 2 * d
-
-        k_latest = float(k.iloc[-1])
-        d_latest = float(d.iloc[-1])
-        j_latest = float(j.iloc[-1])
+        kdj = self._kdj_series(period=period, smooth_k=smooth_k, smooth_d=smooth_d)
+        k_latest = _last_valid(kdj["K"], default=50.0, lower=0.0, upper=100.0)
+        d_latest = _last_valid(kdj["D"], default=50.0, lower=0.0, upper=100.0)
+        j_latest = _last_valid(kdj["J"], default=50.0)
         cross = "golden_cross" if k_latest > d_latest else "death_cross" if k_latest < d_latest else "neutral"
         zone = "overbought" if max(k_latest, d_latest, j_latest) >= overbought else "oversold" if min(k_latest, d_latest, j_latest) <= oversold else "neutral"
         signal = "bullish" if cross == "golden_cross" else "bearish" if cross == "death_cross" else "neutral"
@@ -147,51 +315,33 @@ class TechnicalAnalyzer:
         }
 
     def dmi(self, period: int = 14, adx_strong: int = 25) -> Dict[str, float]:
-        high = self.df["high"]
-        low = self.df["low"]
-        close = self.df["close"]
+        dmi = self._dmi_series(period=period)
+        plus_di = dmi["DI+"]
+        minus_di = dmi["DI-"]
+        adx = dmi["ADX"]
+        plus_latest = _last_valid(plus_di, default=0.0, lower=0.0, upper=100.0)
+        minus_latest = _last_valid(minus_di, default=0.0, lower=0.0, upper=100.0)
+        adx_latest = _last_valid(adx, default=0.0, lower=0.0, upper=100.0)
 
-        plus_move = high.diff()
-        minus_move = -low.diff()
-        plus_dm = plus_move.where((plus_move > minus_move) & (plus_move > 0), 0.0)
-        minus_dm = minus_move.where((minus_move > plus_move) & (minus_move > 0), 0.0)
-
-        tr_components = pd.concat(
-            [high - low, (high - close.shift()).abs(), (low - close.shift()).abs()],
-            axis=1,
-        )
-        tr = tr_components.max(axis=1)
-        atr = tr.rolling(period).mean()
-        plus_di = 100 * (plus_dm.rolling(period).mean() / atr.replace(0, np.nan))
-        minus_di = 100 * (minus_dm.rolling(period).mean() / atr.replace(0, np.nan))
-        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-        adx = dx.rolling(period).mean().fillna(0)
-
-        if adx.iloc[-1] > adx_strong and plus_di.iloc[-1] > minus_di.iloc[-1]:
+        if adx_latest > adx_strong and plus_latest > minus_latest:
             signal = "bullish_trend"
-        elif adx.iloc[-1] > adx_strong and plus_di.iloc[-1] < minus_di.iloc[-1]:
+        elif adx_latest > adx_strong and plus_latest < minus_latest:
             signal = "bearish_trend"
         else:
             signal = "weak_trend"
 
         return {
-            "DI+": float(plus_di.fillna(0).iloc[-1]),
-            "DI-": float(minus_di.fillna(0).iloc[-1]),
-            "ADX": float(adx.iloc[-1]),
+            "DI+": plus_latest,
+            "DI-": minus_latest,
+            "ADX": adx_latest,
             "signal": signal,
         }
 
     def obv(self, period: int = 20) -> Dict[str, float]:
-        close = self.df["close"]
-        volume = self.df["volume"].fillna(0)
-        direction = np.sign(close.diff().fillna(0))
-        obv = (direction * volume).cumsum()
-        obv_ma = obv.rolling(period).mean()
-        slope_5d = obv.diff(5).fillna(0)
-
-        latest_obv = float(obv.iloc[-1])
-        latest_ma = float(obv_ma.fillna(obv).iloc[-1])
-        latest_slope = float(slope_5d.iloc[-1])
+        obv_data = self._obv_series(period=period)
+        latest_obv = _last_valid(obv_data["OBV"])
+        latest_ma = _last_valid(obv_data["MA"], default=latest_obv)
+        latest_slope = _last_valid(obv_data["slope_5d"])
 
         if latest_obv > latest_ma and latest_slope >= 0:
             signal = "bullish"
@@ -254,16 +404,94 @@ class TechnicalAnalyzer:
 
     def volume_analysis(self) -> Dict[str, float]:
         vol = self.df["volume"].fillna(0)
+        close = self.df["close"].astype(float)
         ma5 = vol.rolling(5).mean()
         ma20 = vol.rolling(20).mean()
-        denominator = ma5.iloc[-1] if ma5.iloc[-1] not in (0, np.nan) else np.nan
+        amount = self.df["amount"]
+        amount_ma20 = amount.rolling(20).mean()
+        price_ma20 = close.rolling(20).mean()
+        prev_20d_high = self.df["high"].shift(1).rolling(20).max()
+        prev_20d_low = self.df["low"].shift(1).rolling(20).min()
+        denominator = ma5.iloc[-1]
         ratio = 1.0 if pd.isna(denominator) or denominator == 0 else float(vol.iloc[-1] / denominator)
-        signal = "heavy_volume" if ratio > 1.5 else "light_volume" if ratio < 0.6 else "normal"
+        denominator_20 = ma20.iloc[-1]
+        ratio_20 = 1.0 if pd.isna(denominator_20) or denominator_20 == 0 else float(vol.iloc[-1] / denominator_20)
+        amount_denominator_20 = amount_ma20.iloc[-1]
+        amount_ratio_20 = (
+            float(amount.iloc[-1] / amount_denominator_20)
+            if pd.notna(amount.iloc[-1]) and pd.notna(amount_denominator_20) and amount_denominator_20 > 0
+            else np.nan
+        )
+        latest_return_1d = float(close.pct_change().iloc[-1]) if len(close) > 1 and pd.notna(close.pct_change().iloc[-1]) else 0.0
+        latest_return_5d = float(close.pct_change(5).iloc[-1]) if len(close) > 5 and pd.notna(close.pct_change(5).iloc[-1]) else 0.0
+        latest_close = float(close.iloc[-1])
+        latest_ma20 = float(price_ma20.iloc[-1]) if pd.notna(price_ma20.iloc[-1]) else latest_close
+        breakout_20d = bool(pd.notna(prev_20d_high.iloc[-1]) and prev_20d_high.iloc[-1] > 0 and latest_close >= float(prev_20d_high.iloc[-1]) * 0.995)
+        breakdown_20d = bool(pd.notna(prev_20d_low.iloc[-1]) and prev_20d_low.iloc[-1] > 0 and latest_close <= float(prev_20d_low.iloc[-1]) * 1.005)
+
+        if breakout_20d and ratio_20 >= 1.2:
+            structure = "放量突破"
+        elif latest_return_1d > 0.005 and ratio_20 >= 1.2:
+            structure = "放量上攻"
+        elif latest_return_1d >= 0 and ratio < 0.8:
+            structure = "缩量上涨"
+        elif latest_return_1d <= 0 and ratio < 0.8 and latest_close >= latest_ma20 * 0.98:
+            structure = "缩量回调"
+        elif abs(latest_return_1d) <= 0.01 and ratio_20 >= 1.5:
+            structure = "放量滞涨"
+        elif latest_return_1d < 0 and ratio_20 >= 1.2:
+            structure = "放量下跌"
+        elif breakdown_20d and ratio_20 >= 1.1:
+            structure = "跌破平台"
+        else:
+            structure = "量价中性"
+        signal = structure
         return {
-            "volume": float(vol.iloc[-1]),
-            "MA5": float(ma5.fillna(0).iloc[-1]),
-            "MA20": float(ma20.fillna(0).iloc[-1]),
+            "volume": _last_valid(vol),
+            "MA5": _last_valid(ma5),
+            "MA20": _last_valid(ma20),
             "vol_ratio": ratio,
+            "vol_ratio_20": ratio_20,
+            "amount_ratio_20": float(amount_ratio_20) if pd.notna(amount_ratio_20) else np.nan,
+            "price_change_1d": latest_return_1d,
+            "price_change_5d": latest_return_5d,
+            "breakout_20d": breakout_20d,
+            "breakdown_20d": breakdown_20d,
+            "structure": structure,
+            "signal": signal,
+        }
+
+    def volatility_profile(self, atr_period: int = 14, lookback: int = 60) -> Dict[str, float]:
+        close = self.df["close"].astype(float)
+        atr = self._atr_series(period=atr_period)
+        natr = atr / close.replace(0, np.nan)
+        natr_ma20 = natr.rolling(20).mean()
+        latest_natr = _last_valid(natr, default=0.0, lower=0.0)
+        latest_natr_ma20 = _last_valid(natr_ma20, default=latest_natr if latest_natr > 0 else 1.0, lower=1e-9)
+        atr_ratio = latest_natr / latest_natr_ma20 if latest_natr_ma20 > 0 else 1.0
+
+        boll = self._bollinger_series(period=20, std=2)
+        width = ((boll["UPPER"] - boll["LOWER"]) / boll["MID"].replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+        latest_width = _last_valid(width, default=0.0, lower=0.0)
+        width_window = width.tail(max(lookback, 20)).dropna()
+        if width_window.empty:
+            width_percentile = 0.5
+        else:
+            width_percentile = float((width_window <= latest_width).mean())
+
+        if atr_ratio <= 0.9 and width_percentile <= 0.35:
+            signal = "compressed"
+        elif atr_ratio >= 1.15 and width_percentile >= 0.65:
+            signal = "expanding"
+        else:
+            signal = "neutral"
+
+        return {
+            "ATR": _last_valid(atr, default=0.0, lower=0.0),
+            "NATR": latest_natr,
+            "atr_ratio_20": float(atr_ratio),
+            "boll_width": latest_width,
+            "boll_width_percentile": width_percentile,
             "signal": signal,
         }
 
@@ -291,12 +519,14 @@ class TechnicalAnalyzer:
         ma_periods = list(periods or [5, 10, 20, 30, 60])
         mas = {}
         for period in ma_periods:
-            mas[f"MA{period}"] = float(self.df["close"].rolling(period).mean().iloc[-1])
+            series = self.df["close"].rolling(period).mean()
+            if series.notna().any():
+                mas[f"MA{period}"] = _last_valid(series)
         price = float(self.df["close"].iloc[-1])
         above_count = sum(1 for value in mas.values() if price > value)
-        if above_count >= max(len(mas) - 1, 1):
+        if mas and above_count >= max(len(mas) - 1, 1):
             signal = "bullish"
-        elif above_count <= 1:
+        elif mas and above_count <= 1:
             signal = "bearish"
         else:
             signal = "neutral"
@@ -314,6 +544,7 @@ class TechnicalAnalyzer:
             "obv": self.obv(**technical_config.get("obv", {})),
             "fibonacci": self.fibonacci(**technical_config.get("fibonacci", {})),
             "volume": self.volume_analysis(),
+            "volatility": self.volatility_profile(**technical_config.get("atr", {})),
             "candlestick": self.candlestick_patterns(),
             "ma_system": self.ma_system(technical_config.get("ma_periods")),
         }

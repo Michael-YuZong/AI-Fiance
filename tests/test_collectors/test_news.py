@@ -113,3 +113,60 @@ feeds: []
     monkeypatch.setattr(collector, "cached_call", fake_cached_call)
     collector.search_by_keywords(["腾讯控股", "Tencent"], preferred_sources=["Reuters"], limit=4, recent_days=30)
     assert any("hl=en-US" in cache_key and "Tencent" in cache_key for cache_key in cache_keys)
+
+
+def test_news_collector_search_by_keywords_supports_sec_and_ir_source_hints(tmp_path, monkeypatch):
+    config_path = tmp_path / "news.yaml"
+    config_path.write_text(
+        """
+preferences:
+  preferred_sources: ["Investor Relations", "SEC"]
+  required_sources: []
+  max_items_per_feed: 2
+feeds: []
+""".strip(),
+        encoding="utf-8",
+    )
+    collector = NewsCollector({"news_feeds_file": str(config_path)})
+    cache_keys = []
+
+    def fake_cached_call(cache_key, fetcher, *args, **kwargs):  # noqa: ANN001
+        cache_keys.append(cache_key)
+        return feedparser.parse("<rss><channel></channel></rss>")
+
+    monkeypatch.setattr(collector, "cached_call", fake_cached_call)
+    collector.search_by_keywords(["Coinbase", "earnings", "results"], preferred_sources=["Investor Relations", "SEC"], limit=4, recent_days=30)
+    assert any("sec.gov" in cache_key.lower() for cache_key in cache_keys)
+    assert any("Investor+Relations" in cache_key or "Investor%20Relations" in cache_key for cache_key in cache_keys)
+
+
+def test_news_collector_search_by_keywords_ranks_more_relevant_same_source_item_first(tmp_path, monkeypatch):
+    config_path = tmp_path / "news.yaml"
+    config_path.write_text(
+        """
+preferences:
+  preferred_sources: ["Reuters"]
+  required_sources: []
+  max_items_per_feed: 2
+feeds: []
+""".strip(),
+        encoding="utf-8",
+    )
+    collector = NewsCollector({"news_feeds_file": str(config_path)})
+
+    def fake_cached_call(cache_key, fetcher, *args, **kwargs):  # noqa: ANN001
+        if "reuters.com" in cache_key.lower():
+            return feedparser.parse(
+                """
+<rss><channel>
+  <item><title>China's largest provincial economy vows to reshape industry with AI - Reuters</title><link>https://example.com/generic</link><source>Reuters</source></item>
+  <item><title>Trump administration debates allowing Tencent to keep its gaming stakes, FT reports - Reuters</title><link>https://example.com/tencent</link><source>Reuters</source></item>
+</channel></rss>
+""".strip()
+            )
+        return feedparser.parse("<rss><channel></channel></rss>")
+
+    monkeypatch.setattr(collector, "cached_call", fake_cached_call)
+    items = collector.search_by_keywords(["Tencent", "gaming stakes"], preferred_sources=["Reuters"], limit=4, recent_days=30)
+    assert items
+    assert "gaming stakes" in items[0]["title"].lower()

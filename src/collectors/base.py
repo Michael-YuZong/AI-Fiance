@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import pickle
 import time
 from datetime import datetime
@@ -13,7 +14,7 @@ import pandas as pd
 
 from src.utils.config import resolve_project_path
 from src.utils.logger import logger
-from src.utils.retry import RateLimiter, retry
+from src.utils.retry import RateLimiter
 
 try:
     import tushare as ts
@@ -22,12 +23,45 @@ except ImportError:  # pragma: no cover
 
 _tushare_api_instance: Any = None
 _tushare_rate_limiter = RateLimiter(min_interval_seconds=0.35)
+DIRECT_DATA_HOST_SUFFIXES = (
+    ".eastmoney.com",
+    ".jin10.com",
+    ".tushare.pro",
+    ".cninfo.com.cn",
+)
+
+
+def _ensure_direct_data_no_proxy() -> None:
+    """Bypass system HTTP proxies for domestic market-data domains.
+
+    On macOS, ``requests`` can inherit system proxies through urllib, even when
+    the shell environment is clean. For CN market-data endpoints this adds an
+    unnecessary local-proxy hop and has shown up as intermittent
+    ``ProxyError(... RemoteDisconnected ...)`` failures. We keep these domains
+    on direct/TUN paths and let collector-level retry/cache handle upstream
+    throttling separately.
+    """
+
+    existing = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    items = [item.strip() for item in existing.split(",") if item.strip()]
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*items, *DIRECT_DATA_HOST_SUFFIXES, "localhost", "127.0.0.1"]:
+        normalized = item.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(normalized)
+    joined = ",".join(merged)
+    os.environ["NO_PROXY"] = joined
+    os.environ["no_proxy"] = joined
 
 
 class BaseCollector:
     """Common data collector helpers."""
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, name: Optional[str] = None) -> None:
+        _ensure_direct_data_no_proxy()
         self.config = config or {}
         self.name = name or self.__class__.__name__
         storage = self.config.get("storage", {})
@@ -470,9 +504,58 @@ class BaseCollector:
         with cache_path.open("wb") as handle:
             pickle.dump(payload, handle)
 
-    @retry()
-    def _execute_fetcher(self, fetcher: Callable[..., Any], *args, **kwargs) -> Any:
-        return fetcher(*args, **kwargs)
+    @staticmethod
+    def _looks_like_resolution_error(exc: BaseException) -> bool:
+        text = str(exc)
+        markers = (
+            "NameResolutionError",
+            "Failed to resolve",
+            "nodename nor servname provided",
+            "Temporary failure in name resolution",
+            "Could not resolve host",
+            "curl: (6)",
+            "ProxyError",
+            "RemoteDisconnected",
+        )
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _is_nonrecoverable_fetch_error(fetcher: Callable[..., Any], exc: BaseException) -> bool:
+        if BaseCollector._looks_like_resolution_error(exc):
+            return True
+        fetcher_name = getattr(fetcher, "__name__", "")
+        text = str(exc)
+        if fetcher_name == "history" and "'NoneType' object is not subscriptable" in text:
+            return True
+        return False
+
+    def _execute_fetcher(
+        self,
+        fetcher: Callable[..., Any],
+        *args,
+        attempts: int = 3,
+        backoff_seconds: float = 1.0,
+        backoff_multiplier: float = 2.0,
+        **kwargs,
+    ) -> Any:
+        last_error: BaseException | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return fetcher(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if self._is_nonrecoverable_fetch_error(fetcher, exc):
+                    raise
+                if attempt >= attempts:
+                    raise
+                sleep_seconds = backoff_seconds * (backoff_multiplier ** (attempt - 1))
+                logger.warning(
+                    f"Retrying _execute_fetcher after error on attempt {attempt}/{attempts}: {exc}"
+                )
+                time.sleep(sleep_seconds)
+        if last_error is not None:
+            raise last_error
+        return None
 
     def cached_call(
         self,
@@ -481,6 +564,7 @@ class BaseCollector:
         *args,
         ttl_hours: Optional[int] = None,
         use_cache: bool = True,
+        prefer_stale: bool = False,
         **kwargs,
     ) -> Any:
         """Return cached result when possible, otherwise fetch and cache."""
@@ -490,12 +574,19 @@ class BaseCollector:
                 logger.info(f"{self.name} cache hit: {cache_key}")
                 return cached
             stale_cached = self._load_cache(cache_key, ttl_hours=ttl_hours, allow_stale=True)
+            if prefer_stale and stale_cached is not None:
+                logger.info(f"{self.name} stale cache hit: {cache_key}")
+                return stale_cached
         else:
             stale_cached = None
 
         self.rate_limiter.wait()
         try:
-            result = self._execute_fetcher(fetcher, *args, **kwargs)
+            result = self._execute_fetcher(
+                fetcher,
+                *args,
+                **kwargs,
+            )
         except Exception as exc:
             if stale_cached is not None:
                 logger.warning(f"{self.name} fetch failed for {cache_key}; using stale cache: {exc}")

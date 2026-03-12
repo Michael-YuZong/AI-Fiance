@@ -29,7 +29,12 @@ class _FakeYFinance:
 
 
 def test_market_cn_falls_back_to_yahoo_when_ak_unavailable(monkeypatch):
-    collector = ChinaMarketCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    collector = ChinaMarketCollector(
+        {
+            "storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0},
+            "market": {"enable_yahoo_fallback_for_cn_etf": True},
+        }
+    )
     monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(RuntimeError("ak failed")))
     monkeypatch.setattr("src.collectors.market_cn.yf", _FakeYFinance())
     frame = collector.get_etf_daily("512400")
@@ -143,6 +148,52 @@ def test_market_cn_ts_etf_daily_scales_amount_to_yuan(monkeypatch, tmp_path):
     frame = collector.get_etf_daily("510300")
     assert not frame.empty
     assert float(frame["成交额"].iloc[-1]) == 567_800.0
+
+
+def test_market_cn_unlock_pressure_flags_large_near_term_share_float(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "share_float"
+        assert kwargs.get("ts_code") == "300502.SZ"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "300502.SZ",
+                    "ann_date": "20260301",
+                    "float_date": "20260320",
+                    "float_share": 52_000.0,
+                    "float_ratio": 3.2,
+                    "holder_name": "示例股东A",
+                    "share_type": "定向增发机构配售股份",
+                },
+                {
+                    "ts_code": "300502.SZ",
+                    "ann_date": "20260301",
+                    "float_date": "20260320",
+                    "float_share": 40_000.0,
+                    "float_ratio": 2.1,
+                    "holder_name": "示例股东B",
+                    "share_type": "定向增发机构配售股份",
+                },
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    snapshot = collector.get_unlock_pressure("300502", as_of="2026-03-12")
+    assert snapshot["status"] == "❌"
+    assert snapshot["ratio_30d"] == 5.3
+    assert snapshot["next_date"] == "2026-03-20"
+    assert "未来 30 日预计解禁约 5.30%" in snapshot["detail"]
+
+
+def test_market_cn_unlock_pressure_passes_when_no_upcoming_share_float(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_ts_call", lambda api_name, **kwargs: pd.DataFrame() if api_name == "share_float" else None)
+    snapshot = collector.get_unlock_pressure("300308", as_of="2026-03-12")
+    assert snapshot["status"] == "✅"
+    assert snapshot["ratio_30d"] == 0.0
+    assert "未来 90 日未见明确限售股解禁安排" in snapshot["detail"]
 
 
 def test_ts_daily_basic_snapshot_merges_name_industry_and_amount(monkeypatch, tmp_path):

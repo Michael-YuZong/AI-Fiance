@@ -303,3 +303,50 @@ def test_opportunity_renderer_includes_fund_profile_sections():
     assert "## 基金成分分析" in rendered
     assert "## 基金经理风格分析" in rendered
     assert "### 前十大持仓" in rendered
+
+
+def test_opportunity_renderer_includes_etf_profile_and_intraday_sections():
+    analysis = _sample_analysis("159819", "人工智能ETF易方达")
+    analysis["fund_profile"] = {
+        "overview": {
+            "基金类型": "指数型-股票",
+            "基金管理人": "易方达基金",
+            "基金经理人": "张湛",
+            "净资产规模": "217.96亿元（截止至：2025年12月31日）",
+            "成立日期/规模": "2020年07月27日 / 61.552亿份",
+            "业绩比较基准": "中证人工智能主题指数收益率",
+        },
+        "asset_allocation": [{"资产类型": "股票", "仓位占比": 99.83}, {"资产类型": "现金", "仓位占比": 0.40}],
+        "top_holdings": [{"股票代码": "300308", "股票名称": "中际旭创", "占净值比例": 10.57, "持仓市值": 230284.94, "季度": "2025年4季度股票投资明细"}],
+        "industry_allocation": [{"行业类别": "信息技术", "占净值比例": 88.0, "截止时间": "2025-12-31"}],
+        "manager": {"name": "张湛", "tenure_days": 2160, "aum_billion": 1313.31, "best_return_pct": 57.16, "current_fund_count": 26},
+        "rating": {},
+        "style": {
+            "tags": ["科技主题", "被动跟踪"],
+            "summary": "这只 ETF 更像在买人工智能方向的被动暴露。",
+            "positioning": "股票仓位接近满仓。",
+            "selection": "核心看跟踪指数和前十大权重，不看基金经理主观择时。",
+            "consistency": "更重要的是跟踪误差和标的暴露是否清晰。",
+            "benchmark_note": "中证人工智能主题指数收益率",
+        },
+        "notes": [],
+    }
+    analysis["intraday"] = {
+        "enabled": True,
+        "fallback_mode": False,
+        "current": 1.554,
+        "open": 1.572,
+        "high": 1.587,
+        "low": 1.553,
+        "vwap": 1.566,
+        "range_position": 0.03,
+        "change_vs_prev_close": -0.0108,
+        "change_vs_open": -0.0115,
+        "trend": "偏弱",
+        "commentary": "盘中价格弱于 VWAP 且靠近日内低位，更像承接不足。",
+    }
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+    assert "## 今日盘中视角" in rendered
+    assert "盘中价格弱于 VWAP" in rendered
+    assert "## 基金画像" in rendered
+    assert "中证人工智能主题指数收益率" in rendered

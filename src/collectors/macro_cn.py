@@ -37,7 +37,7 @@ class ChinaMacroCollector(BaseCollector):
         except Exception:
             pass
         fetcher = self._ak_function("macro_china_pmi", "macro_china_pmi_yearly")
-        return self.cached_call("china_macro:pmi", fetcher)
+        return self.cached_call("china_macro:pmi", fetcher, prefer_stale=True)
 
     # ── CPI ───────────────────────────────────────────────────
 
@@ -50,7 +50,7 @@ class ChinaMacroCollector(BaseCollector):
         except Exception:
             pass
         fetcher = self._ak_function("macro_china_cpi_monthly", "macro_china_cpi_yearly")
-        return self.cached_call("china_macro:cpi", fetcher)
+        return self.cached_call("china_macro:cpi", fetcher, prefer_stale=True)
 
     # ── PPI ───────────────────────────────────────────────────
 
@@ -63,7 +63,7 @@ class ChinaMacroCollector(BaseCollector):
         except Exception:
             pass
         fetcher = self._ak_function("macro_china_ppi")
-        return self.cached_call("china_macro:ppi", fetcher)
+        return self.cached_call("china_macro:ppi", fetcher, prefer_stale=True)
 
     # ── M0 / M1 / M2 货币供应 ────────────────────────────────
 
@@ -76,7 +76,7 @@ class ChinaMacroCollector(BaseCollector):
         except Exception:
             pass
         fetcher = self._ak_function("macro_china_money_supply")
-        return self.cached_call("china_macro:money_supply", fetcher)
+        return self.cached_call("china_macro:money_supply", fetcher, prefer_stale=True)
 
     # ── 社会融资规模 ──────────────────────────────────────────
 
@@ -89,7 +89,7 @@ class ChinaMacroCollector(BaseCollector):
         except Exception:
             pass
         fetcher = self._ak_function("macro_china_shrzgm")
-        return self.cached_call("china_macro:social_financing", fetcher)
+        return self.cached_call("china_macro:social_financing", fetcher, prefer_stale=True)
 
     # ── LPR 利率 ──────────────────────────────────────────────
 
@@ -102,14 +102,14 @@ class ChinaMacroCollector(BaseCollector):
         except Exception:
             pass
         fetcher = self._ak_function("macro_china_lpr")
-        return self.cached_call("china_macro:lpr", fetcher)
+        return self.cached_call("china_macro:lpr", fetcher, prefer_stale=True)
 
     # ── 逆回购 ───────────────────────────────────────────────
 
     def get_reverse_repo(self) -> pd.DataFrame:
         """逆回购操作。"""
         fetcher = self._ak_function("macro_china_reverse_repo")
-        return self.cached_call("china_macro:reverse_repo", fetcher)
+        return self.cached_call("china_macro:reverse_repo", fetcher, prefer_stale=True)
 
     # ── SHIBOR ────────────────────────────────────────────────
 

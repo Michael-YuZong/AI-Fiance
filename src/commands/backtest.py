@@ -12,7 +12,7 @@ import pandas as pd
 from src.output.backtest_report import BacktestReportRenderer
 from src.processors.backtester import SimpleBacktester
 from src.processors.risk_support import trim_history_period
-from src.processors.technical import normalize_ohlcv_frame
+from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.utils.config import detect_asset_type, load_config, resolve_project_path
 from src.utils.data import load_yaml
 from src.utils.market import fetch_asset_history
@@ -43,25 +43,12 @@ def _prepare_rule_frame(frame: pd.DataFrame, technical_config: Dict[str, Any]) -
     normalized = normalize_ohlcv_frame(frame).copy()
     close = normalized["close"].astype(float)
     volume = normalized["volume"].fillna(0.0).astype(float)
+    analyzer = TechnicalAnalyzer(normalized)
+    indicators = analyzer.indicator_series(technical_config)
 
-    macd_cfg = technical_config.get("macd", {})
-    fast = int(macd_cfg.get("fast", 12))
-    slow = int(macd_cfg.get("slow", 26))
-    signal = int(macd_cfg.get("signal", 9))
-    normalized["ema_fast"] = close.ewm(span=fast, adjust=False).mean()
-    normalized["ema_slow"] = close.ewm(span=slow, adjust=False).mean()
-    normalized["dif"] = normalized["ema_fast"] - normalized["ema_slow"]
-    normalized["dea"] = normalized["dif"].ewm(span=signal, adjust=False).mean()
-
-    rsi_cfg = technical_config.get("rsi", {})
-    rsi_period = int(rsi_cfg.get("period", 14))
-    delta = close.diff()
-    gain = delta.clip(lower=0.0)
-    loss = -delta.clip(upper=0.0)
-    avg_gain = gain.ewm(alpha=1 / rsi_period, min_periods=rsi_period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / rsi_period, min_periods=rsi_period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    normalized["rsi"] = (100 - (100 / (1 + rs))).fillna(50.0)
+    normalized["dif"] = indicators["macd_dif"].values
+    normalized["dea"] = indicators["macd_dea"].values
+    normalized["rsi"] = indicators["rsi"].values
 
     normalized["ma10"] = close.rolling(10).mean()
     normalized["ma20"] = close.rolling(20).mean()

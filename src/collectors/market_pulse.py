@@ -118,6 +118,7 @@ class MarketPulseCollector(BaseCollector):
                     self._quiet_fetch,
                     fetcher,
                     ttl_hours=2,
+                    prefer_stale=True,
                     date=target,
                 )
             except Exception:
@@ -141,6 +142,7 @@ class MarketPulseCollector(BaseCollector):
                 self._quiet_fetch,
                 fetcher,
                 ttl_hours=6,
+                prefer_stale=True,
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -160,6 +162,7 @@ class MarketPulseCollector(BaseCollector):
                 self._quiet_fetch,
                 fetcher,
                 ttl_hours=12,
+                prefer_stale=True,
                 symbol="近一月",
             )
         except Exception:
@@ -178,6 +181,7 @@ class MarketPulseCollector(BaseCollector):
                 self._quiet_fetch,
                 fetcher,
                 ttl_hours=6,
+                prefer_stale=True,
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -199,6 +203,7 @@ class MarketPulseCollector(BaseCollector):
                 self._quiet_fetch,
                 fetcher,
                 ttl_hours=6,
+                prefer_stale=True,
                 start_date=start_date,
                 end_date=end_date,
             )

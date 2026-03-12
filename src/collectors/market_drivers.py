@@ -139,6 +139,7 @@ class MarketDriversCollector(BaseCollector):
                 self._quiet_fetch,
                 fetcher,
                 ttl_hours=2,
+                prefer_stale=True,
             )
         except Exception:
             return {"frame": pd.DataFrame(), "is_fresh": False, "latest_date": ""}
@@ -230,6 +231,7 @@ class MarketDriversCollector(BaseCollector):
                 self._quiet_fetch,
                 fetcher,
                 ttl_hours=8,
+                prefer_stale=True,
                 symbol=symbol,
                 indicator="今日",
             )
@@ -253,6 +255,7 @@ class MarketDriversCollector(BaseCollector):
                 self._quiet_fetch,
                 fetcher,
                 ttl_hours=1,
+                prefer_stale=True,
             ).reset_index(drop=True)
         except Exception:
             return pd.DataFrame()
@@ -267,6 +270,7 @@ class MarketDriversCollector(BaseCollector):
                 self._quiet_fetch,
                 fetcher,
                 ttl_hours=1,
+                prefer_stale=True,
             ).reset_index(drop=True)
         except Exception:
             return pd.DataFrame()
@@ -281,6 +285,7 @@ class MarketDriversCollector(BaseCollector):
                 self._quiet_fetch,
                 fetcher,
                 ttl_hours=1,
+                prefer_stale=True,
                 indicator="今日",
                 sector_type=sector_type,
             ).reset_index(drop=True)

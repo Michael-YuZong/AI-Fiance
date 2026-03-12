@@ -46,6 +46,18 @@ def _value(item: Any, key: str, default: Any = None) -> Any:
     return getattr(item, key, default)
 
 
+def _keyword_relevance(text: str, keywords: Sequence[str]) -> int:
+    haystack = str(text).lower()
+    score = 0
+    for keyword in keywords:
+        token = str(keyword).strip().lower()
+        if not token:
+            continue
+        if token in haystack:
+            score += 2 if " " in token else 1
+    return score
+
+
 SOURCE_DOMAIN_HINTS = {
     "Reuters": "site:reuters.com",
     "Bloomberg": "site:bloomberg.com",
@@ -54,6 +66,8 @@ SOURCE_DOMAIN_HINTS = {
     "PR Newswire": "site:prnewswire.com",
     "GlobeNewswire": "site:globenewswire.com",
     "HKEXnews": "site:hkexnews.hk",
+    "SEC": "site:sec.gov",
+    "Investor Relations": "\"Investor Relations\"",
     "财联社": "site:cls.cn",
     "证券时报": "site:stcn.com",
 }
@@ -107,6 +121,7 @@ class NewsCollector(BaseCollector):
                     self._fetch_feed,
                     url,
                     ttl_hours=2,
+                    prefer_stale=True,
                 )
             except Exception as exc:
                 errors.append(str(feed.get("name", feed.get("category", "news"))))
@@ -191,6 +206,7 @@ class NewsCollector(BaseCollector):
                     self._fetch_feed,
                     url,
                     ttl_hours=2,
+                    prefer_stale=True,
                 )
             except Exception:
                 continue
@@ -216,7 +232,7 @@ class NewsCollector(BaseCollector):
                     }
                 )
 
-        ranked = self._rank_items(items, preferred)
+        ranked = self._rank_items(items, preferred, query_keywords=cleaned)
         return self._diversify_items(ranked, limit)
 
     def get_stock_news(self, symbol: str, limit: int = 10) -> List[Dict[str, str]]:
@@ -232,6 +248,7 @@ class NewsCollector(BaseCollector):
                 fetcher,
                 symbol=symbol,
                 ttl_hours=2,
+                prefer_stale=True,
             )
         except Exception:
             return []
@@ -288,8 +305,10 @@ class NewsCollector(BaseCollector):
         self,
         items: Sequence[Dict[str, str]],
         preferred_sources: Sequence[str],
+        query_keywords: Optional[Sequence[str]] = None,
     ) -> List[Dict[str, str]]:
         preferred_lower = [item.lower() for item in preferred_sources]
+        query_terms = [str(item).strip() for item in (query_keywords or []) if str(item).strip()]
         deduped: List[Dict[str, str]] = []
         seen_titles = set()
         for item in items:
@@ -299,7 +318,7 @@ class NewsCollector(BaseCollector):
             seen_titles.add(title)
             deduped.append(item)
 
-        def _score(item: Dict[str, str]) -> tuple[int, int, str]:
+        def _score(item: Dict[str, str]) -> tuple[int, int, int, str]:
             source = (item.get("source") or item.get("configured_source") or "").lower()
             score = 0
             if item.get("must_include"):
@@ -308,7 +327,17 @@ class NewsCollector(BaseCollector):
                 score += 3
             if item.get("configured_source") and item["configured_source"].lower() in source:
                 score += 1
-            return (-score, len(item.get("title", "")), item.get("category", ""))
+            relevance = _keyword_relevance(
+                " ".join(
+                    [
+                        str(item.get("title", "")),
+                        str(item.get("source", "")),
+                        str(item.get("configured_source", "")),
+                    ]
+                ),
+                query_terms,
+            )
+            return (-score, -relevance, len(item.get("title", "")), item.get("category", ""))
 
         return sorted(deduped, key=_score)
 
@@ -383,7 +412,7 @@ class NewsCollector(BaseCollector):
                 seen.add(url)
 
             anchor_terms = cleaned_terms[:2]
-            for source in preferred_sources[:3]:
+            for source in preferred_sources[:5]:
                 domain = SOURCE_DOMAIN_HINTS.get(source)
                 if not domain:
                     continue

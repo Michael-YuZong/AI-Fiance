@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import argparse
 
-from src.processors.technical import normalize_ohlcv_frame
 from src.utils.config import detect_asset_type, load_config
-from src.utils.market import fetch_asset_history, fetch_intraday_history, format_pct, get_asset_context, intraday_metrics
+from src.utils.market import build_intraday_snapshot, format_pct, get_asset_context
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,39 +20,25 @@ def main() -> None:
     config = load_config(args.config or None)
     asset_type = detect_asset_type(args.symbol, config)
     context = get_asset_context(args.symbol, asset_type, config)
-
-    daily_history = normalize_ohlcv_frame(fetch_asset_history(args.symbol, asset_type, config))
-    fallback_mode = False
-    try:
-        intraday = fetch_intraday_history(args.symbol, asset_type, config)
-        metrics = intraday_metrics(intraday)
-    except Exception:
-        fallback_mode = True
-        latest = daily_history.iloc[-1:]
-        metrics = intraday_metrics(latest)
-        metrics["vwap"] = float((metrics["open"] + metrics["high"] + metrics["low"] + metrics["current"]) / 4)
-    prev_close = float(daily_history["close"].iloc[-2]) if len(daily_history) >= 2 else metrics["open"]
-    vs_prev_close = metrics["current"] / prev_close - 1 if prev_close else 0.0
-
-    trend = "偏强" if metrics["current"] > metrics["vwap"] and metrics["range_position"] > 0.6 else "偏弱" if metrics["current"] < metrics["vwap"] and metrics["range_position"] < 0.4 else "震荡"
+    snapshot = build_intraday_snapshot(args.symbol, asset_type, config)
 
     print(f"# 盘中快照: {args.symbol} ({context.name})")
     print("")
     print(f"- 资产类型: `{asset_type}`")
-    print(f"- 当前价: `{metrics['current']:.3f}`")
-    print(f"- 相对昨收: `{format_pct(vs_prev_close)}`")
-    print(f"- 相对今开: `{format_pct(metrics['change_pct'])}`")
-    print(f"- 日内高低: `{metrics['low']:.3f} / {metrics['high']:.3f}`")
-    print(f"- VWAP: `{metrics['vwap']:.3f}`")
-    print(f"- 日内位置: `{metrics['range_position']:.0%}`")
+    print(f"- 当前价: `{snapshot['current']:.3f}`")
+    print(f"- 相对昨收: `{format_pct(snapshot['change_vs_prev_close'])}`")
+    print(f"- 相对今开: `{format_pct(snapshot['change_vs_open'])}`")
+    print(f"- 日内高低: `{snapshot['low']:.3f} / {snapshot['high']:.3f}`")
+    print(f"- VWAP: `{snapshot['vwap']:.3f}`")
+    print(f"- 日内位置: `{snapshot['range_position']:.0%}`")
     print("")
     print("## 观察")
-    print(f"- 日内状态判断：{trend}。")
+    print(f"- 日内状态判断：{snapshot['trend']}。")
     print(
-        f"- 当前价格 {'站上' if metrics['current'] >= metrics['vwap'] else '跌破'} VWAP，"
-        f"说明日内平均成本 {'暂时占优' if metrics['current'] >= metrics['vwap'] else '暂时承压'}。"
+        f"- 当前价格 {'站上' if snapshot['current'] >= snapshot['vwap'] else '跌破'} VWAP，"
+        f"说明日内平均成本 {'暂时占优' if snapshot['current'] >= snapshot['vwap'] else '暂时承压'}。"
     )
-    if fallback_mode:
+    if snapshot.get("fallback_mode"):
         print("- 分钟线获取失败，当前结果已退化为最近一根日 K 快照。")
     print("- 当前版本基于 Level 1 分钟线和成交量，五档盘口与大单拆分后续再补。")
 

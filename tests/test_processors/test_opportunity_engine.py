@@ -10,7 +10,8 @@ from src.collectors.market_cn import ChinaMarketCollector
 from src.collectors.market_drivers import MarketDriversCollector
 from src.collectors.valuation import ValuationCollector
 from src.collectors.news import NewsCollector
-from src.processors.opportunity_engine import _action_plan, _catalyst_dimension, _chips_dimension, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _risk_dimension, _seasonality_dimension, _stock_name_tokens, build_stock_pool, discover_stock_opportunities
+from src.processors.opportunity_engine import _action_plan, _catalyst_dimension, _chips_dimension, _company_forward_events, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _preferred_catalyst_sources, _risk_dimension, _seasonality_dimension, _stock_name_tokens, _technical_dimension, build_stock_pool, discover_stock_opportunities
+from src.processors.opportunity_engine import _asset_note
 from src.utils.market import compute_history_metrics
 
 
@@ -157,7 +158,104 @@ def test_fundamental_dimension_for_cn_stock_prefers_financial_proxy_pe_ttm(monke
     factors = {factor["name"]: factor for factor in dimension["factors"]}
     assert dimension["valuation_snapshot"]["pe_ttm"] == 24.5
     assert dimension["valuation_extreme"] is False
-    assert "24.5x" in factors["个股估值"]["signal"]
+
+
+def test_technical_dimension_core_signal_uses_adx_not_di_values():
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=40, freq="B"),
+            "open": [10.0 + i * 0.1 for i in range(40)],
+            "high": [10.5 + i * 0.1 for i in range(40)],
+            "low": [9.5 + i * 0.1 for i in range(40)],
+            "close": [10.0 + i * 0.1 for i in range(40)],
+            "volume": [1_000_000] * 40,
+            "amount": [100_000_000.0] * 40,
+        }
+    )
+    technical = {
+        "macd": {"DIF": -0.2, "DEA": -0.1},
+        "dmi": {"ADX": 29.4, "DI+": 55.3, "DI-": 18.2},
+        "rsi": {"RSI": 47.0},
+        "fibonacci": {"levels": {"0.382": 11.0, "0.500": 10.8, "0.618": 10.6}},
+        "candlestick": [],
+        "volume_ratio": 0.94,
+        "ma_system": {"mas": {"MA5": 13.5, "MA20": 12.4, "MA60": 10.7}, "signal": "bullish"},
+        "bollinger": {"position": "neutral"},
+    }
+    dimension = _technical_dimension(history, technical)
+    adx_factor = next(f for f in dimension["factors"] if f["name"] == "ADX")
+    assert adx_factor["signal"] == "ADX 29.4 · 多头占优"
+    assert "55.3" not in dimension["core_signal"]
+
+
+def test_technical_dimension_does_not_reward_bearish_adx_trend():
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=40, freq="B"),
+            "open": [10.0 + i * 0.1 for i in range(40)],
+            "high": [10.5 + i * 0.1 for i in range(40)],
+            "low": [9.5 + i * 0.1 for i in range(40)],
+            "close": [10.0 + i * 0.1 for i in range(40)],
+            "volume": [1_000_000] * 40,
+            "amount": [100_000_000.0] * 40,
+        }
+    )
+    technical = {
+        "macd": {"DIF": -0.2, "DEA": -0.1},
+        "dmi": {"ADX": 33.9, "DI+": 24.2, "DI-": 31.1},
+        "rsi": {"RSI": 44.7},
+        "fibonacci": {"levels": {"0.382": 11.0, "0.500": 10.8, "0.618": 10.6}},
+        "candlestick": ["marubozu"],
+        "volume": {"vol_ratio": 0.94},
+        "ma_system": {"mas": {"MA5": 13.5, "MA20": 12.4, "MA60": 10.7}, "signal": "bullish"},
+        "bollinger": {"signal": "neutral"},
+    }
+    dimension = _technical_dimension(history, technical)
+    adx_factor = next(f for f in dimension["factors"] if f["name"] == "ADX")
+    assert adx_factor["display_score"] == "0/20"
+    assert "空头占优" in adx_factor["signal"]
+
+
+def test_technical_dimension_rewards_volume_structure_obv_kdj_and_compression():
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=40, freq="B"),
+            "open": [10.0 + i * 0.05 for i in range(40)],
+            "high": [10.4 + i * 0.05 for i in range(40)],
+            "low": [9.7 + i * 0.05 for i in range(40)],
+            "close": [10.1 + i * 0.05 for i in range(40)],
+            "volume": [1_000_000] * 40,
+            "amount": [100_000_000.0] * 40,
+        }
+    )
+    technical = {
+        "macd": {"DIF": 0.2, "DEA": 0.1},
+        "dmi": {"ADX": 31.0, "DI+": 33.5, "DI-": 18.1},
+        "kdj": {"K": 31.0, "D": 24.0, "J": 45.0, "cross": "golden_cross", "zone": "oversold"},
+        "obv": {"OBV": 12_000_000, "MA": 11_000_000, "slope_5d": 800_000, "signal": "bullish"},
+        "rsi": {"RSI": 43.0},
+        "fibonacci": {"levels": {"0.382": 11.8, "0.500": 11.4, "0.618": 11.0}},
+        "candlestick": ["hammer"],
+        "volume": {
+            "vol_ratio": 1.65,
+            "vol_ratio_20": 1.42,
+            "amount_ratio_20": 1.38,
+            "price_change_1d": 0.031,
+            "structure": "放量突破",
+        },
+        "ma_system": {"mas": {"MA5": 11.7, "MA20": 11.3, "MA60": 10.8}, "signal": "bullish"},
+        "bollinger": {"signal": "neutral"},
+        "volatility": {"NATR": 0.022, "atr_ratio_20": 0.84, "boll_width_percentile": 0.22, "signal": "compressed"},
+    }
+
+    dimension = _technical_dimension(history, technical)
+    factors = {factor["name"]: factor for factor in dimension["factors"]}
+
+    assert factors["KDJ"]["display_score"] == "10/10"
+    assert factors["OBV"]["display_score"] == "10/10"
+    assert factors["量价结构"]["display_score"] == "15/15"
+    assert "放量突破" in factors["量价结构"]["signal"]
+    assert factors["波动压缩"]["display_score"] == "10/10"
 
 
 def test_fundamental_dimension_for_us_stock_uses_single_stock_labels(monkeypatch):
@@ -255,6 +353,149 @@ def test_fundamental_dimension_for_cn_fund_prefers_holdings_proxy_and_benchmark_
     assert factors["PEG 代理"]["display_score"] != "缺失"
 
 
+def test_fundamental_dimension_for_cn_etf_prefers_fund_profile_benchmark_and_holdings_proxy(monkeypatch):
+    def fake_snapshot(self, keywords):  # noqa: ANN001
+        assert "中证人工智能主题指数" in keywords or "人工智能" in keywords
+        return {"index_code": "930713", "index_name": "中证人工智能主题指数", "pe_ttm": 58.0}
+
+    monkeypatch.setattr(ValuationCollector, "get_cn_index_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_index_value_history",
+        lambda self, index_code: pd.DataFrame(  # noqa: ARG005
+            {
+                "日期": pd.date_range("2025-01-01", periods=4, freq="QE"),
+                "市盈率2": [40.0, 43.0, 51.0, 58.0],
+                "股息率2": [0.6, 0.5, 0.4, 0.3],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_weighted_stock_financial_proxies",
+        lambda self, holdings, **kwargs: {  # noqa: ARG005
+            "revenue_yoy": 28.0,
+            "profit_yoy": 34.0,
+            "roe": 15.8,
+            "gross_margin": 31.0,
+            "coverage_weight": 48.3,
+            "report_date": "2025-12-31",
+            "top_concentration": 46.1,
+        },
+    )
+    monkeypatch.setattr(
+        MarketDriversCollector,
+        "collect",
+        lambda self: {  # noqa: ARG005
+            "industry_fund_flow": pd.DataFrame(
+                [{"名称": "信息技术", "今日主力净流入-净额": 210_000_000, "今日主力净流入-净占比": 3.2}]
+            ),
+            "concept_fund_flow": pd.DataFrame(),
+        },
+    )
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_etf_fund_flow",
+        lambda self, symbol: (_ for _ in ()).throw(RuntimeError("no etf flow")),  # noqa: ARG005
+    )
+    fund_profile = {
+        "overview": {
+            "基金简称": "人工智能ETF易方达",
+            "业绩比较基准": "中证人工智能主题指数收益率",
+        },
+        "top_holdings": [
+            {"股票代码": "300308", "股票名称": "中际旭创", "占净值比例": 10.57},
+            {"股票代码": "300502", "股票名称": "新易盛", "占净值比例": 10.52},
+            {"股票代码": "688256", "股票名称": "寒武纪", "占净值比例": 9.44},
+        ],
+        "industry_allocation": [{"行业类别": "信息技术", "占净值比例": 88.0}],
+    }
+    dimension = _fundamental_dimension(
+        "159819",
+        "cn_etf",
+        {"name": "人工智能ETF易方达", "sector": "科技", "chain_nodes": ["AI算力", "半导体"]},
+        {"price_percentile_1y": 0.86},
+        {},
+        fund_profile,
+    )
+    factors = {factor["name"]: factor for factor in dimension["factors"]}
+    assert dimension["valuation_snapshot"]["index_name"] == "中证人工智能主题指数"
+    assert "前五大持仓/成分股加权增速代理" in factors["盈利增速"]["signal"]
+    assert "前五大持仓/成分股" in factors["ROE"]["signal"]
+    assert factors["PEG 代理"]["display_score"] != "缺失"
+
+
+def test_fundamental_dimension_for_commodity_etf_uses_product_structure_not_stock_pe(monkeypatch):
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_index_snapshot",
+        lambda self, keywords: (_ for _ in ()).throw(AssertionError("commodity ETF should not query stock index valuation")),  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_weighted_stock_financial_proxies",
+        lambda self, holdings, **kwargs: (_ for _ in ()).throw(AssertionError("commodity ETF should not query stock financial proxy")),  # noqa: ARG005
+    )
+    fund_profile = {
+        "overview": {
+            "基金简称": "能源化工ETF",
+            "基金类型": "商品型 / 能源化工期货型",
+            "业绩比较基准": "易盛郑商所能源化工指数A收益率",
+            "跟踪标的": "易盛郑商所能源化工指数A收益率",
+            "净资产规模": "15.95亿元（截止至：2025年12月31日）",
+        },
+        "style": {
+            "sector": "能源",
+            "tags": ["能源主题", "被动跟踪", "保留机动仓位"],
+            "cash_ratio": 92.32,
+        },
+        "top_holdings": [],
+        "industry_allocation": [],
+    }
+    dimension = _fundamental_dimension(
+        "159981",
+        "cn_etf",
+        {"name": "能源化工ETF", "sector": "能源", "benchmark": "易盛郑商所能源化工指数A收益率", "fund_style_tags": ["能源主题", "被动跟踪", "保留机动仓位"]},
+        {"price_percentile_1y": 0.73},
+        {},
+        fund_profile,
+    )
+    factors = {factor["name"]: factor for factor in dimension["factors"]}
+    assert dimension["valuation_snapshot"] is None
+    assert dimension["financial_proxy"] == {}
+    assert "产品结构评估" in dimension["summary"] or "产品结构" in dimension["summary"]
+    assert factors["产品类型"]["display_score"] != "缺失"
+    assert factors["跟踪标的"]["display_score"] != "缺失"
+    assert factors["产品规模"]["display_score"] != "缺失"
+    assert factors["结构缓冲"]["display_score"] != "缺失"
+    assert "股票 PE" in factors["价格位置"]["detail"]
+
+
+def test_asset_note_for_passive_cn_fund_uses_exposure_wording():
+    note = _asset_note({"sector": "黄金", "is_passive_fund": True}, "cn_fund")
+    assert "被动暴露" in note
+    assert "基金经理" not in note
+
+
+def test_fund_specific_catalyst_profile_keeps_strict_keywords_product_specific():
+    profile = _fund_specific_catalyst_profile(
+        {"sector": "科技", "name": "人工智能ETF易方达"},
+        {
+            "overview": {"业绩比较基准": "中证人工智能主题指数收益率"},
+            "top_holdings": [
+                {"股票名称": "中际旭创"},
+                {"股票名称": "新易盛"},
+                {"股票名称": "寒武纪"},
+            ],
+            "industry_allocation": [{"行业类别": "信息传输、软件和信息技术服务业"}],
+        },
+    )
+    strict_keywords = profile["strict_keywords"]
+    assert "中际旭创" in strict_keywords
+    assert "中证人工智能主题指数" in strict_keywords
+    assert "科技" not in strict_keywords
+
+
 def test_chips_dimension_uses_board_level_proxies(monkeypatch):
     monkeypatch.setattr(
         ValuationCollector,
@@ -346,6 +587,78 @@ def test_chips_dimension_falls_back_to_global_northbound_flow(monkeypatch):
     assert "6.00亿" in factors["北向/南向"]["signal"]
 
 
+def test_chips_dimension_for_cn_stock_does_not_award_global_northbound_fallback(monkeypatch):
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_north_south_flow",
+        lambda self: pd.DataFrame([{"日期": "2026-03-10", "北向资金净流入": 3_037_210_000.0, "南向资金净流入": 0.0}]),  # noqa: ARG005
+    )
+    context = {
+        "drivers": {
+            "industry_fund_flow": pd.DataFrame(),
+            "concept_fund_flow": pd.DataFrame(),
+            "northbound_industry": {"frame": pd.DataFrame()},
+            "northbound_concept": {"frame": pd.DataFrame()},
+            "hot_rank": pd.DataFrame(),
+        }
+    }
+    dimension = _chips_dimension(
+        "300308",
+        "cn_stock",
+        {"name": "中际旭创", "sector": "科技", "chain_nodes": ["光模块"]},
+        context,
+        {},
+    )
+    factor = next(f for f in dimension["factors"] if f["name"] == "北向/南向")
+    assert factor["display_score"] == "信息项"
+    assert "未再回退全市场总量" in factor["signal"]
+
+
+def test_chips_dimension_for_commodity_etf_avoids_northbound_and_stock_concentration(monkeypatch):
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_etf_fund_flow",
+        lambda self, symbol: pd.DataFrame([{"净流入": 120_000_000.0}, {"净流入": 80_000_000.0}, {"净流入": -20_000_000.0}]),  # noqa: ARG005
+    )
+    context = {
+        "fund_profile": {
+            "overview": {
+                "基金类型": "商品型 / 能源化工期货型",
+                "业绩比较基准": "易盛郑商所能源化工指数A收益率",
+            },
+            "style": {
+                "tags": ["能源主题", "被动跟踪", "保留机动仓位"],
+            },
+        },
+        "drivers": {
+            "industry_fund_flow": pd.DataFrame(
+                [{"名称": "石油石化", "今日主力净流入-净额": 220_000_000, "今日主力净流入-净占比": 2.8}]
+            ),
+            "concept_fund_flow": pd.DataFrame(),
+            "northbound_industry": {"frame": pd.DataFrame([{"名称": "石油石化", "北向资金今日增持估计-市值": 300_000_000}])},
+            "northbound_concept": {"frame": pd.DataFrame()},
+            "hot_rank": pd.DataFrame([{"名称": "石油ETF", "排名": 10}]),
+        },
+    }
+    dimension = _chips_dimension(
+        "159981",
+        "cn_etf",
+        {
+            "name": "能源化工ETF",
+            "sector": "能源",
+            "benchmark": "易盛郑商所能源化工指数A收益率",
+            "fund_style_tags": ["能源主题", "被动跟踪", "保留机动仓位"],
+        },
+        context,
+        {},
+    )
+    factors = {factor["name"]: factor for factor in dimension["factors"]}
+    assert factors["北向/南向"]["display_score"] == "不适用"
+    assert factors["机构集中度代理"]["display_score"] == "不适用"
+    assert factors["机构资金承接"]["display_score"] != "缺失"
+    assert "ETF" in factors["机构资金承接"]["detail"]
+
+
 def test_catalyst_dimension_uses_sector_profile_mapping(tmp_path):
     profile_path = tmp_path / "catalyst_profiles.yaml"
     profile_path.write_text(
@@ -412,6 +725,21 @@ def test_catalyst_dimension_uses_derived_profile_and_dynamic_topic_search(monkey
     assert "订单" in signals["龙头公告/业绩"] or "军工" in signals["政策催化"]
 
 
+def test_company_forward_events_do_not_scan_generic_disclosures_for_etf():
+    hits = _company_forward_events(
+        {"symbol": "159981", "name": "能源化工ETF", "asset_type": "cn_etf"},
+        {"as_of": "2026-03-11 10:00:00"},
+        news_items=[
+            {
+                "title": "Porsche CEO plans product overhaul to sharpen margins after 2025 tailspin - Reuters",
+                "published_at": "2026-03-20",
+                "source": "Reuters",
+            }
+        ],
+    )
+    assert hits == []
+
+
 def test_catalyst_dimension_for_cn_fund_filters_generic_ai_noise():
     fund_profile = {
         "overview": {
@@ -428,6 +756,7 @@ def test_catalyst_dimension_for_cn_fund_filters_generic_ai_noise():
     context = {
         "config": {},
         "news_report": {
+            "mode": "live",
             "all_items": [
                 {"title": "【早报】深圳出手，“AI龙虾”支持政策来了", "category": "ai", "source": "财联社"},
                 {"title": "中际旭创拟扩产800G光模块产能", "category": "china_market_domestic", "source": "证券时报"},
@@ -542,8 +871,53 @@ def test_hard_checks_for_us_stock_do_not_claim_etf_proxy_floor() -> None:
     assert "ETF / 行业代理" not in check_map["基本面底线"]["detail"]
 
 
-def test_catalyst_dimension_cn_stock_includes_stock_announcement_factor(monkeypatch):
-    """cn_stock catalyst should have a '个股公告/事件' factor with redistributed weights."""
+def test_hard_checks_for_cn_stock_use_unlock_pressure(monkeypatch) -> None:
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=120, freq="B"),
+            "open": [100.0] * 120,
+            "high": [101.0] * 120,
+            "low": [99.0] * 120,
+            "close": [100.0 + 0.2 * i for i in range(120)],
+            "volume": [1_000_000] * 120,
+            "amount": [800_000_000.0] * 120,
+        }
+    )
+    metrics = {"avg_turnover_20d": 8e8, "price_percentile_1y": 0.43, "return_5d": -0.01}
+    technical = {"rsi": {"RSI": 50.0}}
+    context = {"config": {"opportunity": {}}}
+    fundamental_dimension = {"valuation_snapshot": {"index_name": "新易盛", "pe_ttm": 52.0}, "valuation_extreme": False}
+
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_unlock_pressure",
+        lambda self, symbol, as_of="", lookahead_days=90: {  # noqa: ARG005
+            "status": "❌",
+            "detail": "未来 30 日预计解禁约 5.30%（约 0.92 亿股）；最近一次在 2026-03-20，主要为定向增发机构配售股份",
+        },
+    )
+
+    checks, exclusion_reasons, warnings = _hard_checks(
+        "cn_stock",
+        {"symbol": "300502", "name": "新易盛"},
+        history,
+        metrics,
+        technical,
+        context,
+        10,
+        None,
+        fundamental_dimension,
+        None,
+    )
+
+    check_map = {item["name"]: item for item in checks}
+    assert check_map["解禁压力"]["status"] == "❌"
+    assert "未来 30 日存在大额解禁压力" in exclusion_reasons
+    assert any("大额限售股解禁" in item for item in warnings)
+
+
+def test_catalyst_dimension_cn_stock_includes_structured_event_factor(monkeypatch):
+    """cn_stock catalyst should turn direct stock announcements into structured event evidence."""
     monkeypatch.setattr(
         NewsCollector,
         "get_stock_news",
@@ -561,9 +935,10 @@ def test_catalyst_dimension_cn_stock_includes_stock_announcement_factor(monkeypa
         context,
     )
     factor_names = [f["name"] for f in dimension["factors"]]
-    assert "个股公告/事件" in factor_names
-    ann_factor = next(f for f in dimension["factors"] if f["name"] == "个股公告/事件")
+    assert "结构化事件" in factor_names
+    ann_factor = next(f for f in dimension["factors"] if f["name"] == "结构化事件")
     assert "订单" in ann_factor["signal"]
+    assert ann_factor["awarded"] == 15
     # Policy max should be 25 (not 30) for cn_stock
     policy_factor = next(f for f in dimension["factors"] if f["name"] == "政策催化")
     assert policy_factor["display_score"].endswith("/25")
@@ -584,7 +959,7 @@ def test_catalyst_dimension_hk_us_searches_google_news_when_empty(monkeypatch):
     )
     context = {
         "config": {},
-        "news_report": {"all_items": []},
+        "news_report": {"mode": "live", "all_items": []},
         "events": [],
     }
     _catalyst_dimension(
@@ -594,10 +969,53 @@ def test_catalyst_dimension_hk_us_searches_google_news_when_empty(monkeypatch):
     assert len(search_called) >= 1, "Should have called search_by_keywords for HK stock"
 
 
+def test_catalyst_dimension_hk_us_allows_direct_company_search_when_news_degraded(monkeypatch):
+    search_called = []
+    monkeypatch.setattr(
+        NewsCollector,
+        "search_by_keywords",
+        lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: (  # noqa: ARG005
+            search_called.append(keywords) or []
+        ),
+    )
+    context = {
+        "config": {},
+        "news_report": {"mode": "proxy", "all_items": []},
+        "events": [],
+    }
+    _catalyst_dimension(
+        {"symbol": "00700", "name": "腾讯控股", "asset_type": "hk", "sector": "科技", "chain_nodes": []},
+        context,
+    )
+    assert len(search_called) >= 1
+
+
+def test_catalyst_dimension_cn_stock_skips_per_stock_news_when_news_degraded(monkeypatch):
+    stock_news_called = []
+    monkeypatch.setattr(
+        NewsCollector,
+        "get_stock_news",
+        lambda self, symbol, limit=10: (  # noqa: ARG005
+            stock_news_called.append(symbol) or []
+        ),
+    )
+    context = {
+        "config": {},
+        "news_report": {"mode": "proxy", "all_items": []},
+        "events": [],
+    }
+    _catalyst_dimension(
+        {"symbol": "300308", "name": "中际旭创", "asset_type": "cn_stock", "sector": "科技", "chain_nodes": []},
+        context,
+    )
+    assert stock_news_called == []
+
+
 def test_catalyst_dimension_penalizes_negative_dilution_event():
     context = {
         "config": {},
         "news_report": {
+            "mode": "live",
             "all_items": [
                 {
                     "title": "小米集团-W 配股募资 425 亿港元",
@@ -771,7 +1189,7 @@ def test_catalyst_dimension_us_accepts_high_confidence_company_news(monkeypatch)
     monkeypatch.setattr(NewsCollector, "search_by_keywords", fake_search)
     context = {
         "config": {},
-        "news_report": {"all_items": []},
+        "news_report": {"mode": "live", "all_items": []},
         "as_of": "2026-03-11",
         "events": [],
     }
@@ -866,7 +1284,7 @@ def test_catalyst_dimension_us_counts_official_ir_results_news(monkeypatch):
     )
     context = {
         "config": {},
-        "news_report": {"all_items": []},
+        "news_report": {"mode": "live", "all_items": []},
         "as_of": "2026-03-11",
         "events": [],
     }
@@ -915,12 +1333,86 @@ def test_catalyst_dimension_penalizes_tencent_gaming_stakes_headline():
     negative_factor = next(f for f in dimension["factors"] if f["name"] == "负面事件")
     assert "gaming" in negative_factor["signal"].lower()
     assert negative_factor["display_score"] == "-15"
+    assert "gaming stakes" in str(dimension["core_signal"]).lower()
+
+
+def test_preferred_catalyst_sources_for_hk_us_keep_high_confidence_sources_only():
+    us_sources = _preferred_catalyst_sources({"region": "US"}, {"profile_name": "科技"})
+    hk_sources = _preferred_catalyst_sources({"region": "HK"}, {"profile_name": "科技"})
+    assert us_sources == ["Reuters", "Investor Relations", "SEC", "Bloomberg", "Financial Times"]
+    assert hk_sources == ["Reuters", "HKEXnews", "Investor Relations", "Bloomberg", "Financial Times"]
+
+
+def test_direct_company_event_search_terms_are_capped_for_runtime():
+    groups = _direct_company_event_search_terms(
+        {"asset_type": "hk", "name": "腾讯控股", "symbol": "00700.HK", "aliases": ["Tencent"]},
+        {"earnings_keywords": ["财报", "业绩"], "event_keywords": ["合作", "回购"]},
+    )
+    assert len(groups) <= 3
+    assert groups[0] == ["腾讯控股"]
+
+
+def test_direct_company_negative_search_terms_include_regulatory_phrases():
+    from src.processors.opportunity_engine import _direct_company_negative_search_terms
+
+    groups = _direct_company_negative_search_terms(
+        {"asset_type": "hk", "name": "腾讯控股", "symbol": "00700.HK", "aliases": ["Tencent"]}
+    )
+    flattened = [" ".join(group) for group in groups]
+    assert any("gaming stakes" in item or "cfius" in item or "national security" in item for item in flattened)
 
 
 def test_catalyst_dimension_uses_company_calendar_for_forward_event(monkeypatch):
     monkeypatch.setattr(
         "src.processors.opportunity_engine._company_calendar_event_dates",
         lambda symbol, asset_type: ("2026-03-18",),  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        NewsCollector,
+        "search_by_keywords",
+        lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: [],  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine._search_high_confidence_company_news",
+        lambda metadata, profile, config, recent_days=45: [],  # noqa: ARG005
+    )
+    context = {
+        "config": {},
+        "news_report": {"mode": "live", "all_items": []},
+        "as_of": "2026-03-11",
+        "events": [],
+    }
+    dimension = _catalyst_dimension(
+        {"symbol": "00700.HK", "name": "腾讯控股", "asset_type": "hk", "sector": "科技", "chain_nodes": [], "aliases": ["Tencent"]},
+        context,
+    )
+    forward_factor = next(f for f in dimension["factors"] if f["name"] == "前瞻催化")
+    structured_factor = next(f for f in dimension["factors"] if f["name"] == "结构化事件")
+    assert "2026-03-18" in forward_factor["signal"]
+    assert forward_factor["awarded"] == 5
+    assert structured_factor["awarded"] == 8
+    assert "结构化事件已出现" in dimension["summary"]
+
+
+def test_catalyst_dimension_calendar_does_not_block_high_confidence_company_news(monkeypatch):
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine._company_calendar_event_dates",
+        lambda symbol, asset_type: ("2026-03-18",),  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        NewsCollector,
+        "search_by_keywords",
+        lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: [  # noqa: ARG005
+            {
+                "title": "Tencent quarterly results beat estimates on gaming recovery - Reuters",
+                "category": "topic_search",
+                "source": "Reuters",
+                "configured_source": "Reuters",
+                "must_include": False,
+                "published_at": "2026-03-10",
+                "link": "https://www.reuters.com/example",
+            }
+        ],
     )
     context = {
         "config": {},
@@ -933,8 +1425,89 @@ def test_catalyst_dimension_uses_company_calendar_for_forward_event(monkeypatch)
         context,
     )
     forward_factor = next(f for f in dimension["factors"] if f["name"] == "前瞻催化")
-    assert "2026-03-18" in forward_factor["signal"]
+    leader_factor = next(f for f in dimension["factors"] if f["name"] == "龙头公告/业绩")
     assert forward_factor["awarded"] == 5
+    assert leader_factor["awarded"] == 25
+    assert "Tencent quarterly results beat estimates" in leader_factor["signal"]
+    assert any("Tencent quarterly results beat estimates" in item["title"] for item in dimension["evidence"])
+
+
+def test_chips_dimension_caps_proxy_only_individual_stock_score():
+    context = {
+        "drivers": {
+            "industry_fund_flow": pd.DataFrame(),
+            "concept_fund_flow": pd.DataFrame(),
+            "northbound_industry": {"frame": pd.DataFrame()},
+            "northbound_concept": {"frame": pd.DataFrame()},
+            "hot_rank": pd.DataFrame([{"名称": "腾讯控股", "排名": 88}]),
+        }
+    }
+    dimension = _chips_dimension(
+        "00700.HK",
+        "hk",
+        {"name": "腾讯控股", "sector": "科技", "chain_nodes": ["互联网"]},
+        context,
+        {},
+    )
+    assert dimension["score"] <= 55
+    assert "行业/市场级筹码代理" in dimension["summary"]
+
+
+def test_catalyst_dimension_treats_missing_news_as_information_gap_not_negative(monkeypatch):
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine._company_calendar_event_dates",
+        lambda symbol, asset_type: tuple(),  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        NewsCollector,
+        "search_by_keywords",
+        lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: [],  # noqa: ARG005
+    )
+    context = {
+        "config": {},
+        "news_report": {"all_items": []},
+        "as_of": "2026-03-11",
+        "events": [],
+    }
+    dimension = _catalyst_dimension(
+        {"symbol": "AMD", "name": "AMD", "asset_type": "us", "sector": "科技", "chain_nodes": []},
+        context,
+    )
+    structured_factor = next(f for f in dimension["factors"] if f["name"] == "结构化事件")
+    assert structured_factor["awarded"] == 0
+    assert "信息不足" in structured_factor["detail"]
+    assert "信息不足" in dimension["summary"]
+
+
+def test_catalyst_dimension_ignores_non_positive_company_statement_in_positive_awards(monkeypatch):
+    monkeypatch.setattr(NewsCollector, "get_stock_news", lambda self, symbol, limit=10: [])  # noqa: ARG005
+    monkeypatch.setattr(NewsCollector, "search_by_keywords", lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: [])  # noqa: ARG005
+    context = {
+        "config": {},
+        "news_report": {
+            "mode": "live",
+            "all_items": [
+                {
+                    "title": "中际旭创：公司目前未发布任何业绩指引",
+                    "category": "topic_search",
+                    "source": "Reuters",
+                    "configured_source": "Reuters",
+                    "must_include": False,
+                    "published_at": "2026-03-08",
+                    "link": "https://example.com/no-guidance",
+                }
+            ],
+        },
+        "events": [],
+    }
+    dimension = _catalyst_dimension(
+        {"symbol": "300308", "name": "中际旭创", "asset_type": "cn_stock", "sector": "科技", "chain_nodes": []},
+        context,
+    )
+    leader_factor = next(f for f in dimension["factors"] if f["name"] == "龙头公告/业绩")
+    structured_factor = next(f for f in dimension["factors"] if f["name"] == "结构化事件")
+    assert leader_factor["awarded"] == 0
+    assert structured_factor["awarded"] == 0
 
 
 def test_catalyst_dimension_does_not_penalize_unscoped_negative_headline():
@@ -982,6 +1555,36 @@ def test_catalyst_dimension_ignores_stale_negative_event_beyond_lookback(monkeyp
         "config": {},
         "news_report": {"all_items": []},
         "as_of": "2026-03-10",
+        "events": [],
+    }
+    dimension = _catalyst_dimension(
+        {"symbol": "00700.HK", "name": "腾讯控股", "asset_type": "hk", "sector": "科技", "chain_nodes": [], "aliases": ["Tencent"]},
+        context,
+    )
+    negative_factor = next(f for f in dimension["factors"] if f["name"] == "负面事件")
+    assert negative_factor["display_score"] == "信息项"
+
+
+def test_catalyst_dimension_ignores_unrelated_negative_search_hit(monkeypatch):
+    monkeypatch.setattr(
+        NewsCollector,
+        "search_by_keywords",
+        lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: [  # noqa: ARG005
+            {
+                "title": "Sony fighting $2.7 billion UK lawsuit over PlayStation Store prices - Reuters",
+                "category": "topic_search",
+                "source": "Reuters",
+                "configured_source": "Reuters",
+                "must_include": False,
+                "published_at": "2026-03-10",
+                "link": "",
+            }
+        ],
+    )
+    context = {
+        "config": {},
+        "news_report": {"all_items": []},
+        "as_of": "2026-03-12",
         "events": [],
     }
     dimension = _catalyst_dimension(

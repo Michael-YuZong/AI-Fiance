@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any, Dict, List
 
+from src.commands.release_check import check_generic_client_report
+from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
+from src.output import DecisionRetrospectReportRenderer
+from src.processors.decision_review import build_monthly_decision_review
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.storage.portfolio import PortfolioRepository
 from src.storage.thesis import ThesisRepository
-from src.utils.config import detect_asset_type, load_config
+from src.utils.config import detect_asset_type, load_config, resolve_project_path
 from src.utils.market import compute_history_metrics, fetch_asset_history, get_asset_context
 
 
@@ -53,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     review_parser = subparsers.add_parser("review", help="Review monthly decisions")
     review_parser.add_argument("month", help="Month in YYYY-MM format")
+    review_parser.add_argument("--symbol", default="", help="Optional symbol filter")
+    review_parser.add_argument("--lookahead", type=int, default=20, help="Forward review window in trading days")
+    review_parser.add_argument("--stop-pct", type=float, default=0.08, help="Standard stop loss percent for retrospective scoring")
+    review_parser.add_argument("--target-pct", type=float, default=0.15, help="Standard target percent for retrospective scoring")
+    review_parser.add_argument("--client-final", action="store_true", help="Render and persist client-facing final markdown/pdf")
 
     parser.add_argument("--config", default="", help="Optional path to config YAML")
     return parser
@@ -94,13 +104,31 @@ def _trade_signal_snapshot(symbol: str, asset_type: str, config: Dict[str, Any])
         history = normalize_ohlcv_frame(fetch_asset_history(symbol, asset_type, config))
         metrics = compute_history_metrics(history)
         technical = TechnicalAnalyzer(history).generate_scorecard(config.get("technical", {}))
+        dmi = dict(technical.get("dmi") or {})
+        volume = dict(technical.get("volume") or {})
         return {
             "return_20d": metrics["return_20d"],
+            "price_percentile_1y": metrics["price_percentile_1y"],
             "ma_signal": technical["ma_system"]["signal"],
             "macd_signal": technical["macd"]["signal"],
+            "rsi": dict(technical.get("rsi") or {}).get("RSI"),
+            "adx": dmi.get("ADX"),
+            "plus_di": dmi.get("DI+"),
+            "minus_di": dmi.get("DI-"),
+            "volume_signal": volume.get("signal"),
+            "volume_structure": volume.get("structure"),
         }
     except Exception:
         return {}
+
+
+def _review_output_path(month: str, symbol: str = "") -> Path:
+    safe_month = str(month).replace("/", "-")
+    safe_symbol = str(symbol).replace("/", "_").replace(" ", "_")
+    stem = f"portfolio_review_{safe_month}"
+    if safe_symbol:
+        stem += f"_{safe_symbol}"
+    return resolve_project_path("reports/retrospects/final") / f"{stem}_final.md"
 
 
 def _evaluate_thesis(symbol: str, record: Dict[str, Any], repo: PortfolioRepository, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -158,6 +186,7 @@ def main() -> None:
             basis=args.basis,
             note=args.note,
             signal_snapshot=_trade_signal_snapshot(args.symbol, asset_type, config),
+            thesis_snapshot=thesis_repo.get(args.symbol) or {},
         )
         print(f"已记录 {args.action} {args.symbol}，成交金额 {args.amount:.2f}。")
         return
@@ -244,27 +273,41 @@ def main() -> None:
             return
 
     if args.subcommand == "review":
-        latest_prices = _load_latest_prices(config, repo)
-        review = repo.monthly_review(args.month, latest_prices)
-        print(f"# 操作复盘: {args.month}")
-        print("")
-        if not review["trades"]:
-            print("该月份没有交易记录。")
+        ensure_report_task_registered("retrospect")
+        payload = build_monthly_decision_review(
+            args.month,
+            config=config,
+            symbol=args.symbol,
+            lookahead=args.lookahead,
+            stop_pct=args.stop_pct,
+            target_pct=args.target_pct,
+            repo=repo,
+            thesis_repo=thesis_repo,
+        )
+        markdown = DecisionRetrospectReportRenderer().render(payload)
+        if not args.client_final:
+            print(markdown)
             return
-        print("## Basis 统计")
-        for basis, stats in review["basis_stats"].items():
-            print(
-                f"- {basis}: {stats['count']} 笔，平均结果 {stats['avg_outcome'] * 100:+.2f}%，"
-                f"胜率 {stats['win_rate'] * 100:.1f}%。"
+        findings = check_generic_client_report(markdown, "retrospect")
+        try:
+            bundle = export_reviewed_markdown_bundle(
+                report_type="retrospect",
+                markdown_text=markdown,
+                markdown_path=_review_output_path(args.month, args.symbol),
+                release_findings=findings,
+                extra_manifest={
+                    "month": args.month,
+                    "symbol": args.symbol,
+                    "lookahead": args.lookahead,
+                    "stop_pct": args.stop_pct,
+                    "target_pct": args.target_pct,
+                },
             )
-        print("")
-        print("## 逐笔观察")
-        for trade in review["trades"]:
-            outcome = trade["outcome"] * 100
-            print(
-                f"- {trade['timestamp']} {trade['action']} {trade['symbol']} @ {trade['price']:.3f}，"
-                f"当前结果 {outcome:+.2f}% ，basis={trade.get('basis', 'unknown')}。"
-            )
+        except ReportGuardError as exc:
+            raise SystemExit(str(exc))
+        print(markdown)
+        print(f"\n[final markdown] {bundle['markdown']}")
+        print(f"[final pdf] {bundle['pdf']}")
 
 
 if __name__ == "__main__":

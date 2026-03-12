@@ -42,6 +42,7 @@ class MarketMonitorCollector(BaseCollector):
                     interval="1d",
                     auto_adjust=False,
                     ttl_hours=2,
+                    prefer_stale=True,
                 )
             except Exception:
                 continue

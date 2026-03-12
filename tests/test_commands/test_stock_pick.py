@@ -11,6 +11,7 @@ from src.commands.stock_pick import enrich_payload_with_score_history
 def _sample_payload(score: int, signal: str, generated_at: str) -> dict:
     return {
         "generated_at": generated_at,
+        "data_coverage": {"news_mode": "live", "degraded": False},
         "top": [
             {
                 "symbol": "00700.HK",
@@ -130,3 +131,59 @@ def test_enrich_payload_with_score_history_warns_when_model_version_changes(tmp_
     assert payload["is_daily_baseline"] is False
     assert payload["comparison_basis_at"] == "2026-03-10 09:00:00"
     assert "old-model-version" in payload["model_version_warning"]
+
+
+def test_enrich_payload_with_score_history_applies_catalyst_fallback_when_news_degraded(tmp_path: Path):
+    snapshot_path = tmp_path / "stock_pick_score_history.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "hk:*": {
+                    "latest": {
+                        "generated_at": "2026-03-10 20:00:00",
+                        "model_version": "stock-pick-2026-03-11-indicator-sanity-v6",
+                        "items": {
+                            "00700.HK": {
+                                "name": "腾讯控股",
+                                "rating_rank": 3,
+                                "dimensions": {
+                                    "technical": {"score": 62, "core_signal": "趋势未坏", "factors": {}},
+                                    "fundamental": {"score": 61, "core_signal": "估值中性", "factors": {}},
+                                    "catalyst": {"score": 55, "core_signal": "财报窗口+公司新闻", "factors": {}},
+                                    "relative_strength": {"score": 47, "core_signal": "相对中性", "factors": {}},
+                                    "chips": {"score": None, "core_signal": "缺失", "factors": {}},
+                                    "risk": {"score": 50, "core_signal": "波动偏高", "factors": {}},
+                                    "seasonality": {"score": 40, "core_signal": "中性", "factors": {}},
+                                    "macro": {"score": 10, "core_signal": "轻度逆风", "factors": {}},
+                                },
+                            }
+                        },
+                    },
+                    "daily_baselines": {},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    degraded_payload = _sample_payload(11, "信息不足", "2026-03-11 20:00:00")
+    degraded_payload["data_coverage"] = {"news_mode": "proxy", "degraded": True}
+    degraded_payload["top"][0]["dimensions"]["catalyst"]["coverage"] = {
+        "news_mode": "proxy",
+        "high_confidence_company_news": False,
+        "structured_event": False,
+        "forward_event": False,
+        "degraded": True,
+    }
+
+    payload = enrich_payload_with_score_history(
+        degraded_payload,
+        market="hk",
+        sector_filter="",
+        snapshot_path=snapshot_path,
+    )
+    catalyst = payload["top"][0]["dimensions"]["catalyst"]
+    assert catalyst["score"] > 11
+    assert catalyst["coverage"]["fallback_applied"] is True
+    assert any(f["name"] == "历史催化回退" for f in catalyst["factors"])

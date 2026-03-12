@@ -169,7 +169,9 @@ class ChinaMarketCollector(BaseCollector):
                 adjust=adjust,
             )
         except Exception as primary_exc:
-            if yf is None:
+            market_cfg = dict(self.config or {}).get("market", {})
+            allow_yahoo_fallback = bool(market_cfg.get("enable_yahoo_fallback_for_cn_etf", False))
+            if yf is None or not allow_yahoo_fallback:
                 raise primary_exc
             ticker = self._yahoo_symbol(symbol)
             try:
@@ -583,6 +585,125 @@ class ChinaMarketCollector(BaseCollector):
             pass
         return pd.DataFrame()
 
+    def get_share_float(self, symbol: str, start_date: str = "", end_date: str = "") -> pd.DataFrame:
+        """A股限售股解禁日历。Tushare share_float 优先。"""
+        start = start_date or self._date_str()
+        end = end_date or self._date_str(90)
+
+        try:
+            frame = self._ts_share_float(symbol, start, end)
+            if frame is not None:
+                return frame
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    def get_unlock_pressure(self, symbol: str, as_of: str = "", lookahead_days: int = 90) -> dict[str, Any]:
+        """Summarize upcoming unlock pressure for an A-share symbol.
+
+        Status policy:
+        - ``✅``: no explicit unlock within the lookahead window or only very small unlocks
+        - ``⚠️``: moderate unlock pressure in the next 30/90 days
+        - ``❌``: large unlock pressure in the next 30 days
+        - ``ℹ️``: data source unavailable
+        """
+
+        as_of_ts = pd.Timestamp(as_of or datetime.now().strftime("%Y-%m-%d")).normalize()
+        start = as_of_ts.strftime("%Y%m%d")
+        end = (as_of_ts + timedelta(days=lookahead_days)).strftime("%Y%m%d")
+        frame = self._ts_share_float(symbol, start, end)
+        if frame is None:
+            return {
+                "supported": False,
+                "status": "ℹ️",
+                "detail": "Tushare share_float 当前不可用，解禁压力暂未纳入本轮检查",
+                "next_date": "",
+                "ratio_30d": None,
+                "ratio_90d": None,
+                "share_30d": None,
+                "share_90d": None,
+            }
+
+        if frame.empty:
+            return {
+                "supported": True,
+                "status": "✅",
+                "detail": f"未来 {lookahead_days} 日未见明确限售股解禁安排",
+                "next_date": "",
+                "ratio_30d": 0.0,
+                "ratio_90d": 0.0,
+                "share_30d": 0.0,
+                "share_90d": 0.0,
+            }
+
+        future = frame.copy()
+        future["float_date"] = pd.to_datetime(future["float_date"], errors="coerce")
+        future = future.dropna(subset=["float_date"])
+        future = future[future["float_date"] >= as_of_ts].sort_values(["float_date", "float_ratio"], ascending=[True, False])
+        if future.empty:
+            return {
+                "supported": True,
+                "status": "✅",
+                "detail": f"未来 {lookahead_days} 日未见明确限售股解禁安排",
+                "next_date": "",
+                "ratio_30d": 0.0,
+                "ratio_90d": 0.0,
+                "share_30d": 0.0,
+                "share_90d": 0.0,
+            }
+
+        future["days_until"] = (future["float_date"] - as_of_ts).dt.days
+        next_date = future["float_date"].iloc[0]
+        next_rows = future[future["float_date"] == next_date]
+        window_30 = future[future["days_until"] <= 30]
+        window_90 = future[future["days_until"] <= lookahead_days]
+
+        ratio_30 = round(float(pd.to_numeric(window_30.get("float_ratio"), errors="coerce").fillna(0).sum()), 4)
+        ratio_90 = round(float(pd.to_numeric(window_90.get("float_ratio"), errors="coerce").fillna(0).sum()), 4)
+        share_30 = round(float(pd.to_numeric(window_30.get("float_share"), errors="coerce").fillna(0).sum()), 4)
+        share_90 = round(float(pd.to_numeric(window_90.get("float_share"), errors="coerce").fillna(0).sum()), 4)
+        next_ratio = round(float(pd.to_numeric(next_rows.get("float_ratio"), errors="coerce").fillna(0).sum()), 4)
+        next_share_types = [str(item).strip() for item in next_rows.get("share_type", pd.Series(dtype=str)).tolist() if str(item).strip()]
+        next_share_types = list(dict.fromkeys(next_share_types))
+        share_type_text = "、".join(next_share_types[:2]) if next_share_types else "未披露解禁类型"
+
+        share_30_yi = share_30 / 100_000_000.0
+        if ratio_30 >= 5.0:
+            status = "❌"
+            detail = (
+                f"未来 30 日预计解禁约 {ratio_30:.2f}%（约 {share_30_yi:.2f} 亿股）；"
+                f"最近一次在 {next_date.strftime('%Y-%m-%d')}，主要为 {share_type_text}"
+            )
+        elif ratio_30 >= 1.0:
+            status = "⚠️"
+            detail = (
+                f"未来 30 日预计解禁约 {ratio_30:.2f}%（约 {share_30_yi:.2f} 亿股）；"
+                f"最近一次在 {next_date.strftime('%Y-%m-%d')}，主要为 {share_type_text}"
+            )
+        elif ratio_90 >= 5.0:
+            status = "⚠️"
+            detail = (
+                f"未来 30 日无明显解禁，但未来 {lookahead_days} 日累计约 {ratio_90:.2f}%（最近一次 "
+                f"{next_date.strftime('%Y-%m-%d')}，单次约 {next_ratio:.2f}%）"
+            )
+        else:
+            status = "✅"
+            detail = (
+                f"未来 30 日无明显解禁；最近一次在 {next_date.strftime('%Y-%m-%d')}，单次约 {next_ratio:.2f}%"
+            )
+
+        return {
+            "supported": True,
+            "status": status,
+            "detail": detail,
+            "next_date": next_date.strftime("%Y-%m-%d"),
+            "next_ratio": next_ratio,
+            "ratio_30d": ratio_30,
+            "ratio_90d": ratio_90,
+            "share_30d": share_30,
+            "share_90d": share_90,
+        }
+
     def _ts_margin(self) -> pd.DataFrame | None:
         """Tushare margin — 融资融券汇总。"""
         cache_key = "cn_market:ts_margin:v2"
@@ -600,6 +721,39 @@ class ChinaMarketCollector(BaseCollector):
                 self._save_cache(cache_key, normalized)
                 return normalized
         return None
+
+    def _ts_share_float(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
+        """Tushare share_float — A股限售股解禁日历。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"cn_market:ts_share_float:v1:{ts_code}:{start}:{end}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call(
+            "share_float",
+            ts_code=ts_code,
+            start_date=start,
+            end_date=end,
+            fields="ts_code,ann_date,float_date,float_share,float_ratio,holder_name,share_type",
+        )
+        if raw is None:
+            return None
+        if raw.empty:
+            empty = pd.DataFrame(columns=["ts_code", "ann_date", "float_date", "float_share", "float_ratio", "holder_name", "share_type"])
+            self._save_cache(cache_key, empty)
+            return empty
+
+        frame = raw.copy()
+        for column in ("ann_date", "float_date"):
+            if column in frame.columns:
+                frame[column] = frame[column].map(self._normalize_date_text)
+        for column in ("float_share", "float_ratio"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.sort_values(["float_date", "float_ratio"], ascending=[True, False]).reset_index(drop=True)
+        self._save_cache(cache_key, frame)
+        return frame
 
     def _ak_margin_summary(self) -> pd.DataFrame | None:
         """AKShare 融资融券汇总兜底，统一为与 Tushare 一致的汇总列。"""
