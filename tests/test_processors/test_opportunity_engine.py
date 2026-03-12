@@ -10,7 +10,7 @@ from src.collectors.market_cn import ChinaMarketCollector
 from src.collectors.market_drivers import MarketDriversCollector
 from src.collectors.valuation import ValuationCollector
 from src.collectors.news import NewsCollector
-from src.processors.opportunity_engine import _action_plan, _catalyst_dimension, _chips_dimension, _company_forward_events, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _preferred_catalyst_sources, _risk_dimension, _seasonality_dimension, _stock_name_tokens, _technical_dimension, build_stock_pool, discover_stock_opportunities
+from src.processors.opportunity_engine import _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _risk_dimension, _seasonality_dimension, _stock_name_tokens, _technical_dimension, build_default_pool, build_stock_pool, discover_stock_opportunities
 from src.processors.opportunity_engine import _asset_note
 from src.utils.market import compute_history_metrics
 
@@ -29,6 +29,94 @@ def test_compute_history_metrics_prefers_amount_column_for_turnover():
     )
     metrics = compute_history_metrics(frame)
     assert metrics["avg_turnover_20d"] == 120_000_000.0
+
+
+def test_client_safe_issue_hides_raw_exception_details() -> None:
+    message = _client_safe_issue("全球代理数据缺失", RuntimeError("Too Many Requests. Rate limited. Try after a while."))
+    assert "Too Many Requests" not in message
+    assert "限流" in message
+
+
+def test_build_default_pool_prefers_tushare_etf_universe(monkeypatch):
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_etf_universe_snapshot",
+        lambda self: pd.DataFrame(
+            [
+                {
+                    "symbol": "510880",
+                    "name": "红利ETF",
+                    "benchmark": "上证红利指数收益率",
+                    "invest_type": "被动指数型",
+                    "fund_type": "股票型",
+                    "management": "华泰柏瑞基金",
+                    "trade_date": "2026-03-12",
+                    "list_date": "2007-01-18",
+                    "delist_date": "",
+                    "amount": 238_000_000.0,
+                },
+                {
+                    "symbol": "511010",
+                    "name": "国债ETF",
+                    "benchmark": "上证5年期国债指数收益率",
+                    "invest_type": "被动指数型",
+                    "fund_type": "债券型",
+                    "management": "某基金",
+                    "trade_date": "2026-03-12",
+                    "list_date": "2013-03-25",
+                    "delist_date": "",
+                    "amount": 500_000_000.0,
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr("src.processors.opportunity_engine.load_watchlist", lambda: [])
+    pool, warnings = build_default_pool({"opportunity": {"min_turnover": 50_000_000, "max_scan_candidates": 30}})
+    assert warnings == []
+    assert [item.symbol for item in pool] == ["510880"]
+    assert pool[0].source == "tushare_etf_universe"
+
+
+def test_build_default_pool_theme_filter_uses_current_filtered_index(monkeypatch):
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_etf_universe_snapshot",
+        lambda self: pd.DataFrame(
+            [
+                {
+                    "symbol": "510880",
+                    "name": "红利ETF",
+                    "benchmark": "上证红利指数收益率",
+                    "invest_type": "被动指数型",
+                    "fund_type": "股票型",
+                    "management": "华泰柏瑞基金",
+                    "trade_date": "2026-03-12",
+                    "list_date": "2007-01-18",
+                    "delist_date": "",
+                    "amount": 238_000_000.0,
+                },
+                {
+                    "symbol": "159981",
+                    "name": "能源化工ETF",
+                    "benchmark": "易盛郑商所能源化工指数A收益率",
+                    "invest_type": "商品型",
+                    "fund_type": "商品型",
+                    "management": "建信基金",
+                    "trade_date": "2026-03-12",
+                    "list_date": "2019-12-13",
+                    "delist_date": "",
+                    "amount": 498_000_000.0,
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr("src.processors.opportunity_engine.load_watchlist", lambda: [])
+    pool, warnings = build_default_pool(
+        {"opportunity": {"min_turnover": 50_000_000, "max_scan_candidates": 30}},
+        theme_filter="红利",
+    )
+    assert warnings == []
+    assert [item.symbol for item in pool] == ["510880"]
 
 
 def test_seasonality_dimension_handles_range_index_history():
@@ -256,6 +344,37 @@ def test_technical_dimension_rewards_volume_structure_obv_kdj_and_compression():
     assert factors["量价结构"]["display_score"] == "15/15"
     assert "放量突破" in factors["量价结构"]["signal"]
     assert factors["波动压缩"]["display_score"] == "10/10"
+
+
+def test_macro_dimension_uses_leading_macro_indicators_for_growth_sector():
+    dimension = _macro_dimension(
+        {"sector": "科技"},
+        {
+            "china_macro": {
+                "pmi": 50.8,
+                "pmi_new_orders": 51.2,
+                "pmi_production": 51.6,
+                "demand_state": "improving",
+                "ppi_yoy": -0.5,
+                "price_state": "reflation",
+                "credit_impulse": "expanding",
+                "m1_m2_spread": -2.1,
+                "social_financing_3m_avg_text": "2.58 万亿元",
+            },
+            "regime": {"current_regime": "recovery"},
+            "monitor_rows": [
+                {"name": "布伦特原油", "return_5d": -0.03},
+                {"name": "美国10Y收益率", "return_5d": -0.01},
+                {"name": "美元指数", "return_20d": -0.02},
+                {"name": "USDCNY", "return_20d": -0.01},
+            ],
+        },
+    )
+
+    assert dimension["score"] is not None
+    assert dimension["score"] >= 25
+    assert any(factor["name"] == "景气方向" and "新订单" in factor["signal"] for factor in dimension["factors"])
+    assert any(factor["name"] == "信用脉冲" and "社融" in factor["signal"] for factor in dimension["factors"])
 
 
 def test_fundamental_dimension_for_us_stock_uses_single_stock_labels(monkeypatch):
@@ -970,6 +1089,9 @@ def test_hard_checks_for_cn_stock_use_pledge_risk(monkeypatch) -> None:
 
 def test_catalyst_dimension_cn_stock_includes_structured_event_factor(monkeypatch):
     """cn_stock catalyst should turn direct stock announcements into structured event evidence."""
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_repurchase", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_dividend", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_holder_trades", lambda self, symbol: [])  # noqa: ARG005
     monkeypatch.setattr(
         NewsCollector,
         "get_stock_news",
@@ -1043,6 +1165,29 @@ def test_catalyst_dimension_cn_stock_uses_tushare_capital_return_events(monkeypa
     assert any(item["source"] in {"Tushare repurchase", "Tushare dividend"} for item in dimension["evidence"])
 
 
+def test_catalyst_dimension_cn_stock_stale_dividend_does_not_keep_full_score(monkeypatch):
+    monkeypatch.setattr(NewsCollector, "get_stock_news", lambda self, symbol, limit=10: [])  # noqa: ARG005
+    monkeypatch.setattr(NewsCollector, "search_by_keywords", lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_disclosure_dates", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_holder_trades", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_repurchase", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_stock_dividend",
+        lambda self, symbol: [  # noqa: ARG005
+            {"ann_date": "2025-08-27", "div_proc": "预案", "cash_div_tax": 6.5},
+        ],
+    )
+    context = {"config": {}, "news_report": {"all_items": [], "mode": "live"}, "events": [], "now": "2026-03-12"}
+    dimension = _catalyst_dimension(
+        {"symbol": "300308", "name": "中际旭创", "asset_type": "cn_stock", "sector": "科技", "chain_nodes": ["AI算力"]},
+        context,
+    )
+    structured_factor = next(f for f in dimension["factors"] if f["name"] == "结构化事件")
+    assert structured_factor["display_score"] in {"0/15", "信息项"}
+    assert "超出结构化事件有效窗口" in structured_factor["detail"]
+
+
 def test_chips_dimension_cn_stock_uses_holdertrade_snapshot(monkeypatch):
     monkeypatch.setattr(
         ValuationCollector,
@@ -1060,6 +1205,32 @@ def test_chips_dimension_cn_stock_uses_holdertrade_snapshot(monkeypatch):
     )
     signals = {factor["name"]: factor["signal"] for factor in dimension["factors"]}
     assert "净增持约 0.18%" in signals["高管增持"]
+
+
+def test_chips_dimension_cn_stock_labels_sector_northbound_as_proxy(monkeypatch):
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_stock_holder_trades",
+        lambda self, symbol: [],  # noqa: ARG005
+    )
+    dimension = _chips_dimension(
+        "300502",
+        "cn_stock",
+        {"symbol": "300502", "name": "新易盛", "asset_type": "cn_stock", "sector": "科技"},
+        {
+            "config": {},
+            "drivers": {
+                "northbound_industry": {
+                    "frame": pd.DataFrame([{"名称": "消费电子", "净流入估算(亿)": 1.77}]),
+                },
+                "northbound_concept": {"frame": pd.DataFrame()},
+            },
+        },
+        {},
+    )
+    northbound_factor = next(f for f in dimension["factors"] if f["name"] == "北向/南向")
+    assert "所属行业/概念代理" in northbound_factor["signal"]
+    assert "不是单一个股的北向持仓变动" in northbound_factor["detail"]
 
 
 def test_chips_dimension_cn_stock_uses_holder_concentration_snapshot(monkeypatch):
@@ -1534,7 +1705,7 @@ def test_catalyst_dimension_uses_company_calendar_for_forward_event(monkeypatch)
     structured_factor = next(f for f in dimension["factors"] if f["name"] == "结构化事件")
     assert "2026-03-18" in forward_factor["signal"]
     assert forward_factor["awarded"] == 5
-    assert structured_factor["awarded"] == 8
+    assert structured_factor["awarded"] == 5
     assert "结构化事件已出现" in dimension["summary"]
 
 
@@ -1624,6 +1795,9 @@ def test_catalyst_dimension_treats_missing_news_as_information_gap_not_negative(
 
 
 def test_catalyst_dimension_ignores_non_positive_company_statement_in_positive_awards(monkeypatch):
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_repurchase", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_dividend", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_holder_trades", lambda self, symbol: [])  # noqa: ARG005
     monkeypatch.setattr(NewsCollector, "get_stock_news", lambda self, symbol, limit=10: [])  # noqa: ARG005
     monkeypatch.setattr(NewsCollector, "search_by_keywords", lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: [])  # noqa: ARG005
     context = {
@@ -1971,6 +2145,14 @@ def test_action_plan_portfolio_management_fields():
     assert "分" in result["scaling_plan"]
     assert result["stop_loss_pct"] == "-5%"
     assert "0.85" in result["correlated_warning"]
+
+
+def test_action_plan_uses_watchful_bullish_direction_when_odds_are_low():
+    analysis = _make_action_plan_analysis(rating_rank=3, tech=62, risk=55, relative=65, catalyst=30, asset_type="cn_etf")
+    history = _make_simple_history()
+    technical = {"rsi": {"RSI": 75.0}, "fibonacci": {"levels": {}}, "ma_system": {"mas": {"MA20": 10.0, "MA60": 9.8}}}
+    result = _action_plan(analysis, history, technical, None, {"volatility_percentile_1y": 0.4, "price_percentile_1y": 0.95})
+    assert result["direction"] == "观望偏多"
 
 
 def test_action_plan_warns_when_price_runs_far_above_ma20():

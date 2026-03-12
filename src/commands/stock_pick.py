@@ -151,10 +151,15 @@ def _coverage_summary(analyses: list[Mapping[str, Any]]) -> Dict[str, Any]:
         if not row:
             continue
         lines.append(
-            f"{market} 结构化事件覆盖 {row['structured_rate'] * 100:.0f}% / 高置信公司新闻覆盖 {row['direct_rate'] * 100:.0f}%"
+            f"{market} 结构化事件覆盖 {row['structured_rate'] * 100:.0f}%（{int(round(row['structured_rate'] * row['total']))}/{row['total']}）"
+            f" / 高置信公司新闻覆盖 {row['direct_rate'] * 100:.0f}%（{int(round(row['direct_rate'] * row['total']))}/{row['total']}）"
         )
     overall_degraded = any((row.get("degraded_rate", 0.0) or 0.0) > 0.5 for row in by_market.values())
-    note = "本轮实时新闻/事件覆盖存在降级，名单更容易偏保守。" if overall_degraded else "本轮新闻/事件覆盖基本正常。"
+    note = (
+        "本轮实时新闻/事件覆盖存在降级，名单更容易偏保守。"
+        if overall_degraded
+        else "本轮新闻/事件覆盖基本正常。"
+    )
     return {"by_market": by_market, "lines": lines, "note": note}
 
 

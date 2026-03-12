@@ -31,6 +31,19 @@
 | `L014` | 催化证据要能在成稿中直接复核 | `renderer` / `external_review` |
 | `L015` | A股结构化公司事件应优先使用 Tushare 而不是新闻标题猜测 | `opportunity_engine` / `external_review` |
 | `L016` | A股资本结构与执行层风险应优先使用 Tushare 结构化数据 | `opportunity_engine` / `external_review` |
+| `L017` | 历史相似样本置信度必须说明样本边界并严控数据置信度 | `release_check` / `external_review` |
+| `L018` | 正式推荐的过线逻辑与边界案例必须对客户讲清楚 | `external_review` / `renderer` |
+| `L019` | 历史相似样本只能作为辅助验证，不能冒充严格回测 | `external_review` / `renderer` |
+| `L020` | 跨市场覆盖率不均时必须明确不同市场的参考强弱 | `external_review` / `renderer` |
+| `L021` | 同一事件若出现数值冲突，成稿必须统一口径或显式解释差异 | `external_review` / `renderer` |
+| `L022` | 结构化事件必须做新鲜度控制，陈旧事件不能按满额催化计分 | `opportunity_engine` / `external_review` |
+| `L023` | 样本置信度必须和总推荐置信度分开命名 | `renderer` / `external_review` |
+| `L024` | 覆盖率与覆盖源分数必须说明分母和阈值 | `renderer` / `external_review` |
+| `L025` | 结论文案必须拆开估值、质量和信息不足，不能混成一句模板话 | `renderer` / `external_review` |
+| `L026` | 相关性/分散度基准映射必须可解释 | `external_review` / `renderer` |
+| `L027` | 中期宏观判断必须拆开景气、价格与信用指标角色 | `external_review` / `renderer` |
+| `L028` | 商品/期货 ETF 必须显式披露展期与期限结构风险 | `external_review` / `renderer` |
+| `L029` | 客户稿不得暴露原始异常字符串 | `release_check` / `renderer` |
 
 ## 处理规则
 

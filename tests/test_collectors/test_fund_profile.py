@@ -274,6 +274,8 @@ def test_fund_profile_backfills_overview_from_tushare_when_overview_empty(monkey
     assert overview["基金类型"] == "被动指数型 / 股票型"
     assert overview["业绩比较基准"] == "上证红利指数"
     assert overview["跟踪标的"] == "上证红利指数"
+    assert overview["成立日期"] == "2006-11-17"
+    assert overview["首发规模"] == "24.7230亿份"
     assert overview["成立日期/规模"] == "2006-11-17 / 24.7230亿份"
 
 
@@ -366,3 +368,46 @@ def test_fund_profile_does_not_render_nan_issue_amount(monkeypatch):
 
     profile = collector.collect_profile("021740")
     assert profile["overview"]["成立日期/规模"] == "2024-06-19"
+
+
+def test_fund_profile_commodity_etf_treats_cash_as_margin_structure(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    monkeypatch.setattr(
+        collector,
+        "get_overview",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "基金简称": "能源化工ETF",
+                    "基金类型": "商品型 / 能源化工期货型",
+                    "基金管理人": "建信基金",
+                    "基金经理人": "朱金钰、亢豆",
+                    "净资产规模": "15.95亿元（截止至：2025年12月31日）",
+                    "业绩比较基准": "易盛郑商所能源化工指数A收益率",
+                    "成立日期": "2019-12-13",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_asset_allocation",
+        lambda symbol: pd.DataFrame(
+            [
+                {"资产类型": "债券", "占总资产比例": 5.94},
+                {"资产类型": "现金", "占总资产比例": 92.32},
+                {"资产类型": "其他", "占总资产比例": 8.23},
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_portfolio_hold", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_industry_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_manager_directory", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_basic", lambda market="E": pd.DataFrame())  # noqa: ARG005
+
+    profile = collector.collect_profile("159981")
+    assert "商品/期货跟踪" in profile["style"]["tags"]
+    assert "保证金/备付结构" in profile["style"]["tags"]
+    assert "不等于主观空仓" in profile["style"]["positioning"]
