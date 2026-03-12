@@ -29,6 +29,9 @@ from src.collectors import (
     SocialSentimentCollector,
 )
 from src.output.briefing import BriefingRenderer
+from src.output.client_report import ClientReportRenderer
+from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
+from src.commands.release_check import check_generic_client_report
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
 from src.processors.regime import RegimeDetector
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
@@ -86,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("mode", choices=["daily", "weekly", "noon", "evening"], help="Briefing mode")
     parser.add_argument("--news-source", action="append", default=[], help="Preferred news source, e.g. Reuters")
     parser.add_argument("--config", default="", help="Optional path to config YAML")
+    parser.add_argument("--client-final", action="store_true", help="Render and persist client-facing final markdown/pdf")
     return parser
 
 
@@ -133,11 +137,11 @@ def _build_summary(metrics: Dict[str, float], technical: Dict[str, Any], trend: 
         summary = "趋势尚未形成单边共振，更适合等进一步确认。"
 
     if volume_ratio > 1.5:
-        note = f"量比 {volume_ratio:.2f}，盘面明显活跃。"
+        note = f"量能比 {volume_ratio:.2f}，盘面明显活跃。"
     elif volume_ratio < 0.7:
-        note = f"量比 {volume_ratio:.2f}，资金参与度偏弱。"
+        note = f"量能比 {volume_ratio:.2f}，资金参与度偏弱。"
     else:
-        note = f"量比 {volume_ratio:.2f}，量能处于常态区间。"
+        note = f"量能比 {volume_ratio:.2f}，量能处于常态区间。"
     return summary, note
 
 
@@ -3405,6 +3409,7 @@ def _render_briefing_charts(snapshots: List[BriefingSnapshot]) -> Dict[str, Dict
 
 def main() -> None:
     args = build_parser().parse_args()
+    ensure_report_task_registered("briefing")
     setup_logger("ERROR")
     config = load_config(args.config or None)
     china_macro = load_china_macro_snapshot(config)
@@ -3516,7 +3521,44 @@ def main() -> None:
         }
         rendered = BriefingRenderer().render(payload)
     _persist_briefing(rendered, args.mode)
+    if not args.client_final:
+        print(rendered)
+        return
+
+    if args.mode in {"daily", "weekly"}:
+        client_markdown = ClientReportRenderer().render_briefing(payload)
+        findings = check_generic_client_report(client_markdown, "briefing")
+        output_path = resolve_project_path("reports/briefings/final") / f"{args.mode}_briefing_{str(payload.get('generated_at', ''))[:10]}_client_final.md"
+        try:
+            bundle = export_reviewed_markdown_bundle(
+                report_type="briefing",
+                markdown_text=client_markdown,
+                markdown_path=output_path,
+                release_findings=findings,
+                extra_manifest={"mode": args.mode},
+            )
+        except ReportGuardError as exc:
+            raise SystemExit(str(exc))
+        print(client_markdown)
+        print(f"\n[client markdown] {bundle['markdown']}")
+        print(f"[client pdf] {bundle['pdf']}")
+        return
+
+    findings = check_generic_client_report(rendered, "briefing")
+    output_path = resolve_project_path("reports/briefings/final") / f"{args.mode}_briefing_{datetime.now().strftime('%Y-%m-%d')}_client_final.md"
+    try:
+        bundle = export_reviewed_markdown_bundle(
+            report_type="briefing",
+            markdown_text=rendered,
+            markdown_path=output_path,
+            release_findings=findings,
+            extra_manifest={"mode": args.mode},
+        )
+    except ReportGuardError as exc:
+        raise SystemExit(str(exc))
     print(rendered)
+    print(f"\n[client markdown] {bundle['markdown']}")
+    print(f"[client pdf] {bundle['pdf']}")
 
 
 if __name__ == "__main__":

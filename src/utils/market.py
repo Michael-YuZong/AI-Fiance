@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -84,6 +84,163 @@ def latest_close(frame: pd.DataFrame) -> float:
     return float(normalized["close"].iloc[-1])
 
 
+def _to_float(value: Any) -> Optional[float]:
+    series = pd.to_numeric(pd.Series([value]), errors="coerce")
+    number = series.iloc[0]
+    if pd.isna(number):
+        return None
+    return float(number)
+
+
+def _to_timestamp(value: Any) -> Optional[pd.Timestamp]:
+    if value is None:
+        return None
+    try:
+        stamp = pd.Timestamp(value)
+    except Exception:
+        return None
+    if pd.isna(stamp):
+        return None
+    if stamp.tzinfo is not None:
+        try:
+            stamp = stamp.tz_convert("Asia/Shanghai").tz_localize(None)
+        except TypeError:
+            stamp = stamp.tz_localize(None)
+    return stamp
+
+
+def fetch_cn_etf_realtime_row(symbol: str, config: Mapping[str, Any]) -> Dict[str, Any]:
+    try:
+        frame = ChinaMarketCollector(dict(config)).get_etf_realtime()
+    except Exception:
+        return {}
+    if frame is None or frame.empty:
+        return {}
+    code_col = "代码" if "代码" in frame.columns else "基金代码" if "基金代码" in frame.columns else None
+    if not code_col:
+        return {}
+    matched = frame[frame[code_col].astype(str) == str(symbol)]
+    if matched.empty:
+        return {}
+    row = matched.iloc[0]
+    current = _to_float(row.get("最新价"))
+    prev_close = _to_float(row.get("昨收"))
+    change_pct = _to_float(row.get("涨跌幅"))
+    if change_pct is not None:
+        change_pct /= 100.0
+    elif current is not None and prev_close:
+        change_pct = current / prev_close - 1
+    return {
+        "name": str(row.get("名称", row.get("基金简称", ""))).strip(),
+        "current": current,
+        "open": _to_float(row.get("开盘价", row.get("今开"))),
+        "high": _to_float(row.get("最高价", row.get("最高"))),
+        "low": _to_float(row.get("最低价", row.get("最低"))),
+        "prev_close": prev_close,
+        "change_pct": change_pct,
+        "volume": _to_float(row.get("成交量")),
+        "amount": _to_float(row.get("成交额")),
+        "data_date": _to_timestamp(row.get("数据日期")),
+        "updated_at": _to_timestamp(row.get("更新时间")),
+    }
+
+
+def fetch_cn_stock_realtime_row(symbol: str, config: Mapping[str, Any]) -> Dict[str, Any]:
+    try:
+        frame = ChinaMarketCollector(dict(config)).get_stock_realtime()
+    except Exception:
+        return {}
+    if frame is None or frame.empty or "代码" not in frame.columns:
+        return {}
+    matched = frame[frame["代码"].astype(str) == str(symbol)]
+    if matched.empty:
+        return {}
+    row = matched.iloc[0]
+    current = _to_float(row.get("最新价"))
+    prev_close = _to_float(row.get("昨收"))
+    change_pct = _to_float(row.get("涨跌幅"))
+    if change_pct is not None:
+        change_pct /= 100.0
+    elif current is not None and prev_close:
+        change_pct = current / prev_close - 1
+    return {
+        "name": str(row.get("名称", "")).strip(),
+        "current": current,
+        "open": _to_float(row.get("开盘价", row.get("今开"))),
+        "high": _to_float(row.get("最高价", row.get("最高"))),
+        "low": _to_float(row.get("最低价", row.get("最低"))),
+        "prev_close": prev_close,
+        "change_pct": change_pct,
+        "volume": _to_float(row.get("成交量")),
+        "amount": _to_float(row.get("成交额")),
+        "data_date": _to_timestamp(row.get("数据日期")),
+        "updated_at": _to_timestamp(row.get("更新时间")),
+    }
+
+
+def build_snapshot_fallback_history(
+    symbol: str,
+    asset_type: str,
+    config: Mapping[str, Any],
+    periods: int = 60,
+) -> pd.DataFrame:
+    """Build a minimal local history from a realtime ETF snapshot.
+
+    This is only used when the normal daily-history chain fails. It allows the
+    report pipeline to degrade into a clearly-marked snapshot analysis instead of
+    failing end-to-end. The generated series is intentionally conservative:
+    previous rows stay flat at yesterday's close and only the latest row carries
+    today's realtime OHLCV snapshot.
+    """
+
+    if asset_type not in {"cn_etf", "cn_stock"}:
+        return pd.DataFrame()
+
+    realtime = fetch_cn_etf_realtime_row(symbol, config) if asset_type == "cn_etf" else fetch_cn_stock_realtime_row(symbol, config)
+    if not realtime:
+        return pd.DataFrame()
+
+    current = _to_float(realtime.get("current"))
+    prev_close = _to_float(realtime.get("prev_close")) or current
+    open_price = _to_float(realtime.get("open")) or current or prev_close
+    high_price = _to_float(realtime.get("high")) or max(filter(None, [current, open_price, prev_close]), default=None)
+    low_price = _to_float(realtime.get("low")) or min(filter(None, [current, open_price, prev_close]), default=None)
+    amount = _to_float(realtime.get("amount"))
+    volume = _to_float(realtime.get("volume")) or 0.0
+    anchor = _to_timestamp(realtime.get("updated_at") or realtime.get("data_date")) or pd.Timestamp.now()
+
+    if current is None or prev_close is None or open_price is None or high_price is None or low_price is None:
+        return pd.DataFrame()
+
+    count = max(int(periods), 30)
+    dates = pd.bdate_range(end=anchor.normalize(), periods=count)
+    rows: List[Dict[str, Any]] = []
+    for trade_date in dates[:-1]:
+        rows.append(
+            {
+                "date": trade_date,
+                "open": prev_close,
+                "high": prev_close,
+                "low": prev_close,
+                "close": prev_close,
+                "volume": 0.0,
+                "amount": np.nan,
+            }
+        )
+    rows.append(
+        {
+            "date": dates[-1],
+            "open": open_price,
+            "high": max(high_price, open_price, current, prev_close),
+            "low": min(low_price, open_price, current, prev_close),
+            "close": current,
+            "volume": max(volume, 0.0),
+            "amount": amount if amount is not None else np.nan,
+        }
+    )
+    return pd.DataFrame(rows)
+
+
 def compute_history_metrics(frame: pd.DataFrame) -> Dict[str, float]:
     normalized = normalize_ohlcv_frame(frame)
     close = normalized["close"].astype(float)
@@ -116,7 +273,31 @@ def compute_history_metrics(frame: pd.DataFrame) -> Dict[str, float]:
     }
 
 
+def infer_previous_close(history: pd.DataFrame, snapshot_time: Any | None = None) -> float:
+    normalized = normalize_ohlcv_frame(history)
+    if normalized.empty:
+        raise ValueError("Price dataframe is empty")
+    if len(normalized) == 1:
+        return float(normalized["close"].iloc[-1])
+    snapshot_stamp = _to_timestamp(snapshot_time)
+    if snapshot_stamp is None:
+        return float(normalized["close"].iloc[-1])
+    latest_stamp = _to_timestamp(normalized["date"].iloc[-1])
+    if latest_stamp is None:
+        return float(normalized["close"].iloc[-1])
+    if latest_stamp.date() < snapshot_stamp.date():
+        return float(normalized["close"].iloc[-1])
+    if latest_stamp.date() == snapshot_stamp.date():
+        return float(normalized["close"].iloc[-2])
+    return float(normalized["close"].iloc[-1])
+
+
 def intraday_metrics(frame: pd.DataFrame) -> Dict[str, float]:
+    source_vwap = None
+    if "均价" in frame.columns:
+        avg_series = pd.to_numeric(frame["均价"], errors="coerce").dropna()
+        if not avg_series.empty:
+            source_vwap = float(avg_series.iloc[-1])
     normalized = normalize_ohlcv_frame(frame)
     latest = normalized.iloc[-1]
     day_open = float(normalized["open"].iloc[0])
@@ -124,8 +305,17 @@ def intraday_metrics(frame: pd.DataFrame) -> Dict[str, float]:
     day_low = float(normalized["low"].min())
     current = float(latest["close"])
     volume = normalized["volume"].fillna(0.0)
+    start_time = pd.to_datetime(normalized["date"].iloc[0])
+    first_30m_cutoff = start_time + pd.Timedelta(minutes=30)
+    first_30m = normalized[normalized["date"] <= first_30m_cutoff]
+    if first_30m.empty:
+        first_30m = normalized.iloc[:1]
+    first_30m_close = float(first_30m["close"].iloc[-1])
+    first_30m_volume = float(first_30m["volume"].fillna(0.0).sum())
 
-    if "amount" in normalized.columns and normalized["amount"].notna().any():
+    if source_vwap is not None and source_vwap > 0:
+        vwap = source_vwap
+    elif "amount" in normalized.columns and normalized["amount"].notna().any():
         amount = normalized["amount"].fillna(0.0)
         vwap = float(amount.sum() / max(volume.sum(), 1))
     else:
@@ -144,8 +334,91 @@ def intraday_metrics(frame: pd.DataFrame) -> Dict[str, float]:
         "change_pct": float(current / day_open - 1) if day_open else 0.0,
         "vwap": vwap,
         "volume": float(volume.sum()),
+        "first_30m_change_pct": float(first_30m_close / day_open - 1) if day_open else 0.0,
+        "first_30m_volume_share": float(first_30m_volume / max(volume.sum(), 1.0)),
         "range_position": range_pos,
     }
+
+
+def build_intraday_snapshot(
+    symbol: str,
+    asset_type: str,
+    config: Mapping[str, Any],
+    history: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    history_frame = normalize_ohlcv_frame(history if history is not None else fetch_asset_history(symbol, asset_type, dict(config)))
+    snapshot: Dict[str, Any] = {"enabled": False}
+    fallback_mode = False
+    snapshot_time: Optional[pd.Timestamp] = None
+
+    try:
+        intraday = fetch_intraday_history(symbol, asset_type, dict(config))
+        metrics = intraday_metrics(intraday)
+        intraday_frame = normalize_ohlcv_frame(intraday)
+        if not intraday_frame.empty:
+            snapshot_time = _to_timestamp(intraday_frame["date"].iloc[-1])
+    except Exception:
+        latest = history_frame.iloc[-1:]
+        metrics = intraday_metrics(latest)
+        metrics["vwap"] = float((metrics["open"] + metrics["high"] + metrics["low"] + metrics["current"]) / 4)
+        fallback_mode = True
+        if not history_frame.empty:
+            snapshot_time = _to_timestamp(history_frame["date"].iloc[-1])
+
+    realtime = fetch_cn_etf_realtime_row(symbol, config) if asset_type == "cn_etf" else {}
+    if realtime:
+        for key in ("current", "open", "high", "low", "volume"):
+            if realtime.get(key) is not None:
+                metrics[key] = float(realtime[key])
+        if metrics.get("open"):
+            metrics["change_pct"] = float(metrics["current"] / metrics["open"] - 1) if metrics["open"] else 0.0
+        high = float(metrics["high"])
+        low = float(metrics["low"])
+        metrics["range_position"] = 0.5 if high == low else float((float(metrics["current"]) - low) / (high - low))
+        snapshot_time = realtime.get("updated_at") or realtime.get("data_date") or snapshot_time
+
+    prev_close = realtime.get("prev_close")
+    if prev_close is None:
+        prev_close = infer_previous_close(history_frame, snapshot_time)
+    else:
+        prev_close = float(prev_close)
+    vs_prev_close = float(metrics["current"] / prev_close - 1) if prev_close else 0.0
+    opening_gap = float(metrics["open"] / prev_close - 1) if prev_close and metrics.get("open") else 0.0
+
+    if metrics["current"] > metrics["vwap"] and metrics["range_position"] > 0.6:
+        trend = "偏强"
+    elif metrics["current"] < metrics["vwap"] and metrics["range_position"] < 0.4:
+        trend = "偏弱"
+    else:
+        trend = "震荡"
+
+    snapshot.update(
+        {
+            "enabled": True,
+            "fallback_mode": fallback_mode,
+            "current": float(metrics["current"]),
+            "open": float(metrics["open"]),
+            "high": float(metrics["high"]),
+            "low": float(metrics["low"]),
+            "prev_close": float(prev_close),
+            "vwap": float(metrics["vwap"]),
+            "range_position": float(metrics["range_position"]),
+            "opening_gap": opening_gap,
+            "change_vs_prev_close": vs_prev_close,
+            "change_vs_open": float(metrics["change_pct"]),
+            "first_30m_change": float(metrics.get("first_30m_change_pct", 0.0)),
+            "first_30m_volume_share": float(metrics.get("first_30m_volume_share", 0.0)),
+            "trend": trend,
+            "commentary": (
+                "盘中价格站上 VWAP 且处于日内高位区域，更接近强势承接。"
+                if trend == "偏强"
+                else "盘中价格弱于 VWAP 且靠近日内低位，更像承接不足。"
+                if trend == "偏弱"
+                else "盘中价格围绕 VWAP 摆动，今天更像日内震荡而不是单边确认。"
+            ),
+        }
+    )
+    return snapshot
 
 
 def format_pct(value: float) -> str:

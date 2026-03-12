@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 
@@ -23,6 +24,28 @@ def _sample_price_frame(rows: int = 120) -> pd.DataFrame:
     )
 
 
+def _wilder_average(values: pd.Series, period: int, *, start: int = 0) -> pd.Series:
+    series = pd.to_numeric(values, errors="coerce").astype(float).fillna(0.0)
+    result = pd.Series(np.nan, index=series.index, dtype=float)
+    seed_end = start + period - 1
+    if len(series) <= seed_end:
+        return result
+    result.iloc[seed_end] = float(series.iloc[start : seed_end + 1].mean())
+    for i in range(seed_end + 1, len(series)):
+        result.iloc[i] = ((float(result.iloc[i - 1]) * (period - 1)) + float(series.iloc[i])) / period
+    return result
+
+
+def _seeded_recursive_average(values: pd.Series, alpha: float, seed: float) -> pd.Series:
+    series = pd.to_numeric(values, errors="coerce").astype(float).fillna(seed)
+    result = pd.Series(index=series.index, dtype=float)
+    prev = float(seed)
+    for idx, value in series.items():
+        prev = (1 - alpha) * prev + alpha * float(value)
+        result.loc[idx] = prev
+    return result
+
+
 def test_normalize_ohlcv_frame_accepts_chinese_columns():
     frame = pd.DataFrame(
         {
@@ -39,6 +62,25 @@ def test_normalize_ohlcv_frame_accepts_chinese_columns():
     assert len(normalized) == 35
 
 
+def test_normalize_ohlcv_frame_sanitizes_invalid_ohlcv_values():
+    frame = pd.DataFrame(
+        {
+            "日期": pd.date_range("2025-01-01", periods=35, freq="D"),
+            "开盘": np.linspace(10, 12, 35),
+            "最高": np.linspace(9, 11, 35),
+            "最低": np.linspace(11, 13, 35),
+            "收盘": np.linspace(10.5, 12.5, 35),
+            "成交量": np.linspace(-100, 500, 35),
+            "成交额": np.linspace(-1000, 2000, 35),
+        }
+    )
+    normalized = normalize_ohlcv_frame(frame)
+    assert (normalized["high"] >= normalized[["open", "close", "low"]].max(axis=1)).all()
+    assert (normalized["low"] <= normalized[["open", "close", "high"]].min(axis=1)).all()
+    assert (normalized["volume"] >= 0).all()
+    assert (normalized["amount"] >= 0).all()
+
+
 def test_technical_analyzer_generates_bullish_ma_signal():
     analyzer = TechnicalAnalyzer(_sample_price_frame())
     scorecard = analyzer.generate_scorecard()
@@ -48,4 +90,148 @@ def test_technical_analyzer_generates_bullish_ma_signal():
     assert scorecard["obv"]["signal"] in {"bullish", "bearish", "neutral"}
     assert scorecard["fibonacci"]["nearest_level"] in {"0.236", "0.382", "0.500", "0.618", "0.786"}
     assert 0 <= scorecard["fibonacci"]["position_pct"] <= 1.2
+    assert scorecard["volatility"]["signal"] in {"compressed", "neutral", "expanding"}
     assert "candlestick" in scorecard
+
+
+def test_volume_analysis_detects_breakout_structure():
+    frame = _sample_price_frame(80).copy()
+    frame.loc[40:, "close"] = np.linspace(20.0, 20.6, 40)
+    frame.loc[40:, "open"] = frame.loc[40:, "close"] - 0.1
+    frame.loc[40:, "high"] = frame.loc[40:, "close"] + 0.2
+    frame.loc[40:, "low"] = frame.loc[40:, "close"] - 0.3
+    frame.loc[40:78, "volume"] = 1_000
+    frame.loc[79, "close"] = 21.4
+    frame.loc[79, "open"] = 20.8
+    frame.loc[79, "high"] = 21.7
+    frame.loc[79, "low"] = 20.7
+    frame.loc[79, "volume"] = 4_000
+
+    analyzer = TechnicalAnalyzer(frame)
+    volume = analyzer.volume_analysis()
+
+    assert volume["structure"] == "放量突破"
+    assert volume["breakout_20d"] is True
+    assert volume["vol_ratio_20"] > 1.2
+
+
+def test_volatility_profile_identifies_compression():
+    rows = 120
+    dates = pd.date_range("2025-01-01", periods=rows, freq="D")
+    close = np.concatenate([np.linspace(20, 23, 90), np.linspace(23.1, 23.4, 30)])
+    wide_range = np.concatenate([np.full(90, 1.8), np.full(30, 0.25)])
+    frame = pd.DataFrame(
+        {
+            "date": dates,
+            "open": close - 0.05,
+            "high": close + wide_range,
+            "low": close - wide_range,
+            "close": close,
+            "volume": np.linspace(1000, 1800, rows),
+        }
+    )
+
+    analyzer = TechnicalAnalyzer(frame)
+    profile = analyzer.volatility_profile()
+
+    assert profile["signal"] == "compressed"
+    assert profile["atr_ratio_20"] < 1
+    assert profile["boll_width_percentile"] <= 0.35
+
+
+def test_rsi_uses_wilder_seed_average():
+    frame = _sample_price_frame(80).copy()
+    frame.loc[::6, "close"] -= 0.9
+    frame.loc[::5, "close"] += 1.1
+    analyzer = TechnicalAnalyzer(frame)
+    result = analyzer.rsi(period=14)
+
+    close = frame["close"]
+    delta = close.diff()
+    gain = delta.clip(lower=0).fillna(0.0)
+    loss = (-delta.clip(upper=0)).fillna(0.0)
+    avg_gain = _wilder_average(gain, 14, start=1)
+    avg_loss = _wilder_average(loss, 14, start=1)
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    expected = float((100 - (100 / (1 + rs))).clip(lower=0, upper=100).fillna(50.0).iloc[-1])
+
+    assert result["RSI"] == pytest.approx(expected, rel=1e-6)
+
+
+def test_dmi_uses_wilder_smoothing_for_adx():
+    frame = _sample_price_frame(80).copy()
+    frame["high"] = frame["close"] + np.linspace(0.6, 1.2, 80)
+    frame["low"] = frame["close"] - np.linspace(0.5, 1.1, 80)
+    frame.loc[::7, "high"] += 0.8
+    frame.loc[::5, "low"] -= 0.6
+
+    analyzer = TechnicalAnalyzer(frame)
+    dmi = analyzer.dmi(period=14)
+
+    high = frame["high"]
+    low = frame["low"]
+    close = frame["close"]
+    plus_move = high.diff()
+    minus_move = -low.diff()
+    plus_dm = plus_move.where((plus_move > minus_move) & (plus_move > 0), 0.0).fillna(0.0)
+    minus_dm = minus_move.where((minus_move > plus_move) & (minus_move > 0), 0.0).fillna(0.0)
+    tr = pd.concat(
+        [high - low, (high - close.shift()).abs(), (low - close.shift()).abs()],
+        axis=1,
+    ).max(axis=1).fillna(0.0)
+    atr = _wilder_average(tr, 14)
+    plus_di = 100 * (_wilder_average(plus_dm, 14) / atr.replace(0, np.nan))
+    minus_di = 100 * (_wilder_average(minus_dm, 14) / atr.replace(0, np.nan))
+    dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)).clip(lower=0, upper=100)
+    adx = pd.Series(np.nan, index=dx.index, dtype=float)
+    first_dx = 13
+    adx_seed_end = first_dx + 13
+    adx.iloc[adx_seed_end] = float(dx.iloc[first_dx : adx_seed_end + 1].dropna().mean())
+    for i in range(adx_seed_end + 1, len(dx)):
+        adx.iloc[i] = ((float(adx.iloc[i - 1]) * 13) + float(dx.iloc[i])) / 14
+    expected_adx = float(adx.fillna(0).iloc[-1])
+
+    assert dmi["ADX"] == pytest.approx(expected_adx, rel=1e-6)
+
+
+def test_kdj_uses_seeded_recursive_average():
+    frame = _sample_price_frame(60).copy()
+    frame.loc[::4, "high"] += 0.6
+    frame.loc[::3, "low"] -= 0.4
+    analyzer = TechnicalAnalyzer(frame)
+    result = analyzer.kdj(period=9, smooth_k=3, smooth_d=3)
+
+    high_n = frame["high"].rolling(9).max()
+    low_n = frame["low"].rolling(9).min()
+    rsv = ((frame["close"] - low_n) / (high_n - low_n).replace(0, np.nan) * 100).clip(lower=0, upper=100).fillna(50)
+    k = _seeded_recursive_average(rsv, alpha=1 / 3, seed=50.0).clip(lower=0, upper=100)
+    d = _seeded_recursive_average(k, alpha=1 / 3, seed=50.0).clip(lower=0, upper=100)
+    j = 3 * k - 2 * d
+
+    assert result["K"] == pytest.approx(float(k.iloc[-1]), rel=1e-6)
+    assert result["D"] == pytest.approx(float(d.iloc[-1]), rel=1e-6)
+    assert result["J"] == pytest.approx(float(j.iloc[-1]), rel=1e-6)
+
+
+def test_indicator_series_matches_latest_scorecard_values():
+    analyzer = TechnicalAnalyzer(_sample_price_frame(90))
+    series = analyzer.indicator_series()
+    scorecard = analyzer.generate_scorecard()
+
+    assert float(series["macd_dif"].iloc[-1]) == pytest.approx(scorecard["macd"]["DIF"], rel=1e-6)
+    assert float(series["macd_dea"].iloc[-1]) == pytest.approx(scorecard["macd"]["DEA"], rel=1e-6)
+    assert float(series["rsi"].iloc[-1]) == pytest.approx(scorecard["rsi"]["RSI"], rel=1e-6)
+    assert float(series["adx"].iloc[-1]) == pytest.approx(scorecard["dmi"]["ADX"], rel=1e-6)
+    assert float(series["plus_di"].iloc[-1]) == pytest.approx(scorecard["dmi"]["DI+"], rel=1e-6)
+    assert float(series["minus_di"].iloc[-1]) == pytest.approx(scorecard["dmi"]["DI-"], rel=1e-6)
+    assert float(series["kdj_k"].iloc[-1]) == pytest.approx(scorecard["kdj"]["K"], rel=1e-6)
+    assert float(series["kdj_d"].iloc[-1]) == pytest.approx(scorecard["kdj"]["D"], rel=1e-6)
+    assert float(series["kdj_j"].iloc[-1]) == pytest.approx(scorecard["kdj"]["J"], rel=1e-6)
+    assert float(series["obv"].iloc[-1]) == pytest.approx(scorecard["obv"]["OBV"], rel=1e-6)
+
+
+def test_ma_system_omits_unavailable_long_averages():
+    analyzer = TechnicalAnalyzer(_sample_price_frame(35))
+    ma = analyzer.ma_system([5, 10, 20, 60])
+    assert "MA5" in ma["mas"]
+    assert "MA60" not in ma["mas"]

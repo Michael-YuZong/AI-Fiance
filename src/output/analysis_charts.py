@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import font_manager
 
+from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.utils.config import resolve_project_path
 
 try:  # pragma: no cover - rendering dependency
@@ -352,71 +353,8 @@ class AnalysisChartRenderer:
         ax.set_ylabel("价格")
 
     def _indicator_series(self, history: pd.DataFrame) -> Dict[str, Any]:
-        close = history["close"]
-        high = history["high"]
-        low = history["low"]
-        volume = history["volume"].fillna(0)
-
-        ema12 = close.ewm(span=12, adjust=False).mean()
-        ema26 = close.ewm(span=26, adjust=False).mean()
-        dif = ema12 - ema26
-        dea = dif.ewm(span=9, adjust=False).mean()
-        hist = 2 * (dif - dea)
-
-        high_n = high.rolling(9).max()
-        low_n = low.rolling(9).min()
-        rsv = ((close - low_n) / (high_n - low_n).replace(0, np.nan) * 100).fillna(50)
-        k = rsv.ewm(alpha=1 / 3, adjust=False).mean()
-        d = k.ewm(alpha=1 / 3, adjust=False).mean()
-        j = 3 * k - 2 * d
-
-        delta = close.diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        avg_gain = gain.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
-        rs = avg_gain / avg_loss.replace(0, np.nan)
-        rsi = (100 - (100 / (1 + rs))).fillna(50)
-
-        plus_move = high.diff()
-        minus_move = -low.diff()
-        plus_dm = plus_move.where((plus_move > minus_move) & (plus_move > 0), 0.0)
-        minus_dm = minus_move.where((minus_move > plus_move) & (minus_move > 0), 0.0)
-        tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
-        atr = tr.rolling(14).mean()
-        plus_di = (100 * (plus_dm.rolling(14).mean() / atr.replace(0, np.nan))).fillna(0)
-        minus_di = (100 * (minus_dm.rolling(14).mean() / atr.replace(0, np.nan))).fillna(0)
-        dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)).fillna(0)
-        adx = dx.rolling(14).mean().fillna(0)
-
-        mid = close.rolling(20).mean()
-        std = close.rolling(20).std(ddof=0)
-        upper = mid + 2 * std
-        lower = mid - 2 * std
-
-        direction = np.sign(close.diff().fillna(0))
-        obv = (direction * volume).cumsum()
-        obv_ma = obv.rolling(20).mean()
-
-        return {
-            "date": history["date"],
-            "close": close,
-            "macd_dif": dif,
-            "macd_dea": dea,
-            "macd_hist": hist,
-            "kdj_k": k,
-            "kdj_d": d,
-            "kdj_j": j,
-            "rsi": rsi,
-            "adx": adx,
-            "plus_di": plus_di,
-            "minus_di": minus_di,
-            "boll_mid": mid,
-            "boll_upper": upper,
-            "boll_lower": lower,
-            "obv": obv,
-            "obv_ma": obv_ma,
-        }
+        normalized = normalize_ohlcv_frame(history)
+        return TechnicalAnalyzer(normalized).indicator_series()
 
     def _trim_indicator_series(self, indicators: Mapping[str, Any], window: int) -> Dict[str, Any]:
         trimmed: Dict[str, Any] = {}

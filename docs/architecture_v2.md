@@ -119,6 +119,12 @@ data_collector/
 - `compare <代码...>`
 - `briefing daily|weekly`
 - `portfolio status|rebalance|log|thesis|review`
+  - 其中 `review` 不再只是月度摘要，而是标准化决策回溯：
+    - 原始决策
+    - 当时信号 / thesis
+    - 后验 1/3/5/20 日路径
+    - 标准止损 / 目标是否触发
+    - 复盘结论
 - `risk report|stress|correlation`
 - `backtest <规则> <代码> <区间>`
 - `discover`

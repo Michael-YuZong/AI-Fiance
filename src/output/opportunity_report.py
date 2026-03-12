@@ -178,13 +178,15 @@ def _score_change_rows(analysis: Dict[str, Any]) -> List[List[str]]:
 
 def _data_sources(analysis: Dict[str, Any]) -> str:
     sources: List[str] = ["行情/技术: Tushare 优先，AKShare / Yahoo 回退"]
+    if dict(analysis.get("intraday") or {}).get("enabled"):
+        sources.append("盘中快照: AKShare 分钟线 / 实时行情")
     if analysis["dimensions"]["fundamental"].get("valuation_snapshot"):
         sources.append("估值/基本面: Tushare + 指数估值快照/财务代理")
     else:
         sources.append("估值: 价格位置代理")
     sources.append("催化: RSS + 动态关键词检索")
     sources.append("事件: 本地事件日历")
-    if analysis.get("asset_type") == "cn_fund":
+    if analysis.get("asset_type") in {"cn_fund", "cn_etf"}:
         sources.append("基金画像: Tushare + 天天基金/雪球")
     if analysis.get("day_theme", {}).get("label"):
         sources.append("上下文: 晨报主线/Regime")
@@ -208,7 +210,7 @@ def _missing_data_notes(analysis: Dict[str, Any]) -> str:
             preview = "、".join(missing_factors[:3])
             suffix = "等" if len(missing_factors) > 3 else ""
             items.append(f"{label}: {preview}{suffix}")
-    if analysis.get("asset_type") == "cn_fund":
+    if analysis.get("asset_type") in {"cn_fund", "cn_etf"}:
         for note in (analysis.get("fund_profile") or {}).get("notes", []):
             if "缺失" in str(note):
                 items.append(str(note))
@@ -219,7 +221,7 @@ def _estimated_notes(analysis: Dict[str, Any]) -> str:
     notes: List[str] = []
     fundamental = analysis["dimensions"]["fundamental"]
     if not fundamental.get("valuation_snapshot"):
-        notes.append("基本面估值未接入真实指数估值时，使用价格位置代理")
+        notes.append("基本面估值未接入可用指数估值时，使用价格位置代理")
     for note in analysis.get("notes", []):
         if "代理" in note or "估算" in note or "回退" in note:
             notes.append(note)
@@ -260,7 +262,7 @@ def _fmt_pct_point(value: Any) -> str:
 
 
 def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
-    if analysis.get("asset_type") != "cn_fund":
+    if analysis.get("asset_type") not in {"cn_fund", "cn_etf"}:
         return []
     profile = dict(analysis.get("fund_profile") or {})
     if not profile:
@@ -406,6 +408,35 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def _intraday_lines(analysis: Dict[str, Any]) -> List[str]:
+    intraday = dict(analysis.get("intraday") or {})
+    if not intraday.get("enabled"):
+        return []
+    lines = [
+        "## 今日盘中视角",
+        "这部分只回答“今天/现在的执行节奏”，不替代默认的日线评分框架。",
+        "",
+    ]
+    lines.extend(
+        _table(
+            ["项目", "内容"],
+            [
+                ["当前价", _fmt_number(intraday.get("current"), 3)],
+                ["相对昨收", _fmt_pct_point(float(intraday.get("change_vs_prev_close", 0.0)) * 100)],
+                ["相对今开", _fmt_pct_point(float(intraday.get("change_vs_open", 0.0)) * 100)],
+                ["日内高低", f"{_fmt_number(intraday.get('low'), 3)} / {_fmt_number(intraday.get('high'), 3)}"],
+                ["VWAP", _fmt_number(intraday.get("vwap"), 3)],
+                ["日内位置", f"{float(intraday.get('range_position', 0.0)):.0%}"],
+                ["盘中状态", intraday.get("trend", "—")],
+            ],
+        )
+    )
+    lines.extend(["", f"- {intraday.get('commentary', '当前没有额外盘中结论。')}"])
+    if intraday.get("fallback_mode"):
+        lines.append("- 分钟线不可用，盘中视角已退化为最近一根日K快照。")
+    return lines
+
+
 def _visual_lines(visuals: Optional[Mapping[str, str]]) -> List[str]:
     if not visuals:
         return []
@@ -507,6 +538,9 @@ class OpportunityReportRenderer:
                 ],
             )
         )
+        intraday_lines = _intraday_lines(analysis)
+        if intraday_lines:
+            lines.extend(["", *intraday_lines])
         visual_lines = _visual_lines(visuals)
         if visual_lines:
             lines.extend(["", *visual_lines])

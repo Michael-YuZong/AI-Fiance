@@ -77,6 +77,7 @@ class PortfolioRepository:
         basis: str = "rule",
         note: str = "",
         signal_snapshot: Optional[Dict[str, Any]] = None,
+        thesis_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         payload = self.load()
         holdings = {item["symbol"]: item for item in payload.get("holdings", [])}
@@ -132,6 +133,7 @@ class PortfolioRepository:
                 "basis": basis,
                 "note": note,
                 "signal_snapshot": signal_snapshot or {},
+                "thesis_snapshot": thesis_snapshot or {},
             }
         )
         save_json(self.trade_log_path, trades)

@@ -25,6 +25,35 @@ except ImportError:  # pragma: no cover
     bs = None
 
 
+GENERIC_INDEX_KEYWORDS = {
+    "科技",
+    "成长",
+    "价值",
+    "红利",
+    "消费",
+    "医药",
+    "金融",
+    "地产",
+    "周期",
+    "制造",
+    "材料",
+}
+
+
+def _normalize_index_label(value: str) -> str:
+    text = str(value).strip().lower()
+    for token in ("收益率", "价格指数", "指数", " ", "\t", "\n", "*", "×", "+", "/", "-", "（", "）", "(", ")", "·"):
+        text = text.replace(token, "")
+    return text
+
+
+def _keyword_specificity(value: str) -> int:
+    normalized = _normalize_index_label(value)
+    if not normalized:
+        return 0
+    return 1 if normalized in GENERIC_INDEX_KEYWORDS else len(normalized)
+
+
 class ValuationCollector(BaseCollector):
     """Collect ETF scale, index valuation snapshots, and financial proxies.
 
@@ -98,46 +127,77 @@ class ValuationCollector(BaseCollector):
         cleaned = [str(item).strip() for item in keywords if str(item).strip()]
         if not cleaned:
             return None
+        normalized_keywords = [(_normalize_index_label(item), index, _keyword_specificity(item), item) for index, item in enumerate(cleaned)]
         frame = self.cached_call("valuation:index_all_cni", client.index_all_cni, ttl_hours=12)
         if frame is None or frame.empty:
             return None
         if "指数简称" not in frame.columns or "指数代码" not in frame.columns:
             return None
 
-        ranked: list[tuple[tuple[int, int, int], Dict[str, Any]]] = []
+        ranked_exact: list[tuple[tuple[int, int, int, int, int], Dict[str, Any]]] = []
+        ranked_proxy: list[tuple[tuple[int, int, int, int, int], Dict[str, Any]]] = []
+        exact_without_pe: list[tuple[tuple[int, int, int, int, int], Dict[str, Any]]] = []
         for _, row in frame.iterrows():
             name = str(row.get("指数简称", "")).strip()
             code = str(row.get("指数代码", "")).strip()
             if not name or not code:
                 continue
             lowered = name.lower()
-            matched_keywords = [keyword for keyword in cleaned if keyword.lower() in lowered]
+            normalized_name = _normalize_index_label(name)
+            matched_keywords = [raw for normalized, _, _, raw in normalized_keywords if normalized and (normalized == normalized_name or normalized in normalized_name or raw.lower() in lowered)]
             if not matched_keywords:
                 continue
             pe_value = pd.to_numeric(pd.Series([row.get("PE滚动")]), errors="coerce").iloc[0]
             has_pe = not pd.isna(pe_value)
-            score = 0
-            if has_pe:
-                score += 4
-            score += min(len(matched_keywords), 3) * 2
+            exact_match = any(_normalize_index_label(keyword) == normalized_name for keyword in matched_keywords)
+            specificities = [_keyword_specificity(keyword) for keyword in matched_keywords]
+            best_specificity = max(specificities) if specificities else 0
+            total_specificity = sum(specificities)
+            keyword_index = min(index for normalized, index, _, raw in normalized_keywords if raw in matched_keywords)
+            penalty = 0
             if "港股" in name or "港币" in name or "人民币" in name:
-                score -= 2
+                penalty += 2
             if name.endswith("R"):
-                score -= 1
-            ranked.append(
-                (
-                    (-score, len(name), 0 if has_pe else 1),
-                    {
-                        "index_code": code,
-                        "index_name": name,
-                        "pe_ttm": None if pd.isna(pe_value) else float(pe_value),
-                    },
-                )
-            )
-        if not ranked:
-            return None
-        ranked.sort(key=lambda item: item[0])
-        return ranked[0][1]
+                penalty += 1
+            candidate = {
+                "index_code": code,
+                "index_name": name,
+                "pe_ttm": None if pd.isna(pe_value) else float(pe_value),
+                "matched_keywords": matched_keywords,
+                "match_quality": "exact" if exact_match else "theme_proxy",
+                "display_label": "真实指数估值" if exact_match else "指数估值代理",
+            }
+            rank_key = (-best_specificity, -total_specificity, keyword_index, penalty, len(name))
+            if exact_match and has_pe:
+                ranked_exact.append((rank_key, candidate))
+            elif exact_match:
+                exact_without_pe.append((rank_key, candidate))
+            elif has_pe:
+                ranked_proxy.append((rank_key, candidate))
+
+        if ranked_exact:
+            ranked_exact.sort(key=lambda item: item[0])
+            selected = ranked_exact[0][1]
+            selected["match_note"] = "估值库已匹配到与目标基准高度一致的指数名称。"
+            return selected
+        if ranked_proxy:
+            ranked_proxy.sort(key=lambda item: item[0])
+            selected = ranked_proxy[0][1]
+            if exact_without_pe:
+                exact_without_pe.sort(key=lambda item: item[0])
+                selected["exact_benchmark_name"] = exact_without_pe[0][1]["index_name"]
+                selected["match_note"] = f"估值库未提供 `{selected['exact_benchmark_name']}` 的滚动PE，当前改用最接近的主题指数代理。"
+            else:
+                selected["match_note"] = "估值库未直接命中精确基准，当前使用最接近的主题指数代理。"
+            return selected
+        if exact_without_pe:
+            exact_without_pe.sort(key=lambda item: item[0])
+            selected = exact_without_pe[0][1]
+            selected["match_quality"] = "exact_no_pe"
+            selected["display_label"] = "真实指数估值"
+            selected["match_note"] = "估值库已命中基准指数，但当前缺少可用滚动PE。"
+            return selected
+        return None
 
     def get_cn_index_value_history(self, index_code: str) -> pd.DataFrame:
         """Fetch CSI/CNI index valuation history."""

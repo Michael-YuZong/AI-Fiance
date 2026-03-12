@@ -26,6 +26,26 @@ def test_valuation_index_weight_uses_index_code_candidates(monkeypatch, tmp_path
     assert list(frame["symbol"]) == ["600519", "300750"]
 
 
+def test_valuation_index_snapshot_prefers_specific_theme_proxy_over_generic_keyword(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    frame = pd.DataFrame(
+        [
+            {"指数简称": "创科技", "指数代码": "399276", "PE滚动": 35.5},
+            {"指数简称": "人工智能精选", "指数代码": "980087", "PE滚动": 71.6},
+            {"指数简称": "创业板人工智能", "指数代码": "970070", "PE滚动": 69.1},
+        ]
+    )
+
+    monkeypatch.setattr(collector, "cached_call", lambda *args, **kwargs: frame)
+    monkeypatch.setattr(collector, "_require_ak", lambda: type("AKClient", (), {"index_all_cni": object()})())
+
+    snapshot = collector.get_cn_index_snapshot(["中证人工智能主题指数", "人工智能", "科技"])
+    assert snapshot is not None
+    assert snapshot["index_name"] == "人工智能精选"
+    assert snapshot["display_label"] == "指数估值代理"
+    assert "代理" in snapshot["match_note"]
+
+
 def test_valuation_etf_nav_resolves_tushare_fund_code(monkeypatch, tmp_path):
     collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
 

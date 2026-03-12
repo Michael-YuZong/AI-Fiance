@@ -42,6 +42,7 @@ def route_request(
     text = request.strip()
     lowered = text.lower()
     symbols = _merge_symbols(_extract_symbols(text, candidate_symbols), resolved_symbols)
+    today_sensitive = any(keyword in text for keyword in ["今天", "今日", "现在", "目前", "此刻"])
 
     if any(keyword in text for keyword in ["代码", "编号", "哪只ETF", "对应ETF", "对应代码", "是什么ETF"]) and symbols:
         return RoutedCommand("lookup", [text], "识别为标的代码/编号查询。")
@@ -83,8 +84,11 @@ def route_request(
         period = _detect_period(text)
         if symbols:
             return RoutedCommand("backtest", [rule, symbols[0], period], "识别为规则回测。")
-    if symbols and any(keyword in text for keyword in ["扫描", "看看", "分析", "打分卡", "标的", "怎么样", "能不能买", "深度分析"]):
-        return RoutedCommand("scan", [symbols[0]], "识别为单标的扫描。")
+    if symbols and any(keyword in text for keyword in ["扫描", "看看", "分析", "打分卡", "标的", "怎么样", "能不能买", "适合买", "适合买吗", "深度分析"]):
+        args = [symbols[0]]
+        if today_sensitive:
+            args.append("--today")
+        return RoutedCommand("scan", args, "识别为单标的扫描。" + (" 请求包含今天/当前语义，已补充盘中视角。" if today_sensitive else ""))
     if symbols and len(symbols) == 1 and len(text) <= 24:
         return RoutedCommand("scan", [symbols[0]], "检测到单个标的，默认执行扫描。")
     return RoutedCommand("research", [text], "无法稳定匹配到专用命令，回退到研究问答。")

@@ -111,7 +111,7 @@ class ScorecardBuilder:
             {
                 "name": "量能",
                 "icon": _item_icon(volume_score),
-                "reason": f"量比={technical['volume']['vol_ratio']:.2f}，状态为 {volume_signal}。",
+                "reason": f"量能比={technical['volume']['vol_ratio']:.2f}（日成交量相对 5 日均量），状态为 {volume_signal}。",
             }
         )
 

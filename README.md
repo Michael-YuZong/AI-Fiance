@@ -35,7 +35,7 @@
 - `briefing`：每日晨报 / 午报 / 晚报 / 每周周报
 - `snap`：盘中快照
 - `compare`：同类标的横向对比
-- `portfolio`：持仓、日志、目标权重、thesis、月度复盘
+- `portfolio`：持仓、日志、目标权重、thesis、月度复盘 / 决策回溯
 - `discover`：基于 watchlist 和 regime 的主动发现
 - `regime`：宏观体制判断
 - `policy`：政策关键词 / URL 解读
@@ -138,6 +138,8 @@ python -m src.commands.portfolio log buy 561380 2.23 10000
 python -m src.commands.portfolio set-target 561380 0.30
 python -m src.commands.portfolio rebalance
 python -m src.commands.portfolio review 2026-03
+python -m src.commands.portfolio review 2026-03 --symbol 300750
+python -m src.commands.portfolio review 2026-03 --lookahead 20 --stop-pct 0.08 --target-pct 0.15
 python -m src.commands.risk report
 python -m src.commands.risk stress "美股崩盘"
 python -m src.commands.backtest macd_golden_cross 561380 3y

@@ -86,7 +86,16 @@ class FundProfileCollector(BaseCollector):
         return self.cached_call(f"fund_profile:asset_mix:{symbol}", fetcher, symbol=symbol, ttl_hours=12)
 
     def get_portfolio_hold(self, symbol: str, years: Optional[Sequence[str]] = None) -> pd.DataFrame:
-        fetcher = self._ak_function("fund_portfolio_hold_em")
+        raw_fetcher = self._ak_function("fund_portfolio_hold_em")
+
+        def fetcher(**kwargs) -> pd.DataFrame:
+            try:
+                return raw_fetcher(**kwargs)
+            except Exception as exc:
+                if self._is_known_empty_detail_error(exc):
+                    return pd.DataFrame()
+                raise
+
         for year in years or self._year_candidates():
             try:
                 frame = self.cached_call(f"fund_profile:holdings:{symbol}:{year}", fetcher, symbol=symbol, date=year, ttl_hours=24)
@@ -98,7 +107,16 @@ class FundProfileCollector(BaseCollector):
         return pd.DataFrame()
 
     def get_industry_allocation(self, symbol: str, years: Optional[Sequence[str]] = None) -> pd.DataFrame:
-        fetcher = self._ak_function("fund_portfolio_industry_allocation_em")
+        raw_fetcher = self._ak_function("fund_portfolio_industry_allocation_em")
+
+        def fetcher(**kwargs) -> pd.DataFrame:
+            try:
+                return raw_fetcher(**kwargs)
+            except Exception as exc:
+                if self._is_known_empty_detail_error(exc):
+                    return pd.DataFrame()
+                raise
+
         for year in years or self._year_candidates():
             try:
                 frame = self.cached_call(f"fund_profile:industry:{symbol}:{year}", fetcher, symbol=symbol, date=year, ttl_hours=24)
@@ -131,6 +149,7 @@ class FundProfileCollector(BaseCollector):
         rating_df = self._safe_frame(self.get_rating_table)
 
         overview = overview_df.iloc[0].to_dict() if not overview_df.empty else {}
+        overview = self._merge_overview_with_tushare(overview, symbol)
         if not overview:
             notes.append("基金概况缺失")
         achievement = self._achievement_snapshot(achievement_df)
@@ -161,6 +180,87 @@ class FundProfileCollector(BaseCollector):
             "notes": notes,
         }
 
+    def _merge_overview_with_tushare(self, overview: Dict[str, Any], symbol: str) -> Dict[str, Any]:
+        basic = self._tushare_fund_basic_row(symbol)
+        merged = self._overview_from_tushare_basic(basic) if basic else {}
+        if not overview:
+            return merged
+        if not merged:
+            return dict(overview)
+
+        for key, value in dict(overview).items():
+            if merged.get(key) in (None, "", "—"):
+                if value not in (None, "", "—"):
+                    merged[key] = value
+        return merged
+
+    def _overview_from_tushare_basic(self, basic: Dict[str, Any]) -> Dict[str, Any]:
+        overview: Dict[str, Any] = {}
+        if not basic:
+            return overview
+
+        fund_type = str(basic.get("fund_type", "")).strip()
+        invest_type = str(basic.get("invest_type", "")).strip()
+        type_text = fund_type or invest_type
+        if fund_type and invest_type and invest_type not in fund_type:
+            type_text = f"{fund_type} / {invest_type}"
+
+        found_date = self._normalize_compact_date(basic.get("found_date"))
+        issue_date = self._normalize_compact_date(basic.get("issue_date"))
+        list_date = self._normalize_compact_date(basic.get("list_date"))
+        issue_amount = self._to_float(basic.get("issue_amount"))
+        if found_date and issue_amount is not None and pd.notna(issue_amount):
+            founding_text = f"{found_date} / {issue_amount:.4f}亿份"
+        else:
+            founding_text = found_date or ""
+
+        if str(basic.get("name", "")).strip():
+            overview["基金简称"] = str(basic.get("name", "")).strip()
+        ts_code = str(basic.get("ts_code", "")).split(".")[0]
+        if ts_code:
+            overview["基金代码"] = ts_code
+        if type_text:
+            overview["基金类型"] = type_text
+        if str(basic.get("management", "")).strip():
+            overview["基金管理人"] = str(basic.get("management", "")).strip()
+        custodian = str(basic.get("custodian", "") or basic.get("trustee", "")).strip()
+        if custodian:
+            overview["基金托管人"] = custodian
+        if issue_date:
+            overview["发行日期"] = issue_date
+        if founding_text:
+            overview["成立日期/规模"] = founding_text
+        benchmark = str(basic.get("benchmark", "")).strip()
+        if benchmark:
+            overview["业绩比较基准"] = benchmark
+            overview["跟踪标的"] = benchmark
+        if list_date:
+            overview["上市日期"] = list_date
+        if basic.get("m_fee") not in (None, ""):
+            overview["管理费率"] = f"{float(basic.get('m_fee')):.2f}%（每年）"
+        if basic.get("c_fee") not in (None, ""):
+            overview["托管费率"] = f"{float(basic.get('c_fee')):.2f}%（每年）"
+        return overview
+
+    def _tushare_fund_basic_row(self, symbol: str) -> Dict[str, Any]:
+        bare_symbol = str(symbol).split(".")[0]
+        for market in ("E", "O", "L"):
+            frame = self.get_fund_basic(market)
+            if frame.empty or "ts_code" not in frame.columns:
+                continue
+            matched = frame[frame["ts_code"].astype(str).str.startswith(f"{bare_symbol}.", na=False)]
+            if not matched.empty:
+                return matched.iloc[0].to_dict()
+        return {}
+
+    def _normalize_compact_date(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text or text.lower() == "nan":
+            return ""
+        if text.isdigit() and len(text) == 8:
+            return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+        return text
+
     def _safe_frame(self, method, *args) -> pd.DataFrame:  # noqa: ANN001
         try:
             frame = method(*args)
@@ -171,6 +271,18 @@ class FundProfileCollector(BaseCollector):
     def _year_candidates(self) -> List[str]:
         year = datetime.now().year
         return [str(year - offset) for offset in range(0, 4)]
+
+    def _is_known_empty_detail_error(self, exc: Exception) -> bool:
+        text = str(exc)
+        return any(
+            token in text
+            for token in (
+                "Length mismatch",
+                "Excel file format cannot be determined",
+                "CERTIFICATE_VERIFY_FAILED",
+                "'data'",
+            )
+        )
 
     def _latest_quarter_frame(self, frame: pd.DataFrame, column: str) -> pd.DataFrame:
         if frame.empty or column not in frame.columns:
@@ -313,22 +425,37 @@ class FundProfileCollector(BaseCollector):
         asset_mix: List[Dict[str, Any]],
         manager: Dict[str, Any],
     ) -> Dict[str, Any]:
-        text_parts = [
-            str(overview.get("基金简称", "")),
-            str(overview.get("基金类型", "")),
-            str(overview.get("业绩比较基准", "")),
+        fund_name = str(overview.get("基金简称", "")).strip()
+        fund_type = str(overview.get("基金类型", "")).strip()
+        benchmark_note = str(overview.get("业绩比较基准", "")).strip() or "未披露业绩比较基准"
+        tracking_target = str(overview.get("跟踪标的", "")).strip()
+        passive_text = f"{fund_name} {fund_type}".lower()
+        is_passive = any(token in passive_text for token in ("指数", "etf", "联接"))
+        core_text_parts = [
+            fund_name,
+            fund_type,
+            benchmark_note,
+            tracking_target,
+        ]
+        secondary_text_parts = [
             " ".join(item.get("行业类别", "") for item in top_industries),
             " ".join(item.get("股票名称", "") for item in top_holdings),
-            " ".join(manager.get("peer_funds", [])),
         ]
-        sector, chain_nodes = self._infer_theme(" ".join(text_parts))
+        sector, chain_nodes = self._infer_theme(" ".join(core_text_parts))
+        if sector == "综合":
+            sector, chain_nodes = self._infer_theme(" ".join(secondary_text_parts))
+        if sector == "综合":
+            fallback_text = " ".join([*core_text_parts, *secondary_text_parts, " ".join(manager.get("peer_funds", []))])
+            sector, chain_nodes = self._infer_theme(fallback_text)
         stock_ratio = self._asset_ratio(asset_mix, "股票")
         cash_ratio = self._asset_ratio(asset_mix, "现金")
         top5 = sum(item.get("占净值比例") or 0.0 for item in top_holdings[:5])
         tags: List[str] = []
         if sector != "综合":
             tags.append(f"{sector}主题")
-        if stock_ratio >= 80:
+        if is_passive:
+            tags.append("被动跟踪")
+        elif stock_ratio >= 80:
             tags.append("高仓位主动")
         elif stock_ratio >= 60:
             tags.append("偏股进攻")
@@ -336,15 +463,16 @@ class FundProfileCollector(BaseCollector):
             tags.append("仓位灵活")
         if cash_ratio >= 15:
             tags.append("保留机动仓位")
-        if top5 >= 40:
+        if not is_passive and top5 >= 40:
             tags.append("高集中选股")
-        elif top5 >= 25:
+        elif not is_passive and top5 >= 25:
             tags.append("中等集中")
-        if self._manager_style_consistent(manager.get("peer_funds", []), sector):
+        if not is_passive and self._manager_style_consistent(manager.get("peer_funds", []), sector):
             tags.append("风格稳定")
 
-        benchmark_note = str(overview.get("业绩比较基准", "")).strip() or "未披露业绩比较基准"
-        if stock_ratio >= 80:
+        if is_passive:
+            positioning = "这类基金更看跟踪标的暴露、跟踪误差和申赎效率，不以基金经理主观择时择股为核心。"
+        elif stock_ratio >= 80:
             positioning = f"股票仓位约 {stock_ratio:.1f}% ，整体是高仓位进攻框架。"
         elif stock_ratio > 0:
             positioning = f"股票仓位约 {stock_ratio:.1f}% ，仓位并不保守。"
@@ -353,14 +481,21 @@ class FundProfileCollector(BaseCollector):
         if cash_ratio >= 15:
             positioning += f" 同时保留约 {cash_ratio:.1f}% 现金，机动性不低。"
 
-        if top5 >= 40:
+        if is_passive:
+            if sector != "综合":
+                selection = f"核心不是基金经理主动选股，而是跟踪 `{sector}` 暴露及其对应基准。"
+            else:
+                selection = "核心不是基金经理主动选股，而是跟踪对应指数/标的本身。"
+        elif top5 >= 40:
             selection = f"前五大重仓合计约 {top5:.1f}% ，选股集中度较高，本质上是在买基金经理的高 conviction 组合。"
         elif top5 > 0:
             selection = f"前五大重仓合计约 {top5:.1f}% ，持仓集中度中等，更像主题内的主动均衡配置。"
         else:
             selection = "当前没有拿到稳定的前十大持仓，选股风格暂时无法下强结论。"
 
-        if manager:
+        if is_passive:
+            consistency = "这类产品更重要的是跟踪误差、费率和标的暴露是否清晰，基金经理风格漂移不是核心变量。"
+        elif manager:
             consistency = (
                 f"经理当前在管约 {manager.get('current_fund_count', 0)} 只产品，"
                 f"在管规模约 {manager.get('aum_billion', 0.0):.2f} 亿。"
@@ -373,8 +508,10 @@ class FundProfileCollector(BaseCollector):
         summary = "这只基金更像在买"
         if sector != "综合":
             summary += f"`{sector}`方向"
+            if is_passive:
+                summary += "的被动暴露"
         else:
-            summary += "基金经理的主动选股框架"
+            summary += "对应指数/标的本身" if is_passive else "基金经理的主动选股框架"
         if tags:
             summary += "，当前标签是 `" + " / ".join(tags) + "`。"
         else:

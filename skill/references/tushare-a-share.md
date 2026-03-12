@@ -66,6 +66,8 @@
    - `daily.vol`: `手`
    - `daily_basic.total_mv/circ_mv`: `万元`
    - `daily_basic.total_share/float_share/free_share`: `万股`
+   - `share_float.float_share`: 按 `股` 处理更稳妥；展示时再换算成 `亿股`
+   - `share_float.float_ratio`: 按 `占总股本比(%)` 解读，不要当成小数
    - `moneyflow_hsgt.hgt/sgt/north_money/south_money`: `百万元`
    - `hsgt_top10.amount/net_amount/buy/sell`: `元`
    - `margin.rzye/rzmre/rzche/rqye/rzrqye`: 默认按 `元` 处理
@@ -84,6 +86,81 @@
 - Tushare 不完整时优先“补表/修字段/修单位”，不是立刻换源
 - 降级到 `AKShare / efinance / Yahoo` 时，要在结果里明确这是 fallback
 - 资金流和两融统一后，内部金额口径默认按 `元` 存储；只有展示时再换成 `亿`
+
+### 当前仓库已接入的高价值接口
+
+这些接口已经真正进入采集/评分/报告链路：
+
+- `stock_basic`
+  - 用途：A 股名称、行业、上市状态、上市日期
+- `daily` + `adj_factor`
+  - 用途：个股/ETF 日线、复权历史、技术指标
+- `daily_basic`
+  - 用途：A 股快照、PE/PB/PS、换手率、市值、成交额拼表
+- `fina_indicator`
+  - 用途：ROE、毛利率、营收/利润同比等个股基本面主链
+- `fund_basic` + `fund_nav`
+  - 用途：ETF/场外基金画像、净值历史
+- `moneyflow`
+  - 用途：A 股市场资金流聚合
+- `moneyflow_hsgt` / `hsgt_top10`
+  - 用途：北向南向总量、活跃股
+- `margin`
+  - 用途：融资融券汇总
+- `trade_cal`
+  - 用途：交易日校准
+- `forecast` / `express`
+  - 用途：业绩预告、业绩快报补充
+- `share_float`
+  - 用途：A 股限售股解禁压力；当前已接进个股硬检查
+
+### 高价值优先队列：建议下一步继续接
+
+下面这些接口，价值高而且更适合做“结构化事件优先”，比纯新闻标题更稳：
+
+| 接口 | 价值 | 建议用法 |
+| --- | --- | --- |
+| `disclosure_date` | 很高 | 财报披露计划表；比新闻更适合做 `未来 14/30 日` 披露窗口与前瞻催化 |
+| `stk_holdertrade` | 很高 | 董监高/大股东增减持；可作为负面事件、筹码结构、风险提示 |
+| `dividend` | 很高 | 分红预案/实施节奏；适合红利策略、回报质量、事件催化 |
+| `repurchase` | 很高 | 回购预案/实施；适合正向催化和资金信号 |
+| `stk_auction` | 很高 | 集合竞价价格、量比、换手；适合“开盘是否可执行”的盘中层因子 |
+| `stk_limit` | 中高 | 涨跌停价边界；适合执行层 sanity check、极端波动过滤 |
+| `top10_holders` / `top10_floatholders` | 中高 | 股东集中度、机构稳定性；适合长期质量、筹码稳定性 |
+| `pledge_detail` | 中高 | 质押明细；比汇总统计更适合单票风险提示 |
+| `bak_daily` | 中高 | 带更丰富日度特征的全市场快照；适合候选池增强和量价结构补强 |
+
+### 当前不建议直接重仓依赖的接口/用法
+
+- 纯新闻标题替代结构化事件
+  - 新闻适合补充，不适合代替 `披露计划 / 增减持 / 回购 / 分红 / 解禁`
+- 市场级资金数据伪装成个股级优势
+  - 比如全市场北向净流入，不应直接写成某一只股票独有的筹码优势
+- 单次空表直接判定“没有催化/没有风险”
+  - 要先区分：接口不可用、权限不足、当日无更新、确实没有事件
+
+### 当前环境已验证可用的高价值接口（live probe）
+
+这台环境里已经真实打通过：
+
+- `share_float`
+  - 用途：未来 30/60/90 日解禁压力
+- `disclosure_date`
+  - 用途：财报披露计划
+- `stk_holdertrade`
+  - 用途：股东增减持
+- `stk_auction`
+  - 用途：集合竞价量价
+- `stk_limit`
+  - 用途：涨跌停价边界
+- `dividend`
+  - 用途：分红预案/实施
+- `repurchase`
+  - 用途：回购预案/实施
+- `top10_holders` / `top10_floatholders`
+  - 用途：股东集中度、稳定性
+- `bak_daily`
+  - 用途：日度增强快照
 
 ### 官方文档
 
