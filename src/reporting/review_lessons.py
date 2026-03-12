@@ -121,6 +121,13 @@ ACTIVE_REVIEW_LESSONS: List[ReviewLesson] = [
         owner_layer="opportunity_engine",
         rationale="A股已有披露计划、增减持、回购、分红、解禁等结构化接口时，应优先用这些高置信事件构建催化和风险，而不是仅靠新闻标题推断。",
     ),
+    ReviewLesson(
+        lesson_id="L016",
+        title="A股资本结构与执行层风险应优先使用 Tushare 结构化数据",
+        scope="cn_stock_reports",
+        owner_layer="opportunity_engine",
+        rationale="解禁、质押、前十大股东、集合竞价、涨跌停边界这类信息如果 Tushare 已可稳定获取，就应优先用于硬检查、筹码结构和执行层，而不是继续用市场级代理或缺省占位。",
+    ),
 ]
 
 

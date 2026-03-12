@@ -140,3 +140,44 @@ def test_valuation_holdertrade_and_capital_return_normalize_fields(monkeypatch, 
     assert holder_rows[0]["change_ratio"] == 0.12
     assert repurchase_rows[0]["proc"] == "实施"
     assert dividend_rows[0]["div_proc"] == "预案"
+
+
+def test_valuation_top_holders_and_pledge_normalize_fields(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame:
+        if api_name == "top10_holders":
+            return pd.DataFrame(
+                [
+                    {"ts_code": "300502.SZ", "ann_date": "20251030", "end_date": "20250930", "holder_name": "张三", "hold_amount": "1000000", "hold_ratio": "6.5", "hold_float_ratio": "1.8", "hold_change": "0"},
+                ]
+            )
+        if api_name == "top10_floatholders":
+            return pd.DataFrame(
+                [
+                    {"ts_code": "300502.SZ", "ann_date": "20251030", "end_date": "20250930", "holder_name": "李四", "hold_amount": "500000", "hold_ratio": "2.5", "hold_float_ratio": "2.3", "hold_change": "0"},
+                ]
+            )
+        if api_name == "pledge_stat":
+            return pd.DataFrame(
+                [
+                    {"ts_code": "300502.SZ", "end_date": "20260306", "pledge_count": 2, "unrest_pledge": 1000, "rest_pledge": 500, "total_share": 99400.9312, "pledge_ratio": 6.2},
+                ]
+            )
+        if api_name == "pledge_detail":
+            return pd.DataFrame(
+                [
+                    {"ts_code": "300502.SZ", "ann_date": "20260301", "holder_name": "张三", "pledge_amount": 500, "start_date": "20260201", "end_date": "20270301", "is_release": "0", "release_date": None, "pledgor": "某券商", "holding_amount": 1000, "pledged_amount": 500, "p_total_ratio": 0.5, "h_total_ratio": 50.0, "is_buyback": "1"},
+                ]
+            )
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    holder_rows = collector.get_cn_stock_top10_holders("300502")
+    float_holder_rows = collector.get_cn_stock_top10_floatholders("300502")
+    pledge_stat_rows = collector.get_cn_stock_pledge_stat("300502")
+    pledge_detail_rows = collector.get_cn_stock_pledge_detail("300502")
+    assert holder_rows[0]["hold_ratio"] == 6.5
+    assert float_holder_rows[0]["hold_float_ratio"] == 2.3
+    assert pledge_stat_rows[0]["pledge_ratio"] == 6.2
+    assert pledge_detail_rows[0]["h_total_ratio"] == 50.0

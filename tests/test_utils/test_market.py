@@ -171,9 +171,21 @@ def test_build_intraday_snapshot_for_cn_stock_includes_auction_metrics(monkeypat
             "auction_gap": 400.01 / 393.23 - 1,
         },
     )
+    monkeypatch.setattr(
+        market,
+        "fetch_cn_stock_limit_row",
+        lambda *args, **kwargs: {
+            "up_limit": 432.0,
+            "down_limit": 353.45,
+        },
+    )
 
     snapshot = market.build_intraday_snapshot("300502", "cn_stock", {}, history)
     assert snapshot["auction_price"] == pytest.approx(400.01)
     assert snapshot["auction_volume_ratio"] == pytest.approx(1.35)
     assert snapshot["auction_gap"] == pytest.approx(400.01 / 393.23 - 1)
     assert "抢筹" in snapshot["auction_commentary"]
+    assert snapshot["up_limit"] == pytest.approx(432.0)
+    assert snapshot["down_limit"] == pytest.approx(353.45)
+    assert snapshot["limit_distance_up"] == pytest.approx(432.0 / 403.0 - 1)
+    assert "涨跌停边界" in snapshot["limit_commentary"] or "涨跌停" in snapshot["limit_commentary"]

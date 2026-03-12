@@ -225,6 +225,30 @@ def test_market_cn_stock_auction_normalizes_tushare_fields(monkeypatch, tmp_path
     assert float(frame.iloc[0]["price"]) == 400.01
 
 
+def test_market_cn_stock_limit_normalizes_tushare_fields(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "stk_limit"
+        assert kwargs.get("ts_code") == "300502.SZ"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "300502.SZ",
+                    "trade_date": "20260312",
+                    "up_limit": 432.0,
+                    "down_limit": 353.45,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    frame = collector.get_stock_limit("300502", trade_date="20260312")
+    assert not frame.empty
+    assert frame.iloc[0]["trade_date"] == "2026-03-12"
+    assert float(frame.iloc[0]["up_limit"]) == 432.0
+
+
 def test_ts_daily_basic_snapshot_merges_name_industry_and_amount(monkeypatch, tmp_path):
     collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
 
@@ -262,6 +286,8 @@ def test_ts_daily_basic_snapshot_merges_name_industry_and_amount(monkeypatch, tm
             return stock_basic
         if api_name == "daily":
             return daily
+        if api_name == "bak_daily":
+            return pd.DataFrame()
         raise AssertionError(api_name)
 
     monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
@@ -311,6 +337,8 @@ def test_ts_daily_basic_snapshot_estimates_amount_when_daily_missing(monkeypatch
             return stock_basic
         if api_name == "daily":
             return pd.DataFrame()
+        if api_name == "bak_daily":
+            return pd.DataFrame()
         raise AssertionError(api_name)
 
     monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
@@ -318,6 +346,65 @@ def test_ts_daily_basic_snapshot_estimates_amount_when_daily_missing(monkeypatch
     frame = collector._ts_daily_basic_snapshot()
     assert frame is not None
     assert frame.loc[0, "成交额"] == 12_500_000.0
+
+
+def test_ts_daily_basic_snapshot_uses_bak_daily_for_enrichment_and_amount_fallback(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    daily_basic = pd.DataFrame(
+        [
+            {
+                "ts_code": "300502.SZ",
+                "trade_date": "20260311",
+                "close": 393.23,
+                "turnover_rate": 3.82,
+                "turnover_rate_f": 3.93,
+                "volume_ratio": 0.74,
+                "pe": 137.7,
+                "pe_ttm": 51.99,
+                "pb": 26.91,
+                "total_mv": 39087.4,
+                "circ_mv": 34817.3,
+            }
+        ]
+    )
+
+    def fake_ts_call(api_name: str, **_: object) -> pd.DataFrame | None:
+        if api_name == "daily_basic":
+            return daily_basic
+        if api_name == "stock_basic":
+            return pd.DataFrame()
+        if api_name == "daily":
+            return pd.DataFrame()
+        if api_name == "bak_daily":
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "300502.SZ",
+                        "trade_date": "20260311",
+                        "name": "新易盛",
+                        "industry": "通信设备",
+                        "amount": 1669605.4478,
+                        "swing": 4.79,
+                        "avg_price": 393.0,
+                        "strength": 2.31,
+                        "activity": 3988.0,
+                        "attack": 3.42,
+                        "area": "四川",
+                    }
+                ]
+            )
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    monkeypatch.setattr(collector, "_latest_open_trade_date", lambda *args, **kwargs: "20260311")
+    frame = collector._ts_daily_basic_snapshot()
+    assert frame is not None
+    assert frame.loc[0, "名称"] == "新易盛"
+    assert frame.loc[0, "行业"] == "通信设备"
+    assert frame.loc[0, "成交额"] == 16_696_054_478.0
+    assert frame.loc[0, "强弱度"] == 2.31
+    assert frame.loc[0, "攻击度"] == 3.42
 
 
 def test_market_cn_open_fund_daily_resolves_tushare_fund_code(monkeypatch, tmp_path):

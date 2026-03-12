@@ -593,6 +593,105 @@ class ValuationCollector(BaseCollector):
         self._save_cache(cache_key, records)
         return records
 
+    def get_cn_stock_top10_holders(self, symbol: str) -> list[Dict[str, Any]]:
+        """Tushare top10_holders — 前十大股东。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"valuation:ts_top10_holders:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("top10_holders", ts_code=ts_code)
+        if raw is None or raw.empty:
+            return []
+
+        frame = raw.copy()
+        for column in ("ann_date", "end_date"):
+            if column in frame.columns:
+                frame[column] = frame[column].map(self._normalize_date_text)
+        for column in ("hold_amount", "hold_ratio", "hold_float_ratio", "hold_change"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.sort_values(["end_date", "hold_ratio"], ascending=[False, False]).reset_index(drop=True)
+        records = frame.to_dict("records")
+        self._save_cache(cache_key, records)
+        return records
+
+    def get_cn_stock_top10_floatholders(self, symbol: str) -> list[Dict[str, Any]]:
+        """Tushare top10_floatholders — 前十大流通股东。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"valuation:ts_top10_floatholders:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("top10_floatholders", ts_code=ts_code)
+        if raw is None or raw.empty:
+            return []
+
+        frame = raw.copy()
+        for column in ("ann_date", "end_date"):
+            if column in frame.columns:
+                frame[column] = frame[column].map(self._normalize_date_text)
+        for column in ("hold_amount", "hold_ratio", "hold_float_ratio", "hold_change"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.sort_values(["end_date", "hold_float_ratio"], ascending=[False, False]).reset_index(drop=True)
+        records = frame.to_dict("records")
+        self._save_cache(cache_key, records)
+        return records
+
+    def get_cn_stock_pledge_stat(self, symbol: str) -> list[Dict[str, Any]]:
+        """Tushare pledge_stat — 股权质押统计。"""
+        ts_code = self._to_ts_code(symbol)
+        cache_key = f"valuation:ts_pledge_stat:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("pledge_stat", ts_code=ts_code)
+        if raw is None or raw.empty:
+            return []
+
+        frame = raw.copy()
+        if "end_date" in frame.columns:
+            frame["end_date"] = frame["end_date"].map(self._normalize_date_text)
+        for column in ("pledge_count", "unrest_pledge", "rest_pledge", "total_share", "pledge_ratio"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.sort_values("end_date", ascending=False).reset_index(drop=True)
+        records = frame.to_dict("records")
+        self._save_cache(cache_key, records)
+        return records
+
+    def get_cn_stock_pledge_detail(self, symbol: str, start_date: str = "", end_date: str = "") -> list[Dict[str, Any]]:
+        """Tushare pledge_detail — 股权质押明细。"""
+        ts_code = self._to_ts_code(symbol)
+        end = end_date or datetime.now().strftime("%Y%m%d")
+        start = start_date or (datetime.now() - timedelta(days=365 * 3)).strftime("%Y%m%d")
+        cache_key = f"valuation:ts_pledge_detail:{ts_code}:{start}:{end}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+
+        raw = self._ts_call("pledge_detail", ts_code=ts_code)
+        if raw is None or raw.empty:
+            return []
+
+        frame = raw.copy()
+        for column in ("ann_date", "start_date", "end_date", "release_date"):
+            if column in frame.columns:
+                frame[column] = frame[column].map(self._normalize_date_text)
+        for column in ("pledge_amount", "holding_amount", "pledged_amount", "p_total_ratio", "h_total_ratio"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        if "ann_date" in frame.columns:
+            frame["ann_date_ts"] = pd.to_datetime(frame["ann_date"], errors="coerce")
+            frame = frame.sort_values(["ann_date_ts", "p_total_ratio"], ascending=[False, False]).drop(columns=["ann_date_ts"])
+        records = frame.reset_index(drop=True).to_dict("records")
+        self._save_cache(cache_key, records)
+        return records
+
     # ── 指数聚合财务 ─────────────────────────────────────────
 
     def get_cn_index_financial_proxies(self, index_code: str, top_n: int = 5) -> Dict[str, Any]:
