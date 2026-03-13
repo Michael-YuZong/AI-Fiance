@@ -12,6 +12,10 @@
   The eight-dimension analysis path is the strongest core capability.
 - `src/commands/stock_pick.py`
   This is the most productized feature: scoring, daily baseline snapshots, diffing, internal/client outputs.
+- `src/commands/fund_pick.py`
+  As of 2026-03-13 this is no longer just a fixed-candidate comparer. It now does full-universe open-end fund pre-screening, explicit theme/style/manager filters, client/detail output, release gating, and same-day baseline-vs-rerun score diffing.
+- `src/commands/etf_pick.py`
+  ETF pick now shares the same coverage disclosure, score-history snapshotting, rerun diffing, and release-guard workflow as the stronger pick pipelines.
 - `src/commands/risk.py`
   Risk report, correlation, VaR/CVaR, drawdown, scenario stress are already coherent.
 - `src/commands/portfolio.py`
@@ -25,10 +29,8 @@
 
 ## What Is Usable But Still Needs Iteration
 
-- `src/commands/discover.py` and `src/commands/etf_pick.py`
-  Useful, but still mainly ETF-pool and rules driven.
-- `src/commands/fund_pick.py`
-  Works as a candidate comparator, not yet a full-market fund selector.
+- `src/commands/discover.py`
+  Useful, but still mainly ETF-pool and rules driven. Discovery quality is below the fully productized pick outputs.
 - `src/commands/research.py`
   As of 2026-03-13 it now classifies question type and answers in a clearer structure: direct answer, evidence, uncertainty, next step. It is no longer just a flat module dump, but it still needs stronger market-level diagnosis and better evidence ranking.
 - `src/commands/policy.py` and `src/processors/policy_engine.py`
@@ -64,16 +66,16 @@ When in doubt, optimize for:
 
 ## Current Priority Backlog
 
-1. `fund_pick`
-   Expand beyond the fixed candidate list into a real searchable universe with explicit filters and downgrade notes.
-2. `research` v2
+1. `research` v2
    Improve market-level diagnosis when no explicit symbol exists, and rank evidence instead of listing every usable module.
-3. Proxy signals
+2. Proxy signals
    Expose confidence and downgrade impact from social/global-flow proxies more explicitly in reports.
-4. Scheduler v2
+3. Scheduler v2
    Add persistent run history, failure visibility, and possibly automation integration if the user asks for recurring workflows in the app.
-5. Policy v2
+4. Policy v2
    Keep improving official-source extraction, especially for longer raw pages/PDF-like content and stricter policy taxonomy.
+5. Pick pipeline consolidation
+   `src/commands/pick_history.py` now holds shared snapshot/history helpers. Continue consolidating ETF/fund/stock pick contracts there instead of duplicating scoring-history and coverage logic per command.
 
 ## Recent Changes
 
@@ -87,6 +89,12 @@ When in doubt, optimize for:
   `policy` now reports template confidence, matched aliases, policy direction, stage, timeline cues, and stronger watchlist impact reasons.
 - 2026-03-13
   `research` now classifies question type and renders structured answers with a direct answer, evidence, uncertainty, and next-step sections.
+- 2026-03-13
+  `fund_pick` now does real full-universe open-end fund screening with theme/style/manager filters, coverage disclosure, same-day baseline snapshots, rerun diffing, and catalyst fallback when live news/event coverage degrades.
+- 2026-03-13
+  `etf_pick` now uses the shared pick-history snapshot layer and the same release-gated coverage/rerun-diff contract as fund pick.
+- 2026-03-13
+  `src/commands/pick_history.py` was introduced to centralize pick coverage summaries, baseline snapshots, score-change explanations, and degraded-news catalyst fallback.
 
 ## Commands You Will Actually Use
 
@@ -115,7 +123,7 @@ When in doubt, optimize for:
 ## Tests To Run Before You Claim Something Is Better
 
 - Narrow tests first
-  `pytest tests/test_commands/test_compare.py tests/test_output/test_opportunity_report.py tests/test_output/test_briefing.py tests/test_scheduler.py -q`
+  `pytest tests/test_commands/test_compare.py tests/test_output/test_opportunity_report.py tests/test_output/test_briefing.py tests/test_scheduler.py tests/test_commands/test_fund_pick.py tests/test_commands/test_pick_history.py tests/test_output/test_client_report.py tests/test_commands/test_release_check.py tests/test_commands/test_report_guard.py -q`
 - Then broader regression
   `pytest -q`
 
@@ -137,3 +145,5 @@ If a report contract changes, update both renderer tests and any command/helper 
 - Use the existing loop: real task -> critique -> revise -> test -> document.
 - Research Q&A external review prompt:
   `docs/prompts/external_research_reviewer.md`
+- Fund/ETF pick maturity now depends on four linked contracts staying aligned:
+  discovery/pre-screen -> client renderer -> release checks -> review guard/export
