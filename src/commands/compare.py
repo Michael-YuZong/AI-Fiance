@@ -23,7 +23,7 @@ def main() -> None:
         raise SystemExit("compare 至少需要两个标的代码")
     setup_logger("ERROR")
     config = load_config(args.config or None)
-    payload = compare_opportunities(args.symbols[:2], config)
+    payload = compare_opportunities(args.symbols, config)
     print(OpportunityReportRenderer().render_compare(payload))
 
 

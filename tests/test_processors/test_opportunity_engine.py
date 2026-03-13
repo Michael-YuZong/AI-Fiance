@@ -6,11 +6,12 @@ import re
 
 import pandas as pd
 
+from src.collectors.fund_profile import FundProfileCollector
 from src.collectors.market_cn import ChinaMarketCollector
 from src.collectors.market_drivers import MarketDriversCollector
 from src.collectors.valuation import ValuationCollector
 from src.collectors.news import NewsCollector
-from src.processors.opportunity_engine import _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _risk_dimension, _seasonality_dimension, _stock_name_tokens, _technical_dimension, build_default_pool, build_stock_pool, discover_stock_opportunities
+from src.processors.opportunity_engine import _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _risk_dimension, _seasonality_dimension, _stock_name_tokens, _technical_dimension, build_default_pool, build_fund_pool, build_stock_pool, discover_fund_opportunities, discover_stock_opportunities
 from src.processors.opportunity_engine import _asset_note
 from src.utils.market import compute_history_metrics
 
@@ -2211,6 +2212,147 @@ def test_build_stock_pool_warns_when_cn_snapshot_missing_required_columns(monkey
     pool, warnings = build_stock_pool({}, market="cn")
     assert pool == []
     assert any("A 股实时快照缺少必要列" in warning for warning in warnings)
+
+
+def test_build_fund_pool_prefers_full_open_fund_universe_and_dedupes_share_classes(monkeypatch):
+    monkeypatch.setattr(
+        FundProfileCollector,
+        "get_fund_basic",
+        lambda self, market="O": pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "ts_code": "021739.OF",
+                    "name": "前海开源黄金ETF联接A",
+                    "management": "前海开源基金",
+                    "fund_type": "商品型",
+                    "invest_type": "黄金现货合约",
+                    "found_date": "20240115",
+                    "issue_amount": 6.0,
+                    "benchmark": "上海黄金交易所Au99.99现货实盘合约收盘价收益率*90%+人民币活期存款利率(税后)*10%",
+                    "status": "L",
+                },
+                {
+                    "ts_code": "021740.OF",
+                    "name": "前海开源黄金ETF联接C",
+                    "management": "前海开源基金",
+                    "fund_type": "商品型",
+                    "invest_type": "黄金现货合约",
+                    "found_date": "20240115",
+                    "issue_amount": 6.0,
+                    "benchmark": "上海黄金交易所Au99.99现货实盘合约收盘价收益率*90%+人民币活期存款利率(税后)*10%",
+                    "status": "L",
+                },
+                {
+                    "ts_code": "022365.OF",
+                    "name": "永赢科技智选混合发起C",
+                    "management": "永赢基金",
+                    "fund_type": "混合型",
+                    "invest_type": "混合型",
+                    "found_date": "20240801",
+                    "issue_amount": 4.2,
+                    "benchmark": "中国战略新兴产业成份指数收益率*70%+恒生科技指数收益率*10%",
+                    "status": "L",
+                },
+                {
+                    "ts_code": "019999.OF",
+                    "name": "某纯债A",
+                    "management": "某基金",
+                    "fund_type": "债券型",
+                    "invest_type": "债券型",
+                    "found_date": "20220101",
+                    "issue_amount": 30.0,
+                    "benchmark": "中债综合财富指数收益率",
+                    "status": "L",
+                },
+                {
+                    "ts_code": "029999.OF",
+                    "name": "某新基金C",
+                    "management": "某基金",
+                    "fund_type": "股票型",
+                    "invest_type": "股票型",
+                    "found_date": "20260201",
+                    "issue_amount": 5.0,
+                    "benchmark": "中证人工智能指数收益率",
+                    "status": "L",
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr("src.processors.opportunity_engine.load_watchlist", lambda: [])
+    pool, warnings = build_fund_pool({}, preferred_sectors=["黄金"], max_candidates=5)
+    assert warnings == []
+    assert [item.symbol for item in pool] == ["021740", "022365"]
+    assert all(item.source == "tushare_open_fund_basic" for item in pool)
+    assert pool[0].sector == "黄金"
+    assert (pool[0].metadata or {})["invest_type"] == "黄金现货合约"
+
+
+def test_discover_fund_opportunities_uses_full_universe_pool(monkeypatch):
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.build_market_context",
+        lambda config, relevant_asset_types=None: {"day_theme": {"label": "地缘风险升温"}, "regime": {"current_regime": "recovery"}},  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.build_fund_pool",
+        lambda config, theme_filter="", preferred_sectors=None, max_candidates=None: (  # noqa: ARG005
+            [
+                type(
+                    "PoolItemStub",
+                    (),
+                    {
+                        "symbol": "021740",
+                        "asset_type": "cn_fund",
+                        "name": "前海开源黄金ETF联接C",
+                        "sector": "黄金",
+                        "chain_nodes": ["黄金"],
+                        "region": "CN",
+                        "in_watchlist": False,
+                        "metadata": {"benchmark": "黄金现货"},
+                    },
+                )(),
+                type(
+                    "PoolItemStub",
+                    (),
+                    {
+                        "symbol": "022365",
+                        "asset_type": "cn_fund",
+                        "name": "永赢科技智选混合发起C",
+                        "sector": "科技",
+                        "chain_nodes": ["科技"],
+                        "region": "CN",
+                        "in_watchlist": False,
+                        "metadata": {"benchmark": "战略新兴"},
+                    },
+                )(),
+            ],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.analyze_opportunity",
+        lambda symbol, asset_type, config, context=None, metadata_override=None: {  # noqa: ARG005
+            "symbol": symbol,
+            "name": "前海开源黄金ETF联接C" if symbol == "021740" else "永赢科技智选混合发起C",
+            "asset_type": asset_type,
+            "rating": {"rank": 2 if symbol == "021740" else 1, "label": "储备机会", "stars": "⭐⭐"},
+            "dimensions": {
+                "technical": {"score": 36 if symbol == "021740" else 44},
+                "fundamental": {"score": 80 if symbol == "021740" else 62},
+                "catalyst": {"score": 70 if symbol == "021740" else 55},
+                "relative_strength": {"score": 55 if symbol == "021740" else 51},
+                "chips": {"score": None},
+                "risk": {"score": 75 if symbol == "021740" else 58},
+                "seasonality": {"score": 30 if symbol == "021740" else 25},
+                "macro": {"score": 20 if symbol == "021740" else 18},
+            },
+            "excluded": False,
+        },
+    )
+    payload = discover_fund_opportunities({}, top_n=2, max_candidates=6)
+    assert payload["scan_pool"] == 2
+    assert payload["passed_pool"] == 2
+    assert payload["preferred_sectors"][:2] == ["黄金", "高股息"]
+    assert payload["top"][0]["symbol"] == "021740"
 
 
 def test_build_stock_pool_prefers_cn_ttm_pe_column(monkeypatch):

@@ -131,6 +131,15 @@ def _review_output_path(month: str, symbol: str = "") -> Path:
     return resolve_project_path("reports/retrospects/final") / f"{stem}_final.md"
 
 
+def _review_detail_output_path(month: str, symbol: str = "") -> Path:
+    safe_month = str(month).replace("/", "-")
+    safe_symbol = str(symbol).replace("/", "_").replace(" ", "_")
+    stem = f"portfolio_review_{safe_month}"
+    if safe_symbol:
+        stem += f"_{safe_symbol}"
+    return resolve_project_path("reports/retrospects/internal") / f"{stem}_internal_detail.md"
+
+
 def _evaluate_thesis(symbol: str, record: Dict[str, Any], repo: PortfolioRepository, config: Dict[str, Any]) -> Dict[str, Any]:
     holdings = {item["symbol"]: item for item in repo.list_holdings()}
     asset_type = holdings.get(symbol, {}).get("asset_type") or detect_asset_type(symbol, config)
@@ -288,7 +297,10 @@ def main() -> None:
         if not args.client_final:
             print(markdown)
             return
-        findings = check_generic_client_report(markdown, "retrospect")
+        detail_path = _review_detail_output_path(args.month, args.symbol)
+        detail_path.parent.mkdir(parents=True, exist_ok=True)
+        detail_path.write_text(markdown, encoding="utf-8")
+        findings = check_generic_client_report(markdown, "retrospect", source_text=markdown)
         try:
             bundle = export_reviewed_markdown_bundle(
                 report_type="retrospect",
@@ -301,6 +313,7 @@ def main() -> None:
                     "lookahead": args.lookahead,
                     "stop_pct": args.stop_pct,
                     "target_pct": args.target_pct,
+                    "detail_source": str(detail_path),
                 },
             )
         except ReportGuardError as exc:

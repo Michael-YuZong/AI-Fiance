@@ -150,6 +150,12 @@ class BriefingRenderer:
             ["市场", "指数", "收盘", "涨跌幅", "简评"],
             payload.get("overnight_rows", []),
         )
+        _append_table_subsection(
+            lines,
+            "2.5 Watchlist",
+            ["标的", "最新价", "1日", "5日", "20日", "趋势", "信号", "简评"],
+            payload.get("watchlist_rows", []),
+        )
         _append_block(lines, "3. 驱动与催化")
         _append_subsection(lines, "3.1 核心事件（限3-5条）", payload.get("core_event_lines", []))
         _append_table_subsection(

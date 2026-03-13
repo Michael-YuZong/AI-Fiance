@@ -219,6 +219,13 @@ ACTIVE_REVIEW_LESSONS: List[ReviewLesson] = [
         owner_layer="release_check",
         rationale="像 Too Many Requests、ProxyError、Traceback 这类原始异常属于系统细节，终稿应改写成客户可理解的数据限制说明，不能直接暴露报错串。",
     ),
+    ReviewLesson(
+        lesson_id="L030",
+        title="历史样本验证必须披露非重叠样本、置信区间和样本质量",
+        scope="stock_reports",
+        owner_layer="release_check",
+        rationale="如果成稿引用历史相似样本来支撑当前建议，就不能只给一个胜率或样本分；必须说明严格去重后的非重叠样本数、置信区间以及样本质量，否则读者容易把脆弱统计误读成高置信结论。",
+    ),
 ]
 
 

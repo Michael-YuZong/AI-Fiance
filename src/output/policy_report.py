@@ -14,22 +14,44 @@ class PolicyReportRenderer:
             "",
             f"- 来源: `{payload['source']}`",
             f"- 主题: `{payload['theme']}`",
+            f"- 模板置信度: `{payload.get('match_confidence', '低')}`",
+            f"- 政策方向: `{payload.get('policy_direction', '中性/待原文确认')}`",
+            f"- 所处阶段: `{payload.get('policy_stage', '阶段待原文确认')}`",
             "",
             "## 核心结论",
             f"- {payload['summary']}",
             "",
+        ]
+        matched_aliases = payload.get("matched_aliases", [])
+        if matched_aliases:
+            lines.extend(
+                [
+                    "## 模板命中",
+                    f"- 命中别名: {', '.join(matched_aliases)}",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
             "## 目标与节奏",
             f"- 政策目标: {payload['policy_goal']}",
             f"- 落地节奏: {payload['timeline']}",
             "",
             "## 重点支持方向",
-        ]
+            ]
+        )
         for item in payload.get("support_points", []):
             lines.append(f"- {item}")
 
         lines.extend(["", "## 受益 / 风险映射"])
         for item in payload.get("benefit_risk_lines", []):
             lines.append(f"- {item}")
+
+        timeline_points = payload.get("timeline_points", [])
+        if timeline_points:
+            lines.extend(["", "## 时间线 / 执行抓手"])
+            for item in timeline_points:
+                lines.append(f"- {item}")
 
         numbers = payload.get("headline_numbers", [])
         if numbers:

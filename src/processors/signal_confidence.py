@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import comb
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
@@ -15,6 +16,9 @@ MIN_HISTORY_ROWS = 420
 MIN_MATCH_SAMPLES = 12
 DEFAULT_LOOKAHEAD_DAYS = 20
 DEFAULT_NEIGHBORS = 20
+DEFAULT_BOOTSTRAP_ITERATIONS = 1000
+MIN_COVERAGE_MONTHS = 5
+MIN_COVERAGE_DAYS = 120
 
 
 @dataclass(frozen=True)
@@ -149,6 +153,89 @@ def _future_outcome(
     )
 
 
+def _wilson_interval(successes: int, total: int, *, z: float = 1.96) -> tuple[float, float]:
+    if total <= 0:
+        return (0.0, 0.0)
+    p_hat = successes / total
+    denom = 1.0 + (z * z) / total
+    center = (p_hat + (z * z) / (2.0 * total)) / denom
+    margin = (
+        z
+        * np.sqrt((p_hat * (1.0 - p_hat) / total) + ((z * z) / (4.0 * total * total)))
+        / denom
+    )
+    return (float(max(0.0, center - margin)), float(min(1.0, center + margin)))
+
+
+def _bootstrap_interval(
+    values: np.ndarray,
+    *,
+    statistic: str = "median",
+    confidence: float = 0.95,
+    iterations: int = DEFAULT_BOOTSTRAP_ITERATIONS,
+    seed: int = 20260312,
+) -> tuple[float, float]:
+    clean = np.asarray(values, dtype=float)
+    clean = clean[np.isfinite(clean)]
+    if clean.size == 0:
+        return (0.0, 0.0)
+    if clean.size == 1:
+        value = float(clean[0])
+        return (value, value)
+
+    rng = np.random.default_rng(seed + clean.size)
+    indices = rng.integers(0, clean.size, size=(iterations, clean.size))
+    samples = clean[indices]
+    if statistic == "mean":
+        stats = samples.mean(axis=1)
+    else:
+        stats = np.median(samples, axis=1)
+    alpha = (1.0 - confidence) / 2.0
+    low = float(np.quantile(stats, alpha))
+    high = float(np.quantile(stats, 1.0 - alpha))
+    return (low, high)
+
+
+def _one_sided_binomial_pvalue(successes: int, total: int, *, baseline: float = 0.5) -> float:
+    if total <= 0:
+        return 1.0
+    pvalue = 0.0
+    for count in range(successes, total + 1):
+        pvalue += comb(total, count) * (baseline**count) * ((1.0 - baseline) ** (total - count))
+    return float(min(max(pvalue, 0.0), 1.0))
+
+
+def _pick_non_overlapping_rows(
+    ranked_rows: pd.DataFrame,
+    *,
+    min_spacing: int,
+    max_count: int,
+) -> pd.DataFrame:
+    chosen_indices: list[int] = []
+    chosen_rows: list[pd.Series] = []
+    for idx, row in ranked_rows.iterrows():
+        current_index = int(idx)
+        if any(abs(current_index - previous) <= min_spacing for previous in chosen_indices):
+            continue
+        chosen_indices.append(current_index)
+        chosen_rows.append(row)
+        if len(chosen_rows) >= max_count:
+            break
+    if not chosen_rows:
+        return ranked_rows.iloc[0:0].copy()
+    return pd.DataFrame(chosen_rows)
+
+
+def _score_label(score: int) -> str:
+    if score >= 75:
+        return "高"
+    if score >= 60:
+        return "中高"
+    if score >= 45:
+        return "中"
+    return "低"
+
+
 def _confidence_label(score: int) -> str:
     if score >= 75:
         return "高"
@@ -162,17 +249,23 @@ def _confidence_label(score: int) -> str:
 def _confidence_summary(
     *,
     sample_count: int,
+    coverage_months: int,
     win_rate_20d: float,
+    win_rate_ci: tuple[float, float],
     median_return_20d: float,
+    median_return_ci: tuple[float, float],
     avg_mae_20d: float,
     target_hit_rate: float,
     stop_hit_rate: float,
+    quality_label: str,
     confidence_label: str,
 ) -> str:
     return (
-        f"同标的近似场景共 `{sample_count}` 个，20 日胜率约 `{win_rate_20d:.0%}`，"
-        f"20 日中位收益约 `{median_return_20d:+.1%}`，平均最大回撤约 `{avg_mae_20d:.1%}`。"
-        f" 目标触达率 `{target_hit_rate:.0%}`，止损触发率 `{stop_hit_rate:.0%}`，当前归类为`{confidence_label}`置信。"
+        f"严格口径下保留 `{sample_count}` 个非重叠样本，覆盖约 `{coverage_months}` 个月；"
+        f"20 日胜率约 `{win_rate_20d:.0%}`（95%区间 `{win_rate_ci[0]:.0%} ~ {win_rate_ci[1]:.0%}`），"
+        f"20 日中位收益约 `{median_return_20d:+.1%}`（bootstrap 区间 `{median_return_ci[0]:+.1%} ~ {median_return_ci[1]:+.1%}`），"
+        f"平均最大回撤约 `{avg_mae_20d:.1%}`。目标触达率 `{target_hit_rate:.0%}`，止损触发率 `{stop_hit_rate:.0%}`；"
+        f"样本质量 `{quality_label}`，样本置信度 `{confidence_label}`。"
     )
 
 
@@ -280,12 +373,19 @@ def build_signal_confidence(
     same_state["distance"] = ((normalized**2).mean(axis=1).astype(float)) ** 0.5
     same_state = same_state.sort_values("distance")
 
-    selected = same_state.head(max(neighbors, MIN_MATCH_SAMPLES)).copy()
+    selected = _pick_non_overlapping_rows(
+        same_state,
+        min_spacing=max(int(lookahead_days), 1),
+        max_count=max(neighbors, MIN_MATCH_SAMPLES),
+    )
     median_distance = float(selected["distance"].median()) if not selected.empty else np.inf
     if len(selected) < MIN_MATCH_SAMPLES or median_distance > 2.5:
         return {
             "available": False,
-            "reason": f"相似样本距离过大或数量不足：样本 {len(selected)} 个，中位距离 {median_distance:.2f}。",
+            "reason": (
+                "相似样本距离过大或严格去重后的样本数量不足："
+                f"当前仅保留 {len(selected)} 个非重叠样本，中位距离 {median_distance:.2f}。"
+            ),
             "method": "same_symbol_daily_analog",
         }
 
@@ -333,6 +433,9 @@ def build_signal_confidence(
     target_hits = np.array([1.0 if item.target_hit else 0.0 for item in matches], dtype=float)
 
     sample_count = len(matches)
+    sample_dates_dt = pd.to_datetime([item.date for item in matches], errors="coerce").dropna()
+    coverage_months = int(sample_dates_dt.to_period("M").nunique()) if not sample_dates_dt.empty else 0
+    coverage_span_days = int((sample_dates_dt.max() - sample_dates_dt.min()).days) if len(sample_dates_dt) >= 2 else 0
     win_rate_5d = float(np.mean(ret_5 > 0))
     win_rate_20d = float(np.mean(ret_20 > 0))
     avg_return_5d = float(np.mean(ret_5))
@@ -343,38 +446,77 @@ def build_signal_confidence(
     stop_hit_rate = float(np.mean(stop_hits))
     target_hit_rate = float(np.mean(target_hits))
 
-    score = 0
-    score += 25 if sample_count >= 20 else 18 if sample_count >= 16 else 10
-    score += 20 if median_distance <= 1.0 else 14 if median_distance <= 1.4 else 6
-    score += 20 if win_rate_20d >= 0.65 else 12 if win_rate_20d >= 0.55 else 0 if win_rate_20d >= 0.45 else -10
-    score += 15 if median_return_20d >= 0.08 else 10 if median_return_20d >= 0.04 else 4 if median_return_20d >= 0.02 else -8 if median_return_20d <= -0.02 else 0
-    score += 10 if avg_mae_20d >= -0.05 else 5 if avg_mae_20d >= -0.08 else -8
-    score += 10 if target_hit_rate >= stop_hit_rate + 0.10 else 4 if target_hit_rate >= stop_hit_rate else -6
-    score = max(0, min(int(round(score)), 100))
+    wins_20d = int(np.sum(ret_20 > 0))
+    win_rate_ci = _wilson_interval(wins_20d, sample_count)
+    avg_return_ci = _bootstrap_interval(ret_20, statistic="mean")
+    median_return_ci = _bootstrap_interval(ret_20, statistic="median")
+    sign_test_pvalue = _one_sided_binomial_pvalue(wins_20d, sample_count, baseline=0.5)
+
+    quality_score = 0
+    quality_score += 20 if sample_count >= 20 else 15 if sample_count >= 16 else 10
+    quality_score += 15 if coverage_months >= 8 else 10 if coverage_months >= 6 else 5 if coverage_months >= MIN_COVERAGE_MONTHS else 0
+    quality_score += 15 if coverage_span_days >= 240 else 10 if coverage_span_days >= 180 else 5 if coverage_span_days >= MIN_COVERAGE_DAYS else 0
+    quality_score += 20 if median_distance <= 1.0 else 14 if median_distance <= 1.35 else 8 if median_distance <= 1.75 else 2
+    win_ci_width = win_rate_ci[1] - win_rate_ci[0]
+    quality_score += 15 if win_ci_width <= 0.22 else 10 if win_ci_width <= 0.32 else 5 if win_ci_width <= 0.42 else 0
+    return_ci_width = median_return_ci[1] - median_return_ci[0]
+    quality_score += 15 if return_ci_width <= 0.08 else 10 if return_ci_width <= 0.14 else 5 if return_ci_width <= 0.22 else 0
+    quality_score = max(0, min(int(round(quality_score)), 100))
+    quality_label = _score_label(quality_score)
+
+    outcome_score = 0
+    outcome_score += 30 if win_rate_20d >= 0.65 else 24 if win_rate_20d >= 0.58 else 16 if win_rate_20d >= 0.52 else 8 if win_rate_20d >= 0.47 else 0
+    outcome_score += 20 if win_rate_ci[0] >= 0.50 else 10 if win_rate_20d > 0.50 else 0
+    outcome_score += 20 if median_return_20d >= 0.08 else 15 if median_return_20d >= 0.04 else 8 if median_return_20d > 0 else 0
+    outcome_score += 15 if median_return_ci[0] > 0 else 8 if median_return_20d > 0 else 0
+    outcome_score += 15 if target_hit_rate >= stop_hit_rate + 0.10 else 8 if target_hit_rate >= stop_hit_rate else 0
+    outcome_score = max(0, min(int(round(outcome_score)), 100))
+
+    score = max(0, min(int(round(quality_score * 0.45 + outcome_score * 0.55)), 100))
     confidence_label = _confidence_label(score)
+
+    quality_notes: List[str] = []
+    if coverage_months < MIN_COVERAGE_MONTHS:
+        quality_notes.append(f"样本时间覆盖只有 {coverage_months} 个月，时间分布偏窄。")
+    if coverage_span_days < MIN_COVERAGE_DAYS:
+        quality_notes.append(f"样本跨度只有 {coverage_span_days} 天，容易集中在单一行情段。")
+    if win_rate_ci[0] < 0.50:
+        quality_notes.append("20 日胜率的下沿还没站上 50%，统计优势不够硬。")
+    if median_return_ci[0] <= 0:
+        quality_notes.append("20 日收益区间下沿仍覆盖 0，历史结果更像弱优势而不是强优势。")
+    if sign_test_pvalue > 0.10:
+        quality_notes.append("胜率相对 50% 的统计强度一般，更多只能作为执行参考。")
 
     sample_dates = [item.date for item in matches[:5]]
     summary = _confidence_summary(
         sample_count=sample_count,
+        coverage_months=coverage_months,
         win_rate_20d=win_rate_20d,
+        win_rate_ci=win_rate_ci,
         median_return_20d=median_return_20d,
+        median_return_ci=median_return_ci,
         avg_mae_20d=avg_mae_20d,
         target_hit_rate=target_hit_rate,
         stop_hit_rate=stop_hit_rate,
+        quality_label=quality_label,
         confidence_label=confidence_label,
     )
     return {
         "available": True,
-        "method": "same_symbol_daily_analog",
-        "scope": "同标的日线相似场景",
+        "method": "same_symbol_daily_analog_strict",
+        "scope": "同标的日线相似场景（严格非重叠样本）",
         "summary": summary,
         "reason": (
-            "只使用当时可见的同标的日线量价/技术状态做相似样本，不重建历史新闻和财报快照；"
-            "因此这层更适合验证执行节奏和胜率，不等于完整重放当时全部基本面环境。"
+            "只使用当时可见的同标的日线量价/技术状态做相似样本，先按方向过滤，再按特征距离匹配，"
+            "并强制去掉未来窗口重叠样本；不重建历史新闻、财报和完整基本面快照。"
+            "因此这层更适合验证执行节奏和历史胜率，不等于完整策略回测。"
         ),
         "lookahead_days": lookahead_days,
         "sample_count": sample_count,
         "candidate_pool": int(len(same_state)),
+        "non_overlapping_count": sample_count,
+        "coverage_months": coverage_months,
+        "coverage_span_days": coverage_span_days,
         "median_distance": median_distance,
         "sample_dates": sample_dates,
         "latest_sample_date": max(item.date for item in matches),
@@ -384,11 +526,21 @@ def build_signal_confidence(
         "win_rate_20d": win_rate_20d,
         "avg_return_5d": avg_return_5d,
         "avg_return_20d": avg_return_20d,
+        "avg_return_20d_ci_low": avg_return_ci[0],
+        "avg_return_20d_ci_high": avg_return_ci[1],
         "median_return_20d": median_return_20d,
+        "median_return_20d_ci_low": median_return_ci[0],
+        "median_return_20d_ci_high": median_return_ci[1],
         "avg_mae_20d": avg_mae_20d,
         "avg_mfe_20d": avg_mfe_20d,
         "stop_hit_rate": stop_hit_rate,
         "target_hit_rate": target_hit_rate,
+        "win_rate_20d_ci_low": win_rate_ci[0],
+        "win_rate_20d_ci_high": win_rate_ci[1],
+        "sign_test_pvalue": sign_test_pvalue,
+        "sample_quality_score": quality_score,
+        "sample_quality_label": quality_label,
+        "quality_notes": quality_notes,
         "confidence_score": score,
         "confidence_label": confidence_label,
         "matches": [

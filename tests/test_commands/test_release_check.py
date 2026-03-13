@@ -67,7 +67,9 @@ def test_release_check_passes_clean_stock_pick_client_report() -> None:
 
 - `结构化事件`：[新易盛：公司将出席2026年OFC大会](https://example.com/xys)（证券时报 / 2026-03-11）
 
-**历史相似样本：** 同标的近似样本 `16` 个，20 日胜率 `69%`，20 日中位收益 `+8.1%`。
+**历史相似样本：** 严格口径下保留 `16` 个非重叠样本，20 日胜率 `69%`（95%区间 `45% ~ 86%`），20 日中位收益 `+8.1%`。
+
+- 样本质量：中高（68/100）
 
 - 这层只反映历史相似量价/技术场景的样本置信度，不等于本次总推荐置信度。
 
@@ -147,7 +149,9 @@ def test_release_check_passes_detailed_stock_pick_client_report() -> None:
 **催化证据来源：**
 - `结构化事件`：[新易盛：公司将出席2026年OFC大会](https://example.com/xys)（证券时报 / 2026-03-11）
 
-**历史相似样本：** 同标的近似样本 `16` 个，20 日胜率 `69%`，20 日中位收益 `+8.1%`。
+**历史相似样本：** 严格口径下保留 `16` 个非重叠样本，20 日胜率 `69%`（95%区间 `45% ~ 86%`），20 日中位收益 `+8.1%`。
+
+- 样本质量：中高（68/100）
 
 ### 2. [A] 中际旭创 (300308)  — 无信号
 
@@ -485,6 +489,89 @@ def test_release_check_flags_raw_exception_strings_in_client_report() -> None:
     assert any("原始异常/系统报错信息" in item for item in findings)
 
 
+def test_release_check_flags_scan_score_drift_against_source() -> None:
+    client = """# 示例 | 客户版分析 | 2026-03-13
+
+## 为什么这么判断
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 55/100 | 趋势未坏 |
+| 基本面 | 70/100 | 增速还行 |
+| 催化面 | 40/100 | 有催化 |
+| 相对强弱 | 60/100 | 强于基准 |
+| 风险特征 | 30/100 | 波动偏高 |
+| 宏观敏感度 | 18/40 | 宏观中性 |
+"""
+    source = """# 示例全景分析 | 2026-03-13
+
+## 八维评分
+
+| 维度 | 得分 | 一句话判断 | 详情 |
+| --- | --- | --- | --- |
+| 技术面 | 44/100 | 趋势未坏 | 细节 |
+| 基本面 | 70/100 | 增速还行 | 细节 |
+| 催化面 | 40/100 | 有催化 | 细节 |
+| 相对强弱 | 60/100 | 强于基准 | 细节 |
+| 筹码结构 | 50/100 | 中性 | 细节 |
+| 风险特征 | 30/100 | 波动偏高 | 细节 |
+| 季节/日历 | 20/100 | 中性 | 细节 |
+| 宏观敏感度 | 18/40 | 宏观中性 | 细节 |
+"""
+    findings = check_generic_client_report(client, "scan", source_text=source)
+    assert any("scan 客户稿与详细稿分数不一致: 技术面" in item for item in findings)
+
+
+def test_release_check_passes_stock_analysis_when_client_matches_source_scores() -> None:
+    client = """# Meta (META) | 个股详细分析 | 2026-03-12
+
+## 为什么这么判断
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 44/100 | 趋势未坏 |
+| 基本面 | 70/100 | 增速还行 |
+| 催化面 | 40/100 | 有催化 |
+| 相对强弱 | 60/100 | 强于基准 |
+| 风险特征 | 30/100 | 波动偏高 |
+| 宏观敏感度 | 18/40 | 宏观中性 |
+
+## 值得继续看的地方
+
+- 相对强弱仍占优。
+
+## 现在不适合激进的地方
+
+- 事件窗口仍在。
+- 不适合直接追高。
+
+## 当前更合适的动作
+
+- 等回踩确认后再做。
+
+## 分维度详解
+
+### 技术面 44/100
+"""
+    source = """# Meta (META) 全景分析 | 2026-03-12
+
+## 八维评分
+
+| 维度 | 得分 | 一句话判断 | 详情 |
+| --- | --- | --- | --- |
+| 技术面 | 44/100 | 趋势未坏 | 细节 |
+| 基本面 | 70/100 | 增速还行 | 细节 |
+| 催化面 | 40/100 | 有催化 | 细节 |
+| 相对强弱 | 60/100 | 强于基准 | 细节 |
+| 筹码结构 | 50/100 | 中性 | 细节 |
+| 风险特征 | 30/100 | 波动偏高 | 细节 |
+| 季节/日历 | 20/100 | 中性 | 细节 |
+| 宏观敏感度 | 18/40 | 宏观中性 | 细节 |
+"""
+    findings = check_generic_client_report(client, "stock_analysis", source_text=source)
+    assert findings == []
+
+
 def test_release_check_passes_stock_analysis_report() -> None:
     client = """# Meta (META) | 个股详细分析 | 2026-03-12
 
@@ -556,3 +643,189 @@ def test_release_check_passes_etf_pick_report() -> None:
 """
     findings = check_generic_client_report(client, "etf_pick")
     assert findings == []
+
+
+def test_release_check_flags_etf_pick_score_drift_against_source() -> None:
+    client = """# 今日ETF推荐 | 2026-03-12
+
+## 为什么推荐它
+
+- 方向没坏。
+- 相对强弱仍在。
+- 当前更适合小仓分批。
+
+## 这只ETF为什么是这个分
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 52/100 | 方向没坏但不适合追高 |
+
+## 基金画像
+
+| 项目 | 内容 |
+| --- | --- |
+| 基金类型 | 商品型 |
+| 基金公司 | 建信基金 |
+| 基金经理 | 朱金钰、亢豆 |
+| 成立日期 | 2019-12-13 |
+| 业绩比较基准 | 易盛郑商所能源化工指数A收益率 |
+
+## 为什么不是另外几只
+
+### 1. 红利ETF (510880)
+
+- 今天弹性更弱。
+
+### 2. 黄金ETF (518880)
+
+- 今天主线不是纯避险配置。
+"""
+    source = """# 今日ETF推荐内部详细稿 | 2026-03-12
+
+## 中选标的详细分析
+
+## 八维评分
+
+| 维度 | 得分 | 一句话判断 | 详情 |
+| --- | --- | --- | --- |
+| 技术面 | 48/100 | 趋势未坏 | 细节 |
+"""
+    findings = check_generic_client_report(client, "etf_pick", source_text=source)
+    assert any("etf_pick 客户稿与详细稿分数不一致: 技术面" in item for item in findings)
+
+
+def test_release_check_passes_fund_pick_when_client_matches_source_scores() -> None:
+    client = """# 今日场外基金推荐 | 2026-03-12
+
+## 为什么推荐它
+
+- 当前更适合做防守。
+- 风险收益比比同类更稳。
+- 但不适合一次性重仓。
+
+## 这只基金为什么是这个分
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 44/100 | 结构没坏，但不适合追高 |
+
+## 怎么做
+
+| 项目 | 建议 |
+| --- | --- |
+| 当前动作 | 观察为主 |
+
+## 为什么不是另外几只
+
+### 1. 主动权益A (000001)
+
+- 回撤承受度更差。
+
+### 2. 黄金联接C (000002)
+
+- 当前优先级略低。
+"""
+    source = """# 今日场外基金推荐内部详细稿 | 2026-03-12
+
+## 中选标的详细分析
+
+## 八维评分
+
+| 维度 | 得分 | 一句话判断 | 详情 |
+| --- | --- | --- | --- |
+| 技术面 | 44/100 | 趋势未坏 | 细节 |
+"""
+    findings = check_generic_client_report(client, "fund_pick", source_text=source)
+    assert findings == []
+
+
+def test_release_check_flags_briefing_lines_missing_from_source() -> None:
+    client = """# 今日晨报 | 2026-03-12
+
+## 今日最重要的判断
+
+先看风险控制，再看主线确认。
+
+## 为什么今天这么判断
+
+- 风格轮动还没结束。
+- 主线强度还在，但不适合无条件追高。
+- 资金承接更偏右侧确认。
+
+## 宏观领先指标
+
+- PMI 还在荣枯线附近。
+- PPI 方向在修复。
+- 社融脉冲边际改善。
+
+## 今天怎么做
+
+- 先控仓，再等放量确认。
+- 观察红利和黄金谁更强。
+
+## 今日关键数据
+
+暂无关键资产快照。
+
+## 今天最值得看的 3 个方向
+
+### 1. 红利
+
+- 为什么值得看：防守属性更强。
+- 当前催化：资金回流。
+- 主要风险：弹性有限。
+
+## 今天最该盯的验证点
+
+暂无。
+
+## 今天最重要的风险提醒
+
+- 不要把盘中反抽当成趋势反转。
+"""
+    source = """# 每日晨报
+
+## 1. 主线判断与行动
+
+### 1.1 今日主线
+
+先看风险控制，再看主线确认。
+- 风格轮动还没结束。
+- 主线强度还在，但不适合无条件追高。
+- 资金承接更偏右侧确认。
+
+### 1.2 今天怎么做
+
+先控仓，再等放量确认。
+"""
+    findings = check_generic_client_report(client, "briefing", source_text=source)
+    assert any("briefing 客户稿动作在详细稿行动章节中不存在" in item for item in findings)
+
+
+def test_release_check_flags_retrospect_when_client_and_source_differ() -> None:
+    client = """# 决策回溯
+
+## 原始决策
+
+### 1. 示例标的 (000001)
+
+- 第一条原因。
+- 第二条原因。
+
+## 为什么当时会做这个决定
+
+- 第三条原因。
+- 第四条原因。
+
+## 后验路径
+
+- 第五条原因。
+- 第六条原因。
+
+## 复盘结论
+
+- 结果符合预期。
+"""
+    source = client.replace("结果符合预期。", "结果不符合预期。")
+    findings = check_generic_client_report(client, "retrospect", source_text=source)
+    assert any("retrospect 客户稿与内部详细稿不一致" in item for item in findings)

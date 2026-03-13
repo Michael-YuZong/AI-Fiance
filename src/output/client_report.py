@@ -40,6 +40,20 @@ def _fmt_ratio(value: Any) -> str:
         return "—"
 
 
+def _fmt_pct_interval(low: Any, high: Any) -> str:
+    try:
+        return f"{float(low):.0%} ~ {float(high):.0%}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_return_interval(low: Any, high: Any) -> str:
+    try:
+        return f"{float(low):+.1%} ~ {float(high):+.1%}"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _signal_confidence_lines(analysis: Mapping[str, Any]) -> List[str]:
     confidence = dict(analysis.get("signal_confidence") or {})
     if not confidence:
@@ -65,13 +79,21 @@ def _signal_confidence_lines(analysis: Mapping[str, Any]) -> List[str]:
     ]
     rows = [
         ["样本范围", str(confidence.get("scope", "同标的日线相似场景"))],
-        ["相似样本数", str(confidence.get("sample_count", "—"))],
+        ["候选池", str(confidence.get("candidate_pool", "—"))],
+        ["非重叠样本", str(confidence.get("non_overlapping_count", confidence.get("sample_count", "—")))],
+        ["样本覆盖", f"{confidence.get('coverage_months', '—')} 个月 / {confidence.get('coverage_span_days', '—')} 天"],
         ["20日胜率", _fmt_ratio(confidence.get("win_rate_20d"))],
+        ["20日胜率区间", f"95%区间 `{_fmt_pct_interval(confidence.get('win_rate_20d_ci_low'), confidence.get('win_rate_20d_ci_high'))}`"],
         ["20日平均收益", _fmt_pct(confidence.get("avg_return_20d"))],
         ["20日中位收益", _fmt_pct(confidence.get("median_return_20d"))],
+        [
+            "20日中位收益区间",
+            f"bootstrap 区间 `{_fmt_return_interval(confidence.get('median_return_20d_ci_low'), confidence.get('median_return_20d_ci_high'))}`",
+        ],
         ["20日平均最大回撤", _fmt_pct(confidence.get("avg_mae_20d"))],
         ["止损触发率", _fmt_ratio(confidence.get("stop_hit_rate"))],
         ["目标触达率", _fmt_ratio(confidence.get("target_hit_rate"))],
+        ["样本质量", f"{confidence.get('sample_quality_label', '—')} ({confidence.get('sample_quality_score', '—')}/100)"],
         ["样本置信度", f"{confidence.get('confidence_label', '—')} ({confidence.get('confidence_score', '—')}/100)"],
     ]
     lines.extend(_table(["指标", "结果"], rows))
@@ -80,8 +102,12 @@ def _signal_confidence_lines(analysis: Mapping[str, Any]) -> List[str]:
         [
             "",
             "- 这层只反映历史相似量价/技术场景的样本置信度，不等于本次总推荐置信度。",
+            "- 严格口径会剔除未来窗口重叠样本，避免把一段连续走势重复算成多次命中。",
         ]
     )
+    quality_notes = [str(item).strip() for item in (confidence.get("quality_notes") or []) if str(item).strip()]
+    for item in quality_notes[:3]:
+        lines.append(f"- 样本质量提示：{item}")
     if sample_dates:
         lines.extend(
             [
@@ -976,6 +1002,10 @@ class ClientReportRenderer:
         lines.extend(["", "## 仓位管理", ""])
         for item in _position_management_lines(action):
             lines.append(f"- {item}")
+        signal_confidence_lines = _signal_confidence_lines(analysis) if "signal_confidence" in analysis else []
+        if signal_confidence_lines:
+            lines.extend(["", "## 历史相似样本验证", ""])
+            lines.extend(signal_confidence_lines)
         fund_sections = _fund_profile_sections(analysis)
         if fund_sections:
             lines.extend(["", *fund_sections])
@@ -1098,6 +1128,7 @@ class ClientReportRenderer:
         generated_at = str(payload.get("generated_at", ""))[:10]
         winner = dict(payload.get("winner") or {})
         alternatives = list(payload.get("alternatives") or [])
+        selection_context = dict(payload.get("selection_context") or {})
         lines = [
             f"# 今日场外基金推荐 | {generated_at}",
             "",
@@ -1107,9 +1138,21 @@ class ClientReportRenderer:
             "",
             f"这不是激进进攻型推荐，而是：**`{winner.get('trade_state', '持有优于追高')}`**",
             "",
+        ]
+        if selection_context:
+            lines.extend(
+                [
+                    f"> 发现方式: {selection_context.get('discovery_mode_label', '未标注')} | 初筛池: {selection_context.get('scan_pool', '—')} | 完整分析: {selection_context.get('passed_pool', '—')}",
+                    f"> 主题过滤: {selection_context.get('theme_filter_label', '未指定')} | 风格过滤: {selection_context.get('style_filter_label', '不限')} | 管理人过滤: {selection_context.get('manager_filter_label', '未指定')}",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
             "## 为什么推荐它",
             "",
-        ]
+            ]
+        )
         for item in winner.get("positives", [])[:3]:
             lines.append(f"- {item}")
         lines.extend(["", "## 这只基金为什么是这个分", ""])
@@ -1132,6 +1175,10 @@ class ClientReportRenderer:
                 ],
             )
         )
+        if selection_context.get("blind_spots"):
+            lines.extend(["", "## 数据限制与说明", ""])
+            for item in selection_context.get("blind_spots", [])[:3]:
+                lines.append(f"- {item}")
         if alternatives:
             lines.extend(["", "## 为什么不是另外几只", ""])
             for index, item in enumerate(alternatives[:2], start=1):

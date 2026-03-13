@@ -267,6 +267,31 @@ def test_opportunity_renderer_compare_uses_total_score_when_rank_ties():
     assert "评级相同，但综合八维总分" in compare
 
 
+def test_opportunity_renderer_compare_supports_multiple_analyses():
+    analysis_a = _sample_analysis("561380", "电网ETF")
+    analysis_b = _sample_analysis("512400", "有色ETF")
+    analysis_c = _sample_analysis("QQQM", "纳指ETF")
+    analysis_b["rating"] = {"stars": "⭐⭐", "label": "储备机会", "meaning": "催化偏弱。", "rank": 2, "warnings": []}
+    analysis_b["dimensions"]["catalyst"]["score"] = 38
+    analysis_c["dimensions"]["technical"]["score"] = 88
+    analysis_c["dimensions"]["risk"]["score"] = 45
+    analysis_c["dimensions"]["macro"]["score"] = 34
+
+    compare = OpportunityReportRenderer().render_compare(
+        {
+            "generated_at": "2026-03-09 08:00:00",
+            "analyses": [analysis_a, analysis_b, analysis_c],
+            "best_symbol": "QQQM",
+        }
+    )
+
+    assert "# 561380 vs 512400 vs QQQM 对比分析 | 2026-03-09" in compare
+    assert "## 综合排序" in compare
+    assert "| 维度 | 561380 | 512400 | QQQM | 优势方 |" in compare
+    assert "纳指ETF (QQQM)" in compare
+    assert "如果你想优先押催化弹性" in compare
+
+
 def test_opportunity_renderer_includes_fund_profile_sections():
     analysis = _sample_analysis("022365", "永赢科技智选混合发起C")
     analysis["asset_type"] = "cn_fund"

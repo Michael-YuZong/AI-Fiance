@@ -9,7 +9,7 @@ from typing import Dict, Tuple
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
 from src.commands.release_check import check_generic_client_report
 from src.output import AnalysisChartRenderer, ClientReportRenderer, OpportunityReportRenderer
-from src.processors.opportunity_engine import analyze_opportunity, build_market_context
+from src.processors.opportunity_engine import _attach_signal_confidence, analyze_opportunity, build_market_context
 from src.utils.config import detect_asset_type, load_config, resolve_project_path
 from src.utils.logger import setup_logger
 
@@ -22,6 +22,7 @@ def run_stock_analysis(symbol: str, config_path: str = "", today_mode: bool = Fa
         raise SystemExit(f"`{symbol}` 当前识别为 `{asset_type}`，不属于个股分析对象。")
     context = build_market_context(config, relevant_asset_types=[asset_type, "cn_stock", "hk", "us"])
     analysis = analyze_opportunity(symbol, asset_type, config, context=context, today_mode=today_mode)
+    _attach_signal_confidence([analysis], config, limit=1)
     visuals = AnalysisChartRenderer().render(analysis)
     analysis["visuals"] = visuals
     report = OpportunityReportRenderer().render_scan(analysis, visuals=visuals)
@@ -32,6 +33,12 @@ def _client_output_path(symbol: str, generated_at: str) -> Path:
     safe_symbol = str(symbol).replace("/", "_").replace(" ", "_")
     date_str = generated_at[:10]
     return resolve_project_path(f"reports/stock_analysis/final/stock_analysis_{safe_symbol}_{date_str}_final.md")
+
+
+def _detail_output_path(symbol: str, generated_at: str) -> Path:
+    safe_symbol = str(symbol).replace("/", "_").replace(" ", "_")
+    date_str = generated_at[:10]
+    return resolve_project_path(f"reports/stock_analysis/internal/stock_analysis_{safe_symbol}_{date_str}_internal_detail.md")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,8 +58,11 @@ def main() -> None:
         print(report)
         return
 
+    detail_path = _detail_output_path(args.symbol, str(analysis.get("generated_at", "")))
+    detail_path.parent.mkdir(parents=True, exist_ok=True)
+    detail_path.write_text(report, encoding="utf-8")
     client_markdown = ClientReportRenderer().render_stock_analysis(analysis)
-    findings = check_generic_client_report(client_markdown, "stock_analysis")
+    findings = check_generic_client_report(client_markdown, "stock_analysis", source_text=report)
     try:
         bundle = export_reviewed_markdown_bundle(
             report_type="stock_analysis",
@@ -62,6 +72,7 @@ def main() -> None:
             extra_manifest={
                 "symbol": str(args.symbol),
                 "asset_type": str(analysis.get("asset_type", "")),
+                "detail_source": str(detail_path),
             },
         )
     except ReportGuardError as exc:

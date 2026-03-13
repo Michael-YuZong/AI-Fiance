@@ -32,6 +32,20 @@ FUND_THEME_RULES = [
 ]
 
 
+def _theme_detection_text(text: str) -> str:
+    cleaned = str(text or "")
+    for noise in (
+        "中国人民银行人民币活期存款利率",
+        "银行活期存款利率",
+        "人民币活期存款利率",
+        "活期存款税后利率",
+        "活期存款利率",
+        "税后",
+    ):
+        cleaned = cleaned.replace(noise, " ")
+    return cleaned
+
+
 class FundProfileCollector(BaseCollector):
     """场外基金画像数据采集。Tushare fund_basic/fund_nav 优先。"""
 
@@ -554,7 +568,7 @@ class FundProfileCollector(BaseCollector):
         }
 
     def _infer_theme(self, text: str) -> tuple[str, List[str]]:
-        lowered = str(text).lower()
+        lowered = _theme_detection_text(str(text)).lower()
         for keywords, payload in FUND_THEME_RULES:
             if any(keyword.lower() in lowered for keyword in keywords):
                 return payload[0], list(payload[1])
