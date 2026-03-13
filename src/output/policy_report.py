@@ -43,7 +43,7 @@ class PolicyReportRenderer:
             if coverage_scope:
                 lines.append(f"- 当前已覆盖: {', '.join(coverage_scope)}")
             if attachment_titles:
-                if "PDF" in str(payload.get("input_type", "")):
+                if any(token in str(payload.get("input_type", "")) for token in ("PDF", "OFD")):
                     lines.append(f"- 当前文档: {'；'.join(attachment_titles)}")
                 else:
                     lines.append(f"- 检测到附件: {'；'.join(attachment_titles)}")

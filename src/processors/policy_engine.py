@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import io
 import re
+import zipfile
 from dataclasses import dataclass, field
 from html import unescape
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urljoin, urlparse
+from xml.etree import ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
@@ -92,6 +94,8 @@ class AttachmentResource:
 
 class PolicyEngine:
     """Heuristic policy analysis without requiring an LLM key."""
+
+    _OFD_NS = {"ofd": "http://www.ofdspec.org/2016"}
 
     def __init__(self) -> None:
         self.library = load_json(PROJECT_ROOT / "data" / "policy_library.json", default=[]) or []
@@ -194,7 +198,7 @@ class PolicyEngine:
         if context.content_kind == "url" and context.title:
             body_facts.append(f"原文标题：{context.title}")
         body_facts.extend(f"原文元信息：{line}" for line in metadata_lines[:3])
-        if context.attachment_titles and not context.source.lower().endswith(".pdf"):
+        if context.attachment_titles and not context.source.lower().endswith((".pdf", ".ofd")):
             body_facts.append(f"页面附件：{'；'.join(context.attachment_titles[:2])}")
         for sentence in self.extract_policy_facts(context.text, template):
             body_facts.append(f"原文明确动作：{sentence}")
@@ -220,6 +224,8 @@ class PolicyEngine:
         if context.content_kind == "url":
             if context.source.lower().endswith(".pdf"):
                 unconfirmed_lines.append("PDF 正文已抽取，但表格、扫描页、图片页和版式内容仍可能存在漏提。")
+            elif context.source.lower().endswith(".ofd"):
+                unconfirmed_lines.append("OFD 正文已抽取，但表格、矢量版式和特殊对象仍可能存在漏提。")
             elif context.extraction_quality != "正文抽取较完整":
                 unconfirmed_lines.append("当前 URL 抽取仍可能漏掉附件、表格、折叠区或 PDF 原件，不能替代完整原文复核。")
         if context.content_kind == "keyword":
@@ -437,6 +443,25 @@ class PolicyEngine:
         response.raise_for_status()
         content_type = str(response.headers.get("content-type", "")).lower()
         notes: List[str] = []
+        if "ofd" in content_type or target.lower().endswith(".ofd"):
+            authority = self._assess_source_authority(target, {})
+            text, metadata, ofd_title = self._extract_ofd_text(response.content, target, notes)
+            title = ofd_title or urlparse(target).path.rsplit("/", 1)[-1] or urlparse(target).netloc
+            quality = "OFD正文已抽取" if text else "仅识别到 OFD 链接，正文未抽取"
+            if text:
+                notes.append("已抽取 OFD 原文，可用于正文事实、时间线和方向判断。")
+            return PolicyContext(
+                title=title,
+                source=target,
+                text=text,
+                metadata=metadata,
+                extraction_quality=quality,
+                extraction_notes=notes or ["当前链接是 OFD 原件，正文仍未抽取。"],
+                content_kind="url",
+                source_authority=authority,
+                coverage_scope=["OFD正文"] if text else ["仅识别到附件链接"],
+                attachment_titles=[title or "OFD原件"],
+            )
         if "pdf" in content_type or target.lower().endswith(".pdf"):
             authority = self._assess_source_authority(target, {})
             text, metadata, pdf_title = self._extract_pdf_text(response.content, target, notes)
@@ -473,23 +498,32 @@ class PolicyEngine:
         pdf_attachments = [item for item in attachments if item.kind == "pdf"]
         ofd_attachments = [item for item in attachments if item.kind == "ofd"]
         pdf_text = ""
+        ofd_text = ""
         if pdf_attachments:
             pdf_text, pdf_metadata, pdf_title = self._extract_pdf_attachment_text(pdf_attachments[0], notes)
             if pdf_text:
                 text = self._merge_unique_text(text, pdf_text)
                 metadata = self._merge_metadata(metadata, pdf_metadata)
-                if pdf_title and pdf_title not in attachment_titles:
-                    attachment_titles.insert(0, pdf_title)
                 quality = "公告页正文 + PDF附件已补抽"
                 notes.append(f"已补抽 PDF 附件正文 `{pdf_attachments[0].title}`。")
             else:
                 notes.append(f"检测到 PDF 附件（{pdf_attachments[0].title}），但当前未抽到可用正文。")
+        if ofd_attachments:
+            ofd_text, ofd_metadata, ofd_title = self._extract_ofd_attachment_text(ofd_attachments[0], notes)
+            if ofd_text:
+                text = self._merge_unique_text(text, ofd_text)
+                metadata = self._merge_metadata(metadata, ofd_metadata)
+                if quality == "公告页正文 + PDF附件已补抽":
+                    quality = "公告页正文 + PDF/OFD附件已补抽"
+                else:
+                    quality = "公告页正文 + OFD附件已补抽"
+                notes.append(f"已补抽 OFD 附件正文 `{ofd_attachments[0].title}`。")
+            else:
+                notes.append(f"检测到 OFD 附件（{ofd_attachments[0].title}），但当前未抽到可用正文。")
         if attachment_titles:
-            if not pdf_text:
+            if not (pdf_text or ofd_text):
                 quality = "正文抽取部分成功"
             notes.append(f"检测到 PDF/OFD 附件（{'; '.join(attachment_titles[:2])}），当前只抽取了公告页正文，未展开全部附件原文。")
-        if ofd_attachments:
-            notes.append("检测到 OFD 附件，当前仍未接入稳定的 OFD 原文抽取。")
         if not text:
             notes.append("当前没有抽到足够正文，只能基于标题和元信息做弱判断。")
         source_authority = self._assess_source_authority(target, metadata)
@@ -499,6 +533,7 @@ class PolicyEngine:
             text,
             attachment_titles,
             pdf_text_extracted=bool(pdf_text),
+            ofd_text_extracted=bool(ofd_text),
         )
         return PolicyContext(
             title=title,
@@ -601,6 +636,20 @@ class PolicyEngine:
         text, metadata, pdf_title = self._extract_pdf_text(response.content, attachment.url, notes)
         return text, metadata, pdf_title or attachment.title
 
+    def _extract_ofd_attachment_text(
+        self,
+        attachment: AttachmentResource,
+        notes: List[str],
+    ) -> Tuple[str, Dict[str, str], str]:
+        try:
+            response = requests.get(attachment.url, timeout=20)
+            response.raise_for_status()
+        except Exception as exc:
+            notes.append(f"尝试补抽 OFD 附件 `{attachment.title}` 失败：{exc.__class__.__name__}。")
+            return "", {}, attachment.title
+        text, metadata, ofd_title = self._extract_ofd_text(response.content, attachment.url, notes)
+        return text, metadata, ofd_title or attachment.title
+
     def _extract_pdf_text(
         self,
         content: bytes,
@@ -645,6 +694,120 @@ class PolicyEngine:
         if not title:
             title = urlparse(source).path.rsplit("/", 1)[-1]
         return "\n".join(text_blocks).strip(), metadata, title
+
+    def _extract_ofd_text(
+        self,
+        content: bytes,
+        source: str,
+        notes: List[str],
+    ) -> Tuple[str, Dict[str, str], str]:
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(content))
+        except Exception as exc:
+            notes.append(f"OFD 原文抽取失败：{exc.__class__.__name__}。")
+            return "", {}, ""
+
+        metadata: Dict[str, str] = {}
+        title = ""
+        doc_root = "Doc_0/Document.xml"
+        try:
+            ofd_root = ET.fromstring(archive.read("OFD.xml"))
+            doc_info = ofd_root.find(".//ofd:DocInfo", self._OFD_NS)
+            if doc_info is not None:
+                author = self._normalize_text((doc_info.findtext("ofd:Author", "", self._OFD_NS) or ""))
+                creation = self._normalize_text((doc_info.findtext("ofd:CreationDate", "", self._OFD_NS) or ""))
+                creator = self._normalize_text((doc_info.findtext("ofd:Creator", "", self._OFD_NS) or ""))
+                if author and author.lower() not in {"user", "anonymous", "wps"}:
+                    metadata["来源"] = author
+                if creation:
+                    metadata["成文日期"] = creation
+                if creator and creator.lower() not in {"wps 文字"}:
+                    metadata["公文种类"] = creator
+            doc_root = (
+                ofd_root.findtext(".//ofd:DocRoot", default=doc_root, namespaces=self._OFD_NS)
+                or doc_root
+            )
+        except Exception:
+            notes.append("OFD 根信息不完整，当前按默认文档结构回退。")
+
+        try:
+            document_root = ET.fromstring(archive.read(doc_root))
+        except Exception as exc:
+            notes.append(f"OFD 文档结构读取失败：{exc.__class__.__name__}。")
+            return "", metadata, ""
+
+        page_paths: List[str] = []
+        base_dir = doc_root.rsplit("/", 1)[0] if "/" in doc_root else ""
+        for page in document_root.findall(".//ofd:Page", self._OFD_NS):
+            base_loc = self._normalize_text(page.attrib.get("BaseLoc", ""))
+            if not base_loc:
+                continue
+            full_path = f"{base_dir}/{base_loc}" if base_dir and not base_loc.startswith(base_dir) else base_loc
+            page_paths.append(full_path)
+
+        page_texts: List[str] = []
+        for page_path in page_paths[:12]:
+            page_text = self._extract_ofd_page_text(archive, page_path)
+            if page_text:
+                page_texts.append(page_text)
+        if len(page_paths) > 12:
+            notes.append(f"OFD 共 {len(page_paths)} 页，当前只抽取前 12 页。")
+        text = "\n".join(page_texts).strip()
+        if not text:
+            notes.append("OFD 可能包含复杂矢量对象或异常版式，当前没有抽到可用文本。")
+            return "", metadata, ""
+
+        title = self._derive_document_title(text, fallback=urlparse(source).path.rsplit("/", 1)[-1])
+        if title:
+            metadata.setdefault("标题", title)
+        return text, metadata, title
+
+    def _extract_ofd_page_text(self, archive: zipfile.ZipFile, page_path: str) -> str:
+        try:
+            root = ET.fromstring(archive.read(page_path))
+        except Exception:
+            return ""
+
+        rows: List[Tuple[float, float, str]] = []
+        for text_obj in root.findall(".//ofd:TextObject", self._OFD_NS):
+            boundary = self._normalize_text(text_obj.attrib.get("Boundary", ""))
+            x, y = self._parse_ofd_boundary(boundary)
+            text_parts = [self._normalize_text(node.text) for node in text_obj.findall(".//ofd:TextCode", self._OFD_NS)]
+            text = "".join(part for part in text_parts if part)
+            if text:
+                rows.append((y, x, text))
+        if not rows:
+            return ""
+
+        lines: List[Tuple[float, List[Tuple[float, str]]]] = []
+        for y, x, text in sorted(rows, key=lambda item: (round(item[0], 1), item[1])):
+            if not lines or abs(lines[-1][0] - y) > 0.8:
+                lines.append((y, [(x, text)]))
+            else:
+                lines[-1][1].append((x, text))
+        rendered_lines: List[str] = []
+        for _, line_items in lines:
+            merged = "".join(text for _, text in sorted(line_items, key=lambda item: item[0]))
+            cleaned = self._normalize_text(merged)
+            if cleaned and not self._is_noise_line(cleaned):
+                rendered_lines.append(cleaned)
+        return "\n".join(rendered_lines)
+
+    def _parse_ofd_boundary(self, boundary: str) -> Tuple[float, float]:
+        parts = boundary.split()
+        if len(parts) >= 2:
+            try:
+                return float(parts[0]), float(parts[1])
+            except Exception:
+                return 0.0, 0.0
+        return 0.0, 0.0
+
+    def _derive_document_title(self, text: str, fallback: str = "") -> str:
+        for line in self._split_sentences(text)[:8]:
+            normalized = self._normalize_title(line)
+            if 4 <= len(normalized) <= 42 and not re.fullmatch(r"[—\-\d（）()年 ]+", normalized):
+                return normalized
+        return self._normalize_title(fallback)
 
     def _extract_body_text(self, soup: BeautifulSoup) -> Tuple[str, str]:
         candidates: List[Tuple[str, str, int]] = []
@@ -914,7 +1077,7 @@ class PolicyEngine:
         support_text = "、".join(support_points[:2]) if support_points else template.get("policy_goal", "")
         timeline_text = f"，并已抽到 `{timeline_points[0]}` 这类时间线" if timeline_points else ""
         attachment_text = ""
-        if context.attachment_titles and not context.source.lower().endswith(".pdf"):
+        if context.attachment_titles and not context.source.lower().endswith((".pdf", ".ofd")):
             attachment_text = f"，页面还挂有 `{context.attachment_titles[0]}` 这类附件但未展开原文"
         return (
             f"原文主要围绕 `{support_text}` 展开，当前判断为 `{direction}`，阶段偏 `{stage}`"
@@ -943,6 +1106,10 @@ class PolicyEngine:
                 if "官方" in context.source_authority or "政府" in context.source_authority:
                     return "官方 PDF / URL"
                 return "PDF / URL"
+            if context.source.lower().endswith(".ofd"):
+                if "官方" in context.source_authority or "政府" in context.source_authority:
+                    return "官方 OFD / URL"
+                return "OFD / URL"
             if "官方" in context.source_authority or "政府" in context.source_authority:
                 return "官方页面 / URL"
             return "网页 / URL"
@@ -1009,6 +1176,7 @@ class PolicyEngine:
         attachment_titles: Sequence[str],
         *,
         pdf_text_extracted: bool = False,
+        ofd_text_extracted: bool = False,
     ) -> List[str]:
         scope: List[str] = []
         if title:
@@ -1019,6 +1187,8 @@ class PolicyEngine:
             scope.append("页面正文")
         if pdf_text_extracted:
             scope.append("PDF附件正文")
+        if ofd_text_extracted:
+            scope.append("OFD附件正文")
         if attachment_titles:
             scope.append(f"附件标题（{len(attachment_titles)}个）")
         return scope or ["覆盖范围待确认"]
@@ -1038,7 +1208,9 @@ class PolicyEngine:
         taxonomy.setdefault("source_level", source_bucket)
         taxonomy.setdefault(
             "evidence_mode",
-            "已覆盖正文" if any(item in {"页面正文", "PDF正文", "PDF附件正文"} for item in context.coverage_scope) else "主题推断",
+            "已覆盖正文"
+            if any(item in {"页面正文", "PDF正文", "PDF附件正文", "OFD正文", "OFD附件正文"} for item in context.coverage_scope)
+            else "主题推断",
         )
         taxonomy["policy_tone"] = direction
         taxonomy["policy_stage"] = stage

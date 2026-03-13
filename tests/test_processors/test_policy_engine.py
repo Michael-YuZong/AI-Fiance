@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
+
 import src.processors.policy_engine as policy_engine_module
 from src.processors.policy_engine import PolicyEngine
 from src.utils.data import load_watchlist
@@ -64,6 +67,47 @@ class FakeBinaryResponse:
 
     def raise_for_status(self) -> None:
         return None
+
+
+def _build_minimal_ofd_bytes() -> bytes:
+    page_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Page xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:Content>
+    <ofd:Layer ID="2">
+      <ofd:TextObject ID="1" Boundary="54.0 57.8 20 8"><ofd:TextCode>加快</ofd:TextCode></ofd:TextObject>
+      <ofd:TextObject ID="2" Boundary="68.0 57.8 20 8"><ofd:TextCode>构建</ofd:TextCode></ofd:TextObject>
+      <ofd:TextObject ID="3" Boundary="82.0 57.8 80 8"><ofd:TextCode>新型电力系统行动方案</ofd:TextCode></ofd:TextObject>
+      <ofd:TextObject ID="4" Boundary="30.0 90.0 120 8"><ofd:TextCode>提出推进特高压和配电网改造，要求在2026年6月30日前形成首批重点项目清单。</ofd:TextCode></ofd:TextObject>
+      <ofd:TextObject ID="5" Boundary="30.0 101.0 120 8"><ofd:TextCode>同时强调防止地方盲目重复建设。</ofd:TextCode></ofd:TextObject>
+    </ofd:Layer>
+  </ofd:Content>
+</ofd:Page>
+"""
+    ofd_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" DocType="OFD" Version="1.1">
+  <ofd:DocBody>
+    <ofd:DocInfo>
+      <ofd:Author>国家发展改革委</ofd:Author>
+      <ofd:CreationDate>2024-08-06</ofd:CreationDate>
+      <ofd:Creator>WPS 文字</ofd:Creator>
+    </ofd:DocInfo>
+    <ofd:DocRoot>Doc_0/Document.xml</ofd:DocRoot>
+  </ofd:DocBody>
+</ofd:OFD>
+"""
+    doc_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Document xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:Pages>
+    <ofd:Page ID="1" BaseLoc="Pages/Page_0/Content.xml"/>
+  </ofd:Pages>
+</ofd:Document>
+"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("OFD.xml", ofd_xml)
+        archive.writestr("Doc_0/Document.xml", doc_xml)
+        archive.writestr("Doc_0/Pages/Page_0/Content.xml", page_xml)
+    return buffer.getvalue()
 
 
 def test_policy_engine_matches_keyword():
@@ -207,6 +251,55 @@ def test_policy_engine_load_context_supports_direct_pdf(monkeypatch):
     assert context.coverage_scope == ["PDF正文"]
     assert "推进特高压和配电网改造" in context.text
     assert any("已抽取 PDF 原文" in item for item in context.extraction_notes)
+
+
+def test_policy_engine_extract_ofd_text_from_minimal_archive():
+    engine = PolicyEngine()
+
+    text, metadata, title = engine._extract_ofd_text(_build_minimal_ofd_bytes(), "https://example.com/policy.ofd", [])
+
+    assert "新型电力系统行动方案" in title
+    assert "提出推进特高压和配电网改造" in text
+    assert metadata["来源"] == "国家发展改革委"
+    assert metadata["成文日期"] == "2024-08-06"
+
+
+def test_policy_engine_load_context_supports_direct_ofd(monkeypatch):
+    monkeypatch.setattr(
+        policy_engine_module.requests,
+        "get",
+        lambda *args, **kwargs: FakeBinaryResponse(_build_minimal_ofd_bytes(), content_type="application/octet-stream"),
+    )
+    engine = PolicyEngine()
+
+    context = engine.load_context("https://www.gov.cn/policy/power-grid.ofd")
+
+    assert context.extraction_quality == "OFD正文已抽取"
+    assert context.coverage_scope == ["OFD正文"]
+    assert "提出推进特高压和配电网改造" in context.text
+    assert any("已抽取 OFD 原文" in item for item in context.extraction_notes)
+
+
+def test_policy_engine_load_context_extracts_ofd_attachment_text(monkeypatch):
+    html = OFFICIAL_NOTICE_HTML.replace(
+        "</div>\n    <div class=\"footer\">",
+        "      <a href=\"./P020240806793811584247.ofd\">《加快构建新型电力系统行动方案（2024—2027年）》.ofd</a>\n    </div>\n    <div class=\"footer\">",
+    )
+
+    def fake_get(url: str, *args, **kwargs):
+        if url.endswith(".ofd"):
+            return FakeBinaryResponse(_build_minimal_ofd_bytes(), content_type="application/octet-stream")
+        return FakeResponse(html)
+
+    monkeypatch.setattr(policy_engine_module.requests, "get", fake_get)
+    engine = PolicyEngine()
+
+    context = engine.load_context("https://www.gov.cn/zhengce/zhengceku/202408/content_6966863.htm")
+
+    assert context.extraction_quality == "公告页正文 + OFD附件已补抽"
+    assert "OFD附件正文" in context.coverage_scope
+    assert "提出推进特高压和配电网改造" in context.text
+    assert any("已补抽 OFD 附件正文" in item for item in context.extraction_notes)
 
 
 def test_policy_engine_analysis_includes_policy_taxonomy():
