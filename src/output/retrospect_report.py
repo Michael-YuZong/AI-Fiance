@@ -55,6 +55,11 @@ class DecisionRetrospectReportRenderer:
             lines.extend(["", "## Setup 校准"])
             lines.extend(_table(["Setup 档位", "笔数", "平均结果", "平均超额", "胜率"], setup_rows))
 
+        horizon_rows = payload.get("horizon_rows", [])
+        if horizon_rows:
+            lines.extend(["", "## 周期校准"])
+            lines.extend(_table(["周期", "笔数", "平均结果", "平均超额", "胜率"], horizon_rows))
+
         attribution_rows = payload.get("attribution_rows", [])
         if attribution_rows:
             lines.extend(["", "## 结果归因"])
@@ -83,6 +88,7 @@ class DecisionRetrospectReportRenderer:
             decision_rows = [
                 ["动作", str(item.get("action", ""))],
                 ["Basis", str(item.get("basis", ""))],
+                ["执行周期", str(dict(item.get("horizon") or {}).get("label", "—"))],
                 ["决策时间", str(item.get("timestamp", ""))],
                 ["入场基准日", str(item.get("entry_date", ""))],
                 ["入场价格", f"{float(item.get('entry_price', 0.0)):.3f}"],
@@ -93,6 +99,20 @@ class DecisionRetrospectReportRenderer:
                 ["预期周期", str(thesis.get("holding_period", "") or "—")],
             ]
             lines.extend(_table(["项目", "内容"], decision_rows))
+            horizon = dict(item.get("horizon") or {})
+            if horizon:
+                lines.extend(["", "### 周期判断"])
+                lines.extend(
+                    _table(
+                        ["项目", "内容"],
+                        [
+                            ["当前复盘口径", str(horizon.get("label", "—"))],
+                            ["为什么按这个周期看", str(horizon.get("fit_reason", "—"))],
+                            ["现在不适合", str(horizon.get("misfit_reason", "—"))],
+                            ["来源", str(horizon.get("source", "—"))],
+                        ],
+                    )
+                )
 
             lines.extend(["", "## 为什么当时会做这个决定"])
             for reason in item.get("reason_lines", []):

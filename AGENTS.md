@@ -19,11 +19,11 @@
 - `src/commands/risk.py`
   Risk report, correlation, VaR/CVaR, drawdown, scenario stress are already coherent.
 - `src/commands/portfolio.py`
-  Holdings, trade log, target weights, rebalance, thesis, and monthly review are usable. As of 2026-03-13 it also has a real `whatif` trade-preview path with first-pass risk-budget / tradability / execution-cost estimates, and trade logs now persist minimal decision/execution snapshots for later retrospective review.
+  Holdings, trade log, target weights, rebalance, thesis, and monthly review are usable. As of 2026-03-13 it also has a real `whatif` trade-preview path with first-pass risk-budget / tradability / execution-cost estimates, and trade logs now persist minimal decision/execution snapshots plus a structured horizon snapshot for later retrospective review.
 - `src/commands/lookup.py` and `src/commands/assistant.py`
   Chinese asset resolution and natural-language routing are stable enough for daily use.
 - `src/commands/research.py`
-  As of 2026-03-13 this now behaves like a real research entrypoint instead of a flat module dump. It classifies market / asset / policy / portfolio questions, uses a lighter market-diagnosis path, includes rule-based scenario-probability framing, ranks evidence by importance, carries proxy-confidence notes through market and flow answers, and now also answers symbol-level position-sizing / tradability questions by reusing the portfolio `whatif` contract instead of only giving directional commentary.
+  As of 2026-03-13 this now behaves like a real research entrypoint instead of a flat module dump. It classifies market / asset / policy / portfolio questions, uses a lighter market-diagnosis path, includes rule-based scenario-probability framing, ranks evidence by importance, carries proxy-confidence notes through market and flow answers, and now also answers symbol-level position-sizing / tradability questions by reusing the portfolio `whatif` contract, including explicit horizon fit / misfit language instead of only giving directional commentary.
 - `src/commands/compare.py` + `src/output/opportunity_report.py`
   As of 2026-03-13 this now supports real multi-symbol comparison instead of silently truncating to 2 symbols.
 - `src/commands/briefing.py` + `src/output/briefing.py`
@@ -34,7 +34,7 @@
 - `src/commands/discover.py`
   Useful, but still mainly ETF-pool and rules driven. Discovery quality is below the fully productized pick outputs.
 - `src/processors/decision_review.py` + `src/output/retrospect_report.py`
-  As of 2026-03-13 monthly review is no longer just path replay. It now includes benchmark-relative excess return, simple setup-bucket calibration, first-pass result attribution, and renders stored timing/execution snapshots. It is still v1 and only partially solves project-wide point-in-time correctness / calibration.
+  As of 2026-03-13 monthly review is no longer just path replay. It now includes benchmark-relative excess return, simple setup-bucket calibration, first-pass result attribution, explicit horizon calibration, and renders stored timing/execution snapshots. It is still v1 and only partially solves project-wide point-in-time correctness / calibration.
 - `src/commands/policy.py` and `src/processors/policy_engine.py`
   Useful for keyword/URL interpretation. As of 2026-03-13 it now exposes template confidence, matched aliases, policy direction, stage, timeline cues, and more explicit watchlist mapping. It also separates extracted正文事实、模板/规则推断、未确认项 for official long-form notice pages, with stronger HTML公告页标题/元信息/时间线抽取 and explicit attachment downgrade notes. It is still template and rule heavy, and attached PDF/OFD originals are not fully parsed yet.
 - `src/scheduler.py`
@@ -73,7 +73,7 @@ When in doubt, optimize for:
 1. `discover` v2
    Move discovery quality closer to the productized pick outputs: less rule-only ranking, better pre-screen quality, and clearer linkage from discovered theme -> candidate pool -> formal pick pipeline.
 2. Propagate portfolio-construction v1 into pick flows
-   `portfolio whatif` / `decision_review` / `research` now share first-pass risk-budget, execution-cost, attribution, and timing-snapshot contracts. Next step is to let ETF/fund/stock pick outputs hand off into the same action language.
+   `portfolio whatif` / `decision_review` / `research` now share first-pass risk-budget, execution-cost, attribution, timing-snapshot, and horizon contracts. Next step is to let ETF/fund/stock pick outputs hand off into the same action language.
 3. Proxy signals
    Expose confidence and downgrade impact from social/global-flow proxies more explicitly in reports.
 4. Scheduler v2
@@ -117,6 +117,8 @@ When in doubt, optimize for:
   `decision_review` / `retrospect_report` now include benchmark-relative excess return, setup-bucket calibration, attribution labels (`alpha兑现` / `更多来自贝塔顺风` / etc.), and stored timing/execution snapshots.
 - 2026-03-13
   `research` asset-trade questions such as “上多少仓位 / 做得进去吗” now reuse the same trade-preview contract: it can answer with a first-pass suggested max weight, tradability label, estimated total cost, and a timing snapshot instead of only repeating trend commentary.
+- 2026-03-13
+  `portfolio whatif`, trade logging, `research` asset-trade Q&A, and `decision_review` / `retrospect_report` now all carry a structured horizon contract so outputs can explain why a setup is being treated as observation / swing / medium-term / long-term and where cycle mismatch likely happened.
 - 2026-03-13
   `fund_pick` now does real full-universe open-end fund screening with theme/style/manager filters, coverage disclosure, same-day baseline snapshots, rerun diffing, and catalyst fallback when live news/event coverage degrades.
 - 2026-03-13

@@ -980,6 +980,7 @@ def _asset_trade_plan_payload(
 
     execution = dict(payload.get("execution") or {})
     decision = dict(payload.get("decision_snapshot") or {})
+    horizon = dict(payload.get("horizon") or {})
     alerts = list(payload.get("alerts") or [])
     participation = execution.get("participation_rate")
     participation_text = "—" if participation is None else f"{float(participation) * 100:.2f}%"
@@ -1011,6 +1012,7 @@ def _asset_trade_plan_payload(
         )
 
     evidence_lines = [
+        f"[周期判断] 当前更适合按 `{horizon.get('label', '观察期')}` 处理：{horizon.get('fit_reason', '当前周期未单独标注。')}",
         f"[仓位预演] 当前按约 `{amount:.0f}` 的示意单预演；更合理的单票上限约 `{float(payload.get('suggested_max_weight', 0.0)) * 100:.1f}%`。",
         (
             f"[执行成本] 近20日日均成交额约 `{float(execution.get('avg_turnover_20d', 0.0)) / 1e8:.2f} 亿`，"
@@ -1026,6 +1028,8 @@ def _asset_trade_plan_payload(
     ]
 
     risk_lines = list(alerts[:3])
+    if horizon.get("misfit_reason"):
+        risk_lines.append(f"周期错配风险：{horizon.get('misfit_reason')}")
     liquidity_note = str(execution.get("liquidity_note", "") or "").strip()
     execution_note = str(execution.get("execution_note", "") or "").strip()
     if liquidity_note:

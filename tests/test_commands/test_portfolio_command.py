@@ -19,6 +19,11 @@ def test_portfolio_whatif_main_renders_trade_preview(monkeypatch, capsys) -> Non
             "amount": 20_000.0,
             "price": 2.1,
             "headline": "561380 买入后仓位约 `12.0%`，仍在组合和执行约束内。",
+            "horizon": {
+                "label": "中线配置（1-3月）",
+                "fit_reason": "原始 thesis 的预期周期写的是 `1-3月`，当前更适合按 `中线配置（1-3月）` 的框架理解。",
+                "misfit_reason": "现在不适合当成纯隔夜交易，也还没强到可以长期不复核地持有一年以上。",
+            },
             "current_weight": 0.0,
             "projected_weight": 0.12,
             "suggested_max_weight": 0.18,
@@ -58,5 +63,6 @@ def test_portfolio_whatif_main_renders_trade_preview(monkeypatch, capsys) -> Non
 
     captured = capsys.readouterr()
     assert "# 交易预演" in captured.out
+    assert "## 周期判断" in captured.out
     assert "## 执行成本与可成交性" in captured.out
     assert "## 时点与证据快照" in captured.out

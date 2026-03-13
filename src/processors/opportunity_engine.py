@@ -28,6 +28,7 @@ from src.collectors import (
     ValuationCollector,
 )
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot
+from src.processors.horizon import build_analysis_horizon_profile
 from src.processors.regime import RegimeDetector
 from src.processors.signal_confidence import build_signal_confidence
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
@@ -5021,87 +5022,6 @@ def _build_narrative(
     }
 
 
-def _action_horizon_profile(
-    *,
-    rating: int,
-    asset_type: str,
-    technical_score: int,
-    fundamental_score: int,
-    catalyst_score: int,
-    relative_score: int,
-    risk_score: int,
-    macro_reverse: bool,
-    trade_state: str,
-    direction: str,
-    position: str,
-) -> Dict[str, str]:
-    trade_state = str(trade_state).strip()
-    direction = str(direction).strip()
-    position = str(position).strip()
-
-    if direction in {"回避", "观望"} and ("暂不出手" in position or rating <= 1):
-        return {
-            "code": "watch",
-            "label": "观察期",
-            "style": "先等催化、趋势或风险收益比进一步确认，不急着把它定义成短线执行仓或长线配置仓。",
-            "fit_reason": "当前信号还没共振到足以支撑正式动作，继续观察比仓促出手更重要。",
-            "misfit_reason": "现在不适合直接按短线执行仓或长线配置仓去理解。",
-        }
-
-    if rating >= 4 and fundamental_score >= 70 and risk_score >= 65 and not macro_reverse:
-        return {
-            "code": "long_term_allocation",
-            "label": "长线配置（6-12月）",
-            "style": "更适合作为中长期底仓来跟踪，允许短线波动，但要持续复核主线、基本面和风险预算。",
-            "fit_reason": "基本面、风险收益和主线顺风更完整，持有逻辑不只依赖眼前一两周的催化。",
-            "misfit_reason": "现在不适合按纯短线追价来理解，短线节奏错了也不能破坏长线仓位纪律。",
-        }
-
-    if rating >= 3 and fundamental_score >= 58 and risk_score >= 55 and not macro_reverse:
-        return {
-            "code": "position_trade",
-            "label": "中线配置（1-3月）",
-            "style": "更像 1-3 个月的分批配置或波段跟踪，不按隔日涨跌去做快进快出。",
-            "fit_reason": "基本面、风险收益和趋势至少有两项站得住，更适合按一段完整主线去拿，而不是只博短催化。",
-            "misfit_reason": "现在不适合当成纯隔夜交易，也还没强到可以长期不复核地持有一年以上。",
-        }
-
-    if catalyst_score >= 65 and technical_score >= 55 and relative_score >= 60:
-        return {
-            "code": "short_term",
-            "label": "短线交易（3-10日）",
-            "style": "更看催化、趋势和执行节奏，适合盯右侧确认和止损，不适合当成长线底仓。",
-            "fit_reason": "当前更强的是催化、相对强弱和执行节奏，优势主要集中在接下来几个交易日到一两周内。",
-            "misfit_reason": "现在不适合直接当成长线底仓，一旦催化和强势股状态失效要更快处理。",
-        }
-
-    if rating >= 2 or (risk_score >= 70 and relative_score >= 60) or (technical_score >= 55 and relative_score >= 55):
-        return {
-            "code": "swing",
-            "label": "波段跟踪（2-6周）",
-            "style": "更适合按几周级别的波段节奏去跟踪，等确认和回踩，不靠单日冲动去追。",
-            "fit_reason": "趋势、轮动或风险收益比已经有基础，但还更依赖未来几周节奏，而不是长周期基本面完全兑现。",
-            "misfit_reason": "现在不适合把它当长期底仓，也不适合只按隔夜消息去赌超短。",
-        }
-
-    if "持有优于追高" in trade_state and asset_type in {"cn_etf", "cn_fund"} and fundamental_score >= 50 and risk_score >= 50:
-        return {
-            "code": "position_trade",
-            "label": "中线配置（1-3月）",
-            "style": "更像 1-3 个月的分批配置或波段跟踪，不按隔日涨跌去做快进快出。",
-            "fit_reason": "虽然短线节奏不算完美，但底层暴露和风险收益还可以，适合按中线框架慢慢做而不是硬追。",
-            "misfit_reason": "现在不适合定义成短线强执行仓，更不适合把短线拉升直接解释成长线买点。",
-        }
-
-    return {
-        "code": "watch",
-        "label": "观察期",
-        "style": "现在先看窗口和确认信号，不建议急着把它定义成短线执行仓或长线配置仓。",
-        "fit_reason": "当前信号还不够集中，继续观察比仓促定周期更稳妥。",
-        "misfit_reason": "现在不适合直接把它归到明确的长线或短线执行框架里。",
-    }
-
-
 def _action_plan(
     analysis: Mapping[str, Any],
     history: pd.DataFrame,
@@ -5253,7 +5173,7 @@ def _action_plan(
         if corr_value is not None and float(corr_value) > 0.7:
             corr_warning = f"与持仓 {corr_symbol} 相关度 {float(corr_value):.2f}，注意合计敞口"
 
-    horizon = _action_horizon_profile(
+    horizon = build_analysis_horizon_profile(
         rating=rating,
         asset_type=asset_type,
         technical_score=int(tech or 0),

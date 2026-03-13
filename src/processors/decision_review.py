@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from src.processors.risk_support import REGION_BENCHMARKS
+from src.processors.horizon import build_review_horizon
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.storage.portfolio import PortfolioRepository
 from src.storage.thesis import ThesisRepository
@@ -476,6 +477,13 @@ def review_trade(
     )
     decision_snapshot = dict(trade.get("decision_snapshot") or {})
     execution_snapshot = dict(trade.get("execution_snapshot") or {})
+    horizon = build_review_horizon(
+        thesis=thesis,
+        signal_snapshot=signal_snapshot,
+        action=str(trade.get("action", "buy")),
+        signal_alignment=signal_alignment,
+        decision_snapshot=decision_snapshot,
+    )
 
     return {
         "symbol": symbol,
@@ -508,6 +516,7 @@ def review_trade(
         "reason_lines": reason_lines,
         "setup_profile": setup_profile,
         "attribution": attribution,
+        "horizon": horizon,
         "decision_snapshot": decision_snapshot,
         "execution_snapshot": execution_snapshot,
     }
@@ -552,6 +561,7 @@ def build_monthly_decision_review(
         lambda: {"count": 0, "wins": 0, "stop_hits": 0, "target_hits": 0, "avg_return": 0.0, "avg_excess": 0.0}
     )
     by_setup: Dict[str, Dict[str, float]] = defaultdict(lambda: {"count": 0, "wins": 0, "avg_return": 0.0, "avg_excess": 0.0})
+    by_horizon: Dict[str, Dict[str, float]] = defaultdict(lambda: {"count": 0, "wins": 0, "avg_return": 0.0, "avg_excess": 0.0})
     attribution_counter: Dict[str, Dict[str, float]] = defaultdict(lambda: {"count": 0, "avg_return": 0.0, "avg_excess": 0.0})
     outcome_counter: Dict[str, int] = defaultdict(int)
     alignment_counter: Dict[str, int] = defaultdict(int)
@@ -582,6 +592,16 @@ def build_monthly_decision_review(
                 setup_stats["wins"] += 1
         if excess is not None:
             setup_stats["avg_excess"] += float(excess)
+
+        horizon_label = str(dict(item.get("horizon") or {}).get("label", "观察期"))
+        horizon_stats = by_horizon[horizon_label]
+        horizon_stats["count"] += 1
+        if adjusted is not None:
+            horizon_stats["avg_return"] += float(adjusted)
+            if float(adjusted) > 0:
+                horizon_stats["wins"] += 1
+        if excess is not None:
+            horizon_stats["avg_excess"] += float(excess)
 
         attribution_label = str(dict(item.get("attribution") or {}).get("label", "未知"))
         attribution_stats = attribution_counter[attribution_label]
@@ -642,6 +662,29 @@ def build_monthly_decision_review(
             ]
         )
 
+    horizon_rows: List[List[str]] = []
+    horizon_rank = {
+        "观察期": 0,
+        "短线交易（3-10日）": 1,
+        "波段跟踪（2-6周）": 2,
+        "中线配置（1-3月）": 3,
+        "长线配置（6-12月）": 4,
+    }
+    for label, stats in sorted(by_horizon.items(), key=lambda item: horizon_rank.get(item[0], 99)):
+        count = int(stats["count"] or 0)
+        avg_return = (stats["avg_return"] / count) if count else 0.0
+        avg_excess = (stats["avg_excess"] / count) if count else 0.0
+        win_rate = stats["wins"] / count if count else 0.0
+        horizon_rows.append(
+            [
+                label,
+                str(count),
+                f"{avg_return * 100:+.2f}%",
+                f"{avg_excess * 100:+.2f}%",
+                f"{win_rate * 100:.1f}%",
+            ]
+        )
+
     summary_lines: List[str] = []
     if items:
         summary_lines.append(f"本次共回看 `{len(items)}` 笔决策，标准观察窗口为 `{lookahead}` 个交易日。")
@@ -653,6 +696,9 @@ def build_monthly_decision_review(
             summary_lines.append(f"信号一致性里占比最高的是 `{major_alignment}`。")
         if attribution_rows:
             summary_lines.append(f"最常见的收益归因是 `{attribution_rows[0][0]}`。")
+        if by_horizon:
+            most_common_horizon = max(by_horizon.items(), key=lambda item: int(item[1]["count"] or 0))[0]
+            summary_lines.append(f"本月最常见的执行周期是 `{most_common_horizon}`。")
         if by_setup.get("高把握") and by_setup.get("低把握"):
             high_count = int(by_setup["高把握"]["count"] or 0)
             low_count = int(by_setup["低把握"]["count"] or 0)
@@ -678,6 +724,7 @@ def build_monthly_decision_review(
         "summary_lines": summary_lines,
         "basis_rows": basis_rows,
         "setup_rows": setup_rows,
+        "horizon_rows": horizon_rows,
         "attribution_rows": attribution_rows,
         "items": items,
     }

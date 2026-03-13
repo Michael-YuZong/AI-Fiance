@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from src.processors.risk_support import build_blended_benchmark, build_portfolio_risk_context
+from src.processors.horizon import build_trade_plan_horizon
 from src.processors.technical import normalize_ohlcv_frame
 from src.storage.portfolio import PortfolioRepository
 from src.storage.thesis import ThesisRepository
@@ -419,6 +420,20 @@ def build_trade_plan(
             "更适合用来回收风险预算或缓解集中度。"
         )
 
+    signal_snapshot = {
+        "return_20d": metrics.get("return_20d"),
+        "price_percentile_1y": metrics.get("price_percentile_1y"),
+    }
+    horizon = build_trade_plan_horizon(
+        thesis=thesis_record,
+        action=action,
+        projected_weight=projected_weight,
+        suggested_max_weight=suggested_max_weight,
+        execution=execution,
+        signal_snapshot=signal_snapshot,
+    )
+    decision_snapshot["horizon"] = dict(horizon)
+
     return {
         "action": action,
         "symbol": symbol,
@@ -439,6 +454,7 @@ def build_trade_plan(
         "projected_risk": projected_risk,
         "execution": execution,
         "decision_snapshot": decision_snapshot,
+        "horizon": horizon,
         "headline": headline,
         "alerts": alerts,
         "volatility_20d": symbol_vol,

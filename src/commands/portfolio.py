@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 from src.commands.release_check import check_generic_client_report
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
 from src.output import DecisionRetrospectReportRenderer
+from src.processors.horizon import build_trade_plan_horizon
 from src.processors.portfolio_actions import (
     build_trade_decision_snapshot,
     build_trade_plan,
@@ -138,6 +139,7 @@ def _trade_signal_snapshot(symbol: str, asset_type: str, config: Dict[str, Any])
 
 def _trade_logging_snapshots(
     *,
+    action: str,
     symbol: str,
     asset_type: str,
     price: float,
@@ -178,6 +180,14 @@ def _trade_logging_snapshots(
             metrics=metrics,
             risk_limits=config.get("risk_limits", {}),
         )
+        decision_snapshot["horizon"] = build_trade_plan_horizon(
+            thesis=thesis_snapshot,
+            action=action,
+            projected_weight=0.0,
+            suggested_max_weight=1.0,
+            execution=execution_snapshot,
+            signal_snapshot=signal_snapshot,
+        )
     except Exception as exc:
         signal_snapshot = {}
         decision_snapshot = {
@@ -187,6 +197,14 @@ def _trade_logging_snapshots(
             "history_window": "3y",
             "thesis_snapshot_at": str(thesis_snapshot.get("updated_at") or thesis_snapshot.get("created_at") or ""),
             "notes": [f"行情/技术快照获取失败，当前只保留了最基础的交易记录：{exc}"],
+            "horizon": build_trade_plan_horizon(
+                thesis=thesis_snapshot,
+                action=action,
+                projected_weight=0.0,
+                suggested_max_weight=1.0,
+                execution={},
+                signal_snapshot={},
+            ),
         }
         execution_snapshot = {
             "execution_mode": "未知",
@@ -228,6 +246,11 @@ def _whatif_lines(plan: Dict[str, Any]) -> List[str]:
         "",
         "## 一句话结论",
         f"- {plan['headline']}",
+        "",
+        "## 周期判断",
+        f"- 当前更适合按 `{dict(plan.get('horizon') or {}).get('label', '观察期')}` 理解。",
+        f"- 为什么按这个周期看: {dict(plan.get('horizon') or {}).get('fit_reason', '当前周期未单独标注。')}",
+        f"- 现在不适合: {dict(plan.get('horizon') or {}).get('misfit_reason', '当前不建议自动切到另一种更长或更短的打法。')}",
         "",
         "## 组合与风险预算",
         f"- 当前权重约 `{plan['current_weight'] * 100:.1f}%`，预演后约 `{plan['projected_weight'] * 100:.1f}%`。",
@@ -321,6 +344,7 @@ def main() -> None:
         asset_type = args.asset_type or detect_asset_type(args.symbol, config)
         context = get_asset_context(args.symbol, asset_type, config)
         snapshots = _trade_logging_snapshots(
+            action=args.action,
             symbol=args.symbol,
             asset_type=asset_type,
             price=args.price,

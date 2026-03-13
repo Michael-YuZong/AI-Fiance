@@ -279,6 +279,11 @@ def test_asset_trade_plan_payload_surfaces_position_execution_and_timing(monkeyp
             "symbol": "561380",
             "suggested_max_weight": 0.12,
             "projected_weight": 0.18,
+            "horizon": {
+                "label": "波段跟踪（2-6周）",
+                "fit_reason": "趋势、轮动或风险收益比已经有基础，但更依赖未来几周节奏，而不是长周期基本面完全兑现。",
+                "misfit_reason": "现在不适合把它当长期底仓，也不适合只按隔夜消息去赌超短。",
+            },
             "execution": {
                 "tradability_label": "可成交",
                 "estimated_total_cost": 28.0,
@@ -309,6 +314,8 @@ def test_asset_trade_plan_payload_surfaces_position_execution_and_timing(monkeyp
 
     assert any("单票上限" in item or "不适合直接重仓" in item for item in payload["answer_lines"])
     assert any("可成交性" in item or "预估总成本" in item for item in payload["answer_lines"])
+    assert any("周期判断" in item for item in payload["evidence_lines"])
+    assert any("周期错配风险" in item for item in payload["risk_lines"])
     assert any("仓位预演" in item for item in payload["evidence_lines"])
     assert any("时点快照" in item for item in payload["evidence_lines"])
     assert any("真实金额" in item for item in payload["action_lines"])

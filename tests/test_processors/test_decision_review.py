@@ -102,3 +102,5 @@ def test_build_monthly_decision_review_computes_path_and_verdict(monkeypatch, tm
     assert item["benchmark_symbol"] == "510300"
     assert item["attribution"]["label"] in {"alpha兑现", "更多来自贝塔顺风", "方向没错但执行/标的拖累", "方向与执行都偏弱"}
     assert item["setup_profile"]["bucket"] in {"高把握", "中等把握", "低把握"}
+    assert item["horizon"]["code"] == "position_trade"
+    assert payload["horizon_rows"][0][0] == "中线配置（1-3月）"

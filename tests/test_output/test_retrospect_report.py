@@ -13,6 +13,7 @@ def test_retrospect_report_renders_calibration_attribution_and_snapshot_sections
         "summary_lines": ["本次共回看 `1` 笔决策。"],
         "basis_rows": [["rule", "1", "+6.00%", "+3.00%", "100.0%", "0.0%", "100.0%"]],
         "setup_rows": [["高把握", "1", "+6.00%", "+3.00%", "100.0%"]],
+        "horizon_rows": [["中线配置（1-3月）", "1", "+6.00%", "+3.00%", "100.0%"]],
         "attribution_rows": [["alpha兑现", "1", "+6.00%", "+3.00%"]],
         "items": [
             {
@@ -46,6 +47,12 @@ def test_retrospect_report_renders_calibration_attribution_and_snapshot_sections
                     "price_percentile_1y": 0.72,
                 },
                 "setup_profile": {"bucket": "高把握", "score": 65},
+                "horizon": {
+                    "label": "中线配置（1-3月）",
+                    "fit_reason": "历史 thesis 里写的预期周期是 `1-3月`，这笔交易更应按 `中线配置（1-3月）` 的框架复盘。",
+                    "misfit_reason": "现在不适合当成纯隔夜交易，也还没强到可以长期不复核地持有一年以上。",
+                    "source": "review_reconstructed_from_thesis",
+                },
                 "decision_snapshot": {
                     "recorded_at": "2026-03-10T10:00:00",
                     "market_data_as_of": "2026-03-10",
@@ -71,7 +78,9 @@ def test_retrospect_report_renders_calibration_attribution_and_snapshot_sections
     markdown = DecisionRetrospectReportRenderer().render(payload)
 
     assert "## Setup 校准" in markdown
+    assert "## 周期校准" in markdown
     assert "## 结果归因" in markdown
+    assert "### 周期判断" in markdown
     assert "### 时点与执行快照" in markdown
     assert "同区基准20日" in markdown
     assert "20日超额" in markdown

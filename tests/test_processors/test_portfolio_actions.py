@@ -97,6 +97,8 @@ def test_build_trade_plan_estimates_budget_execution_and_provenance(monkeypatch,
     assert payload["execution"]["estimated_total_cost"] > 0
     assert payload["execution"]["tradability_label"] in {"顺畅", "可成交", "谨慎", "冲击偏高", "数据不足"}
     assert payload["decision_snapshot"]["market_data_as_of"] == "2025-12-31"
+    assert payload["horizon"]["code"] == "position_trade"
+    assert payload["decision_snapshot"]["horizon"]["code"] == "position_trade"
     assert payload["current_risk"]["annual_vol"] >= 0
     assert payload["projected_risk"]["annual_vol"] >= 0
     assert "仓位" in payload["headline"]
