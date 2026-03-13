@@ -104,6 +104,7 @@ def test_render_stock_picks_has_client_table_and_reasoning() -> None:
     assert "| 标的 | 技术 | 基本面 | 催化 | 相对强弱 | 风险 | 结论 |" in rendered
     assert "为什么能进正式推荐" in rendered
     assert "持有周期：中线配置（1-3月）" in rendered
+    assert "portfolio whatif buy 300502" in rendered
     assert "为什么按这个周期理解" in rendered
     assert "现在不适合的打法" in rendered
     assert "## 仓位管理" in rendered
@@ -189,6 +190,8 @@ def test_render_scan_has_reasoning_and_position_management() -> None:
     assert "https://example.com/earnings" in rendered
     assert "## 当前更合适的动作" in rendered
     assert "## 仓位管理" in rendered
+    assert "## 组合落单前" in rendered
+    assert "portfolio whatif buy 561380" in rendered
     assert "## 分维度详解" in rendered
 
 
@@ -240,6 +243,7 @@ def test_render_fund_pick_has_alternatives() -> None:
         "winner": {
             "name": "前海开源黄金ETF联接C",
             "symbol": "021740",
+            "asset_type": "cn_fund",
             "trade_state": "持有优于追高",
             "positives": ["方向对。", "防守属性更顺风。"],
             "dimension_rows": [["技术面", "44/100", "有支撑、没加速"]],
@@ -283,6 +287,8 @@ def test_render_fund_pick_has_alternatives() -> None:
     assert "当前更合适的持有周期：**`中线配置（1-3月）`**" in rendered
     assert "| 持有周期 | 中线配置（1-3月） |" in rendered
     assert "| 为什么按这个周期看 | 基本面、风险收益和趋势至少有两项站得住，更适合按一段完整主线去拿，而不是只博短催化。 |" in rendered
+    assert "| 预演命令 | `portfolio whatif buy 021740 最新净值 计划金额` |" in rendered
+    assert "## 组合落单前" in rendered
     assert "## 标准化分类" in rendered
     assert "ETF联接" in rendered
     assert "## 跟今天首个快照版相比" in rendered
@@ -322,6 +328,7 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
         "winner": {
             "name": "能源化工ETF",
             "symbol": "159981",
+            "asset_type": "cn_etf",
             "trade_state": "观望偏多",
             "positives": ["方向没坏。", "相对强弱还在。", "催化不算弱。"],
             "dimension_rows": [["技术面", "52/100", "方向没坏但不适合追高"]],
@@ -370,6 +377,8 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     assert "当前更合适的持有周期：**`短线交易（3-10日）`**" in rendered
     assert "| 持有周期 | 短线交易（3-10日） |" in rendered
     assert "现在不适合：现在不适合直接当成长线底仓" in rendered
+    assert "| 预演命令 | `portfolio whatif buy 159981 最新价 计划金额` |" in rendered
+    assert "## 组合落单前" in rendered
     assert "## 这只ETF为什么是这个分" in rendered
     assert "## 标准化分类" in rendered
     assert "场内ETF" in rendered

@@ -73,7 +73,7 @@ When in doubt, optimize for:
 1. `discover` v2
    Move discovery quality closer to the productized pick outputs: less rule-only ranking, better pre-screen quality, and clearer linkage from discovered theme -> candidate pool -> formal pick pipeline.
 2. Propagate portfolio-construction v1 into pick flows
-   `portfolio whatif` / `decision_review` / `research` now share first-pass risk-budget, execution-cost, attribution, timing-snapshot, and horizon contracts. Next step is to let ETF/fund/stock pick outputs hand off into the same action language.
+   `portfolio whatif` / `decision_review` / `research` now share first-pass risk-budget, execution-cost, attribution, timing-snapshot, and horizon contracts, and pick outputs now hand off into `portfolio whatif` with horizon-aware action language. Next step is to extend the same handoff into `discover` / `briefing` style outputs where a user may act before opening a full pick report.
 3. Proxy signals
    Expose confidence and downgrade impact from social/global-flow proxies more explicitly in reports.
 4. Scheduler v2
@@ -119,6 +119,8 @@ When in doubt, optimize for:
   `research` asset-trade questions such as “上多少仓位 / 做得进去吗” now reuse the same trade-preview contract: it can answer with a first-pass suggested max weight, tradability label, estimated total cost, and a timing snapshot instead of only repeating trend commentary.
 - 2026-03-13
   `portfolio whatif`, trade logging, `research` asset-trade Q&A, and `decision_review` / `retrospect_report` now all carry a structured horizon contract so outputs can explain why a setup is being treated as observation / swing / medium-term / long-term and where cycle mismatch likely happened.
+- 2026-03-13
+  ETF/fund/stock client reports and scan-style outputs now hand off directly into `portfolio whatif` with cycle-aware wording, so reports no longer stop at “偏短线 / 偏中线” and instead tell the user how to preflight a real order against portfolio limits.
 - 2026-03-13
   `fund_pick` now does real full-universe open-end fund screening with theme/style/manager filters, coverage disclosure, same-day baseline snapshots, rerun diffing, and catalyst fallback when live news/event coverage degrades.
 - 2026-03-13

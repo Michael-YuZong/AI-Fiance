@@ -386,6 +386,8 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context
         "winner": {
             "name": winner.get("name"),
             "symbol": winner.get("symbol"),
+            "asset_type": winner.get("asset_type"),
+            "reference_price": float(dict(winner.get("metrics") or {}).get("last_close") or 0.0),
             "trade_state": dict(winner.get("narrative") or {}).get("judgment", {}).get("state", "持有优于追高"),
             "positives": _winner_reason_lines(winner),
             "dimension_rows": _dimension_rows(winner),

@@ -255,6 +255,44 @@ def _position_management_lines(action: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _reference_price_text(asset_type: str, reference_price: Any) -> str:
+    try:
+        price = float(reference_price)
+    except (TypeError, ValueError):
+        price = 0.0
+    if price > 0:
+        return f"{price:.4f}"
+    return "最新净值" if asset_type == "cn_fund" else "最新价"
+
+
+def _portfolio_whatif_handoff(
+    *,
+    symbol: str,
+    action: Mapping[str, Any],
+    horizon: Mapping[str, Any],
+    asset_type: str = "",
+    reference_price: Any = None,
+) -> Dict[str, str]:
+    code = str(horizon.get("code", "")).strip()
+    label = str(horizon.get("label", "观察期")).strip() or "观察期"
+    direction = str(action.get("direction", "")).strip()
+    trade_action = "sell" if any(token in direction for token in ("卖", "减仓", "止盈", "止损", "回收")) else "buy"
+    price_text = _reference_price_text(asset_type, reference_price)
+    command = f"portfolio whatif {trade_action} {symbol} {price_text} 计划金额"
+
+    if code == "short_term":
+        summary = f"把它当 `{label}` 的交易仓处理：先预演首笔金额落下去后，仓位、执行成本和止损纪律是否还成立。"
+    elif code == "swing":
+        summary = f"把它当 `{label}` 的波段仓处理：先看首笔落下去后，单票权重、行业暴露和后续第二笔空间还剩多少。"
+    elif code == "position_trade":
+        summary = f"把它当 `{label}` 的配置仓处理：落单前先看加仓后是否仍在组合风险预算和行业/地区上限内。"
+    elif code == "long_term_allocation":
+        summary = f"把它当 `{label}` 的底仓处理：先看长期目标权重和风险预算能否承受，而不是只盯一次下单的短期波动。"
+    else:
+        summary = f"当前更像 `{label}`，先别急着落单；如果你坚持试仓，至少先预演这笔单会不会把组合推过上限。"
+    return {"summary": summary, "command": command}
+
+
 def _evidence_lines(items: Sequence[Mapping[str, Any]], *, max_items: int = 3) -> List[str]:
     lines: List[str] = []
     priority = {
@@ -390,6 +428,13 @@ def _analysis_section_lines(
     action = dict(analysis.get("action") or {})
     narrative = dict(analysis.get("narrative") or {})
     horizon = _pick_horizon_profile(action, str(dict(narrative.get("judgment") or {}).get("state", "")))
+    handoff = _portfolio_whatif_handoff(
+        symbol=symbol,
+        action=action,
+        horizon=horizon,
+        asset_type=str(analysis.get("asset_type", "")),
+        reference_price=dict(analysis.get("metrics") or {}).get("last_close"),
+    )
     positive_candidates = _merge_reason_lines(
         _top_dimension_reasons(analysis, top_n=3),
         list(narrative.get("positives") or []),
@@ -457,6 +502,8 @@ def _analysis_section_lines(
             f"- 首次仓位：{action.get('position', '小仓位分批')}",
             f"- 加仓节奏：{action.get('scaling_plan', '确认后再考虑第二笔')}",
             f"- 止损参考：{action.get('stop', '重新跌破关键支撑就处理')}",
+            f"- 组合落单前：{handoff['summary']}",
+            f"- 预演命令：`{handoff['command']}`",
         ]
     )
     return lines
@@ -1059,6 +1106,13 @@ class ClientReportRenderer:
         narrative = dict(analysis.get("narrative") or {})
         action = dict(analysis.get("action") or {})
         horizon = _pick_horizon_profile(action, str(dict(narrative.get("judgment") or {}).get("state", "")))
+        handoff = _portfolio_whatif_handoff(
+            symbol=symbol,
+            action=action,
+            horizon=horizon,
+            asset_type=str(analysis.get("asset_type", "")),
+            reference_price=dict(analysis.get("metrics") or {}).get("last_close"),
+        )
         notes = [str(item).strip() for item in (analysis.get("notes") or []) if str(item).strip()]
         lines = [
             f"# {name} ({symbol}) | 客户版分析 | {generated_at}",
@@ -1138,6 +1192,8 @@ class ClientReportRenderer:
                     ["持有周期", horizon.get("label", "未单独标注")],
                     ["周期理由", horizon.get("fit_reason", horizon.get("style", "先按当前动作、仓位和止损框架理解。"))],
                     ["现在不适合", horizon.get("misfit_reason", "不要把当前动作自动理解成另一种更长或更短的打法。")],
+                    ["组合落单前", handoff.get("summary", "先跑组合预演，再决定真实金额。")],
+                    ["预演命令", f"`{handoff.get('command', f'portfolio whatif buy {symbol} 最新价 计划金额')}`"],
                     ["介入条件", action.get("entry", "等待进一步确认")],
                     ["首次仓位", action.get("position", "小仓位分批")],
                     ["加仓节奏", action.get("scaling_plan", "确认后再考虑第二笔")],
@@ -1149,6 +1205,9 @@ class ClientReportRenderer:
         lines.extend(["", "## 仓位管理", ""])
         for item in _position_management_lines(action):
             lines.append(f"- {item}")
+        lines.extend(["", "## 组合落单前", ""])
+        lines.append(f"- {handoff.get('summary', '先跑组合预演，再决定真实金额。')}")
+        lines.append(f"- 命令：`{handoff.get('command', f'portfolio whatif buy {symbol} 最新价 计划金额')}`")
         signal_confidence_lines = _signal_confidence_lines(analysis) if "signal_confidence" in analysis else []
         if signal_confidence_lines:
             lines.extend(["", "## 历史相似样本验证", ""])
@@ -1329,6 +1388,13 @@ class ClientReportRenderer:
             dict(winner.get("action") or {}),
             str(winner.get("trade_state", "")),
         )
+        handoff = _portfolio_whatif_handoff(
+            symbol=str(winner.get("symbol", "")),
+            action=dict(winner.get("action") or {}),
+            horizon=horizon,
+            asset_type=str(winner.get("asset_type", "")),
+            reference_price=winner.get("reference_price"),
+        )
         observe_only = bool(selection_context.get("delivery_observe_only"))
         why_heading = "## 为什么先看它" if observe_only else "## 为什么推荐它"
         lead_line = (
@@ -1426,6 +1492,8 @@ class ClientReportRenderer:
                     ["适用打法", horizon.get("style", "先按当前动作、仓位和止损框架理解，不把它默认当成长线配置。")],
                     ["为什么按这个周期看", horizon.get("fit_reason", "当前更适合按已有动作和仓位框架理解。")],
                     ["现在不适合", horizon.get("misfit_reason", "不要把它自动理解成另一种更长或更短的打法。")],
+                    ["组合落单前", handoff.get("summary", "先跑组合预演，再决定真实金额。")],
+                    ["预演命令", f"`{handoff.get('command', 'portfolio whatif buy 标的 最新净值 计划金额')}`"],
                     ["介入条件", winner.get("action", {}).get("entry", "等回撤再看")],
                     ["首次仓位", winner.get("action", {}).get("position", "计划仓位的 1/3 - 1/2")],
                     ["加仓节奏", winner.get("action", {}).get("scaling_plan", "确认后再考虑第二笔")],
@@ -1463,6 +1531,9 @@ class ClientReportRenderer:
         )
         for item in winner.get("positioning_lines", []):
             lines.append(f"- {item}")
+        lines.extend(["", "## 组合落单前", ""])
+        lines.append(f"- {handoff.get('summary', '先跑组合预演，再决定真实金额。')}")
+        lines.append(f"- 命令：`{handoff.get('command', 'portfolio whatif buy 标的 最新净值 计划金额')}`")
         return "\n".join(lines).rstrip()
 
     def render_etf_pick(self, payload: Dict[str, Any]) -> str:
@@ -1473,6 +1544,13 @@ class ClientReportRenderer:
         horizon = _pick_horizon_profile(
             dict(winner.get("action") or {}),
             str(winner.get("trade_state", "")),
+        )
+        handoff = _portfolio_whatif_handoff(
+            symbol=str(winner.get("symbol", "")),
+            action=dict(winner.get("action") or {}),
+            horizon=horizon,
+            asset_type=str(winner.get("asset_type", "")),
+            reference_price=winner.get("reference_price"),
         )
         observe_only = bool(selection_context.get("delivery_observe_only"))
         why_heading = "## 为什么先看它" if observe_only else "## 为什么推荐它"
@@ -1570,6 +1648,8 @@ class ClientReportRenderer:
                     ["适用打法", horizon.get("style", "先按当前动作、仓位和止损框架理解，不把它默认当成长线配置。")],
                     ["为什么按这个周期看", horizon.get("fit_reason", "当前更适合按已有动作和仓位框架理解。")],
                     ["现在不适合", horizon.get("misfit_reason", "不要把它自动理解成另一种更长或更短的打法。")],
+                    ["组合落单前", handoff.get("summary", "先跑组合预演，再决定真实金额。")],
+                    ["预演命令", f"`{handoff.get('command', 'portfolio whatif buy 标的 最新价 计划金额')}`"],
                     ["介入条件", winner.get("action", {}).get("entry", "等回撤再看")],
                     ["首次仓位", winner.get("action", {}).get("position", "计划仓位的 1/3 - 1/2")],
                     ["加仓节奏", winner.get("action", {}).get("scaling_plan", "确认后再考虑第二笔")],
@@ -1602,6 +1682,9 @@ class ClientReportRenderer:
         lines.extend(["## 仓位管理", ""])
         for item in winner.get("positioning_lines", []):
             lines.append(f"- {item}")
+        lines.extend(["", "## 组合落单前", ""])
+        lines.append(f"- {handoff.get('summary', '先跑组合预演，再决定真实金额。')}")
+        lines.append(f"- 命令：`{handoff.get('command', 'portfolio whatif buy 标的 最新价 计划金额')}`")
         notes = [str(item).strip() for item in (payload.get("notes") or []) if str(item).strip()]
         if notes:
             lines.extend(["", "## 数据限制与说明", ""])
