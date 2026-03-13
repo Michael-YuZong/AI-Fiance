@@ -110,6 +110,21 @@ def _bullets_in_section(text: str, heading: str) -> List[str]:
     return bullets
 
 
+def _section_exists(text: str, heading: str) -> bool:
+    return any(line.strip() == heading for line in text.splitlines())
+
+
+def _pick_reason_heading(report_type: str, text: str) -> str:
+    options = {
+        "fund_pick": ("## 为什么先看它", "## 为什么推荐它"),
+        "etf_pick": ("## 为什么先看它", "## 为什么推荐它"),
+    }.get(report_type, ())
+    for heading in options:
+        if _section_exists(text, heading):
+            return heading
+    return options[-1] if options else ""
+
+
 def _section_items(text: str, heading: str) -> List[str]:
     lines = text.splitlines()
     collecting = False
@@ -119,7 +134,7 @@ def _section_items(text: str, heading: str) -> List[str]:
         if stripped == heading:
             collecting = True
             continue
-        if collecting and stripped.startswith("#"):
+        if collecting and (stripped.startswith("# ") or stripped.startswith("## ")):
             break
         if not collecting or not stripped:
             continue
@@ -174,6 +189,130 @@ def _fund_profile_findings(text: str) -> List[str]:
             if value in ("", "—", "nan", "None"):
                 findings.append(format_lesson_finding("L005", f"[P1] 基金画像基础字段缺失: {key}"))
         return findings
+    return findings
+
+
+def _standard_taxonomy_findings(text: str, report_type: str) -> List[str]:
+    findings: List[str] = []
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip() != "## 标准化分类":
+            continue
+        table_start = None
+        for probe in range(idx + 1, len(lines)):
+            stripped = lines[probe].strip()
+            if stripped.startswith("|"):
+                table_start = probe
+                break
+            if stripped.startswith("## "):
+                break
+        if table_start is None:
+            findings.append(format_lesson_finding("L005", f"[P1] {report_type} 缺少标准化分类表"))
+            return findings
+        header, rows = _parse_markdown_table(lines, table_start)
+        if header[:2] != ["维度", "结果"]:
+            findings.append(format_lesson_finding("L005", f"[P1] {report_type} 标准化分类章节存在，但未找到标准分类表"))
+            return findings
+        payload = {row[0]: row[1] for row in rows if len(row) >= 2}
+        required = ("产品形态", "载体角色", "管理方式", "暴露类型", "主方向")
+        for key in required:
+            value = str(payload.get(key, "")).strip()
+            if value in ("", "—", "nan", "None"):
+                findings.append(format_lesson_finding("L005", f"[P1] {report_type} 标准化分类缺失关键字段: {key}"))
+        return findings
+    return findings
+
+
+def _extract_delivery_tier_label(text: str) -> str:
+    if not text:
+        return ""
+    candidates = [*_section_items(text, "## 交付等级"), *text.splitlines()]
+    for item in candidates:
+        match = re.search(r"交付等级\s*[：:]\s*`?([^`\n]+?)`?(?:。|$)", str(item).strip())
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _extract_pick_passed_pool(text: str) -> int | None:
+    patterns = (
+        r"完整分析:\s*`?(\d+)`?",
+        r"再对其中\s*`?(\d+)`?\s*只做完整分析",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _extract_pick_coverage_total(text: str) -> int | None:
+    match = re.search(r"覆盖率的分母是今天进入完整分析的\s*`?(\d+)`?\s*只", text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _delivery_tier_findings(client_text: str, source_text: str, report_type: str) -> List[str]:
+    findings: List[str] = []
+    items = _section_items(client_text, "## 交付等级")
+    if len(items) < 2:
+        findings.append(format_lesson_finding("L002", f"[P2] {report_type} 客户稿解释性不足：'交付等级' 至少需要等级和适用口径两条说明"))
+    if not any("初筛" in item and "完整分析" in item for item in items):
+        findings.append(format_lesson_finding("L002", f"[P2] {report_type} 交付等级没有说明“初筛 -> 少量完整分析”的真实流程"))
+
+    client_label = _extract_delivery_tier_label(client_text)
+    source_label = _extract_delivery_tier_label(source_text)
+    if source_label and client_label and client_label != source_label:
+        findings.append(format_lesson_finding("L005", f"[P1] {report_type} 客户稿与详细稿交付等级不一致: client={client_label} source={source_label}"))
+
+    effective_label = source_label or client_label
+    if effective_label and effective_label != "标准推荐稿":
+        observe_markers = (
+            "观察优先",
+            "不按正式推荐稿理解",
+            "不是正式买入稿",
+            "不代表完整全市场优选结论",
+            "只适合当作兜底观察名单",
+            "只适合按观察优先处理",
+        )
+        if not any(marker in client_text for marker in observe_markers):
+            findings.append(format_lesson_finding("L002", f"[P1] {report_type} 当前是 `{effective_label}`，但客户稿没有明确按观察优先/非正式推荐处理"))
+        first_heading = next((line.strip() for line in client_text.splitlines() if line.strip().startswith("# ")), "")
+        if "推荐" in first_heading:
+            findings.append(format_lesson_finding("L018", f"[P2] {report_type} 当前是 `{effective_label}`，标题仍写成“推荐”，容易高估这份稿件的可执行性"))
+        if "## 为什么推荐它" in client_text:
+            findings.append(format_lesson_finding("L018", f"[P2] {report_type} 当前是 `{effective_label}`，观察稿章节仍写成“为什么推荐它”，建议改成“为什么先看它”"))
+    return findings
+
+
+def _pick_delivery_consistency_findings(client_text: str, report_type: str) -> List[str]:
+    findings: List[str] = []
+    passed_pool = _extract_pick_passed_pool(client_text)
+    coverage_total = _extract_pick_coverage_total(client_text)
+    if passed_pool is not None and coverage_total is not None and passed_pool != coverage_total:
+        findings.append(
+            format_lesson_finding(
+                "L031",
+                f"[P1] {report_type} 覆盖率分母与完整分析样本不一致: coverage_total={coverage_total} passed_pool={passed_pool}",
+            )
+        )
+
+    delivery_label = _extract_delivery_tier_label(client_text)
+    if delivery_label == "标准推荐稿":
+        conflict_markers = (
+            "只能按观察优先或降级稿处理",
+            "只能按观察优先处理",
+            "不按正式推荐稿理解",
+        )
+        alternative_items = _section_items(client_text, "## 为什么不是另外几只")
+        if any(marker in item for marker in conflict_markers for item in alternative_items):
+            findings.append(
+                format_lesson_finding(
+                    "L032",
+                    f"[P1] {report_type} 当前仍是 `标准推荐稿`，但单候选说明把它改写成了观察/降级稿口径",
+                )
+            )
     return findings
 
 
@@ -326,13 +465,29 @@ def _briefing_source_consistency_findings(client_text: str, source_text: str) ->
     if not source_actions:
         findings.append("[P1] briefing 详细稿缺少“1.2 今天怎么做”内容，无法做源稿一致性校验")
         return findings
+    normalized_headlines = {_normalize_briefing_consistency_line(item) for item in source_headlines}
+    normalized_actions = {_normalize_briefing_consistency_line(item) for item in source_actions}
     for item in client_why:
-        if item not in source_headlines:
+        if _normalize_briefing_consistency_line(item) not in normalized_headlines:
             findings.append(f"[P1] briefing 客户稿理由在详细稿主线章节中不存在: {item}")
     for item in client_actions:
-        if item not in source_actions:
+        if _normalize_briefing_consistency_line(item) not in normalized_actions:
             findings.append(f"[P1] briefing 客户稿动作在详细稿行动章节中不存在: {item}")
     return findings
+
+
+def _normalize_briefing_consistency_line(text: str) -> str:
+    line = str(text).strip()
+    replacements = (
+        (r"开盘\s*30\s*分钟", "早段"),
+        (r"开盘后先观察\s*\d+\s*分钟", "先观察早段延续性"),
+        (r"明天开盘前", "明早"),
+        (r"盘中", "交易时段"),
+        (r"日内", "当天"),
+    )
+    for pattern, repl in replacements:
+        line = re.sub(pattern, repl, line)
+    return line
 
 
 def _normalize_markdown(text: str) -> str:
@@ -485,34 +640,62 @@ def check_generic_client_report(client_text: str, report_type: str, source_text:
     findings.extend(_intraday_claim_findings(client_text))
 
     required_headings = {
-        "briefing": ["## 为什么今天这么判断", "## 今天怎么做"],
-        "fund_pick": ["## 为什么推荐它", "## 这只基金为什么是这个分"],
-        "etf_pick": ["## 为什么推荐它", "## 这只ETF为什么是这个分"],
+        "briefing": ["## 为什么今天这么判断", "## 宏观领先指标", "## 数据完整度", "## 今天怎么做", "## 重点观察", "## 今日A股观察池"],
+        "fund_pick": ["## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只基金为什么是这个分", "## 标准化分类"],
+        "etf_pick": ["## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只ETF为什么是这个分", "## 标准化分类", "## 关键证据"],
         "scan": ["## 为什么这么判断", "## 当前更合适的动作"],
         "stock_analysis": ["## 为什么这么判断", "## 当前更合适的动作"],
         "retrospect": ["## 原始决策", "## 为什么当时会做这个决定", "## 后验路径", "## 复盘结论"],
     }.get(report_type, [])
     for heading in required_headings:
+        if isinstance(heading, tuple):
+            if not any(option in client_text for option in heading):
+                findings.append(format_lesson_finding("L002", f"[P2] {report_type} 客户稿缺少解释性章节: {' / '.join(heading)}"))
+            continue
         if heading not in client_text:
             findings.append(format_lesson_finding("L002", f"[P2] {report_type} 客户稿缺少解释性章节: {heading}"))
 
     if report_type == "briefing":
         if len(_bullets_in_section(client_text, "## 为什么今天这么判断")) < 3:
             findings.append(format_lesson_finding("L002", "[P2] briefing 客户稿解释性不足：'为什么今天这么判断' 至少需要 3 条理由"))
+        if len(_bullets_in_section(client_text, "## 数据完整度")) < 2:
+            findings.append(format_lesson_finding("L013", "[P2] briefing 客户稿缺少“数据完整度”说明：至少要交代覆盖和缺失/代理口径。"))
+        if len(_bullets_in_section(client_text, "## 重点观察")) < 2:
+            findings.append(format_lesson_finding("L002", "[P2] briefing 客户稿解释性不足：'重点观察' 至少需要 2 条可执行观察点"))
+        a_share_items = _section_items(client_text, "## 今日A股观察池")
+        if len(a_share_items) < 2:
+            findings.append(format_lesson_finding("L013", "[P2] briefing 客户稿缺少“A股全市场观察池”说明：至少要交代全市场/初筛池与完整分析口径。"))
+        elif not any(token in " ".join(a_share_items) for token in ("全市场", "初筛池", "完整分析", "Tushare")):
+            findings.append(format_lesson_finding("L013", "[P2] briefing A股观察池章节没有讲清全市场初筛口径。"))
         if "## 宏观领先指标" not in client_text:
             findings.append(format_lesson_finding("L027", "[P2] briefing 客户稿缺少“宏观领先指标”章节，未来 3-6 个月判断不够透明"))
         elif len(_bullets_in_section(client_text, "## 宏观领先指标")) < 3:
             findings.append(format_lesson_finding("L027", "[P2] briefing 宏观领先指标解释不足：至少要讲清景气、价格链条和信用脉冲中的 3 条。"))
+        completeness_items = _section_items(client_text, "## 数据完整度")
+        if completeness_items and not any(token in " ".join(completeness_items) for token in ("覆盖", "缺失", "代理")):
+            findings.append(format_lesson_finding("L013", "[P2] briefing 数据完整度章节没有讲清覆盖、缺失或代理口径。"))
     elif report_type == "fund_pick":
-        if len(_bullets_in_section(client_text, "## 为什么推荐它")) < 3:
-            findings.append(format_lesson_finding("L002", "[P2] fund_pick 客户稿解释性不足：'为什么推荐它' 至少需要 3 条理由"))
-        if client_text.count("### ") < 2:
-            findings.append(format_lesson_finding("L002", "[P2] fund_pick 客户稿解释性不足：需要明确写出至少两只备选/未推荐对象的原因"))
+        why_heading = _pick_reason_heading(report_type, client_text)
+        if len(_bullets_in_section(client_text, why_heading)) < 3:
+            findings.append(format_lesson_finding("L002", f"[P2] fund_pick 客户稿解释性不足：'{why_heading.replace('## ', '')}' 至少需要 3 条理由"))
+        if len(_section_items(client_text, "## 为什么不是另外几只")) < 2:
+            findings.append(format_lesson_finding("L002", "[P2] fund_pick 客户稿解释性不足：'为什么不是另外几只' 需要至少给出备选原因或候选不足说明"))
+        if "覆盖率" in client_text and "分母" not in client_text:
+            findings.append(format_lesson_finding("L024", "[P2] fund_pick 披露了覆盖率，但没有说明分母定义"))
+        findings.extend(_delivery_tier_findings(client_text, source_text, report_type))
+        findings.extend(_pick_delivery_consistency_findings(client_text, report_type))
+        findings.extend(_standard_taxonomy_findings(client_text, report_type))
     elif report_type == "etf_pick":
-        if len(_bullets_in_section(client_text, "## 为什么推荐它")) < 3:
-            findings.append(format_lesson_finding("L002", "[P2] etf_pick 客户稿解释性不足：'为什么推荐它' 至少需要 3 条理由"))
-        if client_text.count("### ") < 2:
-            findings.append(format_lesson_finding("L002", "[P2] etf_pick 客户稿解释性不足：需要明确写出至少两只备选/未推荐对象的原因"))
+        why_heading = _pick_reason_heading(report_type, client_text)
+        if len(_bullets_in_section(client_text, why_heading)) < 3:
+            findings.append(format_lesson_finding("L002", f"[P2] etf_pick 客户稿解释性不足：'{why_heading.replace('## ', '')}' 至少需要 3 条理由"))
+        if len(_section_items(client_text, "## 为什么不是另外几只")) < 2:
+            findings.append(format_lesson_finding("L002", "[P2] etf_pick 客户稿解释性不足：'为什么不是另外几只' 需要至少给出备选原因或候选不足说明"))
+        if "覆盖率" in client_text and "分母" not in client_text:
+            findings.append(format_lesson_finding("L024", "[P2] etf_pick 披露了覆盖率，但没有说明分母定义"))
+        findings.extend(_delivery_tier_findings(client_text, source_text, report_type))
+        findings.extend(_pick_delivery_consistency_findings(client_text, report_type))
+        findings.extend(_standard_taxonomy_findings(client_text, report_type))
         findings.extend(_fund_profile_findings(client_text))
     elif report_type == "scan":
         if len(_bullets_in_section(client_text, "## 值得继续看的地方")) < 1:

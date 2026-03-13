@@ -226,6 +226,20 @@ ACTIVE_REVIEW_LESSONS: List[ReviewLesson] = [
         owner_layer="release_check",
         rationale="如果成稿引用历史相似样本来支撑当前建议，就不能只给一个胜率或样本分；必须说明严格去重后的非重叠样本数、置信区间以及样本质量，否则读者容易把脆弱统计误读成高置信结论。",
     ),
+    ReviewLesson(
+        lesson_id="L031",
+        title="Pick 覆盖率分母必须对应完整分析样本",
+        scope="pick_reports",
+        owner_layer="release_check",
+        rationale="ETF/基金 pick 稿里披露的覆盖率分母，必须对应“进入完整分析的样本”而不是 top 榜单、展示子集或别的截断集合，否则覆盖率说明会失真。",
+    ),
+    ReviewLesson(
+        lesson_id="L032",
+        title="单候选说明不能擅自改写交付等级",
+        scope="pick_reports",
+        owner_layer="release_check",
+        rationale="如果交付等级仍是标准推荐稿，单候选说明不能再把同一份报告写成观察优先或降级稿；候选数量说明和交付等级必须一致。",
+    ),
 ]
 
 

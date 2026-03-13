@@ -1,240 +1,149 @@
-"""Tests for briefing helper logic."""
+"""Tests for briefing helper proxy disclosures."""
 
 from __future__ import annotations
 
-import pandas as pd
+from types import SimpleNamespace
+
 import src.commands.briefing as briefing_module
-
 from src.commands.briefing import (
-    BriefingSnapshot,
-    _anomaly_report,
-    _catalyst_rows,
-    _important_event_lines,
-    _liquidity_lines,
-    _narrative_validation_lines,
-    _primary_narrative,
-    _source_quality_lines,
-    _verification_rows,
-    _yesterday_review_lines,
+    _appendix_derivative_lines,
+    _briefing_a_share_watch_rows,
+    _briefing_internal_dir,
+    _coverage_metadata,
+    _flow_lines,
+    _load_same_day_briefing,
+    _monitor_alerts,
+    _persist_briefing,
+    _quality_lines,
+    _sentiment_lines,
 )
-from src.collectors.market_cn import ChinaMarketCollector
-from src.processors.context import derive_regime_inputs
-from src.processors.regime import RegimeDetector
 
 
-def test_important_event_lines_extracts_specific_drivers() -> None:
-    report = {
-        "items": [
-            {"category": "fed", "title": "Reuters: Fed rate-cut odds rise after CPI cools", "source": "Reuters"},
-            {"category": "ai", "title": "OpenAI prepares GPT-5 launch event", "source": "Reuters"},
-            {"category": "semiconductor", "title": "TSMC expands chip capacity in Arizona", "source": "Bloomberg"},
-        ]
-    }
+def test_flow_lines_include_proxy_confidence_and_limitations(monkeypatch) -> None:
+    class _FakeFlowCollector:
+        def __init__(self, _config):
+            pass
 
-    lines = _important_event_lines(report)
+        def collect(self, snapshots):
+            assert snapshots
+            return {
+                "lines": ["成长与黄金的相对强弱接近。"],
+                "confidence_label": "中",
+                "limitations": ["这是相对强弱代理，不是机构申购赎回原始数据。"],
+            }
 
-    assert any("美联储与利率预期" in line for line in lines)
-    assert any("AI 产品与模型" in line for line in lines)
-    assert any("半导体产能与资本开支" in line for line in lines)
+    monkeypatch.setattr("src.commands.briefing.GlobalFlowCollector", _FakeFlowCollector)
 
+    lines = _flow_lines([SimpleNamespace(symbol="561380")], {})
 
-def test_catalyst_rows_builds_transmission_chain() -> None:
-    report = {
-        "items": [
-            {"category": "energy", "title": "Oil surges on Strait risk", "source": "Reuters"},
-            {"category": "china_market_domestic", "title": "财联社：电力板块持续走强", "source": "财联社"},
-        ]
-    }
-
-    rows = _catalyst_rows(report, {"theme": "energy_shock"})
-
-    assert rows
-    assert any("原油" in row[2] or "通胀" in row[2] for row in rows)
+    assert any("代理置信度 `中`" in item for item in lines)
+    assert any("限制：" in item for item in lines)
 
 
-def test_important_event_lines_does_not_misclassify_generic_macro_as_ai() -> None:
-    report = {
-        "items": [
-            {"category": "china_macro", "title": "China to boost spending to meet growth target", "source": "Reuters"},
-        ]
-    }
+def test_sentiment_lines_include_proxy_confidence_and_limitations(monkeypatch) -> None:
+    class _FakeSentimentCollector:
+        def __init__(self, _config):
+            pass
 
-    lines = _important_event_lines(report)
+        def collect(self, symbol, market_snapshot):
+            return {
+                "symbol": symbol,
+                "aggregate": {
+                    "interpretation": "情绪指数 61.0，当前未出现极端一致预期。",
+                    "confidence_label": "高",
+                    "limitations": ["这是价格和量能推导出的情绪代理，不是真实社媒抓取。"],
+                },
+            }
 
-    assert not any("AI 产品与模型" in line for line in lines)
-
-
-def test_primary_narrative_prefers_energy_shock_over_background_regime() -> None:
-    report = {
-        "items": [
-            {"category": "geopolitics", "title": "Oil surges as war disrupts supply fears", "source": "Reuters"},
-            {"category": "energy", "title": "Crude jumps again on Strait shipping risk", "source": "Reuters"},
-        ]
-    }
-    monitor_rows = [
-        {"name": "布伦特原油", "return_1d": 0.12, "return_5d": 0.28, "latest": 118.0},
-        {"name": "美元指数", "return_5d": 0.01, "latest": 100.0},
-        {"name": "VIX波动率", "latest": 30.0},
-    ]
-    pulse = {
-        "zt_pool": pd.DataFrame({"所属行业": ["电力", "电网设备", "石油"]}),
-        "strong_pool": pd.DataFrame({"所属行业": ["电力", "电网设备"]}),
-    }
     snapshots = [
-        BriefingSnapshot("QQQM", "QQQM", "us", "US", "科技", 1, -0.02, -0.01, 0.01, 1.0, "空头", -1, "", ""),
-        BriefingSnapshot("HSTECH", "HSTECH", "hk", "HK", "科技", 1, -0.03, -0.02, -0.05, 1.0, "空头", -2, "", ""),
-        BriefingSnapshot("GLD", "GLD", "us", "US", "黄金", 1, 0.01, 0.02, 0.05, 1.0, "震荡", 0, "", ""),
-        BriefingSnapshot("561380", "电网ETF", "cn_etf", "CN", "电网", 1, 0.02, 0.03, 0.10, 1.0, "多头", 2, "", ""),
+        SimpleNamespace(symbol="561380", signal_score=80.0, return_20d=0.12, return_1d=0.01, return_5d=0.03, volume_ratio=1.2, trend="多头"),
+        SimpleNamespace(symbol="GLD", signal_score=20.0, return_20d=-0.02, return_1d=-0.01, return_5d=-0.02, volume_ratio=0.8, trend="空头"),
     ]
+    monkeypatch.setattr("src.commands.briefing.SocialSentimentCollector", _FakeSentimentCollector)
 
-    narrative = _primary_narrative(
-        news_report=report,
-        monitor_rows=monitor_rows,
-        pulse=pulse,
-        snapshots=snapshots,
-        drivers={},
-        regime_result={"current_regime": "recovery", "preferred_assets": ["成长股", "顺周期"]},
-    )
+    lines = _sentiment_lines(snapshots, {})
 
-    assert narrative["theme"] == "energy_shock"
-    assert "能源冲击" in narrative["summary"]
+    assert any("代理置信度 `高`" in item for item in lines)
+    assert any("限制：" in item for item in lines)
 
 
-def test_narrative_validation_reports_energy_checks() -> None:
-    narrative = {
-        "theme": "energy_shock",
-        "label": "能源冲击",
-        "background_regime": "滞涨",
-    }
-    report = {"items": [{"category": "energy", "title": "Crude jumps", "source": "Reuters"}]}
-    monitor_rows = [
-        {"name": "布伦特原油", "return_1d": 0.09, "return_5d": 0.20, "latest": 115.0},
-        {"name": "美元指数", "return_5d": 0.01, "latest": 100.0},
-        {"name": "VIX波动率", "latest": 29.0},
+def test_briefing_internal_dir_and_same_day_loader_use_internal_path(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(briefing_module, "resolve_project_path", lambda path="": tmp_path / str(path))
+    monkeypatch.setattr(briefing_module, "_export_pdf", lambda markdown_text, pdf_path: None)  # noqa: ARG005
+
+    detail_path = _persist_briefing("# demo", "daily")
+
+    assert detail_path == tmp_path / "reports/briefings/internal/daily_briefing_2026-03-13.md"
+    assert _briefing_internal_dir() == tmp_path / "reports/briefings/internal"
+    assert _load_same_day_briefing("daily") == "# demo"
+
+
+def test_briefing_coverage_and_quality_disclose_stale_monitor_rows() -> None:
+    monitor_rows = [{"name": "布伦特原油", "data_warning": "实时刷新失败", "stale_age_hours": 36.0}]
+
+    coverage, missing = _coverage_metadata({"items": []}, [], [], "", monitor_rows)
+    quality = _quality_lines({"items": []}, {"lines": []}, monitor_rows)
+
+    assert "宏观资产监控" in coverage
+    assert "宏观资产监控(实时刷新)" in missing
+    assert any("陈旧缓存回退" in item for item in quality)
+
+
+def test_monitor_alerts_disclose_missing_or_stale_macro_monitor_data() -> None:
+    assert any("未能完成实时刷新" in item for item in _monitor_alerts([]))
+    stale_alerts = _monitor_alerts([{"name": "布伦特原油", "data_warning": "实时刷新失败"}])
+    assert any("布伦特原油" in item for item in stale_alerts)
+
+
+def test_appendix_derivative_lines_do_not_render_fake_zero_vix() -> None:
+    lines = _appendix_derivative_lines({"theme": "energy_shock"}, [])
+
+    assert any("VIX/外盘波动代理缺失" in item for item in lines)
+    assert not any("VIX 0.0" in item for item in lines)
+
+
+def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> None:
+    pool = [
+        SimpleNamespace(
+            symbol="300750",
+            name="宁德时代",
+            asset_type="cn_stock",
+            region="CN",
+            sector="新能源",
+            chain_nodes=["新能源"],
+            in_watchlist=False,
+            metadata={"bak_strength": 90, "bak_activity": 80, "bak_attack": 70},
+            turnover=1_000_000_000,
+        )
     ]
-    pulse = {
-        "zt_pool": pd.DataFrame({"所属行业": ["电力", "电网设备"]}),
-        "strong_pool": pd.DataFrame({"所属行业": ["电力"]}),
-    }
-    snapshots = [
-        BriefingSnapshot("QQQM", "QQQM", "us", "US", "科技", 1, -0.02, -0.01, 0.01, 1.0, "空头", -1, "", ""),
-        BriefingSnapshot("GLD", "GLD", "us", "US", "黄金", 1, 0.01, 0.02, 0.05, 1.0, "震荡", 0, "", ""),
-    ]
-
-    lines = _narrative_validation_lines(narrative, report, monitor_rows, pulse, snapshots)
-
-    assert any("价格校验通过" in line for line in lines)
-    assert any("盘面校验通过" in line for line in lines)
-    assert any("结论: 当前主线校验通过" in line for line in lines)
-
-
-def test_verification_rows_include_core_checks() -> None:
-    snapshots = [
-        BriefingSnapshot("HSTECH", "恒生科技", "hk_index", "HK", "科技", 4.7, -0.02, -0.03, -0.1, 1.0, "空头", -2, "", ""),
-        BriefingSnapshot("561380", "电网ETF", "cn_etf", "CN", "电网", 2.2, 0.0, 0.02, 0.18, 1.0, "多头", 2, "", ""),
-    ]
-    monitor_rows = [
-        {"name": "布伦特原油", "latest": 108.0, "return_1d": 0.1, "return_5d": 0.2},
-        {"name": "VIX波动率", "latest": 29.0, "return_1d": 0.1, "return_5d": 0.2},
-        {"name": "美元指数", "latest": 99.0, "return_1d": 0.0, "return_5d": 0.01},
-    ]
-
-    rows = _verification_rows(snapshots, monitor_rows)
-
-    assert any(row[0] == "原油" for row in rows)
-    assert any(row[0] == "HSTECH" for row in rows)
-
-
-def test_regime_detector_is_stable_with_oil_shock() -> None:
-    inputs = derive_regime_inputs(
-        {
-            "pmi": 49.0,
-            "pmi_trend": "falling",
-            "pmi_new_orders": 48.5,
-            "pmi_production": 49.1,
-            "demand_state": "weakening",
-            "inventory_state": "destocking_pressure",
-            "cpi_monthly": 0.4,
-            "cpi_trend": "rising",
-            "ppi_yoy": 0.3,
-            "ppi_trend": "rising",
-            "price_state": "reflation",
-            "m1_m2_spread": -4.2,
-            "m1_m2_spread_trend": "falling",
-            "social_financing_3m_avg": 18000.0,
-            "social_financing_prev_3m_avg": 22000.0,
-            "social_financing_trend": "falling",
-            "credit_impulse": "contracting",
-            "lpr_1y": 3.0,
-            "lpr_prev": 3.0,
+    monkeypatch.setattr(briefing_module, "build_stock_pool", lambda config, market="cn", max_candidates=60: (pool, ["部分样本缺少完整事件覆盖。"]))  # noqa: ARG005
+    monkeypatch.setattr(briefing_module, "build_market_context", lambda config, relevant_asset_types=None: {"regime": {}, "day_theme": {}, "notes": []})  # noqa: ARG005
+    monkeypatch.setattr(
+        briefing_module,
+        "analyze_opportunity",
+        lambda symbol, asset_type, config, context=None, metadata_override=None: {  # noqa: ARG005
+            "symbol": symbol,
+            "name": "宁德时代",
+            "metadata": {"sector": "新能源"},
+            "rating": {"label": "较强机会", "rank": 3},
+            "action": {"position": "首次建仓 ≤3%"},
+            "narrative": {"judgment": {"state": "持有优于追高"}},
+            "dimensions": {"risk": {"score": 60}, "relative_strength": {"score": 80}, "technical": {"score": 70}},
+            "excluded": False,
         },
-        {"dxy_20d_change": 0.01},
-        [{"name": "布伦特原油", "return_5d": 0.39, "return_20d": 0.25}],
     )
 
-    result = RegimeDetector(inputs).detect_regime()
+    rows, lines, meta = _briefing_a_share_watch_rows({})
 
-    assert result["current_regime"] == "stagflation"
-    assert any("油价" in line for line in result["reasoning"])
-    assert inputs["price_state"] == "reflation"
-    assert inputs["credit_impulse"] == "contracting"
-
-
-def test_anomaly_report_flags_extreme_oil_and_etf_moves() -> None:
-    snapshots = [
-        BriefingSnapshot("561380", "电网ETF", "cn_etf", "CN", "电网", 2.234, -0.003, 0.023, 0.187, 0.74, "多头", 2, "", ""),
-    ]
-    monitor_rows = [
-        {"name": "布伦特原油", "return_1d": 0.16, "return_5d": 0.39, "latest": 108.0},
-        {"name": "WTI原油", "return_1d": 0.15, "return_5d": 0.48, "latest": 105.0},
-    ]
-
-    report = _anomaly_report(snapshots, monitor_rows)
-
-    assert any("布伦特原油" in line for line in report["lines"])
-    assert any("561380" in line for line in report["lines"])
-    assert "561380" in report["flags"]
-
-
-def test_source_quality_warns_on_single_source() -> None:
-    report = {
-        "items": [
-            {"category": "energy", "title": "Oil surges", "source": "Reuters"},
-            {"category": "fed", "title": "Fed waits", "source": "Reuters"},
-        ]
+    assert rows == [["1", "宁德时代 (300750)", "新能源", "较强机会", "持有优于追高", "首次建仓 ≤3%"]]
+    assert any("Tushare 优先" in item for item in lines)
+    assert any("初筛池 `1`" in item for item in lines)
+    assert meta == {
+        "enabled": True,
+        "mode": "tushare_priority_full_market_prescreen",
+        "pool_size": 1,
+        "shortlist_size": 1,
+        "complete_analysis_size": 1,
+        "report_top_n": 1,
+        "blind_spot": "部分样本缺少完整事件覆盖。",
     }
-
-    lines = _source_quality_lines(report)
-
-    assert any("当前新闻源不足 2 类" in line for line in lines)
-
-
-def test_liquidity_lines_use_normalized_cn_flow_and_margin(monkeypatch) -> None:
-    monkeypatch.setattr(
-        ChinaMarketCollector,
-        "get_north_south_flow",
-        lambda self: pd.DataFrame([{"日期": "2026-03-10", "北向资金净流入": 1_500_000_000.0, "南向资金净流入": -800_000_000.0}]),
-    )
-    monkeypatch.setattr(
-        ChinaMarketCollector,
-        "get_margin_trading",
-        lambda self: pd.DataFrame(
-            [
-                {"日期": "2026-03-10", "交易所": "上交所", "融资余额": 1_000_000_000.0},
-                {"日期": "2026-03-10", "交易所": "深交所", "融资余额": 2_000_000_000.0},
-            ]
-        ),
-    )
-
-    lines = _liquidity_lines({})
-
-    assert any("北向资金当日净流入约 15.00亿" in line for line in lines)
-    assert any("融资余额约 30 亿元。" in line for line in lines)
-    assert not any("⚠️ 北向资金读数偏大" in line for line in lines)
-
-
-def test_yesterday_review_falls_back_without_archive(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(briefing_module, "resolve_project_path", lambda _: tmp_path)
-    lines = _yesterday_review_lines([], [])
-
-    assert any("暂无" in line for line in lines)

@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
 from src.commands.release_check import check_generic_client_report
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
 from src.output import DecisionRetrospectReportRenderer
+from src.processors.portfolio_actions import (
+    build_trade_decision_snapshot,
+    build_trade_plan,
+    estimate_execution_profile,
+)
 from src.processors.decision_review import build_monthly_decision_review
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.storage.portfolio import PortfolioRepository
@@ -32,6 +38,14 @@ def build_parser() -> argparse.ArgumentParser:
     log_parser.add_argument("--asset-type", default="")
     log_parser.add_argument("--basis", choices=["rule", "subjective", "emergency"], default="rule")
     log_parser.add_argument("--note", default="")
+
+    whatif_parser = subparsers.add_parser("whatif", help="Preview portfolio impact before a trade")
+    whatif_parser.add_argument("action", choices=["buy", "sell"])
+    whatif_parser.add_argument("symbol")
+    whatif_parser.add_argument("price", type=float)
+    whatif_parser.add_argument("amount", type=float, help="Trade amount in currency")
+    whatif_parser.add_argument("--asset-type", default="")
+    whatif_parser.add_argument("--period", default="3y", help="Risk lookback, e.g. 3y or 12m")
 
     target_parser = subparsers.add_parser("set-target", help="Set target weight for a holding")
     target_parser.add_argument("symbol")
@@ -122,6 +136,129 @@ def _trade_signal_snapshot(symbol: str, asset_type: str, config: Dict[str, Any])
         return {}
 
 
+def _trade_logging_snapshots(
+    *,
+    symbol: str,
+    asset_type: str,
+    price: float,
+    amount: float,
+    config: Dict[str, Any],
+    thesis_repo: ThesisRepository,
+) -> Dict[str, Dict[str, Any]]:
+    thesis_snapshot = dict(thesis_repo.get(symbol) or {})
+    try:
+        history = normalize_ohlcv_frame(fetch_asset_history(symbol, asset_type, config))
+        metrics = compute_history_metrics(history)
+        technical = TechnicalAnalyzer(history).generate_scorecard(config.get("technical", {}))
+        dmi = dict(technical.get("dmi") or {})
+        volume = dict(technical.get("volume") or {})
+        signal_snapshot = {
+            "return_20d": metrics["return_20d"],
+            "price_percentile_1y": metrics["price_percentile_1y"],
+            "ma_signal": technical["ma_system"]["signal"],
+            "macd_signal": technical["macd"]["signal"],
+            "rsi": dict(technical.get("rsi") or {}).get("RSI"),
+            "adx": dmi.get("ADX"),
+            "plus_di": dmi.get("DI+"),
+            "minus_di": dmi.get("DI-"),
+            "volume_signal": volume.get("signal"),
+            "volume_structure": volume.get("structure"),
+        }
+        decision_snapshot = build_trade_decision_snapshot(
+            symbol=symbol,
+            asset_type=asset_type,
+            config=config,
+            history=history,
+            thesis=thesis_snapshot,
+        )
+        execution_snapshot = estimate_execution_profile(
+            asset_type=asset_type,
+            amount=amount,
+            price=price,
+            metrics=metrics,
+            risk_limits=config.get("risk_limits", {}),
+        )
+    except Exception as exc:
+        signal_snapshot = {}
+        decision_snapshot = {
+            "recorded_at": datetime.now().isoformat(timespec="seconds"),
+            "market_data_as_of": "",
+            "market_data_source": symbol,
+            "history_window": "3y",
+            "thesis_snapshot_at": str(thesis_snapshot.get("updated_at") or thesis_snapshot.get("created_at") or ""),
+            "notes": [f"行情/技术快照获取失败，当前只保留了最基础的交易记录：{exc}"],
+        }
+        execution_snapshot = {
+            "execution_mode": "未知",
+            "tradability_label": "数据不足",
+            "avg_turnover_20d": 0.0,
+            "participation_rate": None,
+            "slippage_bps": 0.0,
+            "estimated_slippage_cost": 0.0,
+            "fee_rate": 0.0,
+            "estimated_fee_cost": 0.0,
+            "estimated_total_cost": 0.0,
+            "quantity": amount / price if price else 0.0,
+            "liquidity_note": "行情历史不可用，未能估算可成交性和执行成本。",
+            "execution_note": "后续复盘时只能看结果路径，不能据此评估当时的冲击成本。",
+            "max_participation_limit": float(config.get("risk_limits", {}).get("max_trade_participation", 0.05)),
+        }
+
+    return {
+        "signal_snapshot": signal_snapshot,
+        "thesis_snapshot": thesis_snapshot,
+        "decision_snapshot": decision_snapshot,
+        "execution_snapshot": execution_snapshot,
+    }
+
+
+def _whatif_lines(plan: Dict[str, Any]) -> List[str]:
+    execution = dict(plan.get("execution") or {})
+    decision = dict(plan.get("decision_snapshot") or {})
+    alerts = list(plan.get("alerts") or [])
+    participation = execution.get("participation_rate")
+    participation_text = "—" if participation is None else f"{float(participation) * 100:.2f}%"
+    return [
+        "# 交易预演",
+        "",
+        f"- 动作: `{plan['action']}`",
+        f"- 标的: `{plan['symbol']}` ({plan['name']})",
+        f"- 预演金额: `{plan['amount']:.2f}`",
+        f"- 假设成交价: `{plan['price']:.4f}`",
+        "",
+        "## 一句话结论",
+        f"- {plan['headline']}",
+        "",
+        "## 组合与风险预算",
+        f"- 当前权重约 `{plan['current_weight'] * 100:.1f}%`，预演后约 `{plan['projected_weight'] * 100:.1f}%`。",
+        f"- 当前更合理的单票上限约为 `{plan['suggested_max_weight'] * 100:.1f}%`。",
+        f"- 行业 `{plan['current_sector']}` 预演后暴露约 `{plan['projected_sector_weight'] * 100:.1f}%`。",
+        f"- 地区 `{plan['current_region']}` 预演后暴露约 `{plan['projected_region_weight'] * 100:.1f}%`。",
+        f"- 组合年化波动预估: `{plan['current_risk']['annual_vol'] * 100:.2f}% -> {plan['projected_risk']['annual_vol'] * 100:.2f}%`。",
+        f"- 组合 Beta 预估: `{plan['current_risk']['beta']:.2f} -> {plan['projected_risk']['beta']:.2f}`。",
+        "",
+        "## 执行成本与可成交性",
+        f"- 执行模式: `{execution.get('execution_mode', '—')}`，可成交性: `{execution.get('tradability_label', '—')}`。",
+        f"- 近20日日均成交额约 `{float(execution.get('avg_turnover_20d', 0.0)) / 1e8:.2f} 亿`，订单参与率约 `{participation_text}`。",
+        f"- 预估滑点 `{float(execution.get('slippage_bps', 0.0)):.1f} bps`，滑点成本约 `{float(execution.get('estimated_slippage_cost', 0.0)):.2f}`。",
+        f"- 显性费用率约 `{float(execution.get('fee_rate', 0.0)) * 100:.2f}%`，费用约 `{float(execution.get('estimated_fee_cost', 0.0)):.2f}`。",
+        f"- 预估总成本约 `{float(execution.get('estimated_total_cost', 0.0)):.2f}`。",
+        f"- {execution.get('liquidity_note', '')}",
+        f"- {execution.get('execution_note', '')}",
+        "",
+        "## 时点与证据快照",
+        f"- 记录时间: `{decision.get('recorded_at', '—')}`",
+        f"- 行情 as_of: `{decision.get('market_data_as_of', '—')}`",
+        f"- 行情来源: `{decision.get('market_data_source', '—')}`",
+        f"- 历史窗口: `{decision.get('history_window', '—')}`",
+        f"- Thesis 快照时间: `{decision.get('thesis_snapshot_at') or '—'}`",
+        "",
+        "## 风险提示",
+    ] + [f"- {item}" for item in alerts or ["当前没有触发新的硬约束告警。"]] + ["", "## 备注"] + [
+        f"- {item}" for item in (decision.get("notes", []) or [])
+    ]
+
+
 def _review_output_path(month: str, symbol: str = "") -> Path:
     safe_month = str(month).replace("/", "-")
     safe_symbol = str(symbol).replace("/", "_").replace(" ", "_")
@@ -183,6 +320,14 @@ def main() -> None:
     if args.subcommand == "log":
         asset_type = args.asset_type or detect_asset_type(args.symbol, config)
         context = get_asset_context(args.symbol, asset_type, config)
+        snapshots = _trade_logging_snapshots(
+            symbol=args.symbol,
+            asset_type=asset_type,
+            price=args.price,
+            amount=args.amount,
+            config=config,
+            thesis_repo=thesis_repo,
+        )
         repo.log_trade(
             action=args.action,
             symbol=args.symbol,
@@ -194,10 +339,27 @@ def main() -> None:
             sector=context.metadata.get("sector", ""),
             basis=args.basis,
             note=args.note,
-            signal_snapshot=_trade_signal_snapshot(args.symbol, asset_type, config),
-            thesis_snapshot=thesis_repo.get(args.symbol) or {},
+            signal_snapshot=snapshots["signal_snapshot"],
+            thesis_snapshot=snapshots["thesis_snapshot"],
+            decision_snapshot=snapshots["decision_snapshot"],
+            execution_snapshot=snapshots["execution_snapshot"],
         )
         print(f"已记录 {args.action} {args.symbol}，成交金额 {args.amount:.2f}。")
+        return
+
+    if args.subcommand == "whatif":
+        payload = build_trade_plan(
+            action=args.action,
+            symbol=args.symbol,
+            price=args.price,
+            amount=args.amount,
+            config=config,
+            asset_type=args.asset_type,
+            repo=repo,
+            thesis_repo=thesis_repo,
+            period=args.period,
+        )
+        print("\n".join(_whatif_lines(payload)))
         return
 
     if args.subcommand == "set-target":

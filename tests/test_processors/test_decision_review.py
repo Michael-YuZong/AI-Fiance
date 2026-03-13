@@ -65,8 +65,11 @@ def test_build_monthly_decision_review_computes_path_and_verdict(monkeypatch, tm
             "macd_signal": "bullish",
             "return_20d": 0.08,
             "volume_structure": "放量上攻",
+            "rsi": 58.0,
         },
         thesis_snapshot={"core_assumption": "产业趋势还在", "holding_period": "1-3月"},
+        decision_snapshot={"recorded_at": "2026-03-02T10:00:00", "market_data_as_of": "2026-03-02", "market_data_source": "300750"},
+        execution_snapshot={"execution_mode": "场内成交", "tradability_label": "可成交", "estimated_total_cost": 18.0},
     )
     trades = repo.list_trades()
     trades[0]["timestamp"] = "2026-03-02T10:00:00"
@@ -88,8 +91,14 @@ def test_build_monthly_decision_review_computes_path_and_verdict(monkeypatch, tm
     )
 
     assert payload["basis_rows"][0][0] == "rule"
+    assert payload["basis_rows"][0][3].startswith("+")
+    assert payload["setup_rows"][0][0] in {"高把握", "中等把握", "低把握"}
+    assert payload["attribution_rows"][0][0] in {"alpha兑现", "更多来自贝塔顺风", "方向没错但执行/标的拖累", "方向与执行都偏弱"}
     item = payload["items"][0]
     assert item["signal_alignment"] == "顺势买入"
     assert item["target_hit_day"] == 3
     assert item["verdict"]["outcome"] in {"结果兑现", "结果偏正"}
     assert item["forward_returns"]["5d"].startswith("+")
+    assert item["benchmark_symbol"] == "510300"
+    assert item["attribution"]["label"] in {"alpha兑现", "更多来自贝塔顺风", "方向没错但执行/标的拖累", "方向与执行都偏弱"}
+    assert item["setup_profile"]["bucket"] in {"高把握", "中等把握", "低把握"}

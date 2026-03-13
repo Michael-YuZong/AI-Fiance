@@ -69,6 +69,11 @@ class SocialSentimentCollector:
         aggregate = self.calculator.compute(aggregate_raw)
         aggregate["interpretation"] = self._interpretation(aggregate["sentiment_index"], aggregate["signal"])
         aggregate["method"] = "proxy"
+        confidence = self._confidence_payload(market_snapshot)
+        aggregate["confidence_score"] = confidence["score"]
+        aggregate["confidence_label"] = confidence["label"]
+        aggregate["limitations"] = confidence["limitations"]
+        aggregate["downgrade_impact"] = confidence["downgrade_impact"]
         return {
             "symbol": symbol,
             "channels": channels,
@@ -107,3 +112,38 @@ class SocialSentimentCollector:
         if signal == "contrarian_bullish":
             return f"情绪指数 {sentiment_index:.1f}，市场情绪较冷，留意超跌修复。"
         return f"情绪指数 {sentiment_index:.1f}，当前未出现极端一致预期。"
+
+    def _confidence_payload(self, market_snapshot: Mapping[str, Any]) -> Dict[str, Any]:
+        required = {
+            "日涨跌": market_snapshot.get("return_1d"),
+            "5日涨跌": market_snapshot.get("return_5d"),
+            "20日涨跌": market_snapshot.get("return_20d"),
+            "量能比": market_snapshot.get("volume_ratio"),
+            "趋势": market_snapshot.get("trend"),
+        }
+        present = [name for name, value in required.items() if value not in (None, "", "nan")]
+        score = len(present) / len(required)
+        if score >= 0.9:
+            label = "高"
+        elif score >= 0.6:
+            label = "中"
+        else:
+            label = "低"
+
+        missing = [name for name, value in required.items() if value in (None, "", "nan")]
+        limitations = [
+            "这是价格和量能行为推导出的情绪代理，不是雪球、东财或 Reddit 的真实发帖/阅读/评论抓取。",
+        ]
+        if missing:
+            limitations.append(f"当前缺少 `{ ' / '.join(missing) }` 输入，情绪判断更容易偏框架化。")
+        downgrade_impact = (
+            "更适合提示拥挤、冷淡或超跌修复线索，不适合把它当成独立买卖信号。"
+            if score >= 0.6
+            else "当前代理输入不足，只适合补充风险提示，不应单独影响交易结论。"
+        )
+        return {
+            "score": round(score, 2),
+            "label": label,
+            "limitations": limitations,
+            "downgrade_impact": downgrade_impact,
+        }

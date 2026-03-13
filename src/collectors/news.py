@@ -184,6 +184,11 @@ class NewsCollector(BaseCollector):
         recent_days: int = 7,
     ) -> List[Dict[str, str]]:
         """Search live RSS by asset/topic keywords for sector-specific catalysts."""
+        topic_search_enabled = bool(
+            self.config.get("news_topic_search_enabled", dict(self.config).get("news", {}).get("topic_search_enabled", True))
+        )
+        if not topic_search_enabled:
+            return []
         cleaned = self._normalize_topic_keywords(keywords)
         if not cleaned:
             return []

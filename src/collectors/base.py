@@ -173,8 +173,8 @@ class BaseCollector:
         # queried with the stock-style converter when fund_basic is unavailable.
         return self._to_ts_code(symbol)
 
-    def _latest_open_trade_date(self, lookback_days: int = 14, exchange: str = "SSE") -> str:
-        """Return the latest open trade date from Tushare trade_cal when available."""
+    def _recent_open_trade_dates(self, lookback_days: int = 14, exchange: str = "SSE") -> list[str]:
+        """Return recent open trade dates from Tushare trade_cal when available."""
         end_date = datetime.now().strftime("%Y%m%d")
         # ``trade_cal`` is small; cache by the current end date to avoid repeated scans.
         cache_key = f"base:ts_trade_cal:{exchange}:{end_date}:{lookback_days}"
@@ -185,16 +185,22 @@ class BaseCollector:
             start_date = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
             raw = self._ts_call("trade_cal", exchange=exchange, start_date=start_date, end_date=end_date)
             if raw is None or getattr(raw, "empty", False):
-                return ""
+                return []
             cached = raw
             self._save_cache(cache_key, raw)
         frame = cached.copy()
         if "is_open" not in frame.columns or "cal_date" not in frame.columns:
-            return ""
+            return []
         open_days = frame[pd.to_numeric(frame["is_open"], errors="coerce") == 1]
         if open_days.empty:
-            return ""
-        return str(open_days["cal_date"].max())
+            return []
+        dates = open_days["cal_date"].astype(str).tolist()
+        return sorted(date for date in dates if date)
+
+    def _latest_open_trade_date(self, lookback_days: int = 14, exchange: str = "SSE") -> str:
+        """Return the latest open trade date from Tushare trade_cal when available."""
+        dates = self._recent_open_trade_dates(lookback_days=lookback_days, exchange=exchange)
+        return dates[-1] if dates else ""
 
     @staticmethod
     def _first_existing_column(frame: pd.DataFrame, candidates: Sequence[str]) -> str | None:
@@ -525,6 +531,17 @@ class BaseCollector:
             return True
         fetcher_name = getattr(fetcher, "__name__", "")
         text = str(exc)
+        nonretry_markers = (
+            "'NoneType' object is not subscriptable",
+            "exceptions must derive from BaseException",
+            "Excel file format cannot be determined",
+            "CERTIFICATE_VERIFY_FAILED",
+            "'data'",
+            "Too Many Requests",
+            "Rate limited",
+        )
+        if any(marker in text for marker in nonretry_markers):
+            return True
         if fetcher_name == "history" and "'NoneType' object is not subscriptable" in text:
             return True
         return False

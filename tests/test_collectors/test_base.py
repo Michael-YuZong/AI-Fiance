@@ -86,6 +86,60 @@ def test_cached_call_does_not_retry_yfinance_history_none_type_failure(tmp_path)
     assert calls["count"] == 1
 
 
+def test_cached_call_does_not_retry_known_parser_failure(tmp_path):
+    collector = BaseCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}}, name="TestCollector")
+    calls = {"count": 0}
+
+    def broken_fetcher():  # noqa: ANN202
+        calls["count"] += 1
+        raise ValueError("Excel file format cannot be determined, you must specify an engine manually.")
+
+    try:
+        collector.cached_call("demo:key", broken_fetcher, ttl_hours=0)
+    except ValueError as exc:
+        assert "Excel file format" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Expected parser failure to bubble up")
+
+    assert calls["count"] == 1
+
+
+def test_cached_call_does_not_retry_known_runtime_wrapper_failure(tmp_path):
+    collector = BaseCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}}, name="TestCollector")
+    calls = {"count": 0}
+
+    def broken_fetcher():  # noqa: ANN202
+        calls["count"] += 1
+        raise TypeError("exceptions must derive from BaseException")
+
+    try:
+        collector.cached_call("demo:key", broken_fetcher, ttl_hours=0)
+    except TypeError as exc:
+        assert "BaseException" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Expected wrapper failure to bubble up")
+
+    assert calls["count"] == 1
+
+
+def test_cached_call_does_not_retry_rate_limit_failure(tmp_path):
+    collector = BaseCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}}, name="TestCollector")
+    calls = {"count": 0}
+
+    def broken_fetcher():  # noqa: ANN202
+        calls["count"] += 1
+        raise RuntimeError("Too Many Requests. Rate limited. Try after a while.")
+
+    try:
+        collector.cached_call("demo:key", broken_fetcher, ttl_hours=0)
+    except RuntimeError as exc:
+        assert "Too Many Requests" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Expected rate limit failure to bubble up")
+
+    assert calls["count"] == 1
+
+
 def test_base_collector_sets_no_proxy_for_domestic_data_domains(tmp_path, monkeypatch):
     monkeypatch.setenv("NO_PROXY", "example.com")
     monkeypatch.delenv("no_proxy", raising=False)

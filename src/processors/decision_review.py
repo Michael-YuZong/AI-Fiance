@@ -9,11 +9,12 @@ from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from src.processors.risk_support import REGION_BENCHMARKS
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.storage.portfolio import PortfolioRepository
 from src.storage.thesis import ThesisRepository
 from src.utils.config import detect_asset_type
-from src.utils.market import compute_history_metrics, fetch_asset_history
+from src.utils.market import compute_history_metrics, fetch_asset_history, get_asset_context
 
 
 FORWARD_WINDOWS = (1, 3, 5, 20)
@@ -124,6 +125,130 @@ def _format_forward_map(path_returns: Mapping[int, Optional[float]]) -> Dict[str
         value = path_returns.get(days)
         payload[f"{days}d"] = "—" if value is None else f"{value * 100:+.2f}%"
     return payload
+
+
+def _benchmark_spec(symbol: str, asset_type: str, config: Mapping[str, Any]) -> tuple[str, str]:
+    context = get_asset_context(symbol, asset_type, dict(config))
+    region = str(context.metadata.get("region", "")).upper()
+    if region in REGION_BENCHMARKS:
+        benchmark_symbol, benchmark_asset_type = REGION_BENCHMARKS[region]
+        return benchmark_symbol, benchmark_asset_type
+    if asset_type == "us":
+        return REGION_BENCHMARKS["US"]
+    if asset_type in {"hk", "hk_index"}:
+        return REGION_BENCHMARKS["HK"]
+    return REGION_BENCHMARKS["CN"]
+
+
+def _forward_return(history: pd.DataFrame, trade_timestamp: Any, *, lookahead: int, action: str) -> Optional[float]:
+    if history.empty:
+        return None
+    entry_index = _resolve_entry_index(history, trade_timestamp)
+    if entry_index >= len(history):
+        return None
+    entry_price = _safe_float(history.iloc[entry_index]["close"])
+    if entry_price <= 0:
+        return None
+    end_index = min(entry_index + max(int(lookahead), 1), len(history) - 1)
+    if end_index <= entry_index:
+        return None
+    close_price = _safe_float(history.iloc[end_index]["close"], entry_price)
+    raw_return = close_price / entry_price - 1 if entry_price else 0.0
+    direction = 1.0 if action == "buy" else -1.0
+    return raw_return * direction
+
+
+def _setup_profile(
+    signal_snapshot: Mapping[str, Any],
+    thesis: Mapping[str, Any],
+    *,
+    action: str,
+    signal_alignment: str,
+) -> Dict[str, Any]:
+    score = 0
+    reasons: List[str] = []
+    if "顺势" in signal_alignment:
+        score += 35
+        reasons.append("当时属于顺势动作")
+    elif "混合" in signal_alignment:
+        score += 20
+        reasons.append("当时属于混合信号")
+    else:
+        score += 5
+        reasons.append("当时更偏逆势动作")
+
+    return_20d = _safe_float(signal_snapshot.get("return_20d"), default=np.nan)
+    if not np.isnan(return_20d):
+        if action == "buy":
+            if return_20d > 0:
+                score += 10
+                reasons.append("近20日收益为正")
+            elif return_20d > -0.05:
+                score += 5
+        else:
+            if return_20d < 0:
+                score += 10
+                reasons.append("近20日收益与卖出方向一致")
+            elif return_20d < 0.05:
+                score += 5
+
+    rsi = _safe_float(signal_snapshot.get("rsi"), default=np.nan)
+    if not np.isnan(rsi):
+        if 40 <= rsi <= 70:
+            score += 10
+            reasons.append("RSI 处在相对健康区间")
+        elif 30 <= rsi <= 80:
+            score += 5
+
+    volume_structure = str(signal_snapshot.get("volume_structure", "") or "").strip()
+    if volume_structure:
+        score += 5
+        reasons.append(f"量价结构记录为 {volume_structure}")
+
+    if thesis:
+        score += 10
+        reasons.append("有同步 thesis 快照")
+
+    score = max(0, min(score, 100))
+    if score >= 55:
+        bucket = "高把握"
+    elif score >= 35:
+        bucket = "中等把握"
+    else:
+        bucket = "低把握"
+    return {"score": score, "bucket": bucket, "reasons": reasons[:4]}
+
+
+def _attribution_summary(
+    adjusted_return: Optional[float],
+    benchmark_return: Optional[float],
+) -> Dict[str, str]:
+    if adjusted_return is None or benchmark_return is None:
+        return {
+            "label": "样本不足",
+            "detail": "没有足够样本和基准窗口来区分这笔收益来自 alpha 还是 beta。",
+        }
+
+    excess_return = adjusted_return - benchmark_return
+    if adjusted_return > 0 and excess_return >= 0.03:
+        return {
+            "label": "alpha兑现",
+            "detail": "绝对收益为正，而且明显跑赢了同区基准，更多是标的/执行带来的超额结果。",
+        }
+    if adjusted_return > 0 and excess_return > -0.02:
+        return {
+            "label": "更多来自贝塔顺风",
+            "detail": "结果为正，但相对同区基准没有明显超额，更像市场或板块顺风。",
+        }
+    if adjusted_return <= 0 and excess_return > 0:
+        return {
+            "label": "方向没错但执行/标的拖累",
+            "detail": "大环境并不更差，但这笔动作没有把环境顺风转成自己的收益。",
+        }
+    return {
+        "label": "方向与执行都偏弱",
+        "detail": "绝对回报和相对收益都偏弱，需要一起复查方向、节奏和仓位。",
+    }
 
 
 def _evaluate_price_path(
@@ -291,6 +416,7 @@ def review_trade(
     config: Mapping[str, Any],
     thesis_repo: ThesisRepository,
     history_cache: MutableMapping[str, pd.DataFrame],
+    benchmark_cache: MutableMapping[str, pd.DataFrame],
     lookahead: int = 20,
     stop_pct: float = 0.08,
     target_pct: float = 0.15,
@@ -326,6 +452,30 @@ def review_trade(
     signal_alignment = _signal_alignment(signal_snapshot, str(trade.get("action", "buy")))
     verdict = _verdict({**path, "signal_alignment": signal_alignment})
     reason_lines = _reason_lines(trade, thesis, signal_snapshot, verdict)
+    benchmark_symbol, benchmark_asset_type = _benchmark_spec(symbol, asset_type, config)
+    benchmark_key = _history_cache_key(benchmark_symbol, benchmark_asset_type)
+    if benchmark_key not in benchmark_cache:
+        benchmark_cache[benchmark_key] = normalize_ohlcv_frame(
+            fetch_asset_history(benchmark_symbol, benchmark_asset_type, dict(config), period="3y")
+        )
+    benchmark_history = benchmark_cache[benchmark_key]
+    benchmark_return = _forward_return(
+        benchmark_history,
+        trade.get("timestamp"),
+        lookahead=lookahead,
+        action=str(trade.get("action", "buy")),
+    )
+    adjusted_return = path.get("adjusted_return")
+    excess_return = adjusted_return - benchmark_return if adjusted_return is not None and benchmark_return is not None else None
+    attribution = _attribution_summary(adjusted_return, benchmark_return)
+    setup_profile = _setup_profile(
+        signal_snapshot,
+        thesis,
+        action=str(trade.get("action", "buy")),
+        signal_alignment=signal_alignment,
+    )
+    decision_snapshot = dict(trade.get("decision_snapshot") or {})
+    execution_snapshot = dict(trade.get("execution_snapshot") or {})
 
     return {
         "symbol": symbol,
@@ -343,6 +493,9 @@ def review_trade(
         "signal_alignment": signal_alignment,
         "forward_returns": _format_forward_map(path["forward_returns"]),
         "adjusted_return": path["adjusted_return"],
+        "benchmark_return": benchmark_return,
+        "excess_return": excess_return,
+        "benchmark_symbol": benchmark_symbol,
         "mfe": path["mfe"],
         "mae": path["mae"],
         "stop_level": path["stop_level"],
@@ -353,6 +506,10 @@ def review_trade(
         "coverage_days": path["coverage_days"],
         "verdict": verdict,
         "reason_lines": reason_lines,
+        "setup_profile": setup_profile,
+        "attribution": attribution,
+        "decision_snapshot": decision_snapshot,
+        "execution_snapshot": execution_snapshot,
     }
 
 
@@ -376,12 +533,14 @@ def build_monthly_decision_review(
         and (not symbol or str(trade.get("symbol", "")) == symbol)
     ]
     history_cache: Dict[str, pd.DataFrame] = {}
+    benchmark_cache: Dict[str, pd.DataFrame] = {}
     items = [
         review_trade(
             trade,
             config=config,
             thesis_repo=thesis_repository,
             history_cache=history_cache,
+            benchmark_cache=benchmark_cache,
             lookahead=lookahead,
             stop_pct=stop_pct,
             target_pct=target_pct,
@@ -389,17 +548,24 @@ def build_monthly_decision_review(
         for trade in trades
     ]
 
-    by_basis: Dict[str, Dict[str, float]] = defaultdict(lambda: {"count": 0, "wins": 0, "stop_hits": 0, "target_hits": 0, "avg_return": 0.0})
+    by_basis: Dict[str, Dict[str, float]] = defaultdict(
+        lambda: {"count": 0, "wins": 0, "stop_hits": 0, "target_hits": 0, "avg_return": 0.0, "avg_excess": 0.0}
+    )
+    by_setup: Dict[str, Dict[str, float]] = defaultdict(lambda: {"count": 0, "wins": 0, "avg_return": 0.0, "avg_excess": 0.0})
+    attribution_counter: Dict[str, Dict[str, float]] = defaultdict(lambda: {"count": 0, "avg_return": 0.0, "avg_excess": 0.0})
     outcome_counter: Dict[str, int] = defaultdict(int)
     alignment_counter: Dict[str, int] = defaultdict(int)
     for item in items:
         basis_stats = by_basis[item["basis"]]
         basis_stats["count"] += 1
         adjusted = item.get("adjusted_return")
+        excess = item.get("excess_return")
         if adjusted is not None:
             basis_stats["avg_return"] += float(adjusted)
             if float(adjusted) > 0:
                 basis_stats["wins"] += 1
+        if excess is not None:
+            basis_stats["avg_excess"] += float(excess)
         if item.get("stop_hit_day") is not None:
             basis_stats["stop_hits"] += 1
         if item.get("target_hit_day") is not None:
@@ -407,10 +573,29 @@ def build_monthly_decision_review(
         outcome_counter[item["verdict"]["outcome"]] += 1
         alignment_counter[item["signal_alignment"]] += 1
 
+        setup_bucket = str(dict(item.get("setup_profile") or {}).get("bucket", "未知"))
+        setup_stats = by_setup[setup_bucket]
+        setup_stats["count"] += 1
+        if adjusted is not None:
+            setup_stats["avg_return"] += float(adjusted)
+            if float(adjusted) > 0:
+                setup_stats["wins"] += 1
+        if excess is not None:
+            setup_stats["avg_excess"] += float(excess)
+
+        attribution_label = str(dict(item.get("attribution") or {}).get("label", "未知"))
+        attribution_stats = attribution_counter[attribution_label]
+        attribution_stats["count"] += 1
+        if adjusted is not None:
+            attribution_stats["avg_return"] += float(adjusted)
+        if excess is not None:
+            attribution_stats["avg_excess"] += float(excess)
+
     basis_rows: List[List[str]] = []
     for basis, stats in sorted(by_basis.items()):
         count = int(stats["count"] or 0)
         avg_return = (stats["avg_return"] / count) if count else 0.0
+        avg_excess = (stats["avg_excess"] / count) if count else 0.0
         win_rate = stats["wins"] / count if count else 0.0
         stop_rate = stats["stop_hits"] / count if count else 0.0
         target_rate = stats["target_hits"] / count if count else 0.0
@@ -419,9 +604,41 @@ def build_monthly_decision_review(
                 basis,
                 str(count),
                 f"{avg_return * 100:+.2f}%",
+                f"{avg_excess * 100:+.2f}%",
                 f"{win_rate * 100:.1f}%",
                 f"{stop_rate * 100:.1f}%",
                 f"{target_rate * 100:.1f}%",
+            ]
+        )
+
+    setup_rows: List[List[str]] = []
+    setup_rank = {"高把握": 0, "中等把握": 1, "低把握": 2}
+    for bucket, stats in sorted(by_setup.items(), key=lambda item: setup_rank.get(item[0], 99)):
+        count = int(stats["count"] or 0)
+        avg_return = (stats["avg_return"] / count) if count else 0.0
+        avg_excess = (stats["avg_excess"] / count) if count else 0.0
+        win_rate = stats["wins"] / count if count else 0.0
+        setup_rows.append(
+            [
+                bucket,
+                str(count),
+                f"{avg_return * 100:+.2f}%",
+                f"{avg_excess * 100:+.2f}%",
+                f"{win_rate * 100:.1f}%",
+            ]
+        )
+
+    attribution_rows: List[List[str]] = []
+    for label, stats in sorted(attribution_counter.items(), key=lambda item: int(item[1]["count"]), reverse=True):
+        count = int(stats["count"] or 0)
+        avg_return = (stats["avg_return"] / count) if count else 0.0
+        avg_excess = (stats["avg_excess"] / count) if count else 0.0
+        attribution_rows.append(
+            [
+                label,
+                str(count),
+                f"{avg_return * 100:+.2f}%",
+                f"{avg_excess * 100:+.2f}%",
             ]
         )
 
@@ -434,6 +651,17 @@ def build_monthly_decision_review(
         if alignment_counter:
             major_alignment = max(alignment_counter.items(), key=lambda item: item[1])[0]
             summary_lines.append(f"信号一致性里占比最高的是 `{major_alignment}`。")
+        if attribution_rows:
+            summary_lines.append(f"最常见的收益归因是 `{attribution_rows[0][0]}`。")
+        if by_setup.get("高把握") and by_setup.get("低把握"):
+            high_count = int(by_setup["高把握"]["count"] or 0)
+            low_count = int(by_setup["低把握"]["count"] or 0)
+            if high_count and low_count:
+                high_avg = by_setup["高把握"]["avg_return"] / high_count
+                low_avg = by_setup["低把握"]["avg_return"] / low_count
+                summary_lines.append(
+                    f"`高把握` setup 的平均结果约 `{high_avg * 100:+.2f}%`，`低把握` 约 `{low_avg * 100:+.2f}%`。"
+                )
         if any(not item["thesis_is_historical"] and item["thesis"] for item in items):
             summary_lines.append("部分旧交易没有历史 thesis 快照，报告已回退到当前 thesis，仅可作辅助参考。")
     else:
@@ -449,5 +677,7 @@ def build_monthly_decision_review(
         "target_pct": target_pct,
         "summary_lines": summary_lines,
         "basis_rows": basis_rows,
+        "setup_rows": setup_rows,
+        "attribution_rows": attribution_rows,
         "items": items,
     }

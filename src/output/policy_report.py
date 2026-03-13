@@ -13,6 +13,8 @@ class PolicyReportRenderer:
             f"# 政策解读: {payload['title']}",
             "",
             f"- 来源: `{payload['source']}`",
+            f"- 输入类型: `{payload.get('input_type', '关键词')}`",
+            f"- 抽取状态: `{payload.get('extraction_status', '待确认')}`",
             f"- 主题: `{payload['theme']}`",
             f"- 模板置信度: `{payload.get('match_confidence', '低')}`",
             f"- 政策方向: `{payload.get('policy_direction', '中性/待原文确认')}`",
@@ -31,27 +33,30 @@ class PolicyReportRenderer:
                     "",
                 ]
             )
-        lines.extend(
-            [
-            "## 目标与节奏",
-            f"- 政策目标: {payload['policy_goal']}",
-            f"- 落地节奏: {payload['timeline']}",
-            "",
-            "## 重点支持方向",
-            ]
-        )
-        for item in payload.get("support_points", []):
-            lines.append(f"- {item}")
 
-        lines.extend(["", "## 受益 / 风险映射"])
-        for item in payload.get("benefit_risk_lines", []):
-            lines.append(f"- {item}")
+        lines.extend(["## 已抽取的正文事实"])
+        body_facts = payload.get("body_facts", [])
+        if body_facts:
+            for item in body_facts:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- 当前没有抽到足够正文事实。")
 
         timeline_points = payload.get("timeline_points", [])
         if timeline_points:
-            lines.extend(["", "## 时间线 / 执行抓手"])
             for item in timeline_points:
-                lines.append(f"- {item}")
+                lines.append(f"- 原文时间线: {item}")
+
+        lines.extend(["", "## 基于模板 / 规则的推断"])
+        if payload.get("policy_goal"):
+            lines.append(f"- 模板政策目标: {payload['policy_goal']}")
+        if payload.get("timeline"):
+            lines.append(f"- 节奏判断: {payload['timeline']}")
+        support_points = payload.get("support_points", [])
+        if support_points:
+            lines.append(f"- 重点支持方向: {', '.join(support_points)}")
+        for item in payload.get("inference_lines", []):
+            lines.append(f"- {item}")
 
         numbers = payload.get("headline_numbers", [])
         if numbers:
@@ -63,6 +68,12 @@ class PolicyReportRenderer:
         if watchlist_impact:
             lines.extend(["", "## 对 watchlist / 持仓的影响"])
             for item in watchlist_impact:
+                lines.append(f"- {item}")
+
+        unconfirmed_lines = payload.get("unconfirmed_lines", [])
+        if unconfirmed_lines:
+            lines.extend(["", "## 待确认 / 降级说明"])
+            for item in unconfirmed_lines:
                 lines.append(f"- {item}")
 
         if payload.get("raw_excerpt"):

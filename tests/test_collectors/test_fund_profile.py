@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.collectors.fund_profile import FundProfileCollector
+from src.utils.fund_taxonomy import build_standard_fund_taxonomy
 
 
 def test_fund_profile_collects_holdings_and_manager_style(monkeypatch):
@@ -97,6 +98,9 @@ def test_fund_profile_collects_holdings_and_manager_style(monkeypatch):
     assert "科技主题" in profile["style"]["tags"]
     assert "高仓位主动" in profile["style"]["tags"]
     assert "保留机动仓位" in profile["style"]["tags"]
+    assert profile["style"]["taxonomy"]["management_style"] == "主动管理"
+    assert profile["style"]["taxonomy"]["sector"] == "科技"
+    assert profile["style"]["taxonomy"]["exposure_scope"] == "行业主题"
     assert profile["manager"]["name"] == "任桀"
     assert len(profile["top_holdings"]) == 5
 
@@ -154,6 +158,8 @@ def test_fund_profile_prefers_fund_benchmark_theme_over_manager_peer_funds(monke
     assert "被动跟踪" in profile["style"]["tags"]
     assert "被动暴露" in profile["style"]["summary"]
     assert "不是基金经理主动选股" in profile["style"]["selection"]
+    assert profile["style"]["taxonomy"]["vehicle_role"] == "ETF联接"
+    assert profile["style"]["taxonomy"]["share_class"] == "ETF联接C类"
 
 
 def test_fund_profile_does_not_misclassify_a500_due_to_bank_deposit_tail(monkeypatch):
@@ -448,7 +454,22 @@ def test_fund_profile_commodity_etf_treats_cash_as_margin_structure(monkeypatch)
     monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(collector, "get_fund_basic", lambda market="E": pd.DataFrame())  # noqa: ARG005
 
-    profile = collector.collect_profile("159981")
+    profile = collector.collect_profile("159981", asset_type="cn_etf")
     assert "商品/期货跟踪" in profile["style"]["tags"]
     assert "保证金/备付结构" in profile["style"]["tags"]
     assert "不等于主观空仓" in profile["style"]["positioning"]
+    assert profile["style"]["taxonomy"]["product_form"] == "ETF"
+    assert profile["style"]["taxonomy"]["vehicle_role"] == "场内ETF"
+
+
+def test_standard_taxonomy_does_not_treat_etf_suffix_as_f_share_class() -> None:
+    taxonomy = build_standard_fund_taxonomy(
+        name="港股创新药ETF",
+        fund_type="股票型",
+        invest_type="被动指数型",
+        benchmark="中证香港创新药指数收益率(人民币计价)",
+        asset_type="cn_etf",
+    )
+
+    assert taxonomy["product_form"] == "ETF"
+    assert taxonomy["share_class"] == "未分级"

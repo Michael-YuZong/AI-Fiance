@@ -21,6 +21,8 @@ def test_briefing_renderer_outputs_core_sections():
         "macro_asset_rows": [["布伦特原油", "108.860", "+1.00%", "+5.00%", "+10.00%", "冲击", "—"]],
         "overnight_rows": [["美股", "标普500", "5000.00", "-1.20%", "偏弱"]],
         "watchlist_rows": [["561380", "场内价格 2.234", "+1.00%", "+2.00%", "+3.00%", "多头", "66.0 / 30.0", "偏强"]],
+        "a_share_watch_rows": [["1", "宁德时代 (300750)", "新能源", "较强机会", "持有优于追高", "首次建仓 ≤3%"]],
+        "a_share_watch_lines": ["A 股观察池来自 `Tushare 优先` 的全市场快照；初筛池 `60` 只，完整分析 `8` 只。"],
         "core_event_lines": ["**油价跳升**\n  → 原油 -> 通胀预期\n  → 先看防守资产"],
         "theme_tracking_rows": [["电力/电网", "能源冲击", "防守与政策承接共振", "短线交易 / 中线配置", "油价回落则催化降温"]],
         "theme_tracking_lines": ["与主线一致性: 电力/电网 与 1.1 主线吻合。", "与前日对比: 暂无前一日行业跟踪归档，对比项从本次开始记录。"],
@@ -55,6 +57,7 @@ def test_briefing_renderer_outputs_core_sections():
     assert "### 2.3 宏观资产" in rendered
     assert "### 2.4 隔夜外盘" in rendered
     assert "### 2.5 Watchlist" in rendered
+    assert "### 2.6 A股全市场观察池（Tushare 初筛）" in rendered
     assert "### 3.1 核心事件（限3-5条）" in rendered
     assert "### 3.2 行业与主题跟踪（限2-4个方向）" in rendered
     assert "### 3.3 今日日历" in rendered

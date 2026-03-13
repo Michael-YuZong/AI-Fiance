@@ -243,6 +243,68 @@ def _linked_briefing(analysis: Dict[str, Any]) -> str:
     return "—"
 
 
+def _discovery_signal_rows(analysis: Dict[str, Any]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for key, label in (
+        ("technical", "技术面"),
+        ("catalyst", "催化面"),
+        ("relative_strength", "相对强弱"),
+        ("risk", "风险特征"),
+    ):
+        dimension = dict(analysis.get("dimensions", {}).get(key) or {})
+        score = "缺失" if dimension.get("score") is None else f"{dimension.get('score', 0)}/{dimension.get('max_score', 100)}"
+        signal = str(dimension.get("summary") or dimension.get("core_signal") or "—")
+        rows.append([label, score, signal])
+    return rows
+
+
+def _discovery_status_label(candidate: Mapping[str, Any]) -> str:
+    bucket = str(dict(candidate.get("discovery") or {}).get("bucket", "observe"))
+    return "可进入下一步候选" if bucket == "next_step" else "先列入观察"
+
+
+def _render_discovery_candidate(
+    lines: List[str],
+    *,
+    candidate: Dict[str, Any],
+    index: int,
+) -> None:
+    discovery = dict(candidate.get("discovery") or {})
+    rating = dict(candidate.get("rating") or {})
+    lines.extend(
+        [
+            "",
+            f"### {index}. {candidate.get('name', '—')} ({candidate.get('symbol', '—')})  {rating.get('stars', '—')} {rating.get('label', '未评级')}",
+            "",
+            f"- 发现类型: `{discovery.get('driver_type', '未标注')}`",
+            f"- 持有周期: `{discovery.get('horizon_label', '观察期')}`",
+            f"- 当前状态: `{_discovery_status_label(candidate)}`",
+            f"- 为什么能进这层: {discovery.get('next_step_reason', '当前没有额外说明。')}",
+            "",
+            "**为什么今天会被发现**",
+        ]
+    )
+    for item in discovery.get("today_reason_lines", []) or []:
+        lines.append(f"- {item}")
+
+    lines.extend(["", "**当前为什么还没直接进正式推荐**"])
+    for item in discovery.get("blockers", []) or []:
+        lines.append(f"- {item}")
+
+    lines.extend(["", "**下一步怎么接**"])
+    for step in discovery.get("next_steps", []) or []:
+        lines.append(f"- `{step.get('command', '继续观察')}`: {step.get('reason', '继续跟踪。')}")
+
+    lines.extend(["", "**关键信号摘要**"])
+    lines.extend(_table(["维度", "分数", "当前信号"], _discovery_signal_rows(candidate)))
+
+    if discovery.get("data_notes"):
+        lines.extend(["", "**降级 / 数据口径**"])
+        for item in discovery.get("data_notes", []) or []:
+            lines.append(f"- {item}")
+    lines.extend(["", "---"])
+
+
 def _total_dimension_score(analysis: Dict[str, Any]) -> int:
     return int(sum((dimension.get("score") or 0) for dimension in analysis.get("dimensions", {}).values()))
 
@@ -809,45 +871,67 @@ class OpportunityReportRenderer:
     def render_discovery(self, payload: Dict[str, Any]) -> str:
         regime = payload.get("regime", {})
         day_theme = payload.get("day_theme", {})
+        pool_summary = dict(payload.get("pool_summary") or {})
+        ready_candidates = list(payload.get("ready_candidates") or [])
+        observation_candidates = list(payload.get("observation_candidates") or [])
+        coverage = dict(payload.get("data_coverage") or {})
         lines = [
-            f"# 每日机会发现 | {payload['generated_at'][:10]}",
+            f"# 每日发现入口 | {payload['generated_at'][:10]}",
             "",
-            f"> 扫描池: {payload.get('scan_pool', 0)}只标的 | 过门槛: {payload.get('passed_pool', 0)}只 | 当前 Regime: {regime.get('current_regime', 'unknown')} | 今日主线: {day_theme.get('label', '未识别')}",
-            "",
-            f"## TOP {len(payload.get('top', []))} 机会",
+            f"> 扫描池: {payload.get('scan_pool', 0)}只 | 过硬排除: {payload.get('passed_pool', 0)}只 | 当前 Regime: {regime.get('current_regime', 'unknown')} | 今日主线: {day_theme.get('label', '未识别')}",
         ]
-        if not payload.get("top"):
-            lines.append("")
-            lines.append("当前没有达到输出阈值的标的。")
-        for index, analysis in enumerate(payload.get("top", []), start=1):
-            lines.extend(
-                [
-                    "",
-                    f"### {index}. {analysis['name']} ({analysis['symbol']})  {analysis['rating']['stars']} {analysis['rating']['label']}",
-                    "",
-                    "**八维雷达：**",
-                ]
-            )
-            lines.extend(_table(["维度", "得分", "核心信号"], _dimension_rows(analysis)))
-            lines.extend(
-                [
-                    "",
-                    f"**结论：** {analysis['conclusion']}",
-                ]
-            )
-            for risk in analysis["rating"]["warnings"][:2]:
-                lines.append(risk)
-            lines.extend(
-                [
-                    "",
-                    "**建议操作：**",
-                    f"- 加入 watchlist / 继续跟踪，介入条件：{analysis['action']['entry']}",
-                    f"- 建议仓位：{analysis['action']['position']}",
-                    f"- 止损参考：{analysis['action']['stop']}",
-                    "",
-                    "---",
-                ]
-            )
+
+        lines.extend(
+            [
+                "",
+                "## 这轮 discover 在做什么",
+                f"- {pool_summary.get('boundary_note', '当前 discover 只是 pre-screen 入口。')}",
+                f"- {pool_summary.get('scan_scope_note', '当前只扫描 ETF 候选池。')}",
+                f"- 发现模式: `{pool_summary.get('mode_label', payload.get('discovery_mode', '未标注'))}`",
+                f"- 主题过滤: `{payload.get('theme_filter') or '未指定'}`",
+            ]
+        )
+        for item in pool_summary.get("summary_lines", []) or []:
+            lines.append(f"- {item}")
+
+        source_rows = pool_summary.get("source_rows") or []
+        if source_rows:
+            lines.extend(["", "### 扫描池来源"])
+            lines.extend(_table(["来源", "数量"], source_rows))
+
+        sector_rows = pool_summary.get("sector_rows") or []
+        if sector_rows:
+            lines.extend(["", "### 过滤后保留下来的主要方向"])
+            lines.extend(_table(["方向", "数量"], sector_rows))
+
+        lines.extend(["", "### 为什么有些方向没进来"])
+        for item in pool_summary.get("filter_rules", []) or []:
+            lines.append(f"- {item}")
+
+        if coverage:
+            lines.extend(["", "## 数据覆盖与发现口径"])
+            lines.append(f"- 事件/新闻覆盖: {coverage.get('summary', '当前没有可统计样本。')}")
+            lines.append(f"- 当前新闻模式: `{coverage.get('news_mode', 'unknown')}`")
+            lines.append(f"- discovery 解释: {coverage.get('note', '当前没有额外说明。')}")
+
+        lines.extend(["", "## 已足够进入下一步 pick / deep scan 的候选"])
+        if not ready_candidates:
+            lines.append("- 当前没有 ETF 达到下一步候选门槛，本轮更像观察清单而不是正式预备池。")
+        for index, candidate in enumerate(ready_candidates, start=1):
+            _render_discovery_candidate(lines, candidate=candidate, index=index)
+
+        lines.extend(["", "## 只是值得继续观察的发现"])
+        if not observation_candidates:
+            lines.append("- 当前没有额外观察候选；如果只看到上一节，说明本轮有效发现主要集中在可继续深扫的 ETF。")
+        for index, candidate in enumerate(observation_candidates, start=1):
+            _render_discovery_candidate(lines, candidate=candidate, index=index)
+
+        lines.extend(["", "## discover 之后怎么接"])
+        lines.append("- `python -m src.commands.scan <symbol>`: 适合把单个 ETF 展开成完整八维分析和执行计划。")
+        lines.append("- `python -m src.commands.etf_pick <theme>`: 适合同主题 ETF 正式排序，确认谁能进推荐链路。")
+        lines.append("- `python -m src.commands.fund_pick --theme <theme>`: 如果想把同主题场外基金一起纳入候选，就切到 fund pick。")
+        lines.append("- `继续观察`: 当 discover 只亮了单个维度，但技术、催化、主线还没共振时，不要跳过观察期。")
+
         if payload.get("blind_spots"):
             lines.extend(["", "## 数据盲区与降级说明"])
             for item in payload["blind_spots"]:

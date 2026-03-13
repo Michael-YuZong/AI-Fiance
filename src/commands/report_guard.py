@@ -23,9 +23,9 @@ REQUIRED_REVIEW_HEADINGS = (
 DETAILED_FINAL_MARKERS = {
     "stock_pick": ("八维雷达", "催化拆解", "硬排除检查", "风险拆解", "历史相似样本"),
     "stock_analysis": ("## 为什么这么判断", "## 硬检查", "## 分维度详解"),
-    "briefing": ("## 为什么今天这么判断", "## 今天怎么做", "## 重点观察"),
-    "fund_pick": ("## 为什么推荐它", "## 这只基金为什么是这个分", "## 为什么不是另外几只"),
-    "etf_pick": ("## 为什么推荐它", "## 这只ETF为什么是这个分", "## 为什么不是另外几只"),
+    "briefing": ("## 为什么今天这么判断", "## 宏观领先指标", "## 数据完整度", "## 今天怎么做", "## 重点观察", "## 今日A股观察池"),
+    "fund_pick": ("## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只基金为什么是这个分", "## 标准化分类", "## 为什么不是另外几只"),
+    "etf_pick": ("## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只ETF为什么是这个分", "## 标准化分类", "## 关键证据", "## 为什么不是另外几只"),
     "scan": ("## 为什么这么判断", "## 硬检查", "## 分维度详解"),
     "retrospect": ("## 原始决策", "## 为什么当时会做这个决定", "## 后验路径", "## 复盘结论"),
 }
@@ -104,7 +104,14 @@ def load_review_summary(markdown_path: Path) -> ReviewSummary:
 
 def ensure_detailed_final_content(report_type: str, markdown_text: str) -> None:
     required_markers = DETAILED_FINAL_MARKERS.get(report_type, ())
-    missing = [marker for marker in required_markers if marker not in markdown_text]
+    missing = []
+    for marker in required_markers:
+        if isinstance(marker, tuple):
+            if not any(option in markdown_text for option in marker):
+                missing.append(" / ".join(marker))
+            continue
+        if marker not in markdown_text:
+            missing.append(marker)
     if missing:
         raise ReportGuardError(
             "成稿必须是详细解释版，当前内容缺少关键章节: " + "、".join(missing)

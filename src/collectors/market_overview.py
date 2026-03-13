@@ -181,6 +181,7 @@ class MarketOverviewCollector(BaseCollector):
                     f"market_overview:global:{symbol}:v1",
                     yf.Ticker(symbol).history,
                     ttl_hours=2,
+                    prefer_stale=True,
                     period="3mo",
                     interval="1d",
                     auto_adjust=False,

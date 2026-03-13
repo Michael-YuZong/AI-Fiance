@@ -296,64 +296,66 @@ class ChinaMarketCollector(BaseCollector):
         Returns a merged frame of ``fund_basic(market='E')`` and ``fund_daily(trade_date=...)``
         with yuan-denominated turnover and normalized symbol/date fields.
         """
-        latest_trade_date = str(trade_date or self._latest_open_trade_date()).replace("-", "")
-        if not latest_trade_date:
-            return pd.DataFrame()
-
-        cache_key = f"cn_market:ts_etf_universe:v1:{latest_trade_date}"
-        cached = self._load_cache(cache_key, ttl_hours=6)
-        if cached is not None:
-            return cached
-
         basic = self._ts_fund_basic_snapshot("E")
-        daily = self._ts_call("fund_daily", trade_date=latest_trade_date)
         if basic is None or getattr(basic, "empty", False):
             return pd.DataFrame()
-        if daily is None or getattr(daily, "empty", False):
-            return pd.DataFrame()
-
         basic_frame = basic.copy()
-        daily_frame = daily.copy()
+        candidate_dates = [str(trade_date).replace("-", "")] if trade_date else list(reversed(self._recent_open_trade_dates()))
+        for candidate in candidate_dates:
+            latest_trade_date = str(candidate).replace("-", "")
+            if not latest_trade_date:
+                continue
 
-        if "amount" in daily_frame.columns:
-            daily_frame["amount"] = pd.to_numeric(daily_frame["amount"], errors="coerce") * 1000.0
-        if "trade_date" in daily_frame.columns:
-            daily_frame["trade_date"] = daily_frame["trade_date"].map(self._normalize_date_text)
+            cache_key = f"cn_market:ts_etf_universe:v1:{latest_trade_date}"
+            cached = self._load_cache(cache_key, ttl_hours=6)
+            if cached is not None:
+                return cached
 
-        merged = daily_frame.merge(
-            basic_frame,
-            on="ts_code",
-            how="left",
-            suffixes=("", "_basic"),
-        )
-        if merged.empty:
+            daily = self._ts_call("fund_daily", trade_date=latest_trade_date)
+            if daily is None or getattr(daily, "empty", False):
+                continue
+
+            daily_frame = daily.copy()
+            if "amount" in daily_frame.columns:
+                daily_frame["amount"] = pd.to_numeric(daily_frame["amount"], errors="coerce") * 1000.0
+            if "trade_date" in daily_frame.columns:
+                daily_frame["trade_date"] = daily_frame["trade_date"].map(self._normalize_date_text)
+
+            merged = daily_frame.merge(
+                basic_frame,
+                on="ts_code",
+                how="left",
+                suffixes=("", "_basic"),
+            )
+            if merged.empty:
+                continue
+
+            merged["symbol"] = merged["ts_code"].astype(str).str.split(".").str[0]
+            for column in (
+                "pre_close",
+                "open",
+                "high",
+                "low",
+                "close",
+                "change",
+                "pct_chg",
+                "vol",
+                "amount",
+                "issue_amount",
+                "m_fee",
+                "c_fee",
+                "min_amount",
+            ):
+                if column in merged.columns:
+                    merged[column] = pd.to_numeric(merged[column], errors="coerce")
+
+            for column in ("found_date", "list_date", "issue_date", "delist_date"):
+                if column in merged.columns:
+                    merged[column] = merged[column].map(self._normalize_date_text)
+
+            self._save_cache(cache_key, merged)
             return merged
-
-        merged["symbol"] = merged["ts_code"].astype(str).str.split(".").str[0]
-        for column in (
-            "pre_close",
-            "open",
-            "high",
-            "low",
-            "close",
-            "change",
-            "pct_chg",
-            "vol",
-            "amount",
-            "issue_amount",
-            "m_fee",
-            "c_fee",
-            "min_amount",
-        ):
-            if column in merged.columns:
-                merged[column] = pd.to_numeric(merged[column], errors="coerce")
-
-        for column in ("found_date", "list_date", "issue_date", "delist_date"):
-            if column in merged.columns:
-                merged[column] = merged[column].map(self._normalize_date_text)
-
-        self._save_cache(cache_key, merged)
-        return merged
+        return pd.DataFrame()
 
     # ── 指数日 K ──────────────────────────────────────────────
 

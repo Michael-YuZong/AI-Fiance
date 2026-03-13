@@ -167,19 +167,66 @@ def test_opportunity_renderer_discovery_and_compare():
     analysis_a = _sample_analysis("561380", "电网ETF")
     analysis_b = _sample_analysis("159611", "电力ETF")
     analysis_b["rating"] = {"stars": "⭐⭐", "label": "储备机会", "meaning": "单维度亮灯但未共振。", "rank": 2, "warnings": []}
+    analysis_a["discovery"] = {
+        "bucket": "next_step",
+        "driver_type": "主线驱动",
+        "horizon_label": "中线",
+        "today_reason_lines": ["今天把它捞出来，首先是因为电网方向仍在主线里。", "价格和催化至少有两项在发光。"],
+        "next_step_reason": "主线、催化和价格结构至少有两项共振，已经够资格进入下一步候选。",
+        "blockers": ["discover 当前只是 pre-screen 入口，还没经过 ETF pick 的同池排序、回看和发布门禁。", "短线位置不算低。"],
+        "next_steps": [
+            {"command": "python -m src.commands.scan 561380", "reason": "先展开单标的八维分析。"},
+            {"command": "python -m src.commands.etf_pick 电网", "reason": "放回同主题 ETF 池里正式排序。"},
+            {"command": "python -m src.commands.fund_pick --theme 电网", "reason": "如果要把场外基金一起筛。"},
+        ],
+        "data_notes": ["催化面存在降级，当前更多依赖结构化事件。"],
+    }
+    analysis_b["discovery"] = {
+        "bucket": "observe",
+        "driver_type": "趋势驱动",
+        "horizon_label": "观察期",
+        "today_reason_lines": ["今天把它捞出来，主要因为走势没有完全坏掉。"],
+        "next_step_reason": "它现在更像观察发现：有一条线索在亮，但还不足以直接进入正式 pick。",
+        "blockers": ["催化不足。"],
+        "next_steps": [{"command": "继续观察", "reason": "先盯验证点。"}],
+        "data_notes": [],
+    }
     payload = {
         "generated_at": "2026-03-09 08:00:00",
         "scan_pool": 20,
         "passed_pool": 8,
         "regime": {"current_regime": "stagflation"},
         "day_theme": {"label": "能源冲击 + 地缘风险"},
+        "theme_filter": "电网",
+        "discovery_mode": "mixed_pool",
+        "pool_summary": {
+            "boundary_note": "当前 discover 只是 pre-screen 入口。",
+            "scan_scope_note": "当前只扫描 ETF 候选池。",
+            "mode_label": "全市场 + watchlist 混合池",
+            "summary_lines": ["本轮最终进入分析 `20` 只 ETF。"],
+            "source_rows": [["Tushare 全市场 ETF 快照", "18"], ["watchlist 回退池", "2"]],
+            "sector_rows": [["电网", "6"], ["黄金", "4"]],
+            "filter_rules": ["池构建阶段会先排掉债券/货币/REIT/低成交额产品。", "本轮额外应用主题过滤 `电网`。"],
+        },
+        "data_coverage": {
+            "summary": "结构化事件覆盖 5/8，高置信直接新闻覆盖 2/8。",
+            "news_mode": "proxy",
+            "note": "当前催化/事件覆盖存在降级，discovery 更适合作为发现线索。",
+        },
         "top": [analysis_a],
+        "ready_candidates": [analysis_a],
+        "observation_candidates": [analysis_b],
         "blind_spots": ["全市场 ETF 扫描池拉取失败，已回退到 watchlist"],
     }
     discovery = OpportunityReportRenderer().render_discovery(payload)
-    assert "# 每日机会发现 | 2026-03-09" in discovery
-    assert "## TOP 1 机会" in discovery
-    assert "**八维雷达：**" in discovery
+    assert "# 每日发现入口 | 2026-03-09" in discovery
+    assert "## 这轮 discover 在做什么" in discovery
+    assert "## 已足够进入下一步 pick / deep scan 的候选" in discovery
+    assert "## 只是值得继续观察的发现" in discovery
+    assert "发现类型: `主线驱动`" in discovery
+    assert "python -m src.commands.etf_pick 电网" in discovery
+    assert "python -m src.commands.fund_pick --theme 电网" in discovery
+    assert "## discover 之后怎么接" in discovery
     assert "## 数据盲区与降级说明" in discovery
 
     compare = OpportunityReportRenderer().render_compare(

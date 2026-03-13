@@ -170,3 +170,23 @@ feeds: []
     items = collector.search_by_keywords(["Tencent", "gaming stakes"], preferred_sources=["Reuters"], limit=4, recent_days=30)
     assert items
     assert "gaming stakes" in items[0]["title"].lower()
+
+
+def test_news_collector_search_by_keywords_can_be_disabled(tmp_path, monkeypatch):
+    config_path = tmp_path / "news.yaml"
+    config_path.write_text(
+        """
+preferences:
+  preferred_sources: ["Reuters"]
+feeds: []
+""".strip(),
+        encoding="utf-8",
+    )
+    collector = NewsCollector({"news_feeds_file": str(config_path), "news_topic_search_enabled": False})
+
+    def fail_cached_call(*args, **kwargs):  # noqa: ANN001, ARG001
+        raise AssertionError("cached_call should not run when topic search is disabled")
+
+    monkeypatch.setattr(collector, "cached_call", fail_cached_call)
+    items = collector.search_by_keywords(["黄金", "避险"], preferred_sources=["Reuters"], limit=4, recent_days=30)
+    assert items == []

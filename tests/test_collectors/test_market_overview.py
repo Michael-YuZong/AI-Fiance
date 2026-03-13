@@ -51,3 +51,22 @@ def test_market_overview_domestic_indices_try_sh_before_sz_for_000_prefix(monkey
     assert len(rows) == 1
     assert rows[0]["symbol"] == "000300"
     assert rows[0]["latest"] == 10.0
+
+
+def test_market_overview_global_indices_prefer_stale_cache(monkeypatch, tmp_path):
+    collector = MarketOverviewCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    collector._save_cache("market_overview:global:^GSPC:v1", pd.DataFrame([{"Close": [5000, 5050]}]))
+
+    calls = []
+
+    def fake_cached_call(cache_key, fetcher, *args, **kwargs):  # noqa: ANN001
+        calls.append({"cache_key": cache_key, "prefer_stale": kwargs.get("prefer_stale")})
+        return pd.DataFrame({"Close": [5000.0, 5050.0]})
+
+    monkeypatch.setattr(collector, "cached_call", fake_cached_call)
+
+    rows = collector._collect_global([{"symbol": "^GSPC", "market": "美股", "name": "标普500"}])
+
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "^GSPC"
+    assert calls[0]["prefer_stale"] is True

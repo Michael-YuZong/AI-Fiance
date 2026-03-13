@@ -4,15 +4,26 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
+from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery, summarize_pick_coverage
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
 from src.commands.release_check import check_generic_client_report
 from src.output import ClientReportRenderer, OpportunityReportRenderer
 from src.output.client_report import _fund_profile_sections
-from src.processors.opportunity_engine import discover_opportunities
+from src.processors.opportunity_engine import _client_safe_issue, analyze_opportunity, build_market_context, discover_opportunities
+from src.utils.fund_taxonomy import taxonomy_from_analysis, taxonomy_rows
 from src.utils.config import load_config, resolve_project_path
+from src.utils.data import load_watchlist
 from src.utils.logger import setup_logger
+
+SNAPSHOT_PATH = resolve_project_path("data/etf_pick_score_history.json")
+MODEL_VERSION = "etf-pick-2026-03-13-coverage-history-v2"
+MODEL_CHANGELOG = [
+    "ETF 推荐现在记录同日基准版和重跑快照，后续重跑会展示分数变化而不是静态覆盖旧稿。",
+    "催化面在新闻/事件覆盖降级时会按最近一次有效快照做衰减回退，避免把 ETF 催化打成假阴性。",
+    "客户稿和内部详细稿都会披露扫描池来源、覆盖率和分母定义，外审门禁同步要求这些章节存在。",
+]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,6 +85,15 @@ def _rank_score(analysis: Dict[str, Any]) -> float:
     )
 
 
+def _rank_key(analysis: Mapping[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        float(int(analysis.get("rating", {}).get("rank", 0) or 0)),
+        _rank_score(dict(analysis)),
+        _score_of(dict(analysis), "relative_strength"),
+        _score_of(dict(analysis), "catalyst"),
+    )
+
+
 def _winner_reason_lines(analysis: Dict[str, Any]) -> List[str]:
     narrative = dict(analysis.get("narrative") or {})
     reasons: List[str] = []
@@ -125,12 +145,130 @@ def _positioning_lines(analysis: Dict[str, Any]) -> List[str]:
     ]
 
 
+def _discovery_mode_label(mode: str) -> str:
+    return {
+        "tushare_universe": "Tushare 全市场快照",
+        "realtime_universe": "实时全市场快照",
+        "watchlist_fallback": "watchlist 回退",
+        "mixed_pool": "混合池",
+    }.get(str(mode), str(mode) or "未标注")
+
+
+def _selection_context(
+    *,
+    discovery_mode: str,
+    scan_pool: int,
+    passed_pool: int,
+    theme_filter: str = "",
+    blind_spots: Sequence[str] | None = None,
+    coverage: Mapping[str, Any] | None = None,
+    model_version: str = "",
+    baseline_snapshot_at: str = "",
+    is_daily_baseline: bool = False,
+    comparison_basis_at: str = "",
+    comparison_basis_label: str = "",
+    model_version_warning: str = "",
+    delivery_tier: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    coverage_payload = dict(coverage or {})
+    delivery = dict(delivery_tier or {})
+    total = int(coverage_payload.get("total") or passed_pool or 0)
+    coverage_lines = []
+    if total:
+        coverage_lines.append(
+            f"结构化事件覆盖 {coverage_payload.get('structured_rate', 0.0) * 100:.0f}%（{int(round(coverage_payload.get('structured_rate', 0.0) * total))}/{total}）"
+        )
+        coverage_lines.append(
+            f"高置信直接新闻覆盖 {coverage_payload.get('direct_news_rate', 0.0) * 100:.0f}%（{int(round(coverage_payload.get('direct_news_rate', 0.0) * total))}/{total}）"
+        )
+    return {
+        "discovery_mode": discovery_mode,
+        "discovery_mode_label": _discovery_mode_label(discovery_mode),
+        "scan_pool": int(scan_pool),
+        "passed_pool": int(passed_pool),
+        "theme_filter_label": theme_filter or "未指定",
+        "blind_spots": [str(item).strip() for item in (blind_spots or []) if str(item).strip()],
+        "coverage_note": coverage_payload.get("note", ""),
+        "coverage_lines": coverage_lines,
+        "coverage_total": total,
+        "model_version": model_version,
+        "baseline_snapshot_at": baseline_snapshot_at,
+        "is_daily_baseline": bool(is_daily_baseline),
+        "comparison_basis_at": comparison_basis_at,
+        "comparison_basis_label": comparison_basis_label,
+        "model_version_warning": model_version_warning,
+        "delivery_tier_code": str(delivery.get("code", "")),
+        "delivery_tier_label": str(delivery.get("label", "未标注")),
+        "delivery_observe_only": bool(delivery.get("observe_only")),
+        "delivery_notes": [str(item).strip() for item in delivery.get("notes", []) if str(item).strip()],
+    }
+
+
 def _detail_output_path(generated_at: str, theme: str) -> Path:
     date_str = generated_at[:10]
     base = resolve_project_path("reports/etf_picks/internal")
     if theme:
         return base / f"etf_pick_{theme}_{date_str}_internal_detail.md"
     return base / f"etf_pick_{date_str}_internal_detail.md"
+
+
+def _watchlist_fallback_payload(
+    config: Mapping[str, Any],
+    *,
+    top_n: int,
+    theme_filter: str,
+) -> Dict[str, Any]:
+    lowered_filter = str(theme_filter or "").strip().lower()
+    pool = [
+        item
+        for item in load_watchlist()
+        if str(item.get("asset_type", "")).strip() == "cn_etf"
+        and (
+            not lowered_filter
+            or lowered_filter in str(item.get("name", "")).lower()
+            or lowered_filter in str(item.get("sector", "")).lower()
+        )
+    ]
+    context = build_market_context(config, relevant_asset_types=["cn_etf", "futures"])
+    coverage_analyses: List[Dict[str, Any]] = []
+    analyses: List[Dict[str, Any]] = []
+    blind_spots = ["全市场 ETF 快照没有形成可交付候选，已回退到 ETF watchlist。"]
+    passed = 0
+    for item in pool:
+        try:
+            analysis = analyze_opportunity(
+                str(item["symbol"]),
+                str(item.get("asset_type", "cn_etf")),
+                config,
+                context=context,
+                metadata_override={
+                    "name": str(item.get("name", item["symbol"])),
+                    "sector": str(item.get("sector", "综合")),
+                    "chain_nodes": list(item.get("chain_nodes") or []),
+                    "region": str(item.get("region", "CN")),
+                    "in_watchlist": True,
+                },
+            )
+        except Exception as exc:
+            blind_spots.append(_client_safe_issue(f"{item['symbol']} ({item.get('name', item['symbol'])}) 扫描失败", exc))
+            continue
+        if analysis["excluded"]:
+            continue
+        passed += 1
+        coverage_analyses.append(analysis)
+        if analysis["rating"]["rank"] > 0:
+            analyses.append(analysis)
+    analyses.sort(key=_rank_key, reverse=True)
+    return {
+        "generated_at": str(analyses[0].get("generated_at", "")) if analyses else "",
+        "scan_pool": len(pool),
+        "passed_pool": passed,
+        "top": analyses[:top_n],
+        "blind_spots": blind_spots,
+        "discovery_mode": "watchlist_fallback",
+        "data_coverage": summarize_pick_coverage(coverage_analyses),
+        "coverage_analyses": coverage_analyses,
+    }
 
 
 def _candidate_summary_rows(analyses: Sequence[Dict[str, Any]]) -> List[List[str]]:
@@ -149,23 +287,45 @@ def _candidate_summary_rows(analyses: Sequence[Dict[str, Any]]) -> List[List[str
     return rows
 
 
-def _detail_markdown(analyses: Sequence[Dict[str, Any]], winner_symbol: str, blind_spots: Sequence[str] | None = None) -> str:
-    ranked = sorted(
-        analyses,
-        key=lambda item: (
-            -int(item.get("rating", {}).get("rank", 0) or 0),
-            -_rank_score(item),
-        ),
-    )
+def _detail_markdown(
+    analyses: Sequence[Dict[str, Any]],
+    winner_symbol: str,
+    *,
+    selection_context: Mapping[str, Any] | None = None,
+) -> str:
+    ranked = sorted(analyses, key=_rank_key, reverse=True)
     winner = next((item for item in ranked if str(item.get("symbol", "")) == winner_symbol), ranked[0])
     alternatives = [item for item in ranked if str(item.get("symbol", "")) != str(winner_symbol)]
     generated_at = str(winner.get("generated_at", ""))[:10]
+    selection = dict(selection_context or {})
     lines = [
         f"# 今日ETF推荐内部详细稿 | {generated_at}",
         "",
-        "## 候选池摘要",
-        "",
+        f"- 交付等级: `{selection.get('delivery_tier_label', '未标注')}`",
+        f"- 发现方式: `{selection.get('discovery_mode_label', '未标注')}`",
+        f"- 初筛池: `{selection.get('scan_pool', len(analyses))}`",
+        f"- 完整分析: `{selection.get('passed_pool', len(analyses))}`",
+        f"- 主题过滤: `{selection.get('theme_filter_label', '未指定')}`",
     ]
+    if selection.get("model_version"):
+        lines.append(f"- 模型版本: `{selection.get('model_version')}`")
+    if selection.get("baseline_snapshot_at"):
+        lines.append(f"- 当日基准版: `{selection.get('baseline_snapshot_at')}`")
+    if selection.get("comparison_basis_at"):
+        lines.append(f"- 分数变动对比基准: `{selection.get('comparison_basis_label', '对比基准')} {selection.get('comparison_basis_at')}`")
+    lines.extend(["", "## 数据完整度", ""])
+    for item in selection.get("delivery_notes", [])[:4]:
+        lines.append(f"- {item}")
+    if selection.get("coverage_note"):
+        lines.append(f"- {selection.get('coverage_note')}")
+    for item in selection.get("coverage_lines", [])[:2]:
+        lines.append(f"- {item}")
+    if selection.get("model_version_warning"):
+        lines.append(f"- 口径提示: {selection.get('model_version_warning')}")
+    if selection.get("blind_spots"):
+        for item in selection.get("blind_spots", [])[:4]:
+            lines.append(f"- {item}")
+    lines.extend(["", "## 候选池摘要", ""])
     lines.extend(_table(["标的", "评级", "排序分", "交易状态"], _candidate_summary_rows(ranked[:5])))
     lines.extend(
         [
@@ -176,35 +336,45 @@ def _detail_markdown(analyses: Sequence[Dict[str, Any]], winner_symbol: str, bli
             f"- 中选依据：当前候选里评级与综合排序分最优，且客户稿引用的维度分数将直接对齐这份详细稿。",
         ]
     )
-    if blind_spots:
-        lines.extend(["", "## 数据盲区与降级说明", ""])
-        for item in blind_spots:
-            text = str(item).strip()
-            if text:
-                lines.append(f"- {text}")
+    if winner.get("score_changes"):
+        lines.extend(["", "## 相对基准版的变化", ""])
+        for item in winner.get("score_changes", [])[:4]:
+            lines.append(f"- `{item.get('label', '维度')}` `{item.get('previous', '—')}` -> `{item.get('current', '—')}`：{item.get('reason', '')}")
+    taxonomy = taxonomy_from_analysis(winner)
+    lines.extend(["", "## 标准化分类", ""])
+    lines.extend(_table(["维度", "结果"], taxonomy_rows(taxonomy)))
+    lines.extend(["", f"- {taxonomy.get('summary', '当前分类只作为产品标签，不替代净值、持仓和交易判断。')}"])
     if alternatives:
         lines.extend(["", "## 未中选候选", ""])
         for item in alternatives[:2]:
             lines.append(f"- `{item.get('name', '—')} ({item.get('symbol', '—')})` 保留观察，但当前排序落后于中选标的。")
+    if selection.get("blind_spots"):
+        lines.extend(["", "## 数据盲区与降级说明", ""])
+        for item in selection.get("blind_spots", [])[:5]:
+            text = str(item).strip()
+            if text:
+                lines.append(f"- {text}")
     lines.extend(["", "## 中选标的详细分析", ""])
     lines.append(OpportunityReportRenderer().render_scan(dict(winner)).rstrip())
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], blind_spots: Sequence[str] | None = None) -> Dict[str, Any]:
+def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
     if not analyses:
         raise ValueError("No ETF analyses available")
-    ranked = sorted(
-        analyses,
-        key=lambda item: (
-            -int(item.get("rating", {}).get("rank", 0) or 0),
-            -_rank_score(item),
-        ),
-    )
+    ranked = sorted(analyses, key=_rank_key, reverse=True)
     winner = ranked[0]
     alternatives = ranked[1:3]
+    evidence = list(dict(winner.get("dimensions", {}).get("catalyst") or {}).get("evidence") or [])
+    if not evidence:
+        coverage = dict(dict(winner.get("dimensions", {}).get("catalyst") or {}).get("coverage") or {})
+        summary = "当前没有抓到高置信直连证据，催化判断更多依赖结构化事件或行业映射。"
+        if coverage.get("fallback_applied"):
+            summary = "当前实时新闻覆盖不足，本次催化分已按最近一次有效信号做衰减回退，不把临时缺数误当成利空。"
+        evidence = [{"title": summary, "source": "内部覆盖率摘要"}]
     return {
         "generated_at": str(winner.get("generated_at", "")),
+        "selection_context": dict(selection_context or {}),
         "winner": {
             "name": winner.get("name"),
             "symbol": winner.get("symbol"),
@@ -213,8 +383,13 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], blind_spots: Sequ
             "dimension_rows": _dimension_rows(winner),
             "action": dict(winner.get("action") or {}),
             "positioning_lines": _positioning_lines(winner),
-            "evidence": list(dict(winner.get("dimensions", {}).get("catalyst") or {}).get("evidence") or []),
+            "evidence": evidence,
             "fund_sections": _fund_profile_sections(winner),
+            "taxonomy_rows": taxonomy_rows(taxonomy_from_analysis(winner)),
+            "taxonomy_summary": str(taxonomy_from_analysis(winner).get("summary", "")),
+            "score_changes": list(winner.get("score_changes") or []),
+            "comparison_basis_label": str(winner.get("comparison_basis_label", "")),
+            "comparison_snapshot_at": str(winner.get("comparison_snapshot_at", "")),
         },
         "alternatives": [
             {
@@ -224,7 +399,7 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], blind_spots: Sequ
             }
             for item in alternatives
         ],
-        "notes": [str(item).strip() for item in (blind_spots or []) if str(item).strip()],
+        "notes": [str(item).strip() for item in (dict(selection_context or {}).get("blind_spots") or []) if str(item).strip()],
     }
 
 
@@ -234,10 +409,46 @@ def main() -> None:
     setup_logger("ERROR")
     config = load_config(args.config or None)
     payload = discover_opportunities(config, top_n=max(args.top, 5), theme_filter=args.theme.strip())
+    if not list(payload.get("top") or []):
+        payload = _watchlist_fallback_payload(
+            config,
+            top_n=max(args.top, 5),
+            theme_filter=args.theme.strip(),
+        )
+    payload = enrich_pick_payload_with_score_history(
+        payload,
+        scope=f"theme:{args.theme.strip() or '*'}",
+        snapshot_path=SNAPSHOT_PATH,
+        model_version=MODEL_VERSION,
+        model_changelog=MODEL_CHANGELOG,
+        rank_key=_rank_key,
+    )
     analyses = list(payload.get("top") or [])
     if not analyses:
         raise SystemExit("当前 ETF 推荐池没有可用候选，请稍后重试或放宽主题过滤。")
-    client_payload = _payload_from_analyses(analyses, blind_spots=payload.get("blind_spots") or [])
+    delivery_tier = grade_pick_delivery(
+        report_type="etf_pick",
+        discovery_mode=str(payload.get("discovery_mode", "")),
+        coverage=payload.get("pick_coverage") or payload.get("data_coverage") or {},
+        scan_pool=int(payload.get("scan_pool") or 0),
+        passed_pool=int(payload.get("passed_pool") or 0),
+    )
+    selection_context = _selection_context(
+        discovery_mode=str(payload.get("discovery_mode", "")),
+        scan_pool=int(payload.get("scan_pool") or 0),
+        passed_pool=int(payload.get("passed_pool") or 0),
+        theme_filter=args.theme.strip(),
+        blind_spots=payload.get("blind_spots") or [],
+        coverage=payload.get("pick_coverage") or payload.get("data_coverage") or summarize_pick_coverage(analyses),
+        model_version=str(payload.get("model_version", "")),
+        baseline_snapshot_at=str(payload.get("baseline_snapshot_at", "")),
+        is_daily_baseline=bool(payload.get("is_daily_baseline")),
+        comparison_basis_at=str(payload.get("comparison_basis_at", "")),
+        comparison_basis_label=str(payload.get("comparison_basis_label", "")),
+        model_version_warning=str(payload.get("model_version_warning", "")),
+        delivery_tier=delivery_tier,
+    )
+    client_payload = _payload_from_analyses(analyses, selection_context=selection_context)
     markdown = ClientReportRenderer().render_etf_pick(client_payload)
     if not args.client_final:
         print(markdown)
@@ -249,7 +460,7 @@ def main() -> None:
     detail_markdown = _detail_markdown(
         analyses,
         str(dict(client_payload.get("winner") or {}).get("symbol", "")),
-        blind_spots=payload.get("blind_spots") or [],
+        selection_context=selection_context,
     )
     detail_path = _detail_output_path(str(client_payload.get("generated_at", "")), theme)
     detail_path.parent.mkdir(parents=True, exist_ok=True)
@@ -265,6 +476,11 @@ def main() -> None:
                 "theme_filter": args.theme.strip(),
                 "winner": dict(client_payload.get("winner") or {}).get("symbol", ""),
                 "detail_source": str(detail_path),
+                "scan_pool": int(payload.get("scan_pool") or 0),
+                "passed_pool": int(payload.get("passed_pool") or 0),
+                "discovery_mode": str(payload.get("discovery_mode", "")),
+                "delivery_tier": dict(delivery_tier),
+                "data_coverage": dict(payload.get("pick_coverage") or {}),
             },
         )
     except ReportGuardError as exc:

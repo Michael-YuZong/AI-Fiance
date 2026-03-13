@@ -24,6 +24,8 @@ venv/
 data/cache/
 data/investment.db
 data/stock_pick_score_history.json
+data/etf_pick_score_history.json
+data/fund_pick_score_history.json
 
 # Secrets
 .env
@@ -37,3 +39,4 @@ build/
 # Generated reports
 reports/
 scan_*_marktext.pdf.pdf
+tmp/

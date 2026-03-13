@@ -156,6 +156,14 @@ class BriefingRenderer:
             ["标的", "最新价", "1日", "5日", "20日", "趋势", "信号", "简评"],
             payload.get("watchlist_rows", []),
         )
+        _append_table_subsection(
+            lines,
+            "2.6 A股全市场观察池（Tushare 初筛）",
+            ["排名", "标的", "行业", "评级", "当前状态", "首次仓位"],
+            payload.get("a_share_watch_rows", []),
+        )
+        for item in payload.get("a_share_watch_lines", []) or []:
+            lines.append(f"- {item}")
         _append_block(lines, "3. 驱动与催化")
         _append_subsection(lines, "3.1 核心事件（限3-5条）", payload.get("core_event_lines", []))
         _append_table_subsection(

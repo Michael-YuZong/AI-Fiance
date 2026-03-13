@@ -152,7 +152,7 @@ def test_market_cn_ts_etf_daily_scales_amount_to_yuan(monkeypatch, tmp_path):
 
 def test_market_cn_etf_universe_snapshot_merges_basic_and_daily(monkeypatch, tmp_path):
     collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
-    monkeypatch.setattr(collector, "_latest_open_trade_date", lambda *args, **kwargs: "20260312")
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda *args, **kwargs: ["20260312"])
     monkeypatch.setattr(
         collector,
         "_ts_fund_basic_snapshot",
@@ -203,6 +203,66 @@ def test_market_cn_etf_universe_snapshot_merges_basic_and_daily(monkeypatch, tmp
     assert row["trade_date"] == "2026-03-12"
     assert float(row["amount"]) == 238_000_000.0
     assert row["benchmark"] == "上证红利指数收益率"
+
+
+def test_market_cn_etf_universe_snapshot_falls_back_to_previous_open_day_when_latest_empty(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda *args, **kwargs: ["20260311", "20260312", "20260313"])
+    monkeypatch.setattr(
+        collector,
+        "_ts_fund_basic_snapshot",
+        lambda market="E": pd.DataFrame(
+            [
+                {
+                    "ts_code": "513120.SH",
+                    "name": "港股创新药ETF",
+                    "management": "广发基金",
+                    "fund_type": "股票型",
+                    "found_date": "20220701",
+                    "list_date": "20220708",
+                    "benchmark": "中证香港创新药指数收益率(人民币计价)",
+                    "status": "L",
+                    "invest_type": "被动指数型",
+                    "delist_date": None,
+                }
+            ]
+        ),
+    )
+
+    seen_dates: list[str] = []
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "fund_daily"
+        trade_date = str(kwargs.get("trade_date"))
+        seen_dates.append(trade_date)
+        if trade_date == "20260313":
+            return pd.DataFrame()
+        if trade_date == "20260312":
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "513120.SH",
+                        "trade_date": "20260312",
+                        "pre_close": 1.22,
+                        "open": 1.23,
+                        "high": 1.25,
+                        "low": 1.20,
+                        "close": 1.21,
+                        "change": -0.01,
+                        "pct_chg": -0.82,
+                        "vol": 123456.0,
+                        "amount": 45678.0,
+                    }
+                ]
+            )
+        return pd.DataFrame()
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    frame = collector.get_etf_universe_snapshot()
+
+    assert seen_dates[:2] == ["20260313", "20260312"]
+    assert not frame.empty
+    assert frame.iloc[0]["trade_date"] == "2026-03-12"
 
 
 def test_market_cn_unlock_pressure_flags_large_near_term_share_float(monkeypatch, tmp_path):

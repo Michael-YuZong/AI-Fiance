@@ -33,6 +33,7 @@ from src.processors.signal_confidence import build_signal_confidence
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.utils.config import detect_asset_type, resolve_project_path
 from src.utils.data import load_watchlist, load_yaml
+from src.utils.fund_taxonomy import build_standard_fund_taxonomy
 from src.utils.market import (
     build_snapshot_fallback_history,
     build_intraday_snapshot,
@@ -466,11 +467,11 @@ def _merge_metadata(
     return merged
 
 
-def _collect_fund_profile(symbol: str, config: Mapping[str, Any]) -> Dict[str, Any]:
+def _collect_fund_profile(symbol: str, asset_type: str, config: Mapping[str, Any]) -> Dict[str, Any]:
     if not symbol:
         return {}
     try:
-        return FundProfileCollector(config).collect_profile(symbol)
+        return FundProfileCollector(config).collect_profile(symbol, asset_type=asset_type)
     except Exception:
         return {}
 
@@ -494,6 +495,12 @@ def _enrich_metadata_with_fund_profile(metadata: Dict[str, Any], fund_profile: M
     if tags:
         enriched["fund_style_tags"] = tags
         enriched["is_passive_fund"] = "被动跟踪" in tags
+    taxonomy = dict(style.get("taxonomy") or {})
+    if taxonomy:
+        enriched["fund_taxonomy"] = taxonomy
+        enriched["fund_taxonomy_labels"] = list(taxonomy.get("labels") or [])
+        enriched["fund_management_style"] = str(taxonomy.get("management_style", ""))
+        enriched["fund_exposure_scope"] = str(taxonomy.get("exposure_scope", ""))
     benchmark = str(overview.get("业绩比较基准", "")).strip()
     if benchmark:
         enriched["benchmark"] = benchmark
@@ -5193,7 +5200,7 @@ def analyze_opportunity(
     runtime_context = dict(context or build_market_context(config, relevant_asset_types=[asset_type, "cn_etf", "futures"]))
     runtime_context["config"] = dict(config)
     metadata = _merge_metadata(symbol, asset_type, metadata_override, config)
-    fund_profile = _collect_fund_profile(symbol, config) if asset_type in {"cn_fund", "cn_etf"} else {}
+    fund_profile = _collect_fund_profile(symbol, asset_type, config) if asset_type in {"cn_fund", "cn_etf"} else {}
     runtime_context["fund_profile"] = fund_profile
     if fund_profile:
         metadata = _enrich_metadata_with_fund_profile(metadata, fund_profile)
@@ -5431,6 +5438,14 @@ def _matches_fund_style_filter(row: Mapping[str, Any], style_filter: str) -> boo
     style = str(style_filter or "").strip().lower()
     if style in {"", "all"}:
         return True
+    normalized_management = str(row.get("_management_style", "") or row.get("management_style", "")).strip()
+    normalized_scope = str(row.get("_exposure_scope", "") or row.get("exposure_scope", "")).strip()
+    if style == "index" and normalized_management:
+        return normalized_management in {"被动跟踪", "指数增强"}
+    if style == "active" and normalized_management:
+        return normalized_management == "主动管理"
+    if style == "commodity" and normalized_scope:
+        return normalized_scope == "商品"
     combined = " ".join(
         [
             str(row.get("fund_type", "") or "").strip(),
@@ -5512,8 +5527,32 @@ def build_fund_pool(
     excluded_pattern = "债券|货币|理财|fof|reits|reit|现金|短债|纯债|同业存单|政金债|国债|信用债|可转债"
     working = working[~working["_composite_text"].str.contains(excluded_pattern, na=False, regex=True)]
 
+    taxonomy_payload = working.apply(
+        lambda row: build_standard_fund_taxonomy(
+            name=str(row.get("_name", "")),
+            fund_type=str(row.get("fund_type", "") or ""),
+            invest_type=str(row.get("invest_type", "") or ""),
+            benchmark=str(row.get("benchmark", "") or ""),
+            asset_type="cn_fund",
+        ),
+        axis=1,
+    )
+    working["_taxonomy"] = taxonomy_payload
+    working["_management_style"] = taxonomy_payload.map(lambda item: str(item.get("management_style", "")))
+    working["_exposure_scope"] = taxonomy_payload.map(lambda item: str(item.get("exposure_scope", "")))
+    working["_taxonomy_labels"] = taxonomy_payload.map(lambda item: " ".join(str(label) for label in item.get("labels", [])))
+    working["_filter_text"] = (
+        working["_composite_text"]
+        + " "
+        + working["_taxonomy_labels"].fillna("").astype(str).str.lower()
+        + " "
+        + working["_management_style"].fillna("").astype(str).str.lower()
+        + " "
+        + working["_exposure_scope"].fillna("").astype(str).str.lower()
+    )
+
     if lowered_filter:
-        working = working[working["_composite_text"].str.contains(lowered_filter, na=False)]
+        working = working[working["_filter_text"].str.contains(lowered_filter, na=False)]
     if str(style_filter).strip():
         style_mask = (
             working.apply(lambda row: _matches_fund_style_filter(row, style_filter), axis=1)
@@ -5529,10 +5568,12 @@ def build_fund_pool(
         )
         working = working[manager_mask]
 
-    working["_theme_text"] = working["_composite_text"].map(_fund_theme_text)
-    sector_payload = working["_theme_text"].map(lambda text: _normalize_sector(text))
-    working["_sector"] = sector_payload.map(lambda item: item[0])
-    working["_chain_nodes"] = sector_payload.map(lambda item: item[1])
+    working["_sector"] = working["_taxonomy"].map(
+        lambda item: item.get("sector", "综合") if isinstance(item, Mapping) else "综合"
+    )
+    working["_chain_nodes"] = working["_taxonomy"].map(
+        lambda item: item.get("chain_nodes", list(DEFAULT_CHAIN_NODES)) if isinstance(item, Mapping) else list(DEFAULT_CHAIN_NODES)
+    )
     working = working[working["_sector"] != "综合"]
 
     if working.empty:
@@ -5604,6 +5645,7 @@ def build_fund_pool(
                     "management": str(row.get("management", "") or ""),
                     "found_date": "" if pd.isna(row.get("_found_date")) else str(pd.Timestamp(row["_found_date"]).date()),
                     "issue_amount": float(row.get("_issue_amount", 0.0) or 0.0),
+                    "taxonomy": dict(row.get("_taxonomy") or {}) if isinstance(row.get("_taxonomy"), Mapping) else {},
                 },
             )
         )
@@ -5612,106 +5654,223 @@ def build_fund_pool(
     return pool, warnings
 
 
-def build_default_pool(config: Mapping[str, Any], theme_filter: str = "") -> tuple[List[PoolItem], List[str]]:
+def build_default_pool(
+    config: Mapping[str, Any],
+    theme_filter: str = "",
+    *,
+    preferred_sectors: Optional[Sequence[str]] = None,
+) -> tuple[List[PoolItem], List[str]]:
     warnings: List[str] = []
     watchlist = load_watchlist()
+    etf_watchlist = [item for item in watchlist if str(item.get("asset_type", "")).strip() == "cn_etf"]
     pool: List[PoolItem] = []
     seen: set[str] = set()
     opportunity_cfg = dict(config).get("opportunity", {})
     min_turnover = float(opportunity_cfg.get("min_turnover", 50_000_000))
     max_candidates = int(opportunity_cfg.get("max_scan_candidates", 30))
     lowered_filter = theme_filter.lower().strip()
+    preferred = [str(item).strip() for item in (preferred_sectors or []) if str(item).strip()]
+
+    def _extend_pool_from_frame(frame: pd.DataFrame, source: str) -> int:
+        amount_col = "amount" if "amount" in frame.columns else None
+        name_col = "name" if "name" in frame.columns else None
+        symbol_col = "symbol" if "symbol" in frame.columns else None
+        benchmark_col = "benchmark" if "benchmark" in frame.columns else None
+        if not amount_col or not name_col or not symbol_col:
+            return 0
+
+        working = frame.copy()
+        working[amount_col] = pd.to_numeric(working[amount_col], errors="coerce").fillna(0.0)
+        working = working[working[amount_col] >= min_turnover]
+        if working.empty:
+            return 0
+
+        if "list_date" in working.columns:
+            latest_trade_date = str(working["trade_date"].iloc[0]).replace("-", "") if "trade_date" in working.columns and not working.empty else ""
+            if latest_trade_date:
+                working = working[
+                    working["list_date"].fillna("").astype(str).str.replace("-", "").le(latest_trade_date)
+                ]
+        if "delist_date" in working.columns:
+            working = working[
+                working["delist_date"].fillna("").astype(str).eq("")
+                | working["delist_date"].fillna("").astype(str).str.lower().eq("nan")
+            ]
+
+        is_etf_like = (
+            working[name_col].astype(str).str.contains("ETF", case=False, na=False)
+            | working.get("benchmark", pd.Series("", index=working.index)).fillna("").astype(str).str.contains("指数|收益率|商品|期货", na=False)
+            | working.get("invest_type", pd.Series("", index=working.index)).fillna("").astype(str).str.contains("指数|被动|增强|QDII", na=False)
+        )
+        working = working[is_etf_like]
+        if working.empty:
+            return 0
+
+        composite_text = working[name_col].astype(str)
+        if benchmark_col:
+            composite_text = composite_text + " " + working[benchmark_col].fillna("").astype(str)
+        if "invest_type" in working.columns:
+            composite_text = composite_text + " " + working["invest_type"].fillna("").astype(str)
+
+        excluded_keywords = ("债", "货币", "国债", "政金", "现金", "利率", "短融", "同业存单", "信用债", "可转债")
+        working = working[~composite_text.str.contains("|".join(excluded_keywords), na=False)]
+        if working.empty:
+            return 0
+
+        taxonomy_payload = working.apply(
+            lambda row: build_standard_fund_taxonomy(
+                name=str(row.get(name_col, "")),
+                fund_type=str(row.get("fund_type", "") or ""),
+                invest_type=str(row.get("invest_type", "") or ""),
+                benchmark=str(row.get("benchmark", "") or ""),
+                asset_type="cn_etf",
+            ),
+            axis=1,
+        )
+        working["_taxonomy"] = taxonomy_payload
+        working["_sector"] = taxonomy_payload.map(lambda item: str(item.get("sector", "综合")))
+        working["_chain_nodes"] = taxonomy_payload.map(lambda item: list(item.get("chain_nodes") or []) or list(DEFAULT_CHAIN_NODES))
+        working["_management_style"] = taxonomy_payload.map(lambda item: str(item.get("management_style", "")))
+        working["_exposure_scope"] = taxonomy_payload.map(lambda item: str(item.get("exposure_scope", "")))
+        working["_taxonomy_labels"] = taxonomy_payload.map(lambda item: " ".join(str(label) for label in item.get("labels", [])))
+        working["_filter_text"] = (
+            composite_text.fillna("").astype(str).str.lower()
+            + " "
+            + working["_taxonomy_labels"].fillna("").astype(str).str.lower()
+            + " "
+            + working["_management_style"].fillna("").astype(str).str.lower()
+            + " "
+            + working["_exposure_scope"].fillna("").astype(str).str.lower()
+        )
+        if lowered_filter:
+            working = working[working["_filter_text"].str.contains(lowered_filter, na=False)]
+        if working.empty:
+            return 0
+
+        working["_tracking_key"] = working.get("benchmark", pd.Series("", index=working.index)).fillna("").astype(str).str.strip().str.lower()
+        working["_tracking_key"] = working["_tracking_key"].where(working["_tracking_key"] != "", working[name_col].fillna("").astype(str).str.strip().str.lower())
+        working["_list_date"] = pd.to_datetime(working.get("list_date"), errors="coerce")
+        working["_in_watchlist"] = working[symbol_col].astype(str).map(lambda symbol: any(item["symbol"] == symbol for item in etf_watchlist))
+
+        def _pre_rank(row: Mapping[str, Any]) -> float:
+            score = 0.0
+            sector = str(row.get("_sector", "")).strip()
+            if sector in preferred:
+                score += 80.0 - float(preferred.index(sector)) * 5.0
+            score += 10.0 if sector != "综合" else 0.0
+            management_style = str(row.get("_management_style", "")).strip()
+            if management_style == "指数增强":
+                score += 12.0
+            elif management_style == "被动跟踪":
+                score += 8.0
+            exposure_scope = str(row.get("_exposure_scope", "")).strip()
+            if exposure_scope in {"行业主题", "商品"}:
+                score += 6.0
+            elif exposure_scope == "宽基":
+                score += 4.0
+            score += min(float(row.get(amount_col, 0.0) or 0.0) / 100_000_000.0, 20.0)
+            if pd.notna(row.get("_list_date")):
+                listed_days = max((pd.Timestamp(datetime.now()) - pd.Timestamp(row["_list_date"])).days, 0)
+                if listed_days >= 365:
+                    score += 8.0
+                elif listed_days >= 180:
+                    score += 4.0
+            if bool(row.get("_in_watchlist")):
+                score += 3.0
+            return score
+
+        working["_pre_rank"] = working.apply(_pre_rank, axis=1)
+        working = working.sort_values(by=["_tracking_key", "_pre_rank", amount_col], ascending=[True, False, False])
+        working = working.drop_duplicates(subset=["_tracking_key"], keep="first")
+        working = working.sort_values(by=["_pre_rank", amount_col], ascending=[False, False]).head(max_candidates)
+        added = 0
+        for _, row in working.iterrows():
+            symbol = str(row[symbol_col])
+            if symbol in seen:
+                continue
+            name = str(row[name_col])
+            taxonomy = dict(row.get("_taxonomy") or {})
+            sector = str(row.get("_sector", taxonomy.get("sector", "综合")))
+            chain_nodes = list(row.get("_chain_nodes") or taxonomy.get("chain_nodes") or []) or list(DEFAULT_CHAIN_NODES)
+            pool.append(
+                PoolItem(
+                    symbol=symbol,
+                    name=name,
+                    asset_type="cn_etf",
+                    region="CN",
+                    sector=sector,
+                    chain_nodes=chain_nodes,
+                    source=source,
+                    turnover=float(row[amount_col]),
+                    in_watchlist=bool(row.get("_in_watchlist")),
+                    metadata={
+                        "benchmark": str(row.get("benchmark", "") or ""),
+                        "fund_type": str(row.get("fund_type", "") or ""),
+                        "invest_type": str(row.get("invest_type", "") or ""),
+                        "management": str(row.get("management", "") or ""),
+                        "trade_date": str(row.get("trade_date", "") or ""),
+                        "taxonomy": taxonomy,
+                    },
+                )
+            )
+            seen.add(symbol)
+            added += 1
+        return added
 
     tushare_universe_loaded = False
+    realtime_universe_loaded = False
+    market_collector = ChinaMarketCollector(config)
     try:
-        universe = ChinaMarketCollector(config).get_etf_universe_snapshot()
+        universe = market_collector.get_etf_universe_snapshot()
         if universe is not None and not universe.empty:
-            tushare_universe_loaded = True
-            frame = universe.copy()
-            amount_col = "amount" if "amount" in frame.columns else None
-            name_col = "name" if "name" in frame.columns else None
-            symbol_col = "symbol" if "symbol" in frame.columns else None
-            benchmark_col = "benchmark" if "benchmark" in frame.columns else None
-            if amount_col and name_col and symbol_col:
-                frame[amount_col] = pd.to_numeric(frame[amount_col], errors="coerce").fillna(0.0)
-                frame = frame[frame[amount_col] >= min_turnover]
-
-                if "list_date" in frame.columns:
-                    latest_trade_date = str(frame["trade_date"].iloc[0]).replace("-", "") if "trade_date" in frame.columns and not frame.empty else ""
-                    if latest_trade_date:
-                        frame = frame[
-                            frame["list_date"].fillna("").astype(str).str.replace("-", "").le(latest_trade_date)
-                        ]
-                if "delist_date" in frame.columns:
-                    frame = frame[
-                        frame["delist_date"].fillna("").astype(str).eq("")
-                        | frame["delist_date"].fillna("").astype(str).str.lower().eq("nan")
-                    ]
-
-                is_etf_like = (
-                    frame[name_col].astype(str).str.contains("ETF", case=False, na=False)
-                    | frame.get("benchmark", pd.Series("", index=frame.index)).fillna("").astype(str).str.contains("指数|收益率|商品|期货", na=False)
-                    | frame.get("invest_type", pd.Series("", index=frame.index)).fillna("").astype(str).str.contains("指数|被动|增强|QDII", na=False)
-                )
-                frame = frame[is_etf_like]
-
-                composite_text = frame[name_col].astype(str)
-                if benchmark_col:
-                    composite_text = composite_text + " " + frame[benchmark_col].fillna("").astype(str)
-                if "invest_type" in frame.columns:
-                    composite_text = composite_text + " " + frame["invest_type"].fillna("").astype(str)
-
-                excluded_keywords = ("债", "货币", "国债", "政金", "现金", "利率", "短融", "同业存单", "信用债", "可转债")
-                frame = frame[~composite_text.str.contains("|".join(excluded_keywords), na=False)]
-                if lowered_filter:
-                    composite_text = frame[name_col].astype(str)
-                    if benchmark_col:
-                        composite_text = composite_text + " " + frame[benchmark_col].fillna("").astype(str)
-                    if "invest_type" in frame.columns:
-                        composite_text = composite_text + " " + frame["invest_type"].fillna("").astype(str)
-                    frame = frame[composite_text.str.lower().str.contains(lowered_filter, na=False)]
-
-                frame = frame.sort_values(amount_col, ascending=False).head(max_candidates)
-                for _, row in frame.iterrows():
-                    symbol = str(row[symbol_col])
-                    if symbol in seen:
-                        continue
-                    name = str(row[name_col])
-                    sector, chain_nodes = _normalize_sector(name)
-                    pool.append(
-                        PoolItem(
-                            symbol=symbol,
-                            name=name,
-                            asset_type="cn_etf",
-                            region="CN",
-                            sector=sector,
-                            chain_nodes=chain_nodes,
-                            source="tushare_etf_universe",
-                            turnover=float(row[amount_col]),
-                            in_watchlist=any(item["symbol"] == symbol for item in watchlist),
-                            metadata={
-                                "benchmark": str(row.get("benchmark", "") or ""),
-                                "fund_type": str(row.get("fund_type", "") or ""),
-                                "invest_type": str(row.get("invest_type", "") or ""),
-                                "management": str(row.get("management", "") or ""),
-                                "trade_date": str(row.get("trade_date", "") or ""),
-                            },
-                        )
-                    )
-                    seen.add(symbol)
+            tushare_universe_loaded = _extend_pool_from_frame(universe, "tushare_etf_universe") > 0
     except Exception as exc:
         warnings.append(f"Tushare ETF 全市场快照拉取失败，已回退到 watchlist: {exc}")
 
     if not tushare_universe_loaded:
-        warnings.append("当前 ETF 扫描池回退到 watchlist；后续推荐可信度低于 Tushare 全市场快照模式。")
+        try:
+            realtime = market_collector.get_etf_realtime()
+            basic = market_collector._ts_fund_basic_snapshot("E")
+            if realtime is not None and not realtime.empty:
+                realtime_frame = realtime.copy()
+                realtime_frame["symbol"] = realtime_frame.get("代码", pd.Series("", index=realtime_frame.index)).astype(str).str.strip()
+                realtime_frame["name"] = realtime_frame.get("名称", pd.Series("", index=realtime_frame.index)).astype(str).str.strip()
+                realtime_frame["amount"] = pd.to_numeric(realtime_frame.get("成交额"), errors="coerce")
+                if "数据日期" in realtime_frame.columns:
+                    realtime_frame["trade_date"] = pd.to_datetime(realtime_frame["数据日期"], errors="coerce").dt.strftime("%Y-%m-%d")
+                elif "更新时间" in realtime_frame.columns:
+                    realtime_frame["trade_date"] = pd.to_datetime(realtime_frame["更新时间"], errors="coerce").dt.strftime("%Y-%m-%d")
+                if basic is not None and not getattr(basic, "empty", False):
+                    basic_frame = basic.copy()
+                    basic_frame["symbol"] = basic_frame["ts_code"].astype(str).str.split(".").str[0]
+                    realtime_frame = realtime_frame.merge(
+                        basic_frame,
+                        on="symbol",
+                        how="left",
+                        suffixes=("", "_basic"),
+                    )
+                realtime_universe_loaded = _extend_pool_from_frame(realtime_frame, "realtime_etf_universe") > 0
+        except Exception as exc:
+            warnings.append(f"ETF 实时全市场快照拉取失败，已回退到 watchlist: {exc}")
 
-    fallback_watchlist = watchlist if not tushare_universe_loaded else []
+    if not tushare_universe_loaded and not realtime_universe_loaded:
+        warnings.append("当前 ETF 扫描池回退到 watchlist；后续推荐可信度低于全市场快照模式。")
+
+    fallback_watchlist = etf_watchlist if not tushare_universe_loaded and not realtime_universe_loaded else []
     for item in fallback_watchlist:
         if lowered_filter and lowered_filter not in str(item.get("name", "")).lower() and lowered_filter not in str(item.get("sector", "")).lower():
             continue
         if item["symbol"] in seen:
             continue
         metadata = _merge_metadata(str(item["symbol"]), str(item.get("asset_type", "cn_etf")), item, config)
+        metadata["taxonomy"] = build_standard_fund_taxonomy(
+            name=str(metadata.get("name", item["symbol"])),
+            fund_type=str(metadata.get("fund_type", "") or ""),
+            invest_type=str(metadata.get("invest_type", "") or ""),
+            benchmark=str(metadata.get("benchmark", "") or ""),
+            asset_type=str(item.get("asset_type", "cn_etf")),
+            sector_hint=str(metadata.get("sector", "")),
+        )
         pool.append(
             PoolItem(
                 symbol=str(item["symbol"]),
@@ -5729,10 +5888,397 @@ def build_default_pool(config: Mapping[str, Any], theme_filter: str = "") -> tup
     return pool, warnings
 
 
+def _pick_coverage_state(analyses: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    rows = list(analyses or [])
+    if not rows:
+        return {
+            "news_mode": "unknown",
+            "degraded": False,
+            "structured_rate": 0.0,
+            "direct_news_rate": 0.0,
+            "total": 0,
+            "summary": "当前没有可统计的样本。",
+        }
+    modes = [
+        str(dict(dict(item.get("dimensions", {}).get("catalyst") or {}).get("coverage") or {}).get("news_mode", "unknown"))
+        for item in rows
+    ]
+    news_mode = "live" if modes and all(mode == "live" for mode in modes) else ("proxy" if "proxy" in modes else (modes[0] if modes else "unknown"))
+    structured_count = 0
+    direct_count = 0
+    degraded_count = 0
+    for item in rows:
+        coverage = dict(dict(item.get("dimensions", {}).get("catalyst") or {}).get("coverage") or {})
+        if coverage.get("structured_event") or coverage.get("forward_event"):
+            structured_count += 1
+        if coverage.get("high_confidence_company_news"):
+            direct_count += 1
+        if coverage.get("degraded"):
+            degraded_count += 1
+    total = len(rows)
+    return {
+        "news_mode": news_mode,
+        "degraded": news_mode != "live" or degraded_count > 0,
+        "structured_rate": structured_count / total if total else 0.0,
+        "direct_news_rate": direct_count / total if total else 0.0,
+        "total": total,
+        "summary": f"结构化事件覆盖 {structured_count}/{total}，高置信直接新闻覆盖 {direct_count}/{total}。",
+    }
+
+
+def _discover_mode_label(mode: str) -> str:
+    return {
+        "tushare_universe": "Tushare 全市场 ETF 快照",
+        "realtime_universe": "实时 ETF 全市场快照",
+        "watchlist_fallback": "watchlist 回退池",
+        "mixed_pool": "全市场 + watchlist 混合池",
+    }.get(str(mode), str(mode) or "未标注")
+
+
+def _discover_source_label(source: str) -> str:
+    return {
+        "tushare_etf_universe": "Tushare 全市场 ETF 快照",
+        "realtime_etf_universe": "实时 ETF 全市场快照",
+        "watchlist": "watchlist 回退池",
+    }.get(str(source), str(source) or "未标注")
+
+
+def _discover_driver_type(
+    analysis: Mapping[str, Any],
+    *,
+    theme_filter: str = "",
+    preferred_sectors: Sequence[str] | None = None,
+) -> tuple[str, str]:
+    metadata = dict(analysis.get("metadata") or {})
+    dimensions = dict(analysis.get("dimensions") or {})
+    day_theme = str(dict(analysis.get("day_theme") or {}).get("label", "")).strip()
+    sector = str(metadata.get("sector", "")).strip()
+    sector_text = " ".join([sector, str(analysis.get("name", "")), day_theme]).lower()
+    preferred = [str(item).strip() for item in (preferred_sectors or []) if str(item).strip()]
+    tech = int(dict(dimensions.get("technical") or {}).get("score") or 0)
+    catalyst = int(dict(dimensions.get("catalyst") or {}).get("score") or 0)
+    relative = int(dict(dimensions.get("relative_strength") or {}).get("score") or 0)
+    risk = int(dict(dimensions.get("risk") or {}).get("score") or 0)
+    macro = int(dict(dimensions.get("macro") or {}).get("score") or 0)
+
+    defensive_match = any(token in sector_text for token in ("黄金", "红利", "高股息", "避险", "防守"))
+    theme_match = bool(
+        (theme_filter and theme_filter.lower() in sector_text)
+        or (sector and sector in preferred)
+        or any(token and token.lower() in sector_text for token in preferred)
+    )
+
+    if defensive_match and risk >= 65:
+        return "防守驱动", "今天更像用它承接防守或避险需求，风险特征分和产品属性比短线趋势更重要。"
+    if theme_match and (catalyst >= 45 or macro >= 20 or relative >= 45):
+        return "主线驱动", f"它和当前主线 `{day_theme or sector or '未识别主线'}` 更贴近，因此优先进入预筛。"
+    if catalyst >= 60 and catalyst >= tech + 10:
+        return "催化驱动", "短期进入视野主要因为事件/政策/新闻催化先亮灯，而不是价格已经完全确认。"
+    if tech >= 60 and relative >= 55:
+        return "趋势驱动", "价格结构和相对强弱更占优，说明它是从走势确认里冒出来的。"
+    if risk >= 70:
+        return "防守驱动", "进池更依赖回撤和防守属性，而不是趋势或催化全面共振。"
+    if catalyst >= tech:
+        return "催化驱动", "当前被发现更多是因为事件驱动比价格结构先走出来。"
+    return "趋势驱动", "当前被发现更多是因为走势没有完全破坏，具备继续跟踪的结构基础。"
+
+
+def _discover_horizon_label(analysis: Mapping[str, Any]) -> str:
+    timeframe = str(dict(analysis.get("action") or {}).get("timeframe", "")).strip()
+    if "中线配置" in timeframe:
+        return "中线"
+    if "短线交易" in timeframe:
+        return "短线"
+    return "观察期"
+
+
+def _discover_ready_for_next_step(analysis: Mapping[str, Any]) -> bool:
+    rating = int(dict(analysis.get("rating") or {}).get("rank", 0) or 0)
+    dimensions = dict(analysis.get("dimensions") or {})
+    tech = int(dict(dimensions.get("technical") or {}).get("score") or 0)
+    catalyst = int(dict(dimensions.get("catalyst") or {}).get("score") or 0)
+    relative = int(dict(dimensions.get("relative_strength") or {}).get("score") or 0)
+    risk = int(dict(dimensions.get("risk") or {}).get("score") or 0)
+    return rating >= 2 or (rating >= 1 and ((catalyst >= 60 and tech >= 40) or (risk >= 75 and relative >= 45)))
+
+
+def _discover_next_step_commands(
+    analysis: Mapping[str, Any],
+    *,
+    theme_filter: str = "",
+) -> List[Dict[str, str]]:
+    symbol = str(analysis.get("symbol", "")).strip()
+    metadata = dict(analysis.get("metadata") or {})
+    sector = str(metadata.get("sector", "")).strip()
+    ready = _discover_ready_for_next_step(analysis)
+    pick_theme = str(theme_filter or sector).strip()
+    steps: List[Dict[str, str]] = []
+    if ready and symbol:
+        steps.append(
+            {
+                "label": "deep_scan",
+                "command": f"python -m src.commands.scan {symbol}",
+                "reason": "先把单标的八维细节、验证点和执行计划展开，确认这不是只靠一个分数冒出来的假阳性。",
+            }
+        )
+        if pick_theme:
+            steps.append(
+                {
+                    "label": "etf_pick",
+                    "command": f"python -m src.commands.etf_pick {pick_theme}",
+                    "reason": "把它放回同主题 ETF 池里做正式排序，确认是否足够进入推荐链路。",
+                }
+            )
+            steps.append(
+                {
+                    "label": "fund_pick",
+                    "command": f"python -m src.commands.fund_pick --theme {pick_theme}",
+                    "reason": "如果你想把同主题场外基金一起纳入候选，就切到 fund pick 做同主题预筛。",
+                }
+            )
+        return steps
+
+    steps.append(
+        {
+            "label": "continue_observe",
+            "command": "继续观察",
+            "reason": "当前更适合先盯验证点和主线延续，不建议直接跳进正式推荐或大仓位决策。",
+        }
+    )
+    if symbol:
+        steps.append(
+            {
+                "label": "deep_scan_later",
+                "command": f"python -m src.commands.scan {symbol}",
+                "reason": "如果后续技术面或催化重新增强，再做单标的深扫会更有效率。",
+            }
+        )
+    return steps
+
+
+def _discover_candidate_blockers(analysis: Mapping[str, Any]) -> List[str]:
+    rating = dict(analysis.get("rating") or {})
+    narrative = dict(analysis.get("narrative") or {})
+    action = dict(analysis.get("action") or {})
+    blockers: List[str] = [
+        "discover 当前只是 pre-screen 入口，还没经过 ETF pick 的同池排序、回看和发布门禁。"
+    ]
+    meaning = str(rating.get("meaning", "")).strip()
+    if meaning:
+        blockers.append(meaning)
+    blockers.extend(str(item).strip() for item in (narrative.get("cautions") or []) if str(item).strip())
+    blockers.extend(str(item).strip() for item in (rating.get("warnings") or []) if str(item).strip())
+    if str(action.get("direction", "")).strip() in {"观望", "观望偏多", "回避"}:
+        blockers.append(f"当前动作仍偏 `{action.get('direction', '观望')}`，说明还没到正式推荐的执行阶段。")
+    deduped: List[str] = []
+    seen = set()
+    for item in blockers:
+        if item and item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped[:4]
+
+
+def _discover_next_step_reason(analysis: Mapping[str, Any], driver_type: str) -> str:
+    rating = dict(analysis.get("rating") or {})
+    dimensions = dict(analysis.get("dimensions") or {})
+    tech = int(dict(dimensions.get("technical") or {}).get("score") or 0)
+    catalyst = int(dict(dimensions.get("catalyst") or {}).get("score") or 0)
+    relative = int(dict(dimensions.get("relative_strength") or {}).get("score") or 0)
+    risk = int(dict(dimensions.get("risk") or {}).get("score") or 0)
+    if _discover_ready_for_next_step(analysis):
+        if driver_type == "防守驱动":
+            return f"它已经不是泛观察主题：风险特征 `{risk}` 分，且评级达到 `{rating.get('label', '已命中')}`，适合进入下一步复核。"
+        if driver_type == "催化驱动":
+            return f"催化面 `{catalyst}` 分已经足够亮，值得继续做 `scan`/同池 pick，确认催化是否能转成趋势。"
+        if driver_type == "趋势驱动":
+            return f"技术面 `{tech}` 分、相对强弱 `{relative}` 分，说明不只是故事存在，价格也开始配合。"
+        return f"评级 `{rating.get('label', '已命中')}`，且主线/催化/价格至少有两项共振，已经够资格进入下一步候选。"
+    return "它现在更像观察发现：有一条线索在亮，但还不足以直接进入正式 pick。"
+
+
+def _discover_today_reason_lines(
+    analysis: Mapping[str, Any],
+    *,
+    driver_type: str,
+    driver_reason: str,
+) -> List[str]:
+    metadata = dict(analysis.get("metadata") or {})
+    dimensions = dict(analysis.get("dimensions") or {})
+    narrative = dict(analysis.get("narrative") or {})
+    day_theme = str(dict(analysis.get("day_theme") or {}).get("label", "")).strip() or "未识别主线"
+    sector = str(metadata.get("sector", "综合")).strip()
+    catalyst_summary = str(dict(dimensions.get("catalyst") or {}).get("summary", "")).strip()
+    technical_summary = str(dict(dimensions.get("technical") or {}).get("summary", "")).strip()
+    relative_summary = str(dict(dimensions.get("relative_strength") or {}).get("summary", "")).strip()
+    risk_summary = str(dict(dimensions.get("risk") or {}).get("summary", "")).strip()
+
+    lines = [
+        f"今天把它捞出来，首先是因为 `{sector}` 在 `{day_theme}` 背景下仍有观察价值。",
+        f"`{driver_type}`：{driver_reason}",
+    ]
+    if driver_type == "防守驱动" and risk_summary:
+        lines.append(f"当前更重要的是 `{risk_summary}`。")
+    elif driver_type == "催化驱动" and catalyst_summary:
+        lines.append(f"短线触发点主要来自 `{catalyst_summary}`。")
+    elif driver_type == "趋势驱动" and technical_summary:
+        lines.append(f"今天被发现更偏价格/趋势确认，核心是 `{technical_summary}`。")
+    else:
+        detail = relative_summary or technical_summary or catalyst_summary or risk_summary
+        if detail:
+            lines.append(f"辅助证据是 `{detail}`。")
+
+    phase = str(dict(narrative.get("phase") or {}).get("label", "")).strip()
+    if phase:
+        lines.append(f"当前阶段更接近 `{phase}`，所以发现不等于立刻推荐。")
+
+    deduped: List[str] = []
+    seen = set()
+    for item in lines:
+        if item and item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped[:4]
+
+
+def _discover_data_notes(analysis: Mapping[str, Any]) -> List[str]:
+    notes: List[str] = []
+    catalyst_coverage = dict(dict(dict(analysis.get("dimensions") or {}).get("catalyst") or {}).get("coverage") or {})
+    if catalyst_coverage.get("degraded"):
+        notes.append("催化面存在降级，当前更多依赖结构化事件、主题映射或代理信号，不等于完整实时新闻覆盖。")
+    news_mode = str(catalyst_coverage.get("news_mode", "")).strip()
+    if news_mode == "proxy":
+        notes.append("新闻模式当前是 `proxy`，事件与主线判断要保留一层不确定性。")
+    if bool(analysis.get("history_fallback_mode")):
+        notes.append("完整日线历史当前不可用，趋势和风险判断只作参考。")
+    notes.extend(
+        str(item).strip()
+        for item in (analysis.get("notes") or [])
+        if str(item).strip() and any(token in str(item) for token in ("降级", "不可用", "快照", "盘中", "watchlist", "代理"))
+    )
+    deduped: List[str] = []
+    seen = set()
+    for item in notes:
+        if item and item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped[:3]
+
+
+def _discover_brief_candidate(
+    analysis: Mapping[str, Any],
+    *,
+    theme_filter: str = "",
+    preferred_sectors: Sequence[str] | None = None,
+) -> Dict[str, Any]:
+    enriched = dict(analysis)
+    driver_type, driver_reason = _discover_driver_type(
+        analysis,
+        theme_filter=theme_filter,
+        preferred_sectors=preferred_sectors,
+    )
+    enriched["discovery"] = {
+        "bucket": "next_step" if _discover_ready_for_next_step(analysis) else "observe",
+        "driver_type": driver_type,
+        "driver_reason": driver_reason,
+        "horizon_label": _discover_horizon_label(analysis),
+        "today_reason_lines": _discover_today_reason_lines(analysis, driver_type=driver_type, driver_reason=driver_reason),
+        "next_step_reason": _discover_next_step_reason(analysis, driver_type),
+        "blockers": _discover_candidate_blockers(analysis),
+        "next_steps": _discover_next_step_commands(analysis, theme_filter=theme_filter),
+        "data_notes": _discover_data_notes(analysis),
+    }
+    return enriched
+
+
+def _discover_observation_candidates(
+    analyses: Sequence[Mapping[str, Any]],
+    ready_symbols: Sequence[str],
+    *,
+    theme_filter: str = "",
+    preferred_sectors: Sequence[str] | None = None,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    ready_symbol_set = {str(item) for item in ready_symbols if str(item).strip()}
+    for item in analyses:
+        symbol = str(item.get("symbol", "")).strip()
+        if not symbol or symbol in ready_symbol_set:
+            continue
+        dimensions = dict(item.get("dimensions") or {})
+        if int(dict(item.get("rating") or {}).get("rank", 0) or 0) <= 0 and not (
+            int(dict(dimensions.get("fundamental") or {}).get("score") or 0) >= 60
+            or int(dict(dimensions.get("catalyst") or {}).get("score") or 0) >= 50
+            or int(dict(dimensions.get("risk") or {}).get("score") or 0) >= 70
+        ):
+            continue
+        rows.append(
+            _discover_brief_candidate(
+                item,
+                theme_filter=theme_filter,
+                preferred_sectors=preferred_sectors,
+            )
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _discover_pool_summary(
+    pool: Sequence[PoolItem],
+    *,
+    passed: int,
+    ready_count: int,
+    observe_count: int,
+    preferred_sectors: Sequence[str] | None = None,
+    theme_filter: str = "",
+    discovery_mode: str = "",
+) -> Dict[str, Any]:
+    source_counts: Dict[str, int] = {}
+    sector_counts: Dict[str, int] = {}
+    watchlist_count = 0
+    for item in pool:
+        source_counts[str(item.source)] = source_counts.get(str(item.source), 0) + 1
+        sector = str(item.sector or "综合").strip()
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        if bool(item.in_watchlist):
+            watchlist_count += 1
+
+    ordered_sectors = sorted(sector_counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    preferred = [str(item).strip() for item in (preferred_sectors or []) if str(item).strip()]
+    filter_rules = [
+        "当前 discover 只做 ETF / 商品类场内基金预筛，不覆盖个股和场外基金正式推荐。",
+        "池构建阶段会先排掉债券/货币/REIT/低成交额产品，并对同跟踪方向做去重。",
+    ]
+    if theme_filter:
+        filter_rules.append(f"本轮额外应用主题过滤 `{theme_filter}`，未命中该主题语义的方向不进入本轮分析。")
+    else:
+        filter_rules.append("本轮没有手动主题过滤，优先按今日主线和 ETF taxonomy 做预筛排序。")
+    if preferred:
+        filter_rules.append(f"今日优先方向：{', '.join(preferred[:4])}。")
+
+    return {
+        "boundary_note": "当前 discover 只是 pre-pick 入口，用来给 `scan` / `etf_pick` / `fund_pick` 输送候选，而不是直接给正式推荐。",
+        "scan_scope_note": "当前池只来自 ETF 全市场快照或 watchlist 回退，不是全资产发现器。",
+        "mode_label": _discover_mode_label(discovery_mode),
+        "source_rows": [[_discover_source_label(key), str(value)] for key, value in sorted(source_counts.items())],
+        "sector_rows": [[sector, str(count)] for sector, count in ordered_sectors[:6]],
+        "watchlist_hits": watchlist_count,
+        "filter_rules": filter_rules,
+        "summary_lines": [
+            f"本轮最终进入分析 `{len(pool)}` 只 ETF，过硬排除后剩 `{passed}` 只。",
+            f"其中达到“进入下一步 pick / deep scan”门槛的有 `{ready_count}` 只，仅适合继续观察的有 `{observe_count}` 只。",
+            f"扫描模式：`{_discover_mode_label(discovery_mode)}`；watchlist 命中 `{watchlist_count}` 只。",
+        ],
+    }
+
+
 def discover_opportunities(config: Mapping[str, Any], top_n: int = 5, theme_filter: str = "") -> Dict[str, Any]:
     context = build_market_context(config, relevant_asset_types=["cn_etf", "futures"])
-    pool, pool_warnings = build_default_pool(config, theme_filter)
+    preferred_sectors = _preferred_fund_sectors(str(context.get("day_theme", {}).get("label", "")), theme_filter)
+    pool, pool_warnings = build_default_pool(config, theme_filter, preferred_sectors=preferred_sectors)
     passed = 0
+    coverage_analyses: List[Dict[str, Any]] = []
     analyses: List[Dict[str, Any]] = []
     blind_spots: List[str] = list(pool_warnings)
     for item in pool:
@@ -5756,6 +6302,7 @@ def discover_opportunities(config: Mapping[str, Any], top_n: int = 5, theme_filt
         if analysis["excluded"]:
             continue
         passed += 1
+        coverage_analyses.append(analysis)
         if analysis["rating"]["rank"] > 0:
             analyses.append(analysis)
     analyses.sort(
@@ -5767,15 +6314,58 @@ def discover_opportunities(config: Mapping[str, Any], top_n: int = 5, theme_filt
         ),
         reverse=True,
     )
+    coverage = _pick_coverage_state(coverage_analyses)
+    sources = {str(item.source) for item in pool}
+    if sources == {"watchlist"}:
+        discovery_mode = "watchlist_fallback"
+    elif sources == {"tushare_etf_universe"}:
+        discovery_mode = "tushare_universe"
+    elif sources == {"realtime_etf_universe"}:
+        discovery_mode = "realtime_universe"
+    elif "watchlist" in sources:
+        discovery_mode = "mixed_pool"
+    else:
+        discovery_mode = "realtime_universe" if "realtime_etf_universe" in sources else "tushare_universe"
+    ready_candidates = [
+        _discover_brief_candidate(item, theme_filter=theme_filter, preferred_sectors=preferred_sectors)
+        for item in analyses[:top_n]
+        if _discover_ready_for_next_step(item)
+    ][:top_n]
+    observation_candidates = _discover_observation_candidates(
+        coverage_analyses,
+        [str(item.get("symbol", "")) for item in ready_candidates],
+        theme_filter=theme_filter,
+        preferred_sectors=preferred_sectors,
+        limit=max(3, min(top_n, 5)),
+    )
+    pool_summary = _discover_pool_summary(
+        pool,
+        passed=passed,
+        ready_count=len([item for item in ready_candidates if dict(item.get("discovery") or {}).get("bucket") == "next_step"]),
+        observe_count=len(observation_candidates),
+        preferred_sectors=preferred_sectors,
+        theme_filter=theme_filter,
+        discovery_mode=discovery_mode,
+    )
+    coverage = dict(coverage)
+    coverage_note = "当前催化/事件覆盖可直接作为 pre-screen 参考。" if not coverage.get("degraded") else "当前催化/事件覆盖存在降级，discovery 更适合作为发现线索，而不是直接推荐。"
+    coverage["note"] = coverage_note
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "scan_pool": len(pool),
         "passed_pool": passed,
         "regime": context.get("regime", {}),
         "day_theme": context.get("day_theme", {}),
+        "data_coverage": coverage,
+        "coverage_analyses": coverage_analyses,
         "top": analyses[:top_n],
+        "ready_candidates": ready_candidates,
+        "observation_candidates": observation_candidates,
         "blind_spots": blind_spots[:8],
         "theme_filter": theme_filter,
+        "discovery_mode": discovery_mode,
+        "preferred_sectors": preferred_sectors,
+        "pool_summary": pool_summary,
     }
 
 
@@ -5846,6 +6436,8 @@ def discover_fund_opportunities(
         "passed_pool": passed,
         "regime": context.get("regime", {}),
         "day_theme": context.get("day_theme", {}),
+        "data_coverage": _pick_coverage_state(analyses),
+        "coverage_analyses": analyses,
         "top": analyses[:top_n],
         "blind_spots": blind_spots[:8],
         "theme_filter": theme_filter,

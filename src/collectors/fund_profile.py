@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 import pandas as pd
 
 from .base import BaseCollector
+from src.utils.fund_taxonomy import build_standard_fund_taxonomy, infer_fund_sector
 
 try:
     import akshare as ak
@@ -89,15 +90,33 @@ class FundProfileCollector(BaseCollector):
 
     def get_overview(self, symbol: str) -> pd.DataFrame:
         fetcher = self._ak_function("fund_overview_em")
-        return self.cached_call(f"fund_profile:overview:{symbol}", fetcher, symbol=symbol, ttl_hours=24)
+        return self.cached_call(
+            f"fund_profile:overview:{symbol}",
+            fetcher,
+            symbol=symbol,
+            ttl_hours=24,
+            prefer_stale=bool(getattr(self, "_profile_prefer_stale", False)),
+        )
 
     def get_achievement(self, symbol: str) -> pd.DataFrame:
         fetcher = self._ak_function("fund_individual_achievement_xq")
-        return self.cached_call(f"fund_profile:achievement:{symbol}", fetcher, symbol=symbol, ttl_hours=12)
+        return self.cached_call(
+            f"fund_profile:achievement:{symbol}",
+            fetcher,
+            symbol=symbol,
+            ttl_hours=12,
+            prefer_stale=bool(getattr(self, "_profile_prefer_stale", False)),
+        )
 
     def get_asset_allocation(self, symbol: str) -> pd.DataFrame:
         fetcher = self._ak_function("fund_individual_detail_hold_xq")
-        return self.cached_call(f"fund_profile:asset_mix:{symbol}", fetcher, symbol=symbol, ttl_hours=12)
+        return self.cached_call(
+            f"fund_profile:asset_mix:{symbol}",
+            fetcher,
+            symbol=symbol,
+            ttl_hours=12,
+            prefer_stale=bool(getattr(self, "_profile_prefer_stale", False)),
+        )
 
     def get_portfolio_hold(self, symbol: str, years: Optional[Sequence[str]] = None) -> pd.DataFrame:
         raw_fetcher = self._ak_function("fund_portfolio_hold_em")
@@ -112,7 +131,14 @@ class FundProfileCollector(BaseCollector):
 
         for year in years or self._year_candidates():
             try:
-                frame = self.cached_call(f"fund_profile:holdings:{symbol}:{year}", fetcher, symbol=symbol, date=year, ttl_hours=24)
+                frame = self.cached_call(
+                    f"fund_profile:holdings:{symbol}:{year}",
+                    fetcher,
+                    symbol=symbol,
+                    date=year,
+                    ttl_hours=24,
+                    prefer_stale=bool(getattr(self, "_profile_prefer_stale", False)),
+                )
             except Exception:
                 continue
             latest = self._latest_quarter_frame(frame, "季度")
@@ -133,7 +159,14 @@ class FundProfileCollector(BaseCollector):
 
         for year in years or self._year_candidates():
             try:
-                frame = self.cached_call(f"fund_profile:industry:{symbol}:{year}", fetcher, symbol=symbol, date=year, ttl_hours=24)
+                frame = self.cached_call(
+                    f"fund_profile:industry:{symbol}:{year}",
+                    fetcher,
+                    symbol=symbol,
+                    date=year,
+                    ttl_hours=24,
+                    prefer_stale=bool(getattr(self, "_profile_prefer_stale", False)),
+                )
             except Exception:
                 continue
             latest = self._latest_cutoff_frame(frame, "截止时间")
@@ -146,21 +179,36 @@ class FundProfileCollector(BaseCollector):
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 return self._ak_function("fund_manager_em")()
 
-        return self.cached_call("fund_profile:manager_directory", fetcher, ttl_hours=24)
+        return self.cached_call(
+            "fund_profile:manager_directory",
+            fetcher,
+            ttl_hours=24,
+            prefer_stale=bool(getattr(self, "_profile_prefer_stale", False)),
+        )
 
     def get_rating_table(self) -> pd.DataFrame:
         fetcher = self._ak_function("fund_rating_all")
-        return self.cached_call("fund_profile:rating_all", fetcher, ttl_hours=24)
+        return self.cached_call(
+            "fund_profile:rating_all",
+            fetcher,
+            ttl_hours=24,
+            prefer_stale=bool(getattr(self, "_profile_prefer_stale", False)),
+        )
 
-    def collect_profile(self, symbol: str) -> Dict[str, Any]:
+    def collect_profile(self, symbol: str, asset_type: str = "cn_fund") -> Dict[str, Any]:
         notes: List[str] = []
-        overview_df = self._safe_frame(self.get_overview, symbol)
-        achievement_df = self._safe_frame(self.get_achievement, symbol)
-        asset_mix_df = self._safe_frame(self.get_asset_allocation, symbol)
-        holdings_df = self._safe_frame(self.get_portfolio_hold, symbol)
-        industry_df = self._safe_frame(self.get_industry_allocation, symbol)
-        manager_df = self._safe_frame(self.get_manager_directory)
-        rating_df = self._safe_frame(self.get_rating_table)
+        previous_prefer_stale = bool(getattr(self, "_profile_prefer_stale", False))
+        self._profile_prefer_stale = asset_type == "cn_etf"
+        try:
+            overview_df = self._safe_frame(self.get_overview, symbol)
+            achievement_df = self._safe_frame(self.get_achievement, symbol)
+            asset_mix_df = self._safe_frame(self.get_asset_allocation, symbol)
+            holdings_df = self._safe_frame(self.get_portfolio_hold, symbol)
+            industry_df = self._safe_frame(self.get_industry_allocation, symbol)
+            manager_df = self._safe_frame(self.get_manager_directory)
+            rating_df = self._safe_frame(self.get_rating_table)
+        finally:
+            self._profile_prefer_stale = previous_prefer_stale
 
         overview = overview_df.iloc[0].to_dict() if not overview_df.empty else {}
         overview = self._merge_overview_with_tushare(overview, symbol)
@@ -172,7 +220,7 @@ class FundProfileCollector(BaseCollector):
         asset_mix = self._asset_mix(asset_mix_df)
         rating = self._rating_snapshot(rating_df, symbol)
         manager = self._manager_snapshot(manager_df, overview)
-        style = self._derive_style(overview, top_holdings, top_industries, asset_mix, manager)
+        style = self._derive_style(overview, top_holdings, top_industries, asset_mix, manager, asset_type=asset_type)
 
         if not top_holdings:
             notes.append("基金持仓明细缺失")
@@ -448,6 +496,8 @@ class FundProfileCollector(BaseCollector):
         top_industries: List[Dict[str, Any]],
         asset_mix: List[Dict[str, Any]],
         manager: Dict[str, Any],
+        *,
+        asset_type: str = "cn_fund",
     ) -> Dict[str, Any]:
         fund_name = str(overview.get("基金简称", "")).strip()
         fund_type = str(overview.get("基金类型", "")).strip()
@@ -557,6 +607,17 @@ class FundProfileCollector(BaseCollector):
             "sector": sector,
             "chain_nodes": chain_nodes,
             "tags": tags,
+            "taxonomy": build_standard_fund_taxonomy(
+                name=fund_name,
+                fund_type=fund_type,
+                invest_type=fund_type,
+                benchmark=benchmark_note,
+                tracking_target=tracking_target,
+                asset_type=asset_type or "cn_fund",
+                sector_hint=sector,
+                is_passive=is_passive,
+                commodity_like=commodity_like,
+            ),
             "summary": summary,
             "positioning": positioning,
             "selection": selection,
@@ -568,11 +629,7 @@ class FundProfileCollector(BaseCollector):
         }
 
     def _infer_theme(self, text: str) -> tuple[str, List[str]]:
-        lowered = _theme_detection_text(str(text)).lower()
-        for keywords, payload in FUND_THEME_RULES:
-            if any(keyword.lower() in lowered for keyword in keywords):
-                return payload[0], list(payload[1])
-        return "综合", ["主动管理", "组合配置"]
+        return infer_fund_sector(str(text))
 
     def _manager_style_consistent(self, peer_funds: Iterable[str], sector: str) -> bool:
         peer_text = " ".join(str(item) for item in peer_funds).lower()

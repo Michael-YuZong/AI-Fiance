@@ -45,6 +45,8 @@
 | `L028` | 商品/期货 ETF 必须显式披露展期与期限结构风险 | `external_review` / `renderer` |
 | `L029` | 客户稿不得暴露原始异常字符串 | `release_check` / `renderer` |
 | `L030` | 历史样本验证必须披露非重叠样本、置信区间和样本质量 | `release_check` / `renderer` |
+| `L031` | Pick 覆盖率分母必须对应完整分析样本 | `release_check` |
+| `L032` | 单候选说明不能擅自改写交付等级 | `release_check` |
 
 ## 处理规则
 

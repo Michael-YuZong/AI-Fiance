@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from src.output.opportunity_report import (
@@ -12,6 +13,7 @@ from src.output.opportunity_report import (
     _hard_check_inline,
     _hard_check_rows,
 )
+from src.utils.fund_taxonomy import taxonomy_rows
 
 GENERIC_DIMENSION_SUMMARIES = {
     "技术面有亮点，但还没有形成满配共振。",
@@ -387,6 +389,7 @@ def _analysis_section_lines(
     symbol = str(analysis.get("symbol", ""))
     action = dict(analysis.get("action") or {})
     narrative = dict(analysis.get("narrative") or {})
+    horizon = _pick_horizon_profile(action, str(dict(narrative.get("judgment") or {}).get("state", "")))
     positive_candidates = _merge_reason_lines(
         _top_dimension_reasons(analysis, top_n=3),
         list(narrative.get("positives") or []),
@@ -440,6 +443,12 @@ def _analysis_section_lines(
             "",
             "操作上怎么做：",
             "",
+        ]
+    )
+    if horizon:
+        lines.append(f"- 持有周期：{horizon['label']}。{horizon['style']}")
+    lines.extend(
+        [
             f"- 介入条件：{action.get('entry', '等待进一步确认')}",
             f"- 首次仓位：{action.get('position', '小仓位分批')}",
             f"- 加仓节奏：{action.get('scaling_plan', '确认后再考虑第二笔')}",
@@ -522,6 +531,11 @@ def _fund_profile_sections(analysis: Mapping[str, Any]) -> List[str]:
     ]
     lines.extend(["", "### 基金风格", ""])
     lines.extend(_table(["维度", "说明"], style_rows))
+    taxonomy = dict(style.get("taxonomy") or {})
+    if taxonomy:
+        lines.extend(["", "### 标准化分类", ""])
+        lines.extend(_table(["维度", "结果"], taxonomy_rows(taxonomy)))
+        lines.extend(["", f"- {taxonomy.get('summary', '当前分类只作为产品标签，不替代净值、持仓和交易判断。')}"])
 
     asset_mix = list(fund_profile.get("asset_mix") or [])
     if asset_mix:
@@ -561,6 +575,49 @@ def _fund_profile_sections(analysis: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _delivery_tier_section(selection_context: Mapping[str, Any], *, asset_label: str) -> List[str]:
+    selection = dict(selection_context or {})
+    label = str(selection.get("delivery_tier_label", "未标注")).strip() or "未标注"
+    observe_only = bool(selection.get("delivery_observe_only"))
+    notes = [str(item).strip() for item in (selection.get("delivery_notes") or []) if str(item).strip()]
+    lines = [
+        "## 交付等级",
+        "",
+        f"- 当前交付等级：`{label}`。",
+    ]
+    if observe_only:
+        lines.append(f"- 这是一份 `{asset_label}` 观察优先稿，不按正式推荐稿理解。")
+    else:
+        lines.append(f"- 这份 `{asset_label}` 稿件仍按正式推荐框架编排，但执行上仍要遵守仓位和止损。")
+    if notes:
+        for item in notes[:3]:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- 当前没有额外降级或回退说明。")
+    return lines
+
+
+def _taxonomy_section(winner: Mapping[str, Any]) -> List[str]:
+    rows = list(winner.get("taxonomy_rows") or [])
+    if not rows:
+        rows = [
+            ["产品形态", "—"],
+            ["载体角色", "—"],
+            ["管理方式", "—"],
+            ["暴露类型", "—"],
+            ["主方向", "—"],
+            ["份额类别", "—"],
+        ]
+    summary = str(winner.get("taxonomy_summary", "")).strip()
+    lines = [
+        "## 标准化分类",
+        "",
+    ]
+    lines.extend(_table(["维度", "结果"], rows))
+    lines.extend(["", f"- {summary or '当前分类只作为产品标签，不替代净值、持仓和交易判断。'}"])
+    return lines
+
+
 def _bucket_summary_text(bucket: str, analysis: Mapping[str, Any]) -> str:
     if bucket == "正式推荐":
         return "逻辑和执行条件都还在，可以小仓分批，但不适合重仓追高。"
@@ -569,8 +626,55 @@ def _bucket_summary_text(bucket: str, analysis: Mapping[str, Any]) -> str:
     return "当前主要价值在观察，不在立即执行。"
 
 
+def _pick_horizon_profile(action: Mapping[str, Any], trade_state: str = "") -> Dict[str, str]:
+    raw = str(action.get("timeframe", "")).strip()
+    trade_state = str(trade_state).strip()
+    direction = str(action.get("direction", "")).strip()
+    label = raw.replace("(", "（").replace(")", "）") if raw else ""
+
+    if "长线" in label:
+        return {
+            "label": label,
+            "style": "更适合作为中长期底仓来跟踪，允许短线波动，但要持续复核主线、基本面和风险预算。",
+        }
+    if "中线" in label:
+        return {
+            "label": label,
+            "style": "更像 1-3 个月的分批配置或波段跟踪，不按隔日涨跌去做快进快出。",
+        }
+    if "短线" in label:
+        return {
+            "label": label,
+            "style": "更看催化、趋势和执行节奏，适合盯右侧确认和止损，不适合当成长线底仓。",
+        }
+
+    fallback_blob = " ".join(part for part in (raw, trade_state, direction) if part)
+    if any(token in fallback_blob for token in ("等待", "观察", "回避", "暂不出手")):
+        return {
+            "label": "观察期",
+            "style": "现在先看窗口和确认信号，不建议急着把它定义成短线执行仓或长线配置仓。",
+        }
+    return {}
+
+
 class ClientReportRenderer:
     """Render concise client-facing reports from structured payloads."""
+
+    @staticmethod
+    def _briefing_client_safe_line(text: Any) -> str:
+        line = str(text).strip()
+        if not line:
+            return ""
+        replacements = (
+            (r"开盘\s*30\s*分钟", "早段"),
+            (r"开盘后先观察\s*\d+\s*分钟", "先观察早段延续性"),
+            (r"明天开盘前", "明早"),
+            (r"盘中", "交易时段"),
+            (r"日内", "当天"),
+        )
+        for pattern, repl in replacements:
+            line = re.sub(pattern, repl, line)
+        return line
 
     @staticmethod
     def _rank_market_items(
@@ -1055,12 +1159,17 @@ class ClientReportRenderer:
 
     def render_briefing(self, payload: Dict[str, Any]) -> str:
         generated_at = str(payload.get("generated_at", ""))[:10]
-        headline_lines = list(payload.get("headline_lines") or [])
-        action_lines = list(payload.get("action_lines") or [])
+        headline_lines = [self._briefing_client_safe_line(item) for item in list(payload.get("headline_lines") or [])]
+        action_lines = [self._briefing_client_safe_line(item) for item in list(payload.get("action_lines") or [])]
+        quality_lines = [self._briefing_client_safe_line(item) for item in list(payload.get("quality_lines") or [])]
         theme_rows = list(payload.get("theme_tracking_rows") or [])
         verification_rows = list(payload.get("verification_rows") or [])
         macro_asset_rows = list(payload.get("macro_asset_rows") or [])
         macro_items = list(payload.get("macro_items") or [])
+        a_share_watch_rows = list(payload.get("a_share_watch_rows") or [])
+        a_share_watch_lines = [self._briefing_client_safe_line(item) for item in list(payload.get("a_share_watch_lines") or [])]
+        data_coverage = str(payload.get("data_coverage", "")).strip()
+        missing_sources = str(payload.get("missing_sources", "")).strip()
         lines = [
             f"# 今日晨报 | {generated_at}",
             "",
@@ -1085,15 +1194,59 @@ class ClientReportRenderer:
             lines.extend(["", "## 宏观领先指标", ""])
             for item in macro_items[:5]:
                 lines.append(f"- {item}")
+        lines.extend(["", "## 数据完整度", ""])
+        lines.append(f"- 本次覆盖：{data_coverage or '未标注'}。")
+        lines.append(f"- 当前缺失：{missing_sources or '无'}。")
+        detail_lines = [
+            item
+            for item in quality_lines
+            if any(token in item for token in ("代理", "改用", "覆盖", "缺失", "复核", "免费源"))
+        ]
+        if not detail_lines:
+            detail_lines = quality_lines
+        for item in detail_lines[:2]:
+            lines.append(f"- {item}")
         lines.extend(["", "## 今天怎么做", ""])
         for item in action_lines[:4]:
             lines.append(f"- {item}")
+        lines.extend(["", "## 重点观察", ""])
+        if theme_rows:
+            for row in theme_rows[:2]:
+                direction = row[0] if len(row) > 0 else "重点方向"
+                catalyst = row[1] if len(row) > 1 else "暂无"
+                risk = row[4] if len(row) > 4 else "暂无"
+                lines.append(f"- `{direction}`：先看 `{catalyst}` 是否延续，同时防范 `{risk}`。")
+        elif verification_rows:
+            for row in verification_rows[:2]:
+                label = row[1] if len(row) > 1 else "验证点"
+                criterion = row[2] if len(row) > 2 else "暂无"
+                lines.append(f"- `{label}`：重点看 `{criterion}` 是否兑现。")
+        else:
+            lines.append("- 当前先看主线是否延续，再决定是否升级风险偏好。")
         lines.extend(["", "## 今日关键数据", ""])
         key_rows = macro_asset_rows[:5]
         if key_rows:
             lines.extend(_table(["资产", "最新价", "1日", "5日", "20日", "状态", "异常"], key_rows))
         else:
             lines.append("暂无关键资产快照。")
+        lines.extend(["", "## 今日A股观察池", ""])
+        if a_share_watch_lines:
+            for item in a_share_watch_lines[:3]:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- A股全市场观察池暂未生成。")
+        if a_share_watch_rows:
+            lines.extend(
+                [
+                    "",
+                    *_table(
+                        ["排名", "标的", "行业", "评级", "当前状态", "首次仓位"],
+                        a_share_watch_rows[:5],
+                    ),
+                ]
+            )
+        else:
+            lines.extend(["", "暂无可用的 A 股全市场观察池结果。"])
         lines.extend(["", "## 今天最值得看的 3 个方向", ""])
         if theme_rows:
             for index, row in enumerate(theme_rows[:3], start=1):
@@ -1118,7 +1271,7 @@ class ClientReportRenderer:
             lines.extend(_table(["验证点", "怎么判断", "如果成立", "如果不成立"], [row[1:] for row in verification_rows[:5]]))
         else:
             lines.append("暂无。")
-        alerts = list(payload.get("alerts") or [])
+        alerts = [self._briefing_client_safe_line(item) for item in list(payload.get("alerts") or [])]
         lines.extend(["", "## 今天最重要的风险提醒", ""])
         for item in alerts[:3]:
             lines.append(f"- {item}")
@@ -1129,16 +1282,37 @@ class ClientReportRenderer:
         winner = dict(payload.get("winner") or {})
         alternatives = list(payload.get("alternatives") or [])
         selection_context = dict(payload.get("selection_context") or {})
+        horizon = _pick_horizon_profile(
+            dict(winner.get("action") or {}),
+            str(winner.get("trade_state", "")),
+        )
+        observe_only = bool(selection_context.get("delivery_observe_only"))
+        why_heading = "## 为什么先看它" if observe_only else "## 为什么推荐它"
+        lead_line = (
+            f"今天先给一个观察优先的场外基金对象：**`{winner.get('name', '')} ({winner.get('symbol', '')})`**"
+            if observe_only
+            else f"今天如果只推荐一只场外基金，我给：**`{winner.get('name', '')} ({winner.get('symbol', '')})`**"
+        )
+        title = "今日场外基金观察" if observe_only else "今日场外基金推荐"
         lines = [
-            f"# 今日场外基金推荐 | {generated_at}",
+            f"# {title} | {generated_at}",
             "",
             "## 今日结论",
             "",
-            f"今天如果只推荐一只场外基金，我给：**`{winner.get('name', '')} ({winner.get('symbol', '')})`**",
+            lead_line,
             "",
             f"这不是激进进攻型推荐，而是：**`{winner.get('trade_state', '持有优于追高')}`**",
             "",
         ]
+        if horizon:
+            lines.extend(
+                [
+                    f"当前更合适的持有周期：**`{horizon.get('label', '观察期')}`**",
+                    "",
+                    f"这更像：{horizon.get('style', '')}",
+                    "",
+                ]
+            )
         if selection_context:
             lines.extend(
                 [
@@ -1147,9 +1321,33 @@ class ClientReportRenderer:
                     "",
                 ]
             )
+        lines.extend(["## 数据完整度", ""])
+        if selection_context.get("coverage_note"):
+            lines.append(f"- {selection_context.get('coverage_note')}")
+        else:
+            lines.append("- 当前没有额外覆盖率备注，默认按已进入完整分析的样本理解。")
+        for item in selection_context.get("coverage_lines", [])[:2]:
+            lines.append(f"- {item}")
+        if selection_context.get("coverage_total"):
+            lines.append(f"- 覆盖率的分母是今天进入完整分析的 `{selection_context.get('coverage_total')}` 只基金，不是全市场全部开放式基金。")
+        if selection_context.get("baseline_snapshot_at"):
+            role = "今天首个快照版" if selection_context.get("is_daily_baseline") else "今天修正版"
+            lines.append(f"- 本次输出角色：{role}；当日首个基准快照时间是 `{selection_context.get('baseline_snapshot_at')}`。")
+        if selection_context.get("comparison_basis_at"):
+            basis_label = selection_context.get("comparison_basis_label", "对比基准")
+            if basis_label == "当日基准版":
+                basis_label = "今天首个快照版"
+            lines.append(
+                f"- 分数变化对比的是 `{basis_label} {selection_context.get('comparison_basis_at')}`。"
+            )
+        if selection_context.get("model_version_warning"):
+            lines.append(f"- {selection_context.get('model_version_warning')}")
+        lines.append("")
+        lines.extend(_delivery_tier_section(selection_context, asset_label="场外基金"))
+        lines.extend([""])
         lines.extend(
             [
-            "## 为什么推荐它",
+            why_heading,
             "",
             ]
         )
@@ -1162,12 +1360,21 @@ class ClientReportRenderer:
                 winner.get("dimension_rows", []),
             )
         )
+        lines.extend(["", *_taxonomy_section(winner)])
+        if winner.get("score_changes"):
+            lines.extend(["", "## 跟今天首个快照版相比", ""])
+            for item in winner.get("score_changes", [])[:4]:
+                lines.append(
+                    f"- `{item.get('label', '维度')}` 从 `{item.get('previous', '—')}` 变到 `{item.get('current', '—')}`：{item.get('reason', '')}"
+                )
         lines.extend(["", "## 怎么做", ""])
         lines.extend(
             _table(
                 ["项目", "建议"],
                 [
                     ["当前动作", winner.get("action", {}).get("direction", "观察为主")],
+                    ["持有周期", horizon.get("label", "未单独标注")],
+                    ["适用打法", horizon.get("style", "先按当前动作、仓位和止损框架理解，不把它默认当成长线配置。")],
                     ["介入条件", winner.get("action", {}).get("entry", "等回撤再看")],
                     ["首次仓位", winner.get("action", {}).get("position", "计划仓位的 1/3 - 1/2")],
                     ["加仓节奏", winner.get("action", {}).get("scaling_plan", "确认后再考虑第二笔")],
@@ -1179,8 +1386,8 @@ class ClientReportRenderer:
             lines.extend(["", "## 数据限制与说明", ""])
             for item in selection_context.get("blind_spots", [])[:3]:
                 lines.append(f"- {item}")
+        lines.extend(["", "## 为什么不是另外几只", ""])
         if alternatives:
-            lines.extend(["", "## 为什么不是另外几只", ""])
             for index, item in enumerate(alternatives[:2], start=1):
                 lines.extend(
                     [
@@ -1191,6 +1398,12 @@ class ClientReportRenderer:
                 for reason in item.get("cautions", [])[:3]:
                     lines.append(f"- {reason}")
                 lines.append("")
+        else:
+            lines.append("- 今天可进入完整评分且未被硬排除的基金候选只有 1 只，没有形成可并列展开的第二候选。")
+            if observe_only:
+                lines.append("- 这也是本次只能按观察优先或降级稿处理、不能把它写成正式强推荐的原因之一。")
+            else:
+                lines.append("- 单候选不等于自动降级，是否按正式推荐理解仍以本页 `交付等级` 为准。")
         lines.extend(
             [
                 "## 仓位管理",
@@ -1205,18 +1418,69 @@ class ClientReportRenderer:
         generated_at = str(payload.get("generated_at", ""))[:10]
         winner = dict(payload.get("winner") or {})
         alternatives = list(payload.get("alternatives") or [])
+        selection_context = dict(payload.get("selection_context") or {})
+        horizon = _pick_horizon_profile(
+            dict(winner.get("action") or {}),
+            str(winner.get("trade_state", "")),
+        )
+        observe_only = bool(selection_context.get("delivery_observe_only"))
+        why_heading = "## 为什么先看它" if observe_only else "## 为什么推荐它"
+        lead_line = (
+            f"今天先给一个观察优先的 ETF 对象：**`{winner.get('name', '')} ({winner.get('symbol', '')})`**"
+            if observe_only
+            else f"今天如果只推荐一只 ETF，我给：**`{winner.get('name', '')} ({winner.get('symbol', '')})`**"
+        )
+        title = "今日ETF观察" if observe_only else "今日ETF推荐"
         lines = [
-            f"# 今日ETF推荐 | {generated_at}",
+            f"# {title} | {generated_at}",
             "",
             "## 今日结论",
             "",
-            f"今天如果只推荐一只 ETF，我给：**`{winner.get('name', '')} ({winner.get('symbol', '')})`**",
+            lead_line,
             "",
             f"这不是无脑追高型推荐，而是：**`{winner.get('trade_state', '持有优于追高')}`**",
             "",
-            "## 为什么推荐它",
-            "",
         ]
+        if horizon:
+            lines.extend(
+                [
+                    f"当前更合适的持有周期：**`{horizon.get('label', '观察期')}`**",
+                    "",
+                    f"这更像：{horizon.get('style', '')}",
+                    "",
+                ]
+            )
+        if selection_context:
+            lines.extend(
+                [
+                    f"> 发现方式: {selection_context.get('discovery_mode_label', '未标注')} | 初筛池: {selection_context.get('scan_pool', '—')} | 完整分析: {selection_context.get('passed_pool', '—')}",
+                    f"> 主题过滤: {selection_context.get('theme_filter_label', '未指定')}",
+                    "",
+                ]
+            )
+        lines.extend(["## 数据完整度", ""])
+        if selection_context.get("coverage_note"):
+            lines.append(f"- {selection_context.get('coverage_note')}")
+        else:
+            lines.append("- 当前没有额外覆盖率备注，默认按已进入完整分析的样本理解。")
+        for item in selection_context.get("coverage_lines", [])[:2]:
+            lines.append(f"- {item}")
+        if selection_context.get("coverage_total"):
+            lines.append(f"- 覆盖率的分母是今天进入完整分析的 `{selection_context.get('coverage_total')}` 只 ETF，不是全市场全部 ETF。")
+        if selection_context.get("baseline_snapshot_at"):
+            role = "今天首个快照版" if selection_context.get("is_daily_baseline") else "今天修正版"
+            lines.append(f"- 本次输出角色：{role}；当日首个基准快照时间是 `{selection_context.get('baseline_snapshot_at')}`。")
+        if selection_context.get("comparison_basis_at"):
+            basis_label = selection_context.get("comparison_basis_label", "对比基准")
+            if basis_label == "当日基准版":
+                basis_label = "今天首个快照版"
+            lines.append(
+                f"- 分数变化对比的是 `{basis_label} {selection_context.get('comparison_basis_at')}`。"
+            )
+        if selection_context.get("model_version_warning"):
+            lines.append(f"- {selection_context.get('model_version_warning')}")
+        lines.extend(_delivery_tier_section(selection_context, asset_label="ETF"))
+        lines.extend(["", why_heading, ""])
         for item in winner.get("positives", [])[:4]:
             lines.append(f"- {item}")
         lines.extend(["", "## 这只ETF为什么是这个分", ""])
@@ -1226,16 +1490,27 @@ class ClientReportRenderer:
                 winner.get("dimension_rows", []),
             )
         )
+        lines.extend(["", *_taxonomy_section(winner)])
+        if winner.get("score_changes"):
+            lines.extend(["", "## 跟今天首个快照版相比", ""])
+            for item in winner.get("score_changes", [])[:4]:
+                lines.append(
+                    f"- `{item.get('label', '维度')}` 从 `{item.get('previous', '—')}` 变到 `{item.get('current', '—')}`：{item.get('reason', '')}"
+                )
         evidence_lines = _evidence_lines(list(winner.get("evidence") or []), max_items=3)
+        lines.extend(["", "## 关键证据", ""])
         if evidence_lines:
-            lines.extend(["", "## 关键证据", ""])
             lines.extend(evidence_lines)
+        else:
+            lines.append("- 当前没有可直接复核的高置信直连证据，催化判断更多依赖结构化事件或历史有效信号。")
         lines.extend(["", "## 怎么做", ""])
         lines.extend(
             _table(
                 ["项目", "建议"],
                 [
                     ["当前动作", winner.get("action", {}).get("direction", "观察为主")],
+                    ["持有周期", horizon.get("label", "未单独标注")],
+                    ["适用打法", horizon.get("style", "先按当前动作、仓位和止损框架理解，不把它默认当成长线配置。")],
                     ["介入条件", winner.get("action", {}).get("entry", "等回撤再看")],
                     ["首次仓位", winner.get("action", {}).get("position", "计划仓位的 1/3 - 1/2")],
                     ["加仓节奏", winner.get("action", {}).get("scaling_plan", "确认后再考虑第二笔")],
@@ -1247,8 +1522,8 @@ class ClientReportRenderer:
         fund_sections = winner.get("fund_sections") or []
         if fund_sections:
             lines.extend(["", *fund_sections])
+        lines.extend(["", "## 为什么不是另外几只", ""])
         if alternatives:
-            lines.extend(["", "## 为什么不是另外几只", ""])
             for index, item in enumerate(alternatives[:2], start=1):
                 lines.extend(
                     [
@@ -1259,6 +1534,12 @@ class ClientReportRenderer:
                 for reason in item.get("cautions", [])[:3]:
                     lines.append(f"- {reason}")
                 lines.append("")
+        else:
+            lines.append("- 今天可进入完整评分且未被硬排除的 ETF 候选只有 1 只，没有形成可并列展开的第二候选。")
+            if observe_only:
+                lines.append("- 这也是本次只能按观察优先或降级稿处理、不能把它写成正式强推荐的原因之一。")
+            else:
+                lines.append("- 单候选不等于自动降级，是否按正式推荐理解仍以本页 `交付等级` 为准。")
         lines.extend(["## 仓位管理", ""])
         for item in winner.get("positioning_lines", []):
             lines.append(f"- {item}")

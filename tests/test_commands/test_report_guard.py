@@ -284,6 +284,15 @@ def test_report_guard_accepts_etf_pick_markdown(isolated_reports: Path) -> None:
         [
             "# 今日ETF推荐 | 2026-03-12",
             "",
+            "## 数据完整度",
+            "- 覆盖正常",
+            "- 覆盖率的分母是今天进入完整分析的 3 只 ETF。",
+            "",
+            "## 交付等级",
+            "- 当前交付等级：标准推荐稿。",
+            "- 这份 ETF 稿件仍按正式推荐框架编排，但执行上仍要遵守仓位和止损。",
+            "- 当前流程不是把全市场每只标的都做完整八维深扫，而是先初筛 6 只，再对其中 3 只做完整分析。",
+            "",
             "## 为什么推荐它",
             "- 理由一",
             "- 理由二",
@@ -293,6 +302,90 @@ def test_report_guard_accepts_etf_pick_markdown(isolated_reports: Path) -> None:
             "| 维度 | 分数 | 为什么是这个分 |",
             "| --- | --- | --- |",
             "| 技术面 | 52/100 | 不适合追高 |",
+            "",
+            "## 标准化分类",
+            "| 维度 | 结果 |",
+            "| --- | --- |",
+            "| 产品形态 | ETF |",
+            "| 载体角色 | 场内ETF |",
+            "| 管理方式 | 被动跟踪 |",
+            "| 暴露类型 | 商品 |",
+            "| 主方向 | 能源 |",
+            "| 份额类别 | 未分级 |",
+            "",
+            "## 关键证据",
+            "- [证据1](https://example.com)",
+            "",
+            "## 为什么不是另外几只",
+            "### 1. 红利ETF (510880)",
+            "- 今天弹性更弱。",
+        ]
+    )
+    bundle = export_reviewed_markdown_bundle(
+        report_type="etf_pick",
+        markdown_text=markdown,
+        markdown_path=target,
+        release_findings=[],
+    )
+    assert bundle["markdown"] == target
+
+
+def test_report_guard_accepts_observe_etf_pick_markdown(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/etf_picks/final/etf_pick_2026-03-13_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        "\n".join(
+            [
+                "## 一句话总评",
+                "可发",
+                "## 主要问题",
+                "- 无新的实质问题",
+                "## 独立答案",
+                "- 结论一致",
+                "## 收敛结论",
+                "- 状态：PASS",
+                "- 无新的 P0/P1：是",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    markdown = "\n".join(
+        [
+            "# 今日ETF观察 | 2026-03-13",
+            "",
+            "## 数据完整度",
+            "- 覆盖存在降级",
+            "- 覆盖率的分母是今天进入完整分析的 2 只 ETF。",
+            "",
+            "## 交付等级",
+            "- 当前交付等级：降级观察稿。",
+            "- 这是一份 ETF 观察优先稿，不按正式推荐稿理解。",
+            "- 当前流程不是把全市场每只标的都做完整八维深扫，而是先初筛 4 只，再对其中 2 只做完整分析。",
+            "",
+            "## 为什么先看它",
+            "- 理由一",
+            "- 理由二",
+            "- 理由三",
+            "",
+            "## 这只ETF为什么是这个分",
+            "| 维度 | 分数 | 为什么是这个分 |",
+            "| --- | --- | --- |",
+            "| 技术面 | 52/100 | 不适合追高 |",
+            "",
+            "## 标准化分类",
+            "| 维度 | 结果 |",
+            "| --- | --- |",
+            "| 产品形态 | ETF |",
+            "| 载体角色 | 场内ETF |",
+            "| 管理方式 | 被动跟踪 |",
+            "| 暴露类型 | 医药 |",
+            "| 主方向 | 医药 |",
+            "| 份额类别 | 未分级 |",
+            "",
+            "## 关键证据",
+            "- [证据1](https://example.com)",
             "",
             "## 为什么不是另外几只",
             "### 1. 红利ETF (510880)",

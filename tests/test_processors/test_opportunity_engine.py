@@ -11,7 +11,7 @@ from src.collectors.market_cn import ChinaMarketCollector
 from src.collectors.market_drivers import MarketDriversCollector
 from src.collectors.valuation import ValuationCollector
 from src.collectors.news import NewsCollector
-from src.processors.opportunity_engine import _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _risk_dimension, _seasonality_dimension, _stock_name_tokens, _technical_dimension, build_default_pool, build_fund_pool, build_stock_pool, discover_fund_opportunities, discover_stock_opportunities
+from src.processors.opportunity_engine import _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _risk_dimension, _seasonality_dimension, _stock_name_tokens, _technical_dimension, build_default_pool, build_fund_pool, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities
 from src.processors.opportunity_engine import _asset_note
 from src.utils.market import compute_history_metrics
 
@@ -118,6 +118,138 @@ def test_build_default_pool_theme_filter_uses_current_filtered_index(monkeypatch
     )
     assert warnings == []
     assert [item.symbol for item in pool] == ["510880"]
+
+
+def test_build_default_pool_watchlist_fallback_keeps_only_cn_etf(monkeypatch):
+    def broken_snapshot(self):  # noqa: ANN001
+        raise RuntimeError("snapshot offline")
+
+    def broken_realtime(self):  # noqa: ANN001
+        raise RuntimeError("realtime offline")
+
+    monkeypatch.setattr(ChinaMarketCollector, "get_etf_universe_snapshot", broken_snapshot)
+    monkeypatch.setattr(ChinaMarketCollector, "get_etf_realtime", broken_realtime)
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.load_watchlist",
+        lambda: [
+            {"symbol": "QQQM", "name": "Invesco NASDAQ 100 ETF", "asset_type": "us", "sector": "科技"},
+            {"symbol": "513120", "name": "港股创新药ETF", "asset_type": "cn_etf", "sector": "医药"},
+            {"symbol": "561380", "name": "电网ETF", "asset_type": "cn_etf", "sector": "电网"},
+        ],
+    )
+
+    pool, warnings = build_default_pool({"opportunity": {"min_turnover": 50_000_000, "max_scan_candidates": 30}})
+
+    assert any("watchlist" in item for item in warnings)
+    assert [item.symbol for item in pool] == ["513120", "561380"]
+    assert all(item.asset_type == "cn_etf" for item in pool)
+
+
+def test_build_default_pool_dedupes_same_benchmark_by_turnover(monkeypatch):
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_etf_universe_snapshot",
+        lambda self: pd.DataFrame(
+            [
+                {
+                    "symbol": "510880",
+                    "name": "红利ETF",
+                    "benchmark": "上证红利指数收益率",
+                    "invest_type": "被动指数型",
+                    "fund_type": "股票型",
+                    "management": "华泰柏瑞基金",
+                    "trade_date": "2026-03-12",
+                    "list_date": "2007-01-18",
+                    "delist_date": "",
+                    "amount": 238_000_000.0,
+                },
+                {
+                    "symbol": "515180",
+                    "name": "红利低波ETF",
+                    "benchmark": "上证红利指数收益率",
+                    "invest_type": "被动指数型",
+                    "fund_type": "股票型",
+                    "management": "某基金",
+                    "trade_date": "2026-03-12",
+                    "list_date": "2022-01-18",
+                    "delist_date": "",
+                    "amount": 120_000_000.0,
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr("src.processors.opportunity_engine.load_watchlist", lambda: [])
+
+    pool, warnings = build_default_pool({"opportunity": {"min_turnover": 50_000_000, "max_scan_candidates": 30}})
+
+    assert warnings == []
+    assert [item.symbol for item in pool] == ["510880"]
+
+
+def test_build_default_pool_falls_back_to_realtime_universe_before_watchlist(monkeypatch):
+    monkeypatch.setattr(ChinaMarketCollector, "get_etf_universe_snapshot", lambda self: pd.DataFrame())
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_etf_realtime",
+        lambda self: pd.DataFrame(
+            [
+                {
+                    "代码": "513120",
+                    "名称": "港股创新药ETF",
+                    "成交额": 1_230_000_000.0,
+                    "数据日期": "2026-03-12",
+                },
+                {
+                    "代码": "159981",
+                    "名称": "能源化工ETF建信",
+                    "成交额": 4_609_059_453.95,
+                    "数据日期": "2026-03-12",
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "_ts_fund_basic_snapshot",
+        lambda self, market="E": pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "ts_code": "513120.SH",
+                    "name": "港股创新药ETF",
+                    "management": "广发基金",
+                    "fund_type": "股票型",
+                    "found_date": "20220701",
+                    "list_date": "20220708",
+                    "benchmark": "中证香港创新药指数收益率(人民币计价)",
+                    "status": "L",
+                    "invest_type": "被动指数型",
+                    "delist_date": None,
+                },
+                {
+                    "ts_code": "159981.SZ",
+                    "name": "能源化工ETF建信",
+                    "management": "建信基金",
+                    "fund_type": "商品型",
+                    "found_date": "20191213",
+                    "list_date": "20191224",
+                    "benchmark": "易盛郑商所能源化工指数A收益率",
+                    "status": "L",
+                    "invest_type": "商品型",
+                    "delist_date": None,
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.load_watchlist",
+        lambda: [{"symbol": "QQQM", "name": "Invesco NASDAQ 100 ETF", "asset_type": "us", "sector": "科技"}],
+    )
+
+    pool, warnings = build_default_pool({"opportunity": {"min_turnover": 50_000_000, "max_scan_candidates": 30}})
+
+    assert warnings == []
+    assert [item.symbol for item in pool] == ["159981", "513120"]
+    assert all(item.source == "realtime_etf_universe" for item in pool)
 
 
 def test_seasonality_dimension_handles_range_index_history():
@@ -2465,3 +2597,115 @@ def test_discover_stock_opportunities_includes_watch_positive(monkeypatch):
     payload = discover_stock_opportunities({}, top_n=5, market="cn")
     assert len(payload["watch_positive"]) == 1
     assert payload["watch_positive"][0]["symbol"] == "300750"
+
+
+def test_discover_opportunities_builds_prepick_candidate_layers(monkeypatch):
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.build_market_context",
+        lambda config, relevant_asset_types=None: {  # noqa: ARG005
+            "day_theme": {"label": "黄金避险升温"},
+            "regime": {"current_regime": "risk_off"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.build_default_pool",
+        lambda config, theme_filter="", preferred_sectors=None: (  # noqa: ARG005
+            [
+                type(
+                    "PoolItemStub",
+                    (),
+                    {
+                        "symbol": "518880",
+                        "asset_type": "cn_etf",
+                        "name": "黄金ETF",
+                        "sector": "黄金",
+                        "chain_nodes": ["黄金"],
+                        "region": "CN",
+                        "in_watchlist": False,
+                        "source": "tushare_etf_universe",
+                    },
+                )(),
+                type(
+                    "PoolItemStub",
+                    (),
+                    {
+                        "symbol": "561380",
+                        "asset_type": "cn_etf",
+                        "name": "电网ETF",
+                        "sector": "电网",
+                        "chain_nodes": ["电网设备"],
+                        "region": "CN",
+                        "in_watchlist": True,
+                        "source": "watchlist",
+                    },
+                )(),
+            ],
+            ["全市场 ETF 扫描池部分数据降级。"],
+        ),
+    )
+
+    def _analysis(symbol, asset_type, config, context=None, metadata_override=None):  # noqa: ARG001
+        if symbol == "518880":
+            return {
+                "symbol": symbol,
+                "name": "黄金ETF",
+                "asset_type": asset_type,
+                "metadata": {"sector": "黄金"},
+                "day_theme": {"label": "黄金避险升温"},
+                "dimensions": {
+                    "technical": {"score": 42, "max_score": 100, "summary": "技术结构一般，更多看防守承接。"},
+                    "fundamental": {"score": 78, "max_score": 100, "summary": "产品结构清晰。"},
+                    "catalyst": {"score": 72, "max_score": 100, "summary": "避险交易和央行增持构成催化。", "coverage": {"news_mode": "proxy", "degraded": True}},
+                    "relative_strength": {"score": 46, "max_score": 100, "summary": "相对强弱中性。"},
+                    "chips": {"score": None, "max_score": 100, "summary": "缺失"},
+                    "risk": {"score": 82, "max_score": 100, "summary": "防守属性和回撤控制更突出。"},
+                    "seasonality": {"score": 30, "max_score": 100, "summary": "一般"},
+                    "macro": {"score": 26, "max_score": 40, "summary": "宏观偏防守。"},
+                },
+                "rating": {"rank": 2, "label": "储备机会", "stars": "⭐⭐", "meaning": "单维度亮灯但还未形成共振。", "warnings": []},
+                "action": {"timeframe": "短线交易(1-2周)", "direction": "观望", "entry": "等确认", "position": "≤2%", "stop": "跌破支撑重评"},
+                "narrative": {"cautions": ["技术确认不足。"], "phase": {"label": "防守轮动"}},
+                "notes": ["当前只拿到代理型新闻覆盖。"],
+                "history_fallback_mode": False,
+                "excluded": False,
+            }
+        return {
+            "symbol": symbol,
+            "name": "电网ETF",
+            "asset_type": asset_type,
+            "metadata": {"sector": "电网"},
+            "day_theme": {"label": "黄金避险升温"},
+            "dimensions": {
+                "technical": {"score": 48, "max_score": 100, "summary": "技术还没完全转强。"},
+                "fundamental": {"score": 63, "max_score": 100, "summary": "底层暴露清晰。"},
+                "catalyst": {"score": 28, "max_score": 100, "summary": "当前缺少新增催化。", "coverage": {"news_mode": "live", "degraded": False}},
+                "relative_strength": {"score": 40, "max_score": 100, "summary": "轮动一般。"},
+                "chips": {"score": None, "max_score": 100, "summary": "缺失"},
+                "risk": {"score": 58, "max_score": 100, "summary": "风险中性。"},
+                "seasonality": {"score": 35, "max_score": 100, "summary": "一般"},
+                "macro": {"score": 18, "max_score": 40, "summary": "宏观没有额外顺风。"},
+            },
+            "rating": {"rank": 1, "label": "有信号但不充分", "stars": "⭐", "meaning": "只有单一维度足够亮，其余不足以支持动作。", "warnings": []},
+            "action": {"timeframe": "等待更好窗口", "direction": "观望", "entry": "继续观察", "position": "暂不出手", "stop": "等待确认"},
+            "narrative": {"cautions": ["催化不足。"], "phase": {"label": "震荡整理"}},
+            "notes": ["该标的已在 watchlist 中，本次分析更偏复核而不是首次发现。"],
+            "history_fallback_mode": False,
+            "excluded": False,
+        }
+
+    monkeypatch.setattr("src.processors.opportunity_engine.analyze_opportunity", _analysis)
+
+    payload = discover_opportunities({}, top_n=3, theme_filter="黄金")
+
+    assert payload["scan_pool"] == 2
+    assert payload["passed_pool"] == 2
+    assert payload["ready_candidates"][0]["symbol"] == "518880"
+    assert payload["ready_candidates"][0]["discovery"]["driver_type"] == "防守驱动"
+    assert any(step["command"] == "python -m src.commands.scan 518880" for step in payload["ready_candidates"][0]["discovery"]["next_steps"])
+    assert any("fund_pick --theme 黄金" in step["command"] for step in payload["ready_candidates"][0]["discovery"]["next_steps"])
+    assert payload["observation_candidates"][0]["symbol"] == "561380"
+    assert payload["observation_candidates"][0]["discovery"]["bucket"] == "observe"
+    assert payload["pool_summary"]["source_rows"] == [["Tushare 全市场 ETF 快照", "1"], ["watchlist 回退池", "1"]]
+    assert any("主题过滤 `黄金`" in item for item in payload["pool_summary"]["filter_rules"])
+    assert payload["data_coverage"]["degraded"] is True
+    assert any("代理型新闻覆盖" in item for item in payload["ready_candidates"][0]["discovery"]["data_notes"])

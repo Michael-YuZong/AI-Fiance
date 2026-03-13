@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import html
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, Iterable, List
 
@@ -239,20 +241,26 @@ def _export_pdf(markdown_text: str, html_path: Path, pdf_path: Path) -> None:
     if not _EDGE_BINARY.exists():
         raise RuntimeError("PDF 导出失败：既没有可用的 fpdf，也没有可用的 Microsoft Edge。")
 
-    subprocess.run(
-        [
-            str(_EDGE_BINARY),
-            "--headless=new",
-            "--disable-gpu",
-            "--allow-file-access-from-files",
-            f"--print-to-pdf={pdf_path}",
-            str(html_path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
+    with tempfile.TemporaryDirectory(prefix="edge-export-", dir="/tmp") as user_data_dir:
+        env = dict(os.environ)
+        env.setdefault("MPLCONFIGDIR", "/tmp/ai-finance-mpl")
+        subprocess.run(
+            [
+                str(_EDGE_BINARY),
+                "--headless=new",
+                "--disable-gpu",
+                f"--user-data-dir={user_data_dir}",
+                "--allow-file-access-from-files",
+                "--run-all-compositor-stages-before-draw",
+                f"--print-to-pdf={pdf_path}",
+                str(html_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env,
+        )
 
 
 def export_markdown_bundle(markdown_text: str, markdown_path: Path, *, allow_unreviewed_final: bool = False) -> Dict[str, Path]:

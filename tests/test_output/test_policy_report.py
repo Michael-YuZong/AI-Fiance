@@ -9,26 +9,36 @@ def test_policy_report_renderer_includes_match_and_timeline_sections():
     payload = {
         "title": "关于加快新型电力系统建设的行动计划",
         "source": "keyword",
+        "input_type": "官方页面 / URL",
+        "extraction_status": "正文抽取部分成功",
         "theme": "电网投资与新型电力系统",
-        "summary": "该主题的核心在于加快新型电力系统建设。",
+        "summary": "原文明确推进新型电力系统建设，当前判断偏支持。",
         "match_confidence": "高",
         "matched_aliases": ["电网", "特高压", "新型电力系统"],
         "policy_direction": "偏支持",
         "policy_stage": "顶层规划/行动方案",
         "policy_goal": "提升电网承载和调峰能力。",
-        "timeline": "需要结合后续细则和项目进度跟踪。",
+        "timeline": "标题给出 2024—2027 年规划区间，正文还有申报节点。",
         "timeline_points": ["要求在2026年6月30日前完成首批申报", "年内形成重点项目清单"],
         "support_points": ["特高压", "配电网改造"],
-        "benefit_risk_lines": ["受益方向：电力需求, 电网设备", "风险点：落地节奏低于预期"],
+        "body_facts": ["原文标题：关于加快新型电力系统建设的行动计划", "原文明确动作：推进特高压和配电网改造"],
+        "inference_lines": ["受益链条映射：电力需求 -> 电网设备 -> 铜铝。", "风险映射：落地节奏低于预期。"],
         "headline_numbers": ["2.5万亿", "10%"],
         "watchlist_impact": ["561380 (电网 ETF) 命中受益方向 `模板显式映射`，适合进入重点跟踪。"],
+        "unconfirmed_lines": ["检测到 PDF/OFD 附件，当前只抽取了公告页正文，未展开附件原文。"],
         "raw_excerpt": "这是摘取内容。",
     }
 
     rendered = PolicyReportRenderer().render(payload)
 
+    assert "输入类型" in rendered
+    assert "抽取状态" in rendered
     assert "模板置信度" in rendered
     assert "## 模板命中" in rendered
-    assert "## 时间线 / 执行抓手" in rendered
+    assert "## 已抽取的正文事实" in rendered
+    assert "## 基于模板 / 规则的推断" in rendered
+    assert "## 待确认 / 降级说明" in rendered
     assert "## 对 watchlist / 持仓的影响" in rendered
+    assert "原文明确动作：推进特高压和配电网改造" in rendered
+    assert "检测到 PDF/OFD 附件" in rendered
     assert "这是摘取内容。" in rendered

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Mapping, Optional
 
 import pandas as pd
@@ -24,6 +25,7 @@ class MarketMonitorCollector(BaseCollector):
         self.monitors_path = resolve_project_path(
             self.config.get("market_monitors_file", "config/market_monitors.yaml")
         )
+        self.max_stale_hours = float(self.config.get("market_monitor_max_stale_hours", 12))
 
     def collect(self) -> List[Dict[str, Any]]:
         if yf is None:
@@ -34,33 +36,64 @@ class MarketMonitorCollector(BaseCollector):
             symbol = str(item.get("symbol", "")).strip()
             if not symbol:
                 continue
-            try:
-                frame = self.cached_call(
-                    f"market_monitor:v2:{symbol}",
-                    yf.Ticker(symbol).history,
-                    period="3mo",
-                    interval="1d",
-                    auto_adjust=False,
-                    ttl_hours=2,
-                    prefer_stale=True,
-                )
-            except Exception:
-                continue
+            cache_key = f"market_monitor:v2:{symbol}"
+            frame = self._load_cache(cache_key, ttl_hours=2)
+            stale_age_hours = None
+            source_status = "fresh_cache"
+            if frame is None:
+                stale_frame = self._load_cache(cache_key, ttl_hours=2, allow_stale=True)
+                stale_age_hours = self._stale_cache_age_hours(cache_key)
+                try:
+                    self.rate_limiter.wait()
+                    frame = self._execute_fetcher(
+                        yf.Ticker(symbol).history,
+                        period="3mo",
+                        interval="1d",
+                        auto_adjust=False,
+                    )
+                    if frame is None or getattr(frame, "empty", False):
+                        raise ValueError(f"{self.name} returned empty result for {cache_key}")
+                    self._save_cache(cache_key, frame)
+                    source_status = "live"
+                except Exception:
+                    if (
+                        stale_frame is None
+                        or stale_age_hours is None
+                        or stale_age_hours > self.max_stale_hours
+                    ):
+                        continue
+                    frame = stale_frame
+                    source_status = "stale_cache"
             close = self._close_series(frame)
             if close.empty:
                 continue
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "name": str(item.get("name", symbol)),
-                    "category": str(item.get("category", "")),
-                    "latest": float(close.iloc[-1]),
-                    "return_1d": self._period_return(close, 1),
-                    "return_5d": self._period_return(close, 5),
-                    "return_20d": self._period_return(close, 20),
-                }
-            )
+            row = {
+                "symbol": symbol,
+                "name": str(item.get("name", symbol)),
+                "category": str(item.get("category", "")),
+                "latest": float(close.iloc[-1]),
+                "return_1d": self._period_return(close, 1),
+                "return_5d": self._period_return(close, 5),
+                "return_20d": self._period_return(close, 20),
+                "source_status": source_status,
+            }
+            if close.index.size:
+                latest_index = close.index[-1]
+                row["as_of"] = str(latest_index.date()) if hasattr(latest_index, "date") else str(latest_index)
+            if source_status == "stale_cache" and stale_age_hours is not None:
+                row["stale_age_hours"] = round(float(stale_age_hours), 1)
+                row["data_warning"] = (
+                    f"实时刷新失败，当前使用约 {stale_age_hours:.1f} 小时前的缓存；"
+                    "不应把它当成严格实时数值。"
+                )
+            rows.append(row)
         return rows
+
+    def _stale_cache_age_hours(self, cache_key: str) -> Optional[float]:
+        cache_path = self._cache_path(cache_key)
+        if not cache_path.exists():
+            return None
+        return max(0.0, (time.time() - cache_path.stat().st_mtime) / 3600)
 
     def _close_series(self, frame: pd.DataFrame) -> pd.Series:
         if frame.empty:

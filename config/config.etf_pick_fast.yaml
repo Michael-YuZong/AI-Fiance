@@ -1,2 +1,6 @@
 news_feeds_file: config/news_feeds.empty.yaml
 news_topic_search_enabled: false
+
+opportunity:
+  max_scan_candidates: 8
+  min_turnover: 100000000
