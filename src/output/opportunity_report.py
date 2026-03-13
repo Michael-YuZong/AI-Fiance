@@ -243,6 +243,59 @@ def _linked_briefing(analysis: Dict[str, Any]) -> str:
     return "—"
 
 
+def _total_dimension_score(analysis: Dict[str, Any]) -> int:
+    return int(sum((dimension.get("score") or 0) for dimension in analysis.get("dimensions", {}).values()))
+
+
+def _compare_sort_key(analysis: Dict[str, Any]) -> tuple[int, int, int, int, int]:
+    dimensions = analysis.get("dimensions", {})
+    return (
+        int(analysis.get("rating", {}).get("rank", 0)),
+        _total_dimension_score(analysis),
+        int(dimensions.get("technical", {}).get("score") or 0),
+        int(dimensions.get("relative_strength", {}).get("score") or 0),
+        int(dimensions.get("catalyst", {}).get("score") or 0),
+    )
+
+
+def _compare_score_display(score: Optional[int]) -> str:
+    return "缺失" if score is None else str(score)
+
+
+def _compare_dimension_winner(analyses: Sequence[Dict[str, Any]], dimension_key: str, default_symbol: str) -> str:
+    available = [
+        (analysis["symbol"], analysis["dimensions"].get(dimension_key, {}).get("score"))
+        for analysis in analyses
+        if analysis["dimensions"].get(dimension_key, {}).get("score") is not None
+    ]
+    if not available:
+        return "—"
+    best_score = max(score for _, score in available)
+    winners = [symbol for symbol, score in available if score == best_score]
+    if len(winners) == len(available):
+        return "平"
+    if len(winners) == 1:
+        return winners[0]
+    if default_symbol in winners:
+        remaining = [symbol for symbol in winners if symbol != default_symbol]
+        return " / ".join([default_symbol, *remaining])
+    return " / ".join(winners)
+
+
+def _compare_focus_pick(analyses: Sequence[Dict[str, Any]], dimension_key: str, default_symbol: str) -> str:
+    winner = _compare_dimension_winner(analyses, dimension_key, default_symbol)
+    return default_symbol if winner in {"—", "平"} else winner
+
+
+def _compare_leading_dimensions(analysis: Dict[str, Any]) -> str:
+    leaders: List[str] = []
+    for key, label in DIMENSION_ORDER:
+        score = analysis.get("dimensions", {}).get(key, {}).get("score")
+        if score is not None and score >= 60:
+            leaders.append(f"{label} {score}")
+    return " / ".join(leaders[:3]) if leaders else "暂无 60 分以上维度"
+
+
 def _fmt_number(value: Any, digits: int = 2, suffix: str = "") -> str:
     if value is None or value == "":
         return "—"
@@ -290,13 +343,24 @@ def _signal_confidence_rows(analysis: Dict[str, Any]) -> List[List[str]]:
         ]
     return [
         ["样本范围", str(confidence.get("scope", "同标的日线相似场景"))],
-        ["相似样本数", str(confidence.get("sample_count", "—"))],
+        ["候选池", str(confidence.get("candidate_pool", "—"))],
+        ["非重叠样本", str(confidence.get("non_overlapping_count", confidence.get("sample_count", "—")))],
+        ["样本覆盖", f"{confidence.get('coverage_months', '—')} 个月 / {confidence.get('coverage_span_days', '—')} 天"],
         ["20日胜率", _fmt_ratio(confidence.get("win_rate_20d"))],
+        [
+            "20日胜率区间",
+            f"95%区间 {_fmt_ratio(confidence.get('win_rate_20d_ci_low'))} ~ {_fmt_ratio(confidence.get('win_rate_20d_ci_high'))}",
+        ],
         ["20日平均收益", _fmt_return(confidence.get("avg_return_20d"))],
         ["20日中位收益", _fmt_return(confidence.get("median_return_20d"))],
+        [
+            "20日中位收益区间",
+            f"bootstrap 区间 {_fmt_return(confidence.get('median_return_20d_ci_low'))} ~ {_fmt_return(confidence.get('median_return_20d_ci_high'))}",
+        ],
         ["20日平均最大回撤", _fmt_return(confidence.get("avg_mae_20d"))],
         ["止损触发率", _fmt_ratio(confidence.get("stop_hit_rate"))],
         ["目标触达率", _fmt_ratio(confidence.get("target_hit_rate"))],
+        ["样本质量", f"{confidence.get('sample_quality_label', '—')} ({confidence.get('sample_quality_score', '—')}/100)"],
         ["样本置信度", f"{confidence.get('confidence_label', '—')} ({confidence.get('confidence_score', '—')}/100)"],
     ]
 
@@ -794,66 +858,84 @@ class OpportunityReportRenderer:
         analyses = payload["analyses"]
         best_symbol = payload["best_symbol"]
         best = next(item for item in analyses if item["symbol"] == best_symbol)
-        other = next(item for item in analyses if item["symbol"] != best_symbol)
-        best_total = sum((dimension.get("score") or 0) for dimension in best["dimensions"].values())
-        other_total = sum((dimension.get("score") or 0) for dimension in other["dimensions"].values())
-        if best["rating"]["rank"] > other["rating"]["rank"]:
-            reason = f"{best['rating']['label']} 评级更高，且多维得分更均衡。"
+        ranked = sorted(analyses, key=_compare_sort_key, reverse=True)
+        runner_up = next(item for item in ranked if item["symbol"] != best_symbol)
+        best_total = _total_dimension_score(best)
+        runner_total = _total_dimension_score(runner_up)
+        if len(analyses) == 2:
+            if best["rating"]["rank"] > runner_up["rating"]["rank"]:
+                reason = f"{best['rating']['label']} 评级更高，且多维得分更均衡。"
+            else:
+                reason = f"评级相同，但综合八维总分 {best_total} 高于 {runner_total}。"
+        elif best["rating"]["rank"] > runner_up["rating"]["rank"]:
+            reason = f"{best_symbol} 的评级更高，且综合八维总分 {best_total} 高于次优 {runner_up['symbol']} 的 {runner_total}。"
         else:
-            reason = f"评级相同，但综合八维总分 {best_total} 高于 {other_total}。"
+            reason = f"{best_symbol} 与次优 {runner_up['symbol']} 评级相同，但综合八维总分 {best_total} 更高。"
         lines = [
-            f"# {analyses[0]['symbol']} vs {analyses[1]['symbol']} 对比分析 | {payload['generated_at'][:10]}",
+            f"# {' vs '.join(analysis['symbol'] for analysis in analyses)} 对比分析 | {payload['generated_at'][:10]}",
             "",
             "## 结论",
             f"**推荐 {best_symbol}**，理由：{reason}",
-            "",
-            "## 八维对比",
         ]
+        if len(analyses) > 2:
+            ranking_rows: List[List[str]] = []
+            for index, analysis in enumerate(ranked, start=1):
+                ranking_rows.append(
+                    [
+                        str(index),
+                        f"{analysis['name']} ({analysis['symbol']})",
+                        analysis["rating"]["label"],
+                        str(_total_dimension_score(analysis)),
+                        _compare_leading_dimensions(analysis),
+                    ]
+                )
+            lines.extend(["", "## 综合排序"])
+            lines.extend(_table(["排名", "标的", "评级", "总分", "领先维度"], ranking_rows))
+
+        lines.extend(["", "## 八维对比"])
         rows: List[List[str]] = []
-        ordered = [
-            ("technical", "技术面"),
-            ("fundamental", "基本面"),
-            ("catalyst", "催化面"),
-            ("relative_strength", "相对强弱"),
-            ("chips", "筹码结构"),
-            ("risk", "风险特征"),
-            ("seasonality", "季节/日历"),
-            ("macro", "宏观敏感度"),
-        ]
-        for key, label in ordered:
-            a_score = analyses[0]["dimensions"][key]["score"]
-            b_score = analyses[1]["dimensions"][key]["score"]
-            a_display = "缺失" if a_score is None else str(a_score)
-            b_display = "缺失" if b_score is None else str(b_score)
-            if a_score is None and b_score is None:
-                winner = "—"
-            elif b_score is None or (a_score is not None and a_score > (b_score or -1)):
-                winner = analyses[0]["symbol"]
-            elif a_score is None or (b_score is not None and b_score > (a_score or -1)):
-                winner = analyses[1]["symbol"]
-            else:
-                winner = "平"
-            rows.append([label, a_display, b_display, winner])
-        lines.extend(_table(["维度", analyses[0]["symbol"], analyses[1]["symbol"], "优势方"], rows))
+        headers = ["维度"] + [analysis["symbol"] for analysis in analyses] + ["优势方"]
+        for key, label in DIMENSION_ORDER:
+            row = [label]
+            for analysis in analyses:
+                row.append(_compare_score_display(analysis["dimensions"][key]["score"]))
+            row.append(_compare_dimension_winner(analyses, key, best_symbol))
+            rows.append(row)
+        lines.extend(_table(headers, rows))
 
         diffs = []
-        for key, label in ordered:
-            a_score = analyses[0]["dimensions"][key]["score"] or 0
-            b_score = analyses[1]["dimensions"][key]["score"] or 0
-            if a_score != b_score:
-                winner = analyses[0]["symbol"] if a_score > b_score else analyses[1]["symbol"]
-                diffs.append((abs(a_score - b_score), label, winner, a_score, b_score))
+        for key, label in DIMENSION_ORDER:
+            available = [
+                (analysis["symbol"], analysis["dimensions"][key]["score"])
+                for analysis in analyses
+                if analysis["dimensions"][key]["score"] is not None
+            ]
+            if len(available) < 2:
+                continue
+            top_score = max(score for _, score in available)
+            bottom_score = min(score for _, score in available)
+            if top_score == bottom_score:
+                continue
+            winners = [symbol for symbol, score in available if score == top_score]
+            laggards = [symbol for symbol, score in available if score == bottom_score]
+            diffs.append((top_score - bottom_score, label, winners, laggards, top_score, bottom_score))
         diffs.sort(reverse=True)
         lines.extend(["", "## 核心差异"])
-        for index, (_, label, winner, a_score, b_score) in enumerate(diffs[:3], start=1):
-            lines.append(f"{index}. `{label}` 差异最大：{analyses[0]['symbol']}={a_score}，{analyses[1]['symbol']}={b_score}，当前更强的是 {winner}。")
+        if diffs:
+            for index, (_, label, winners, laggards, top_score, bottom_score) in enumerate(diffs[:3], start=1):
+                lines.append(
+                    f"{index}. `{label}` 差异最大：领先方 {' / '.join(winners)}={top_score}，相对偏弱 {' / '.join(laggards)}={bottom_score}。"
+                )
+        else:
+            lines.append("1. 当前候选在八维分数上差异不大，更多要靠执行节奏和交易偏好来选。")
 
         lines.extend(
             [
                 "",
                 "## 场景化建议",
-                f"- 如果你追求短线确认和趋势跟随：选 {analyses[0]['symbol'] if (analyses[0]['dimensions']['technical']['score'] or 0) >= (analyses[1]['dimensions']['technical']['score'] or 0) else analyses[1]['symbol']}",
-                f"- 如果你更在意风险控制和分散：选 {analyses[0]['symbol'] if (analyses[0]['dimensions']['risk']['score'] or 0) >= (analyses[1]['dimensions']['risk']['score'] or 0) else analyses[1]['symbol']}",
+                f"- 如果你追求短线确认和趋势跟随：选 {_compare_focus_pick(analyses, 'technical', best_symbol)}",
+                f"- 如果你更在意风险控制和分散：选 {_compare_focus_pick(analyses, 'risk', best_symbol)}",
+                f"- 如果你想优先押催化弹性：选 {_compare_focus_pick(analyses, 'catalyst', best_symbol)}",
                 f"- 如果你只想选一个综合更均衡的：当前优先 {best_symbol}",
             ]
         )

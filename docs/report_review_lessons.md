@@ -44,6 +44,7 @@
 | `L027` | 中期宏观判断必须拆开景气、价格与信用指标角色 | `external_review` / `renderer` |
 | `L028` | 商品/期货 ETF 必须显式披露展期与期限结构风险 | `external_review` / `renderer` |
 | `L029` | 客户稿不得暴露原始异常字符串 | `release_check` / `renderer` |
+| `L030` | 历史样本验证必须披露非重叠样本、置信区间和样本质量 | `release_check` / `renderer` |
 
 ## 处理规则
 

@@ -46,3 +46,26 @@ def test_portfolio_log_trade_persists_thesis_snapshot(tmp_path: Path):
     )
     trade = repo.list_trades()[0]
     assert trade["thesis_snapshot"]["core_assumption"] == "高股息底仓"
+
+
+def test_portfolio_repository_defaults_do_not_leak_between_repos(tmp_path: Path):
+    first = PortfolioRepository(
+        portfolio_path=tmp_path / "first_portfolio.json",
+        trade_log_path=tmp_path / "first_trade_log.json",
+    )
+    second = PortfolioRepository(
+        portfolio_path=tmp_path / "second_portfolio.json",
+        trade_log_path=tmp_path / "second_trade_log.json",
+    )
+
+    first.log_trade(
+        action="buy",
+        symbol="561380",
+        name="电网 ETF",
+        asset_type="cn_etf",
+        price=2.0,
+        amount=1000.0,
+    )
+
+    assert len(first.list_holdings()) == 1
+    assert second.list_holdings() == []

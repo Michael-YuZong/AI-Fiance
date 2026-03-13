@@ -10,7 +10,7 @@ from typing import Dict, Tuple
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
 from src.commands.release_check import check_generic_client_report
 from src.output import AnalysisChartRenderer, ClientReportRenderer, OpportunityReportRenderer
-from src.processors.opportunity_engine import analyze_opportunity, build_market_context
+from src.processors.opportunity_engine import _attach_signal_confidence, analyze_opportunity, build_market_context
 from src.utils.config import detect_asset_type, load_config, resolve_project_path
 from src.utils.logger import setup_logger
 
@@ -21,6 +21,8 @@ def run_scan(symbol: str, config_path: str = "", today_mode: bool = False) -> Tu
     asset_type = detect_asset_type(symbol, config)
     context = build_market_context(config, relevant_asset_types=[asset_type, "cn_etf", "futures"])
     analysis = analyze_opportunity(symbol, asset_type, config, context=context, today_mode=today_mode)
+    if asset_type in {"cn_stock", "hk", "us"}:
+        _attach_signal_confidence([analysis], config, limit=1)
     visuals = AnalysisChartRenderer().render(analysis)
     analysis["visuals"] = visuals
     report = OpportunityReportRenderer().render_scan(analysis, visuals=visuals)
@@ -49,6 +51,18 @@ def _client_output_path(symbol: str, asset_type: str, generated_at: str) -> Path
     return base / f"scan_{safe_symbol}_{date_str}_client_final.md"
 
 
+def _detail_output_path(symbol: str, asset_type: str, generated_at: str) -> Path:
+    safe_symbol = str(symbol).replace("/", "_").replace(" ", "_")
+    date_str = generated_at[:10] or datetime.now().strftime("%Y-%m-%d")
+    if asset_type == "cn_etf":
+        base = resolve_project_path("reports/scans/etfs/internal")
+    elif asset_type == "cn_fund":
+        base = resolve_project_path("reports/scans/funds/internal")
+    else:
+        base = resolve_project_path("reports/scans/internal")
+    return base / f"scan_{safe_symbol}_{date_str}_internal_detail.md"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze a single asset with eight-dimensional opportunity scoring.")
     parser.add_argument("symbol", help="Asset symbol")
@@ -66,8 +80,11 @@ def main() -> None:
         print(report)
         return
 
+    detail_path = _detail_output_path(args.symbol, str(analysis.get("asset_type", "")), str(analysis.get("generated_at", "")))
+    detail_path.parent.mkdir(parents=True, exist_ok=True)
+    detail_path.write_text(report, encoding="utf-8")
     client_markdown = ClientReportRenderer().render_scan(analysis)
-    findings = check_generic_client_report(client_markdown, "scan")
+    findings = check_generic_client_report(client_markdown, "scan", source_text=report)
     try:
         bundle = export_reviewed_markdown_bundle(
             report_type="scan",
@@ -77,6 +94,7 @@ def main() -> None:
             extra_manifest={
                 "symbol": str(args.symbol),
                 "asset_type": str(analysis.get("asset_type", "")),
+                "detail_source": str(detail_path),
             },
         )
     except ReportGuardError as exc:

@@ -3350,7 +3350,7 @@ def _build_evening_payload(
     }
 
 
-def _persist_briefing(markdown: str, mode: str) -> None:
+def _persist_briefing(markdown: str, mode: str) -> Path:
     reports_dir = resolve_project_path("reports")
     reports_dir.mkdir(parents=True, exist_ok=True)
     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -3360,6 +3360,7 @@ def _persist_briefing(markdown: str, mode: str) -> None:
 
     pdf_path = reports_dir / f"{mode}_briefing_{date_str}.pdf"
     _export_pdf(markdown, pdf_path)
+    return md_path
 
 
 def _export_pdf(markdown_text: str, pdf_path: Path) -> None:
@@ -3521,14 +3522,14 @@ def main() -> None:
             "charts": briefing_charts,
         }
         rendered = BriefingRenderer().render(payload)
-    _persist_briefing(rendered, args.mode)
+    detail_path = _persist_briefing(rendered, args.mode)
     if not args.client_final:
         print(rendered)
         return
 
     if args.mode in {"daily", "weekly"}:
         client_markdown = ClientReportRenderer().render_briefing(payload)
-        findings = check_generic_client_report(client_markdown, "briefing")
+        findings = check_generic_client_report(client_markdown, "briefing", source_text=rendered)
         output_path = resolve_project_path("reports/briefings/final") / f"{args.mode}_briefing_{str(payload.get('generated_at', ''))[:10]}_client_final.md"
         try:
             bundle = export_reviewed_markdown_bundle(
@@ -3536,7 +3537,7 @@ def main() -> None:
                 markdown_text=client_markdown,
                 markdown_path=output_path,
                 release_findings=findings,
-                extra_manifest={"mode": args.mode},
+                extra_manifest={"mode": args.mode, "detail_source": str(detail_path)},
             )
         except ReportGuardError as exc:
             raise SystemExit(str(exc))
@@ -3553,7 +3554,7 @@ def main() -> None:
             markdown_text=rendered,
             markdown_path=output_path,
             release_findings=findings,
-            extra_manifest={"mode": args.mode},
+            extra_manifest={"mode": args.mode, "detail_source": str(detail_path)},
         )
     except ReportGuardError as exc:
         raise SystemExit(str(exc))

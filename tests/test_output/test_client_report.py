@@ -51,18 +51,29 @@ def _sample_analysis(symbol: str, name: str, asset_type: str = "cn_stock", rank:
         "hard_checks": [{"name": "流动性", "status": "✅", "detail": "日均成交充足"}],
         "signal_confidence": {
             "available": True,
-            "summary": "同标的近似样本 12 个。",
-            "scope": "同标的日线相似场景",
+            "summary": "严格口径下保留 12 个非重叠样本。",
+            "scope": "同标的日线相似场景（严格非重叠样本）",
             "sample_count": 12,
+            "candidate_pool": 31,
+            "non_overlapping_count": 12,
+            "coverage_months": 7,
+            "coverage_span_days": 198,
             "win_rate_20d": 0.58,
+            "win_rate_20d_ci_low": 0.31,
+            "win_rate_20d_ci_high": 0.81,
             "avg_return_20d": 0.061,
             "median_return_20d": 0.044,
+            "median_return_20d_ci_low": -0.012,
+            "median_return_20d_ci_high": 0.093,
             "avg_mae_20d": -0.072,
             "stop_hit_rate": 0.33,
             "target_hit_rate": 0.42,
+            "sample_quality_label": "中",
+            "sample_quality_score": 54,
             "confidence_label": "中",
             "confidence_score": 57,
             "sample_dates": ["2026-01-05", "2025-11-21"],
+            "quality_notes": ["20 日胜率的下沿还没站上 50%，统计优势不够硬。"],
             "reason": "仅使用同标的当时可见的日线量价和技术状态，不重建历史新闻与财报快照。",
         },
     }
@@ -110,6 +121,9 @@ def test_render_stock_picks_detailed_keeps_analysis_but_hides_internal_trace() -
     assert "硬排除检查" in rendered
     assert "风险拆解" in rendered
     assert "样本置信度" in rendered
+    assert "非重叠样本" in rendered
+    assert "95%区间" in rendered
+    assert "样本质量" in rendered
     assert "这层只反映历史相似量价/技术场景的样本置信度" in rendered
     assert "模型版本" not in rendered
     assert "当日基准版" not in rendered
@@ -170,6 +184,7 @@ def test_render_stock_analysis_uses_stock_analysis_title() -> None:
     rendered = ClientReportRenderer().render_stock_analysis(analysis)
     assert "# Meta (META) | 个股详细分析 | 2026-03-11" in rendered.splitlines()[0]
     assert "## 为什么这么判断" in rendered
+    assert "## 历史相似样本验证" in rendered
 
 
 def test_render_scan_backfills_cautions_when_narrative_is_too_short() -> None:
@@ -191,6 +206,15 @@ def test_render_scan_includes_notes_as_data_limitations() -> None:
 def test_render_fund_pick_has_alternatives() -> None:
     payload = {
         "generated_at": "2026-03-11 10:00:00",
+        "selection_context": {
+            "discovery_mode_label": "全市场初筛",
+            "scan_pool": 12,
+            "passed_pool": 5,
+            "theme_filter_label": "黄金",
+            "style_filter_label": "商品/黄金",
+            "manager_filter_label": "未指定",
+            "blind_spots": ["场外基金画像有 1 只拉取失败，已跳过。"],
+        },
         "winner": {
             "name": "前海开源黄金ETF联接C",
             "symbol": "021740",
@@ -210,6 +234,9 @@ def test_render_fund_pick_has_alternatives() -> None:
     }
     rendered = ClientReportRenderer().render_fund_pick(payload)
     assert "今日场外基金推荐" in rendered
+    assert "发现方式: 全市场初筛 | 初筛池: 12 | 完整分析: 5" in rendered
+    assert "主题过滤: 黄金 | 风格过滤: 商品/黄金 | 管理人过滤: 未指定" in rendered
+    assert "## 数据限制与说明" in rendered
     assert "为什么不是另外几只" in rendered
 
 

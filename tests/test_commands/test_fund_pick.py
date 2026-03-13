@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.commands.fund_pick import _payload_from_analyses
+from src.commands.fund_pick import _payload_from_analyses, _selection_context
 
 
 def _analysis(
@@ -57,3 +57,22 @@ def test_payload_prefers_gold_candidate_in_defensive_mode() -> None:
     assert payload["winner"]["symbol"] == "021740"
     assert any("防守" in line or "黄金" in line for line in payload["winner"]["positives"])
     assert payload["alternatives"][0]["symbol"] == "022365"
+
+
+def test_payload_keeps_selection_context() -> None:
+    payload = _payload_from_analyses(
+        [_analysis("022365", "永赢科技智选混合发起C", "科技", technical=35, fundamental=75, catalyst=50, relative=47, risk=85, macro=30)],
+        selection_context=_selection_context(
+            discovery_mode="full_universe",
+            scan_pool=12,
+            passed_pool=5,
+            theme_filter="科技",
+            style_filter="active",
+            manager_filter="永赢",
+            blind_spots=["全市场基金池有 3 只因画像拉取失败被跳过。"],
+        ),
+    )
+
+    assert payload["selection_context"]["discovery_mode_label"] == "全市场初筛"
+    assert payload["selection_context"]["style_filter_label"] == "主动权益"
+    assert payload["selection_context"]["blind_spots"] == ["全市场基金池有 3 只因画像拉取失败被跳过。"]

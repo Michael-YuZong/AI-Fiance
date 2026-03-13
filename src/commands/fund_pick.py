@@ -4,25 +4,42 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
 from src.commands.release_check import check_generic_client_report
-from src.output import ClientReportRenderer
-from src.processors.opportunity_engine import analyze_opportunity, build_market_context
+from src.output import ClientReportRenderer, OpportunityReportRenderer
+from src.processors.opportunity_engine import analyze_opportunity, build_market_context, discover_fund_opportunities
 from src.utils.config import load_config, resolve_project_path
 from src.utils.logger import setup_logger
 
 DEFAULT_CANDIDATES = ["021740", "022365", "025832"]
+STYLE_LABELS = {
+    "all": "不限",
+    "index": "指数/增强指数",
+    "active": "主动权益",
+    "commodity": "商品/黄金",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Select today's off-exchange fund pick.")
     parser.add_argument("--config", default="", help="Optional path to config YAML")
+    parser.add_argument("--theme", default="", help="Optional theme filter, e.g. 黄金 / 红利 / 科技 / 电网")
+    parser.add_argument(
+        "--style",
+        choices=tuple(STYLE_LABELS),
+        default="all",
+        help="Optional fund style filter: index / active / commodity / all",
+    )
+    parser.add_argument("--manager", default="", help="Optional fund company keyword filter, e.g. 易方达 / 永赢")
+    parser.add_argument("--top", type=int, default=8, help="Number of discovered funds to keep after full analysis")
+    parser.add_argument("--pool-size", type=int, default=12, help="Number of pre-screened funds to run full analysis on")
     parser.add_argument(
         "--candidates",
-        default=",".join(DEFAULT_CANDIDATES),
-        help="Comma-separated candidate fund symbols",
+        default="",
+        help="Optional comma-separated candidate override; when omitted, use full-universe discovery",
     )
     parser.add_argument("--client-final", action="store_true", help="Render and persist client-facing final markdown/pdf")
     return parser
@@ -50,6 +67,19 @@ def _rank_score(analysis: Dict[str, Any], defensive_mode: bool) -> float:
     if defensive_mode:
         return risk * 0.35 + catalyst * 0.25 + macro * 0.15 + technical * 0.15 + relative * 0.10 + defensive_bonus
     return technical * 0.25 + fundamental * 0.20 + catalyst * 0.20 + relative * 0.20 + risk * 0.15
+
+
+def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> List[str]:
+    def _escape(value: Any) -> str:
+        return str(value).replace("|", "\\|").replace("\n", "<br>")
+
+    lines = [
+        "| " + " | ".join(_escape(header) for header in headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(_escape(cell) for cell in row) + " |")
+    return lines
 
 
 def _fund_dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
@@ -108,6 +138,19 @@ def _winner_reason_lines(analysis: Dict[str, Any], defensive_mode: bool) -> List
             f"但这不是追涨型机会，当前更适合按 `{trade_state or action.get('direction', '持有优于追高')}` 去做，而不是直接重仓。"
         )
 
+    if len(lines) < 3:
+        relative = _score_of(analysis, "relative_strength")
+        relative_reason = str(dict(analysis.get("dimensions", {}).get("relative_strength") or {}).get("summary", "")).strip()
+        if relative_reason:
+            lines.append(f"相对强弱 `{int(relative)}` 分。{relative_reason}")
+    if len(lines) < 3:
+        fundamental = _score_of(analysis, "fundamental")
+        fundamental_reason = str(dict(analysis.get("dimensions", {}).get("fundamental") or {}).get("summary", "")).strip()
+        if fundamental_reason:
+            lines.append(f"基本面 `{int(fundamental)}` 分。{fundamental_reason}")
+    if len(lines) < 3:
+        lines.append("这只基金并不是强进攻型机会，但在今天的全市场初筛里，综合优先级仍然排在前面。")
+
     deduped: List[str] = []
     seen = set()
     for item in lines:
@@ -148,22 +191,141 @@ def _alternative_cautions(analysis: Dict[str, Any], winner: Dict[str, Any], defe
     return merged[:3]
 
 
-def _payload_from_analyses(analyses: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+def _defensive_mode(analyses: Sequence[Dict[str, Any]]) -> bool:
+    if not analyses:
+        return False
+    theme = str(analyses[0].get("day_theme", {}).get("label", ""))
+    defensive_mode = any(token in theme for token in ("能源", "风险", "防守", "地缘"))
+    if defensive_mode:
+        return True
+    return any(
+        "黄金" in " ".join(
+            [
+                str(item.get("name", "")),
+                str(dict(item.get("metadata") or {}).get("sector", "")),
+            ]
+        )
+        for item in analyses
+    )
+
+
+def _detail_output_path(generated_at: str) -> Path:
+    date_str = generated_at[:10] or datetime.now().strftime("%Y-%m-%d")
+    return resolve_project_path(f"reports/scans/funds/internal/fund_pick_{date_str}_internal_detail.md")
+
+
+def _candidate_summary_rows(analyses: Sequence[Dict[str, Any]], defensive_mode: bool) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for item in analyses:
+        rating = dict(item.get("rating") or {})
+        narrative = dict(item.get("narrative") or {})
+        rows.append(
+            [
+                f"{item.get('name', '—')} ({item.get('symbol', '—')})",
+                f"{rating.get('stars', '—')} {rating.get('label', '未评级')}",
+                f"{_rank_score(item, defensive_mode):.1f}",
+                str(dict(narrative.get('judgment') or {}).get("state", "观察为主")),
+            ]
+        )
+    return rows
+
+
+def _detail_markdown(
+    analyses: Sequence[Dict[str, Any]],
+    winner_symbol: str,
+    *,
+    blind_spots: Sequence[str] | None = None,
+    scan_pool: int = 0,
+    passed_pool: int = 0,
+    theme_filter: str = "",
+    style_filter: str = "",
+    manager_filter: str = "",
+    discovery_mode: str = "full_universe",
+) -> str:
+    defensive_mode = _defensive_mode(analyses)
+    ranked = sorted(
+        analyses,
+        key=lambda item: (
+            -int(item.get("rating", {}).get("rank", 0) or 0),
+            -_rank_score(item, defensive_mode),
+        ),
+    )
+    winner = next((item for item in ranked if str(item.get("symbol", "")) == winner_symbol), ranked[0])
+    alternatives = [item for item in ranked if str(item.get("symbol", "")) != str(winner_symbol)]
+    generated_at = str(winner.get("generated_at", ""))[:10]
+    lines = [
+        f"# 今日场外基金推荐内部详细稿 | {generated_at}",
+        "",
+        f"- 发现方式: `{_discovery_mode_label(discovery_mode)}`",
+        f"- 初筛基金池: `{scan_pool or len(analyses)}`",
+        f"- 进入完整分析: `{passed_pool or len(analyses)}`",
+        f"- 主题过滤: `{theme_filter or '未指定'}`",
+        f"- 风格过滤: `{STYLE_LABELS.get(style_filter, STYLE_LABELS['all'])}`",
+        f"- 管理人过滤: `{manager_filter or '未指定'}`",
+        "",
+        "## 候选池摘要",
+        "",
+    ]
+    lines.extend(_table(["标的", "评级", "排序分", "交易状态"], _candidate_summary_rows(ranked[:5], defensive_mode)))
+    lines.extend(
+        [
+            "",
+            "## 中选说明",
+            "",
+            f"- 中选标的：`{winner.get('name', '—')} ({winner.get('symbol', '—')})`。",
+            f"- 当前模式：`{'防守优先' if defensive_mode else '平衡/进攻优先'}`，客户稿评分表会与下方详细稿八维评分保持硬一致。",
+        ]
+    )
+    if alternatives:
+        lines.extend(["", "## 未中选候选", ""])
+        for item in alternatives[:2]:
+            lines.append(f"- `{item.get('name', '—')} ({item.get('symbol', '—')})` 仍在观察池，但今天综合优先级低于中选标的。")
+    if blind_spots:
+        lines.extend(["", "## 数据盲区与降级说明", ""])
+        for item in blind_spots[:5]:
+            text = str(item).strip()
+            if text:
+                lines.append(f"- {text}")
+    lines.extend(["", "## 中选标的详细分析", ""])
+    lines.append(OpportunityReportRenderer().render_scan(dict(winner)).rstrip())
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _discovery_mode_label(mode: str) -> str:
+    return {
+        "manual_candidates": "手动候选",
+        "full_universe": "全市场初筛",
+        "default_candidates_fallback": "默认候选回退",
+    }.get(str(mode), str(mode) or "未标注")
+
+
+def _selection_context(
+    *,
+    discovery_mode: str,
+    scan_pool: int,
+    passed_pool: int,
+    theme_filter: str = "",
+    style_filter: str = "all",
+    manager_filter: str = "",
+    blind_spots: Sequence[str] | None = None,
+) -> Dict[str, Any]:
+    return {
+        "discovery_mode": discovery_mode,
+        "discovery_mode_label": _discovery_mode_label(discovery_mode),
+        "scan_pool": int(scan_pool),
+        "passed_pool": int(passed_pool),
+        "theme_filter_label": theme_filter or "未指定",
+        "style_filter_label": STYLE_LABELS.get(style_filter, STYLE_LABELS["all"]),
+        "manager_filter_label": manager_filter or "未指定",
+        "blind_spots": [str(item).strip() for item in (blind_spots or []) if str(item).strip()],
+    }
+
+
+def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
     if not analyses:
         raise ValueError("No fund analyses available")
     generated_at = str(analyses[0].get("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    theme = str(analyses[0].get("day_theme", {}).get("label", ""))
-    defensive_mode = any(token in theme for token in ("能源", "风险", "防守", "地缘"))
-    if not defensive_mode:
-        defensive_mode = any(
-            "黄金" in " ".join(
-                [
-                    str(item.get("name", "")),
-                    str(dict(item.get("metadata") or {}).get("sector", "")),
-                ]
-            )
-            for item in analyses
-        )
+    defensive_mode = _defensive_mode(analyses)
     ranked = sorted(
         analyses,
         key=lambda item: (
@@ -221,6 +383,7 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]]) -> Dict[str, Any]
         "generated_at": generated_at,
         "winner": winner_payload,
         "alternatives": alternatives,
+        "selection_context": dict(selection_context or {}),
     }
 
 
@@ -229,16 +392,73 @@ def main() -> None:
     ensure_report_task_registered("fund_pick")
     setup_logger("ERROR")
     config = load_config(args.config or None)
+    blind_spots: List[str] = []
+    scan_pool = 0
+    passed_pool = 0
+    theme_filter = args.theme.strip()
+    style_filter = str(args.style).strip().lower()
+    manager_filter = args.manager.strip()
     candidates = [item.strip() for item in str(args.candidates).split(",") if item.strip()]
-    context = build_market_context(config, relevant_asset_types=["cn_fund", "cn_etf", "futures"])
-    analyses = [analyze_opportunity(symbol, "cn_fund", config, context=context) for symbol in candidates]
-    payload = _payload_from_analyses(analyses)
+    discovery_mode = "manual_candidates" if candidates else "full_universe"
+    if candidates:
+        if theme_filter or style_filter != "all" or manager_filter:
+            blind_spots.append("当前使用手动候选模式，主题/风格/管理人参数不会重筛基金池，只用于记录本次偏好。")
+        context = build_market_context(config, relevant_asset_types=["cn_fund", "cn_etf", "futures"])
+        analyses = [analyze_opportunity(symbol, "cn_fund", config, context=context) for symbol in candidates]
+        scan_pool = len(candidates)
+        passed_pool = len(analyses)
+    else:
+        discovery = discover_fund_opportunities(
+            config,
+            top_n=max(int(args.top), 5),
+            theme_filter=theme_filter,
+            max_candidates=max(int(args.pool_size), 5),
+            style_filter=style_filter,
+            manager_filter=manager_filter,
+        )
+        analyses = list(discovery.get("top") or [])
+        blind_spots = list(discovery.get("blind_spots") or [])
+        scan_pool = int(discovery.get("scan_pool") or 0)
+        passed_pool = int(discovery.get("passed_pool") or 0)
+        candidates = [str(item.get("symbol", "")) for item in analyses if str(item.get("symbol", "")).strip()]
+        if not analyses:
+            blind_spots.append("全市场场外基金池没有留下可用候选，已回退到默认候选池。")
+            discovery_mode = "default_candidates_fallback"
+            candidates = list(DEFAULT_CANDIDATES)
+            context = build_market_context(config, relevant_asset_types=["cn_fund", "cn_etf", "futures"])
+            analyses = [analyze_opportunity(symbol, "cn_fund", config, context=context) for symbol in candidates]
+            scan_pool = len(candidates)
+            passed_pool = len(analyses)
+    selection_context = _selection_context(
+        discovery_mode=discovery_mode,
+        scan_pool=scan_pool,
+        passed_pool=passed_pool,
+        theme_filter=theme_filter,
+        style_filter=style_filter,
+        manager_filter=manager_filter,
+        blind_spots=blind_spots,
+    )
+    payload = _payload_from_analyses(analyses, selection_context=selection_context)
     markdown = ClientReportRenderer().render_fund_pick(payload)
     if not args.client_final:
         print(markdown)
         return
 
-    findings = check_generic_client_report(markdown, "fund_pick")
+    detail_markdown = _detail_markdown(
+        analyses,
+        str(dict(payload.get("winner") or {}).get("symbol", "")),
+        blind_spots=blind_spots,
+        scan_pool=scan_pool,
+        passed_pool=passed_pool,
+        theme_filter=theme_filter,
+        style_filter=style_filter,
+        manager_filter=manager_filter,
+        discovery_mode=discovery_mode,
+    )
+    detail_path = _detail_output_path(str(payload.get("generated_at", "")))
+    detail_path.parent.mkdir(parents=True, exist_ok=True)
+    detail_path.write_text(detail_markdown, encoding="utf-8")
+    findings = check_generic_client_report(markdown, "fund_pick", source_text=detail_markdown)
     date_str = str(payload.get("generated_at", ""))[:10]
     try:
         bundle = export_reviewed_markdown_bundle(
@@ -246,7 +466,17 @@ def main() -> None:
             markdown_text=markdown,
             markdown_path=resolve_project_path(f"reports/scans/funds/final/fund_pick_{date_str}_client_final.md"),
             release_findings=findings,
-            extra_manifest={"candidates": list(candidates)},
+            extra_manifest={
+                "candidates": list(candidates),
+                "winner": dict(payload.get("winner") or {}).get("symbol", ""),
+                "detail_source": str(detail_path),
+                "theme_filter": theme_filter,
+                "style_filter": style_filter,
+                "manager_filter": manager_filter,
+                "scan_pool": scan_pool,
+                "passed_pool": passed_pool,
+                "discovery_mode": discovery_mode,
+            },
         )
     except ReportGuardError as exc:
         raise SystemExit(str(exc))

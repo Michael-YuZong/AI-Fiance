@@ -110,6 +110,31 @@ def _bullets_in_section(text: str, heading: str) -> List[str]:
     return bullets
 
 
+def _section_items(text: str, heading: str) -> List[str]:
+    lines = text.splitlines()
+    collecting = False
+    items: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == heading:
+            collecting = True
+            continue
+        if collecting and stripped.startswith("#"):
+            break
+        if not collecting or not stripped:
+            continue
+        if stripped.startswith("|"):
+            break
+        if stripped.startswith("- "):
+            items.append(stripped[2:].strip())
+            continue
+        if stripped.startswith(">"):
+            items.append(stripped[1:].strip())
+            continue
+        items.append(stripped)
+    return items
+
+
 def _explanation_bullets(text: str) -> List[str]:
     bullets: List[str] = []
     for line in text.splitlines():
@@ -182,6 +207,144 @@ def _client_stock_table(text: str, market_heading: str = "## A股") -> Dict[str,
     return {}
 
 
+def _analysis_client_dimension_map(text: str) -> Dict[str, str]:
+    return _pick_client_dimension_map(text, "## 为什么这么判断")
+
+
+def _pick_client_dimension_map(text: str, heading: str) -> Dict[str, str]:
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip() != heading:
+            continue
+        table_start = None
+        for probe in range(idx + 1, len(lines)):
+            if lines[probe].strip().startswith("|"):
+                table_start = probe
+                break
+            if lines[probe].strip().startswith("## "):
+                break
+        if table_start is None:
+            return {}
+        header, rows = _parse_markdown_table(lines, table_start)
+        if header[:3] != ["维度", "分数", "为什么是这个分"]:
+            return {}
+        payload: Dict[str, str] = {}
+        for row in rows:
+            if len(row) < 2:
+                continue
+            payload[str(row[0]).strip()] = str(row[1]).strip()
+        return payload
+    return {}
+
+
+def _analysis_source_dimension_map(text: str) -> Dict[str, str]:
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip() != "## 八维评分":
+            continue
+        table_start = None
+        for probe in range(idx + 1, len(lines)):
+            if lines[probe].strip().startswith("|"):
+                table_start = probe
+                break
+            if lines[probe].strip().startswith("## "):
+                break
+        if table_start is None:
+            return {}
+        header, rows = _parse_markdown_table(lines, table_start)
+        if header[:4] != ["维度", "得分", "一句话判断", "详情"]:
+            return {}
+        payload: Dict[str, str] = {}
+        for row in rows:
+            if len(row) < 2:
+                continue
+            payload[str(row[0]).strip()] = str(row[1]).strip()
+        return payload
+    return {}
+
+
+def _analysis_source_consistency_findings(client_text: str, source_text: str, report_type: str) -> List[str]:
+    findings: List[str] = []
+    client_map = _analysis_client_dimension_map(client_text)
+    if not client_map:
+        findings.append(f"[P1] {report_type} 客户稿未解析出“为什么这么判断”维度表，无法做源稿一致性校验")
+        return findings
+    source_map = _analysis_source_dimension_map(source_text)
+    if not source_map:
+        findings.append(f"[P1] {report_type} 详细稿未解析出“八维评分”维度表，无法做源稿一致性校验")
+        return findings
+    for label, client_score in client_map.items():
+        source_score = source_map.get(label)
+        if source_score is None:
+            findings.append(f"[P1] {report_type} 客户稿维度在详细稿里不存在: {label}")
+            continue
+        if _normalized_score_token(client_score) != _normalized_score_token(source_score):
+            findings.append(
+                f"[P1] {report_type} 客户稿与详细稿分数不一致: {label} client={client_score} source={source_score}"
+            )
+    return findings
+
+
+def _normalized_score_token(value: str) -> str:
+    text = str(value).strip()
+    if text in {"", "—", "—/100", "缺失", "信息项", "不适用"}:
+        return "MISSING"
+    return text
+
+
+def _pick_source_consistency_findings(client_text: str, source_text: str, report_type: str, heading: str) -> List[str]:
+    findings: List[str] = []
+    client_map = _pick_client_dimension_map(client_text, heading)
+    if not client_map:
+        findings.append(f"[P1] {report_type} 客户稿未解析出维度评分表，无法做源稿一致性校验")
+        return findings
+    source_map = _analysis_source_dimension_map(source_text)
+    if not source_map:
+        findings.append(f"[P1] {report_type} 详细稿未解析出“八维评分”维度表，无法做源稿一致性校验")
+        return findings
+    for label, client_score in client_map.items():
+        source_score = source_map.get(label)
+        if source_score is None:
+            findings.append(f"[P1] {report_type} 客户稿维度在详细稿里不存在: {label}")
+            continue
+        if _normalized_score_token(client_score) != _normalized_score_token(source_score):
+            findings.append(
+                f"[P1] {report_type} 客户稿与详细稿分数不一致: {label} client={client_score} source={source_score}"
+            )
+    return findings
+
+
+def _briefing_source_consistency_findings(client_text: str, source_text: str) -> List[str]:
+    findings: List[str] = []
+    client_why = _bullets_in_section(client_text, "## 为什么今天这么判断")
+    client_actions = _bullets_in_section(client_text, "## 今天怎么做")
+    source_headlines = _section_items(source_text, "### 1.1 今日主线")
+    source_actions = _section_items(source_text, "### 1.2 今天怎么做")
+    if not source_headlines:
+        findings.append("[P1] briefing 详细稿缺少“1.1 今日主线”内容，无法做源稿一致性校验")
+        return findings
+    if not source_actions:
+        findings.append("[P1] briefing 详细稿缺少“1.2 今天怎么做”内容，无法做源稿一致性校验")
+        return findings
+    for item in client_why:
+        if item not in source_headlines:
+            findings.append(f"[P1] briefing 客户稿理由在详细稿主线章节中不存在: {item}")
+    for item in client_actions:
+        if item not in source_actions:
+            findings.append(f"[P1] briefing 客户稿动作在详细稿行动章节中不存在: {item}")
+    return findings
+
+
+def _normalize_markdown(text: str) -> str:
+    return "\n".join(line.rstrip() for line in text.splitlines()).strip()
+
+
+def _retrospect_source_consistency_findings(client_text: str, source_text: str) -> List[str]:
+    if _normalize_markdown(client_text) == _normalize_markdown(source_text):
+        return []
+    return ["[P1] retrospect 客户稿与内部详细稿不一致：当前流程要求复盘成稿与内部详细稿保持同稿发布"]
+
+
 def _source_stock_dimensions(text: str) -> Dict[str, Dict[str, str]]:
     pattern = re.compile(
         r"^###\s+\d+\.\s+\[A\]\s+(?P<name>.+?)\s+\((?P<symbol>\d{6})\)\s+(?P<label>.+?)\n(?P<body>.*?)(?=^---\n|^###\s+\d+\.|\Z)",
@@ -238,6 +401,13 @@ def check_stock_pick_client_report(client_text: str, source_text: str) -> List[s
         findings.append(format_lesson_finding("L014", "[P1] 个股成稿缺少可直接复核的催化证据来源"))
     if "历史相似样本" not in client_text:
         findings.append(format_lesson_finding("L017", "[P1] 个股成稿缺少历史相似样本/置信度章节"))
+    else:
+        if "非重叠样本" not in client_text:
+            findings.append(format_lesson_finding("L030", "[P1] 个股成稿引用了历史相似样本，但没有说明严格去重后的非重叠样本数"))
+        if "95%区间" not in client_text:
+            findings.append(format_lesson_finding("L030", "[P2] 个股成稿引用了历史相似样本，但没有展示胜率置信区间"))
+        if "样本质量" not in client_text:
+            findings.append(format_lesson_finding("L030", "[P2] 个股成稿引用了历史相似样本，但没有展示样本质量判断"))
     findings.extend(_duplicate_explanation_findings(client_text, max_repeat=2))
     if len(_explanation_bullets(client_text)) < 8:
         findings.append(format_lesson_finding("L002", "[P2] 客户稿解释性不足：实质性解释条目太少"))
@@ -292,7 +462,7 @@ def check_stock_pick_client_report(client_text: str, source_text: str) -> List[s
     return findings
 
 
-def check_generic_client_report(client_text: str, report_type: str) -> List[str]:
+def check_generic_client_report(client_text: str, report_type: str, source_text: str = "") -> List[str]:
     findings: List[str] = []
     for phrase in BANNED_CLIENT_PHRASES:
         if phrase in client_text:
@@ -355,6 +525,13 @@ def check_generic_client_report(client_text: str, report_type: str) -> List[str]
             findings.append(format_lesson_finding("L002", "[P2] stock_analysis 客户稿缺少正向理由：'值得继续看的地方' 至少要有 1 条"))
         if len(_bullets_in_section(client_text, "## 现在不适合激进的地方")) < 2:
             findings.append(format_lesson_finding("L002", "[P2] stock_analysis 客户稿缺少反向理由：'现在不适合激进的地方' 至少要有 2 条"))
+        if "## 历史相似样本验证" in client_text:
+            if "非重叠样本" not in client_text:
+                findings.append(format_lesson_finding("L030", "[P1] stock_analysis 引用了历史相似样本，但没有说明非重叠样本数"))
+            if "95%区间" not in client_text:
+                findings.append(format_lesson_finding("L030", "[P2] stock_analysis 引用了历史相似样本，但没有展示胜率置信区间"))
+            if "样本质量" not in client_text:
+                findings.append(format_lesson_finding("L030", "[P2] stock_analysis 引用了历史相似样本，但没有展示样本质量"))
     elif report_type == "retrospect":
         if client_text.count("### ") < 1:
             findings.append(format_lesson_finding("L002", "[P2] retrospect 客户稿至少要展开 1 笔具体决策。"))
@@ -366,6 +543,17 @@ def check_generic_client_report(client_text: str, report_type: str) -> List[str]
         hits = sum(1 for token in macro_tokens if token in client_text)
         if hits < 3:
             findings.append(format_lesson_finding("L027", "[P2] 报告使用了中期宏观判断语气，但没有把 PMI/PPI/CPI/信用脉冲 的角色讲清楚。"))
+    if source_text:
+        if report_type in {"scan", "stock_analysis"}:
+            findings.extend(_analysis_source_consistency_findings(client_text, source_text, report_type))
+        elif report_type == "fund_pick":
+            findings.extend(_pick_source_consistency_findings(client_text, source_text, report_type, "## 这只基金为什么是这个分"))
+        elif report_type == "etf_pick":
+            findings.extend(_pick_source_consistency_findings(client_text, source_text, report_type, "## 这只ETF为什么是这个分"))
+        elif report_type == "briefing":
+            findings.extend(_briefing_source_consistency_findings(client_text, source_text))
+        elif report_type == "retrospect":
+            findings.extend(_retrospect_source_consistency_findings(client_text, source_text))
     return findings
 
 
@@ -388,13 +576,13 @@ def _intraday_claim_findings(text: str) -> List[str]:
 def main() -> None:
     args = build_parser().parse_args()
     client_text = _read(args.client)
+    source_text = _read(args.source) if args.source else ""
     if args.report_type == "stock_pick":
         if not args.source:
             raise SystemExit("stock_pick 一致性校验必须提供 --source")
-        source_text = _read(args.source)
         findings = check_stock_pick_client_report(client_text, source_text)
     else:
-        findings = check_generic_client_report(client_text, args.report_type)
+        findings = check_generic_client_report(client_text, args.report_type, source_text=source_text)
     if findings:
         print("发布前一致性校验未通过：")
         for item in findings:

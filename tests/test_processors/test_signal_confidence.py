@@ -53,6 +53,14 @@ def test_signal_confidence_builds_same_symbol_statistics() -> None:
     )
     assert result["available"] is True
     assert result["sample_count"] >= 12
+    assert result["non_overlapping_count"] == result["sample_count"]
+    assert result["coverage_months"] >= 1
     assert 0 <= result["win_rate_20d"] <= 1
+    assert 0 <= result["win_rate_20d_ci_low"] <= result["win_rate_20d_ci_high"] <= 1
+    assert result["median_return_20d_ci_low"] <= result["median_return_20d"] <= result["median_return_20d_ci_high"]
+    assert 0 <= result["sample_quality_score"] <= 100
+    assert result["sample_quality_label"] in {"高", "中高", "中", "低"}
+    assert 0 <= result["sign_test_pvalue"] <= 1
+    assert "非重叠样本" in result["summary"]
     assert result["latest_sample_date"] < str(history["date"].iloc[-20].date())
     assert result["confidence_label"] in {"高", "中高", "中", "低"}

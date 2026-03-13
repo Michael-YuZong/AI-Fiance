@@ -52,7 +52,7 @@ SECTOR_RULES = [
     (("沪深300", "中证a500", "a500", "中证500", "上证50", "宽基"), "宽基", ["宽基", "大盘蓝筹", "内需"]),
     (("电网", "电力", "储能", "逆变器", "特高压"), "电网", ["AI算力", "电力需求", "电网设备", "铜铝"]),
     (("黄金", "贵金属"), "黄金", ["黄金", "通胀预期"]),
-    (("半导体", "芯片", "通信", "算力", "人工智能", "AI", "软件", "消费电子"), "科技", ["AI算力", "半导体", "成长股估值修复"]),
+    (("科技", "半导体", "芯片", "通信", "算力", "人工智能", "AI", "软件", "消费电子"), "科技", ["AI算力", "半导体", "成长股估值修复"]),
     (("油", "煤", "能源"), "能源", ["原油", "通胀预期", "能源安全"]),
     (("银行", "红利", "高股息"), "高股息", ["高股息", "防守"]),
     (("医药", "医疗"), "医药", ["医药", "老龄化"]),
@@ -5351,6 +5351,267 @@ def _attach_signal_confidence(
         )
 
 
+def _fund_pool_composite_text(row: Mapping[str, Any]) -> str:
+    return " ".join(
+        [
+            str(row.get("name", "") or "").strip(),
+            str(row.get("benchmark", "") or "").strip(),
+            str(row.get("fund_type", "") or "").strip(),
+            str(row.get("invest_type", "") or "").strip(),
+            str(row.get("management", "") or "").strip(),
+        ]
+    ).strip()
+
+
+def _fund_theme_text(text: str) -> str:
+    cleaned = str(text or "")
+    for noise in (
+        "中国人民银行人民币活期存款利率",
+        "银行活期存款利率",
+        "人民币活期存款利率",
+        "活期存款利率",
+        "税后",
+    ):
+        cleaned = cleaned.replace(noise, " ")
+    return cleaned
+
+
+def _fund_base_name(name: str) -> str:
+    normalized = str(name or "").strip()
+    normalized = re.sub(r"[\s（）()]+$", "", normalized)
+    normalized = re.sub(r"(人民币|美元现汇|美元现钞|场内份额|场外份额)$", "", normalized)
+    if re.search(r"联接[A-Z]$", normalized):
+        normalized = normalized[:-1]
+    elif len(normalized) >= 2 and normalized[-1].isalpha() and not normalized[-2].isascii():
+        normalized = normalized[:-1]
+    return normalized.strip() or str(name or "").strip()
+
+
+def _fund_share_class_priority(name: str) -> int:
+    normalized = str(name or "").strip().upper()
+    if len(normalized) < 2 or normalized[-2].isascii():
+        return 0
+    for marker, score in (
+        ("C", 4),
+        ("A", 3),
+        ("E", 2),
+        ("I", 1),
+        ("Y", 1),
+        ("F", 1),
+        ("B", 1),
+    ):
+        if normalized.endswith(marker):
+            return score
+    return 0
+
+
+def _preferred_fund_sectors(day_theme_label: str, theme_filter: str = "") -> List[str]:
+    preferred: List[str] = []
+    for text in (theme_filter, day_theme_label):
+        sector, _ = _normalize_sector(str(text or ""))
+        if sector != "综合" and sector not in preferred:
+            preferred.append(sector)
+    lowered_theme = str(day_theme_label or "").lower()
+    if any(token in lowered_theme for token in ("风险", "地缘", "防守", "避险")):
+        for sector in ("黄金", "高股息", "宽基"):
+            if sector not in preferred:
+                preferred.append(sector)
+    if "能源" in lowered_theme:
+        for sector in ("能源", "黄金", "高股息"):
+            if sector not in preferred:
+                preferred.append(sector)
+    if any(token in lowered_theme for token in ("科技", "ai", "算力", "半导体", "芯片")):
+        for sector in ("科技", "电网", "宽基"):
+            if sector not in preferred:
+                preferred.append(sector)
+    return preferred
+
+
+def _matches_fund_style_filter(row: Mapping[str, Any], style_filter: str) -> bool:
+    style = str(style_filter or "").strip().lower()
+    if style in {"", "all"}:
+        return True
+    combined = " ".join(
+        [
+            str(row.get("fund_type", "") or "").strip(),
+            str(row.get("invest_type", "") or "").strip(),
+            str(row.get("benchmark", "") or "").strip(),
+            str(row.get("name", "") or "").strip(),
+        ]
+    ).lower()
+    if style == "index":
+        return any(token in combined for token in ("指数", "被动", "增强指数"))
+    if style == "active":
+        return any(token in combined for token in ("混合", "灵活配置", "股票")) and not any(
+            token in combined for token in ("指数", "被动", "增强指数", "黄金现货合约", "商品")
+        )
+    if style == "commodity":
+        return any(token in combined for token in ("商品", "黄金", "贵金属", "现货合约"))
+    return True
+
+
+def _matches_manager_filter(row: Mapping[str, Any], manager_filter: str) -> bool:
+    keyword = str(manager_filter or "").strip().lower()
+    if not keyword:
+        return True
+    manager = str(row.get("management", "") or "").strip().lower()
+    name = str(row.get("name", "") or "").strip().lower()
+    return keyword in manager or keyword in name
+
+
+def build_fund_pool(
+    config: Mapping[str, Any],
+    theme_filter: str = "",
+    *,
+    preferred_sectors: Optional[Sequence[str]] = None,
+    max_candidates: Optional[int] = None,
+    style_filter: str = "",
+    manager_filter: str = "",
+) -> tuple[List[PoolItem], List[str]]:
+    warnings: List[str] = []
+    watchlist = load_watchlist()
+    pool: List[PoolItem] = []
+    seen: set[str] = set()
+    opportunity_cfg = dict(config).get("opportunity", {})
+    max_scan_candidates = int(max_candidates or opportunity_cfg.get("fund_max_scan_candidates", 12))
+    min_found_days = int(opportunity_cfg.get("fund_min_found_days", 120))
+    lowered_filter = theme_filter.lower().strip()
+    preferred = [str(item).strip() for item in (preferred_sectors or []) if str(item).strip()]
+
+    try:
+        frame = FundProfileCollector(config).get_fund_basic("O")
+    except Exception as exc:
+        return [], [f"Tushare 场外基金列表拉取失败: {exc}"]
+
+    if frame is None or frame.empty:
+        return [], ["Tushare 场外基金列表为空，无法构建全市场基金池。"]
+
+    required_columns = {"ts_code", "name", "status"}
+    missing_columns = [column for column in required_columns if column not in frame.columns]
+    if missing_columns:
+        return [], [f"Tushare 场外基金列表缺少必要列: {', '.join(missing_columns)}"]
+
+    working = frame.copy()
+    working = working[working["status"].fillna("").astype(str).eq("L")]
+    if "delist_date" in working.columns:
+        working = working[
+            working["delist_date"].fillna("").astype(str).eq("")
+            | working["delist_date"].fillna("").astype(str).str.lower().eq("nan")
+        ]
+
+    working["_symbol"] = working["ts_code"].fillna("").astype(str).str.split(".").str[0]
+    working["_name"] = working["name"].fillna("").astype(str).str.strip()
+    working = working[(working["_symbol"] != "") & (working["_name"] != "")]
+
+    working["_found_date"] = pd.to_datetime(working.get("found_date"), format="%Y%m%d", errors="coerce")
+    if min_found_days > 0:
+        cutoff = pd.Timestamp(datetime.now()) - pd.Timedelta(days=min_found_days)
+        working = working[working["_found_date"].isna() | (working["_found_date"] <= cutoff)]
+
+    working["_composite_text"] = working.apply(lambda row: _fund_pool_composite_text(row).lower(), axis=1)
+    excluded_pattern = "债券|货币|理财|fof|reits|reit|现金|短债|纯债|同业存单|政金债|国债|信用债|可转债"
+    working = working[~working["_composite_text"].str.contains(excluded_pattern, na=False, regex=True)]
+
+    if lowered_filter:
+        working = working[working["_composite_text"].str.contains(lowered_filter, na=False)]
+    if str(style_filter).strip():
+        style_mask = (
+            working.apply(lambda row: _matches_fund_style_filter(row, style_filter), axis=1)
+            if not working.empty
+            else pd.Series(dtype=bool, index=working.index)
+        )
+        working = working[style_mask]
+    if str(manager_filter).strip():
+        manager_mask = (
+            working.apply(lambda row: _matches_manager_filter(row, manager_filter), axis=1)
+            if not working.empty
+            else pd.Series(dtype=bool, index=working.index)
+        )
+        working = working[manager_mask]
+
+    working["_theme_text"] = working["_composite_text"].map(_fund_theme_text)
+    sector_payload = working["_theme_text"].map(lambda text: _normalize_sector(text))
+    working["_sector"] = sector_payload.map(lambda item: item[0])
+    working["_chain_nodes"] = sector_payload.map(lambda item: item[1])
+    working = working[working["_sector"] != "综合"]
+
+    if working.empty:
+        filters = []
+        if lowered_filter:
+            filters.append(f"主题={theme_filter}")
+        if str(style_filter).strip():
+            filters.append(f"风格={style_filter}")
+        if str(manager_filter).strip():
+            filters.append(f"管理人={manager_filter}")
+        suffix = f"（筛选条件: {', '.join(filters)}）" if filters else ""
+        return [], [f"当前全市场场外基金在初筛后没有留下可分析对象。{suffix}"]
+
+    working["_base_name"] = working["_name"].map(_fund_base_name)
+    working["_share_class_priority"] = working["_name"].map(_fund_share_class_priority)
+    working["_issue_amount"] = pd.to_numeric(working.get("issue_amount"), errors="coerce").fillna(0.0)
+
+    def _pre_rank(row: Mapping[str, Any]) -> float:
+        score = 0.0
+        sector = str(row.get("_sector", "")).strip()
+        if sector in preferred:
+            score += 80.0 - float(preferred.index(sector)) * 5.0
+        score += 10.0 if sector != "综合" else 0.0
+        invest_type = str(row.get("invest_type", "")).strip()
+        fund_type = str(row.get("fund_type", "")).strip()
+        combined_type = f"{fund_type} {invest_type}"
+        if any(token in combined_type for token in ("被动指数型", "增强指数型")):
+            score += 12.0
+        elif any(token in combined_type for token in ("股票型", "混合型", "灵活配置型", "商品型", "黄金现货合约")):
+            score += 8.0
+        score += min(float(row.get("_issue_amount", 0.0) or 0.0), 20.0)
+        if pd.notna(row.get("_found_date")):
+            days = max((pd.Timestamp(datetime.now()) - pd.Timestamp(row["_found_date"])).days, 0)
+            if days >= 365:
+                score += 8.0
+            elif days >= 180:
+                score += 4.0
+        score += float(row.get("_share_class_priority", 0) or 0)
+        if any(item.get("symbol") == row.get("_symbol") for item in watchlist):
+            score += 3.0
+        return score
+
+    working["_pre_rank"] = working.apply(_pre_rank, axis=1)
+    working = working.sort_values(
+        by=["_base_name", "_pre_rank", "_share_class_priority", "_issue_amount"],
+        ascending=[True, False, False, False],
+    )
+    working = working.drop_duplicates(subset=["_base_name"], keep="first")
+    working = working.sort_values(by=["_pre_rank", "_issue_amount"], ascending=[False, False]).head(max_scan_candidates)
+
+    for _, row in working.iterrows():
+        symbol = str(row["_symbol"])
+        if symbol in seen:
+            continue
+        pool.append(
+            PoolItem(
+                symbol=symbol,
+                name=str(row["_name"]),
+                asset_type="cn_fund",
+                region="CN",
+                sector=str(row["_sector"]),
+                chain_nodes=list(row["_chain_nodes"]) if isinstance(row["_chain_nodes"], list) else list(DEFAULT_CHAIN_NODES),
+                source="tushare_open_fund_basic",
+                in_watchlist=any(item["symbol"] == symbol for item in watchlist),
+                metadata={
+                    "benchmark": str(row.get("benchmark", "") or ""),
+                    "fund_type": str(row.get("fund_type", "") or ""),
+                    "invest_type": str(row.get("invest_type", "") or ""),
+                    "management": str(row.get("management", "") or ""),
+                    "found_date": "" if pd.isna(row.get("_found_date")) else str(pd.Timestamp(row["_found_date"]).date()),
+                    "issue_amount": float(row.get("_issue_amount", 0.0) or 0.0),
+                },
+            )
+        )
+        seen.add(symbol)
+
+    return pool, warnings
+
+
 def build_default_pool(config: Mapping[str, Any], theme_filter: str = "") -> tuple[List[PoolItem], List[str]]:
     warnings: List[str] = []
     watchlist = load_watchlist()
@@ -5515,6 +5776,82 @@ def discover_opportunities(config: Mapping[str, Any], top_n: int = 5, theme_filt
         "top": analyses[:top_n],
         "blind_spots": blind_spots[:8],
         "theme_filter": theme_filter,
+    }
+
+
+def discover_fund_opportunities(
+    config: Mapping[str, Any],
+    top_n: int = 8,
+    theme_filter: str = "",
+    *,
+    max_candidates: Optional[int] = None,
+    style_filter: str = "",
+    manager_filter: str = "",
+) -> Dict[str, Any]:
+    context = build_market_context(config, relevant_asset_types=["cn_fund", "cn_etf", "futures"])
+    preferred_sectors = _preferred_fund_sectors(str(context.get("day_theme", {}).get("label", "")), theme_filter)
+    pool_kwargs: Dict[str, Any] = {
+        "theme_filter": theme_filter,
+        "preferred_sectors": preferred_sectors,
+        "max_candidates": max_candidates,
+    }
+    if style_filter.strip():
+        pool_kwargs["style_filter"] = style_filter
+    if manager_filter.strip():
+        pool_kwargs["manager_filter"] = manager_filter
+    pool, pool_warnings = build_fund_pool(
+        config,
+        **pool_kwargs,
+    )
+    passed = 0
+    analyses: List[Dict[str, Any]] = []
+    blind_spots: List[str] = list(pool_warnings)
+    for item in pool:
+        try:
+            override: Dict[str, Any] = {
+                "name": item.name,
+                "sector": item.sector,
+                "chain_nodes": item.chain_nodes,
+                "region": item.region,
+                "in_watchlist": item.in_watchlist,
+            }
+            if item.metadata:
+                override.update(item.metadata)
+            analysis = analyze_opportunity(
+                item.symbol,
+                item.asset_type,
+                config,
+                context=context,
+                metadata_override=override,
+            )
+        except Exception as exc:
+            blind_spots.append(_client_safe_issue(f"{item.symbol} ({item.name}) 扫描失败", exc))
+            continue
+        if analysis["excluded"]:
+            continue
+        passed += 1
+        analyses.append(analysis)
+    analyses.sort(
+        key=lambda item: (
+            item["rating"]["rank"],
+            sum((dimension.get("score") or 0) for dimension in item["dimensions"].values()),
+            item["dimensions"]["risk"]["score"] or 0,
+            item["dimensions"]["catalyst"]["score"] or 0,
+        ),
+        reverse=True,
+    )
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "scan_pool": len(pool),
+        "passed_pool": passed,
+        "regime": context.get("regime", {}),
+        "day_theme": context.get("day_theme", {}),
+        "top": analyses[:top_n],
+        "blind_spots": blind_spots[:8],
+        "theme_filter": theme_filter,
+        "style_filter": style_filter,
+        "manager_filter": manager_filter,
+        "preferred_sectors": preferred_sectors,
     }
 
 

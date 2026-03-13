@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -13,7 +14,7 @@ from .config import PROJECT_ROOT
 
 def load_json(path: Path, default: Optional[Any] = None) -> Any:
     if not path.exists():
-        return default
+        return deepcopy(default)
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
@@ -26,7 +27,7 @@ def save_json(path: Path, payload: Any) -> None:
 
 def load_yaml(path: Path, default: Optional[Any] = None) -> Any:
     if not path.exists():
-        return default
+        return deepcopy(default)
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
 

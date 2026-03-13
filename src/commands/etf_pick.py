@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
 from src.commands.release_check import check_generic_client_report
-from src.output import ClientReportRenderer
+from src.output import ClientReportRenderer, OpportunityReportRenderer
 from src.output.client_report import _fund_profile_sections
 from src.processors.opportunity_engine import discover_opportunities
 from src.utils.config import load_config, resolve_project_path
@@ -25,6 +26,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _score_of(analysis: Dict[str, Any], key: str) -> float:
     return float(dict(analysis.get("dimensions", {}).get(key) or {}).get("score") or 0)
+
+
+def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> List[str]:
+    def _escape(value: Any) -> str:
+        return str(value).replace("|", "\\|").replace("\n", "<br>")
+
+    lines = [
+        "| " + " | ".join(_escape(header) for header in headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(_escape(cell) for cell in row) + " |")
+    return lines
 
 
 def _dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
@@ -111,6 +125,72 @@ def _positioning_lines(analysis: Dict[str, Any]) -> List[str]:
     ]
 
 
+def _detail_output_path(generated_at: str, theme: str) -> Path:
+    date_str = generated_at[:10]
+    base = resolve_project_path("reports/etf_picks/internal")
+    if theme:
+        return base / f"etf_pick_{theme}_{date_str}_internal_detail.md"
+    return base / f"etf_pick_{date_str}_internal_detail.md"
+
+
+def _candidate_summary_rows(analyses: Sequence[Dict[str, Any]]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for item in analyses:
+        rating = dict(item.get("rating") or {})
+        narrative = dict(item.get("narrative") or {})
+        rows.append(
+            [
+                f"{item.get('name', '—')} ({item.get('symbol', '—')})",
+                f"{rating.get('stars', '—')} {rating.get('label', '未评级')}",
+                f"{_rank_score(item):.1f}",
+                str(dict(narrative.get('judgment') or {}).get("state", "观察为主")),
+            ]
+        )
+    return rows
+
+
+def _detail_markdown(analyses: Sequence[Dict[str, Any]], winner_symbol: str, blind_spots: Sequence[str] | None = None) -> str:
+    ranked = sorted(
+        analyses,
+        key=lambda item: (
+            -int(item.get("rating", {}).get("rank", 0) or 0),
+            -_rank_score(item),
+        ),
+    )
+    winner = next((item for item in ranked if str(item.get("symbol", "")) == winner_symbol), ranked[0])
+    alternatives = [item for item in ranked if str(item.get("symbol", "")) != str(winner_symbol)]
+    generated_at = str(winner.get("generated_at", ""))[:10]
+    lines = [
+        f"# 今日ETF推荐内部详细稿 | {generated_at}",
+        "",
+        "## 候选池摘要",
+        "",
+    ]
+    lines.extend(_table(["标的", "评级", "排序分", "交易状态"], _candidate_summary_rows(ranked[:5])))
+    lines.extend(
+        [
+            "",
+            "## 中选说明",
+            "",
+            f"- 中选标的：`{winner.get('name', '—')} ({winner.get('symbol', '—')})`。",
+            f"- 中选依据：当前候选里评级与综合排序分最优，且客户稿引用的维度分数将直接对齐这份详细稿。",
+        ]
+    )
+    if blind_spots:
+        lines.extend(["", "## 数据盲区与降级说明", ""])
+        for item in blind_spots:
+            text = str(item).strip()
+            if text:
+                lines.append(f"- {text}")
+    if alternatives:
+        lines.extend(["", "## 未中选候选", ""])
+        for item in alternatives[:2]:
+            lines.append(f"- `{item.get('name', '—')} ({item.get('symbol', '—')})` 保留观察，但当前排序落后于中选标的。")
+    lines.extend(["", "## 中选标的详细分析", ""])
+    lines.append(OpportunityReportRenderer().render_scan(dict(winner)).rstrip())
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], blind_spots: Sequence[str] | None = None) -> Dict[str, Any]:
     if not analyses:
         raise ValueError("No ETF analyses available")
@@ -166,7 +246,15 @@ def main() -> None:
     date_str = str(client_payload.get("generated_at", ""))[:10]
     theme = args.theme.strip().replace("/", "_").replace(" ", "_")
     filename = f"etf_pick_{theme}_{date_str}_final.md" if theme else f"etf_pick_{date_str}_final.md"
-    findings = check_generic_client_report(markdown, "etf_pick")
+    detail_markdown = _detail_markdown(
+        analyses,
+        str(dict(client_payload.get("winner") or {}).get("symbol", "")),
+        blind_spots=payload.get("blind_spots") or [],
+    )
+    detail_path = _detail_output_path(str(client_payload.get("generated_at", "")), theme)
+    detail_path.parent.mkdir(parents=True, exist_ok=True)
+    detail_path.write_text(detail_markdown, encoding="utf-8")
+    findings = check_generic_client_report(markdown, "etf_pick", source_text=detail_markdown)
     try:
         bundle = export_reviewed_markdown_bundle(
             report_type="etf_pick",
@@ -176,6 +264,7 @@ def main() -> None:
             extra_manifest={
                 "theme_filter": args.theme.strip(),
                 "winner": dict(client_payload.get("winner") or {}).get("symbol", ""),
+                "detail_source": str(detail_path),
             },
         )
     except ReportGuardError as exc:
