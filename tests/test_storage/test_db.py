@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pandas as pd
 
 from src.storage.db import DatabaseManager
@@ -24,3 +26,11 @@ def test_database_initialization_and_market_upsert(tmp_path):
     stored = db.fetch_latest_market_data("561380", limit=5)
     assert inserted == 3
     assert len(stored) == 3
+
+    with sqlite3.connect(tmp_path / "investment.db") as connection:
+        created_at, updated_at = connection.execute(
+            "SELECT created_at, updated_at FROM market_data ORDER BY trade_date LIMIT 1"
+        ).fetchone()
+
+    assert created_at.endswith("+00:00")
+    assert updated_at.endswith("+00:00")
