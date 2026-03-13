@@ -45,6 +45,7 @@ def _classify_question(question: str, symbols: List[str], has_holdings: bool) ->
     lowered = question.lower()
     macro_keywords = ("降息", "宏观", "regime", "体制", "环境", "信用", "通胀", "pmi", "ppi", "cpi")
     risk_keywords = ("风险", "回撤", "相关", "beta", "压力", "stress", "组合", "仓位", "暴露")
+    portfolio_keywords = ("组合", "持仓", "仓位", "暴露", "相关", "beta", "压力测试", "stress")
     flow_keywords = ("资金", "轮动", "情绪", "热度", "拥挤", "风格", "主线", "别扭", "强弱")
     asset_keywords = ("买", "卖", "怎么看", "为什么", "逻辑", "适合", "机会", "还能不能", "值不值得")
 
@@ -52,8 +53,9 @@ def _classify_question(question: str, symbols: List[str], has_holdings: bool) ->
     needs_risk = any(keyword in lowered for keyword in risk_keywords)
     needs_flow = any(keyword in lowered for keyword in flow_keywords)
     asks_asset = bool(symbols) and any(keyword in question for keyword in asset_keywords)
+    asks_portfolio = any(keyword in question for keyword in portfolio_keywords)
 
-    if needs_risk and has_holdings:
+    if needs_risk and has_holdings and (asks_portfolio or not symbols):
         return ResearchIntent("portfolio_risk", "组合风险 / 场景问答", True, True, needs_flow)
     if asks_asset or symbols:
         return ResearchIntent("asset_thesis", "标的研究 / 交易问题", needs_regime, needs_risk and has_holdings, needs_flow)

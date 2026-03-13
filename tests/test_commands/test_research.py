@@ -13,6 +13,13 @@ def test_classify_question_prefers_portfolio_risk_when_holdings_exist() -> None:
     assert intent.needs_regime is True
 
 
+def test_classify_question_keeps_symbol_risk_as_asset_thesis() -> None:
+    intent = _classify_question("561380 风险大吗", ["561380"], has_holdings=True)
+
+    assert intent.kind == "asset_thesis"
+    assert intent.needs_risk is True
+
+
 def test_classify_question_marks_market_diagnosis_without_symbol() -> None:
     intent = _classify_question("为什么最近市场有点别扭", [], has_holdings=False)
 
