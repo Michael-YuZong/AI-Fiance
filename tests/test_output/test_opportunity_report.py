@@ -143,6 +143,9 @@ def test_opportunity_renderer_scan_sections():
     assert "| 维度 | 判断 | 说明 |" in rendered
     assert "| 维度 | 得分 | 一句话判断 | 详情 |" in rendered
     assert "| 因子 | 当前值/信号 | 说明 | 得分 |" in rendered
+    assert "行情 as_of" in rendered
+    assert "催化证据 as_of" in rendered
+    assert "时点边界" in rendered
 
 
 def test_opportunity_renderer_scan_visual_section():

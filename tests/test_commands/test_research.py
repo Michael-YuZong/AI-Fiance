@@ -123,12 +123,14 @@ def test_render_research_markdown_has_structured_sections() -> None:
         symbols=["561380"],
         direct_answer_lines=["561380 当前更像回踩确认，而不是无条件追高。"],
         evidence_lines=["[宏观] 当前 macro regime 为 recovery。", "[行情/技术] 561380 近20日 +8.0%。"],
+        provenance_lines=["[行情时点] 561380 日线 as_of `2026-03-13`，来源 `本地历史日线链路`。"],
         risk_lines=["RSI 已偏热。"],
         action_lines=["先跑 561380 对应的 scan。"],
     )
 
     assert "## 一句话回答" in markdown
     assert "## 证据" in markdown
+    assert "## 证据时点与来源" in markdown
     assert "## 风险与不确定性" in markdown
     assert "## 下一步" in markdown
     assert "类型: 标的研究 / 交易问题" in markdown
@@ -235,6 +237,7 @@ def test_policy_payload_extracts_theme_and_direction() -> None:
 
     assert any("偏支持" in item for item in payload["answer_lines"])
     assert any("电网" in item or "特高压" in item for item in payload["evidence_lines"])
+    assert any("政策口径" in item for item in payload["provenance_lines"])
     assert payload["risk_lines"]
 
 
@@ -244,6 +247,7 @@ def test_policy_payload_keyword_question_uses_keyword_inference_labels() -> None
     assert any("偏支持（关键词推断）" in item for item in payload["answer_lines"])
     assert any("主题跟踪阶段" in item for item in payload["answer_lines"])
     assert any("场景概率" in item for item in payload["evidence_lines"])
+    assert any("keyword" in item for item in payload["provenance_lines"])
 
 
 def test_empty_portfolio_risk_payload_calls_out_missing_holdings() -> None:
@@ -318,6 +322,7 @@ def test_asset_trade_plan_payload_surfaces_position_execution_and_timing(monkeyp
     assert any("周期错配风险" in item for item in payload["risk_lines"])
     assert any("仓位预演" in item for item in payload["evidence_lines"])
     assert any("时点快照" in item for item in payload["evidence_lines"])
+    assert any("交易时点" in item for item in payload["provenance_lines"])
     assert any("真实金额" in item for item in payload["action_lines"])
 
 
@@ -395,6 +400,7 @@ def test_portfolio_risk_payload_highlights_concentration() -> None:
     assert "相关性偏高" in payload["answer_lines"][0]
     assert any("最大持仓" in item for item in payload["evidence_lines"])
     assert any("场景概率" in item for item in payload["evidence_lines"])
+    assert any("组合时点" in item for item in payload["provenance_lines"])
     assert any("Beta" in item for item in payload["risk_lines"])
     assert payload["action_lines"]
 
@@ -437,4 +443,5 @@ def test_market_diagnosis_payload_uses_proxy_flow_and_probability(monkeypatch) -
 
     assert any("代理置信度 `中`" in item for item in payload["evidence_lines"])
     assert any("场景概率" in item for item in payload["evidence_lines"])
+    assert any("市场时点" in item for item in payload["provenance_lines"])
     assert any("市场风格代理限制" in item for item in payload["risk_lines"])

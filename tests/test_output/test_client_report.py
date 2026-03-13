@@ -129,6 +129,7 @@ def test_render_stock_picks_detailed_keeps_analysis_but_hides_internal_trace() -
     assert "八维雷达" in rendered
     assert "催化拆解" in rendered
     assert "催化证据来源" in rendered
+    assert "证据时点与来源" in rendered
     assert "https://example.com/earnings" in rendered
     assert "硬排除检查" in rendered
     assert "风险拆解" in rendered
@@ -188,6 +189,7 @@ def test_render_scan_has_reasoning_and_position_management() -> None:
     assert "## 硬检查" in rendered
     assert "## 关键证据" in rendered
     assert "https://example.com/earnings" in rendered
+    assert "## 证据时点与来源" in rendered
     assert "## 当前更合适的动作" in rendered
     assert "## 仓位管理" in rendered
     assert "## 组合落单前" in rendered
@@ -290,6 +292,7 @@ def test_render_fund_pick_has_alternatives() -> None:
     assert "| 预演命令 | `portfolio whatif buy 021740 最新净值 计划金额` |" in rendered
     assert "## 组合落单前" in rendered
     assert "## 标准化分类" in rendered
+    assert "## 证据时点与来源" in rendered
     assert "ETF联接" in rendered
     assert "## 跟今天首个快照版相比" in rendered
     assert "## 数据限制与说明" in rendered
@@ -384,6 +387,7 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     assert "场内ETF" in rendered
     assert "## 跟今天首个快照版相比" in rendered
     assert "## 关键证据" in rendered
+    assert "## 证据时点与来源" in rendered
     assert "## 基金画像" in rendered
     assert "## 为什么不是另外几只" in rendered
 

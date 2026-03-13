@@ -29,6 +29,7 @@ from src.collectors import (
 )
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot
 from src.processors.horizon import build_analysis_horizon_profile
+from src.processors.provenance import build_analysis_provenance
 from src.processors.regime import RegimeDetector
 from src.processors.signal_confidence import build_signal_confidence
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
@@ -5319,7 +5320,7 @@ def analyze_opportunity(
         fund_profile,
     )
 
-    return {
+    result = {
         "symbol": symbol,
         "name": str(metadata.get("name", symbol)),
         "asset_type": asset_type,
@@ -5348,6 +5349,8 @@ def analyze_opportunity(
         "exclusion_reasons": exclusion_reasons,
         "correlation_pair": correlation_pair,
     }
+    result["provenance"] = build_analysis_provenance(result)
+    return result
 
 
 def _attach_signal_confidence(

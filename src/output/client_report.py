@@ -13,6 +13,7 @@ from src.output.opportunity_report import (
     _hard_check_inline,
     _hard_check_rows,
 )
+from src.processors.provenance import build_analysis_provenance
 from src.processors.trade_handoff import portfolio_whatif_handoff
 from src.utils.fund_taxonomy import taxonomy_rows
 
@@ -285,6 +286,29 @@ def _evidence_lines(items: Sequence[Mapping[str, Any]], *, max_items: int = 3) -
         suffix_parts = [part for part in (source, date) if part]
         suffix = f"（{' / '.join(suffix_parts)}）" if suffix_parts else ""
         lines.append(f"- `{layer}`：{title_text}{suffix}")
+    return lines
+
+
+def _analysis_provenance_rows(analysis: Mapping[str, Any]) -> List[List[str]]:
+    provenance = dict(analysis.get("provenance") or build_analysis_provenance(analysis))
+    rows: List[List[str]] = [
+        ["分析生成时间", provenance.get("analysis_generated_at", "—")],
+        ["行情 as_of", provenance.get("market_data_as_of", "—")],
+        ["盘中快照 as_of", provenance.get("intraday_as_of", "未启用")],
+        ["催化证据 as_of", provenance.get("catalyst_evidence_as_of", "—")],
+        ["催化来源", provenance.get("catalyst_sources_text", "—")],
+        ["新闻模式", provenance.get("news_mode", "unknown")],
+        ["时点边界", provenance.get("point_in_time_note", "默认只使用生成时点前可见信息。")],
+    ]
+    for item in list(provenance.get("notes") or [])[:2]:
+        rows.append(["时点/溯源提醒", str(item)])
+    return rows
+
+
+def _analysis_provenance_lines(analysis: Mapping[str, Any]) -> List[str]:
+    rows = _analysis_provenance_rows(analysis)
+    lines = ["## 证据时点与来源", ""]
+    lines.extend(_table(["项目", "说明"], rows))
     return lines
 
 
@@ -857,6 +881,8 @@ class ClientReportRenderer:
                 if evidence_lines:
                     lines.extend(["", "**催化证据来源：**", ""])
                     lines.extend(evidence_lines)
+                lines.extend(["", "**证据时点与来源：**", ""])
+                lines.extend(_table(["项目", "说明"], _analysis_provenance_rows(item)))
 
                 lines.extend(
                     [
@@ -1140,6 +1166,7 @@ class ClientReportRenderer:
                 ]
             )
             lines.extend(evidence_lines)
+        lines.extend(["", *_analysis_provenance_lines(analysis)])
         lines.extend(
             [
                 "",
@@ -1445,6 +1472,13 @@ class ClientReportRenderer:
                 lines.append(
                     f"- `{item.get('label', '维度')}` 从 `{item.get('previous', '—')}` 变到 `{item.get('current', '—')}`：{item.get('reason', '')}"
                 )
+        evidence_lines = _evidence_lines(list(winner.get("evidence") or []), max_items=3)
+        lines.extend(["", "## 关键证据", ""])
+        if evidence_lines:
+            lines.extend(evidence_lines)
+        else:
+            lines.append("- 当前没有可直接复核的高置信直连证据，催化判断更多依赖结构化事件、基金画像或历史有效信号。")
+        lines.extend(["", *_analysis_provenance_lines(winner)])
         lines.extend(["", "## 怎么做", ""])
         lines.extend(
             _table(
@@ -1601,6 +1635,7 @@ class ClientReportRenderer:
             lines.extend(evidence_lines)
         else:
             lines.append("- 当前没有可直接复核的高置信直连证据，催化判断更多依赖结构化事件或历史有效信号。")
+        lines.extend(["", *_analysis_provenance_lines(winner)])
         lines.extend(["", "## 怎么做", ""])
         lines.extend(
             _table(

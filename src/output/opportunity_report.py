@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import pandas as pd
 
+from src.processors.provenance import build_analysis_provenance
 from src.processors.trade_handoff import portfolio_whatif_handoff
 
 
@@ -195,6 +196,22 @@ def _data_sources(analysis: Dict[str, Any]) -> str:
     if analysis.get("day_theme", {}).get("label"):
         sources.append("上下文: 晨报主线/Regime")
     return "；".join(sources)
+
+
+def _analysis_provenance_rows(analysis: Dict[str, Any]) -> List[List[str]]:
+    provenance = dict(analysis.get("provenance") or build_analysis_provenance(analysis))
+    rows = [
+        ["分析生成时间", provenance.get("analysis_generated_at", "—")],
+        ["行情 as_of", provenance.get("market_data_as_of", "—")],
+        ["盘中快照 as_of", provenance.get("intraday_as_of", "未启用")],
+        ["催化证据 as_of", provenance.get("catalyst_evidence_as_of", "—")],
+        ["催化来源", provenance.get("catalyst_sources_text", "—")],
+        ["新闻模式", provenance.get("news_mode", "unknown")],
+        ["时点边界", provenance.get("point_in_time_note", "默认只使用生成时点前可见信息。")],
+    ]
+    for item in list(provenance.get("notes") or [])[:2]:
+        rows.append(["时点/溯源提醒", str(item)])
+    return rows
 
 
 def _missing_data_notes(analysis: Dict[str, Any]) -> str:
@@ -901,6 +918,7 @@ class OpportunityReportRenderer:
             lines.append("")
         for item in extra_risks:
             lines.append(f"- {item}")
+        provenance = dict(analysis.get("provenance") or build_analysis_provenance(analysis))
         lines.extend(
             [
                 "",
@@ -912,6 +930,10 @@ class OpportunityReportRenderer:
                 ["项目", "内容"],
                 [
                     ["分析时间", analysis["generated_at"]],
+                    ["行情 as_of", provenance.get("market_data_as_of", "—")],
+                    ["催化证据 as_of", provenance.get("catalyst_evidence_as_of", "—")],
+                    ["催化来源", provenance.get("catalyst_sources_text", "—")],
+                    ["时点边界", provenance.get("point_in_time_note", "默认只使用生成时点前可见信息。")],
                     ["当前 Regime", analysis.get("regime", {}).get("current_regime", "—")],
                     ["数据源", _data_sources(analysis)],
                     ["数据缺失", _missing_data_notes(analysis)],

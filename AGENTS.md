@@ -47,7 +47,7 @@
 - `src/collectors/social_sentiment.py` and `src/collectors/global_flow.py`
   These are still proxy-signal modules, not direct full-fidelity data feeds. As of 2026-03-13 they now expose explicit confidence labels, limitations, and downgrade-impact notes so downstream outputs can stop presenting them like hard facts.
 - Project-wide point-in-time correctness, calibration, and execution-cost integration
-  There is now a portfolio/review v1, but it is not yet a repo-wide contract. `scan`/pick/report flows still do not all emit the same evidence-provenance, tradability, or calibration language.
+  There is now a portfolio/review v1 plus shared provenance/handoff helpers, but policy long-form extraction, backtest/history fixtures, and some release-guard wording still do not enforce a single repo-wide contract.
 - Scheduler persistence and operational monitoring
   The scheduler can run jobs now, but it still lacks durable ops features.
 
@@ -70,20 +70,16 @@ When in doubt, optimize for:
 
 ## Current Priority Backlog
 
-1. `discover` v2
-   Move discovery quality closer to the productized pick outputs: less rule-only ranking, better pre-screen quality, and clearer linkage from discovered theme -> candidate pool -> formal pick pipeline.
-2. Propagate portfolio-construction v1 into pick flows
-   `portfolio whatif` / `decision_review` / `research` now share first-pass risk-budget, execution-cost, attribution, timing-snapshot, and horizon contracts, and pick outputs now hand off into `portfolio whatif` with horizon-aware action language. Next step is to extend the same handoff into `discover` / `briefing` style outputs where a user may act before opening a full pick report.
-3. Proxy signals
-   Expose confidence and downgrade impact from social/global-flow proxies more explicitly in reports.
-4. Scheduler v2
-   Add persistent run history, failure visibility, and possibly automation integration if the user asks for recurring workflows in the app.
-5. Policy v2
+1. Policy v2
    Keep improving official-source extraction, especially for longer raw pages/PDF-like content and stricter policy taxonomy.
-6. Pick pipeline consolidation
+2. Proxy signals
+   Finish propagating confidence and downgrade-impact wording into all pick outputs plus release/review guards.
+3. Scheduler v2
+   Add persistent run history, failure visibility, and possibly automation integration if the user asks for recurring workflows in the app.
+4. Scoring calibration v2
+   Deepen setup-bucket calibration and attribution beyond the current first-pass monthly review.
+5. Pick pipeline consolidation
    `src/commands/pick_history.py` now holds shared snapshot/history helpers. Continue consolidating ETF/fund/stock pick contracts there instead of duplicating scoring-history and coverage logic per command.
-7. Horizon propagation
-   ETF/fund/stock pick now carry structured horizon reasoning; next step is to propagate the same vocabulary into `research`, `portfolio`, and retrospective review instead of letting modules fall back to raw `timeframe` strings.
 
 ## Recent Changes
 
@@ -129,6 +125,8 @@ When in doubt, optimize for:
   `src/commands/pick_history.py` was introduced to centralize pick coverage summaries, baseline snapshots, score-change explanations, and degraded-news catalyst fallback.
 - 2026-03-13
   `discover` and `briefing` now hand opportunities off to `portfolio whatif`, so the first-touch discovery/briefing surfaces no longer stop at "watch this" and instead point into the same pre-trade risk-budget workflow as pick reports.
+- 2026-03-13
+  Stage-E point-in-time provenance now has a shared helper; `research`, `scan / stock_analysis`, stock-pick detailed output, `fund_pick`, and `etf_pick` all expose evidence timing, source class, and explicit point-in-time boundary notes instead of burying them in generic metadata.
 - 2026-03-13
   `briefing daily` now has a real finalization chain: internal reports archive to `reports/briefings/internal`, client output must include `宏观领先指标 + 数据完整度 + 重点观察`, macro-monitor refresh failures downgrade coverage instead of silently using old cached prices, and the daily client-final can ship through external review + manifest like the stronger pick pipelines.
 - 2026-03-13

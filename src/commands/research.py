@@ -28,6 +28,7 @@ from src.processors.context import derive_regime_inputs, load_china_macro_snapsh
 from src.processors.opportunity_engine import _today_theme
 from src.processors.portfolio_actions import build_trade_plan
 from src.processors.policy_engine import PolicyEngine
+from src.processors.provenance import history_as_of
 from src.processors.regime import RegimeDetector
 from src.processors.risk import RiskAnalyzer
 from src.processors.risk_support import build_portfolio_risk_context, find_stress_scenario, load_stress_scenarios, resolve_stress_scenario
@@ -214,6 +215,9 @@ def _symbol_snapshot(symbol: str, config: Dict[str, Any]) -> Dict[str, Any]:
         "risks": list(bias_payload["risks"]),
         "action": bias_payload["action"],
         "scenario_lines": _asset_scenario_lines(symbol, metrics, technical, bias_payload["bias"]),
+        "provenance_lines": [
+            f"[行情时点] {symbol} 日线 as_of `{history_as_of(history)}`，来源 `本地历史日线链路`。",
+        ],
         "evidence_lines": [
             f"{symbol}: 最新价 {metrics['last_close']:.3f}，近20日 {metrics['return_20d'] * 100:+.2f}%，近60日 {metrics['return_60d'] * 100:+.2f}%。",
             f"{symbol}: 均线信号 {technical['ma_system']['signal']}，MACD {technical['macd']['signal']}，RSI {technical['rsi']['RSI']:.1f}，量能比 {technical['volume']['vol_ratio']:.2f}。",
@@ -655,6 +659,10 @@ def _market_diagnosis_payload(config: Dict[str, Any]) -> Dict[str, List[str]]:
     return {
         "answer_lines": list(takeaway["answer_lines"]),
         "evidence_lines": evidence_lines,
+        "provenance_lines": [
+            f"[市场时点] 市场概览当前来自 `{overview.get('source', 'unknown')}` 近实时缓存，盘中只适合作近似，不当成逐笔实时报价。",
+            "[时点边界] 主线、宽度和代理信号默认只使用当前生成时点前可见覆盖；缺源或降级会单独写进风险与不确定性。",
+        ],
         "risk_lines": risk_lines,
     }
 
@@ -672,6 +680,7 @@ def _portfolio_risk_payload(
         return {
             "answer_lines": ["当前没有可分析的持仓历史数据，先补齐持仓和价格后再谈组合风险。"],
             "evidence_lines": [],
+            "provenance_lines": ["[组合时点] 当前没有可用持仓快照，暂时无法形成 point-in-time 组合风险判断。"],
             "risk_lines": list(context.coverage_notes[:2]),
         }
 
@@ -745,6 +754,9 @@ def _portfolio_risk_payload(
     return {
         "answer_lines": answer_lines,
         "evidence_lines": evidence_lines,
+        "provenance_lines": [
+            "[组合时点] 当前组合风险预演只使用已记录持仓和历史收益窗口，不回看未来价格路径。",
+        ],
         "risk_lines": risk_lines,
         "action_lines": action_lines,
     }
@@ -762,6 +774,7 @@ def _policy_payload(question: str, holdings: Sequence[Mapping[str, Any]]) -> Dic
         return {
             "answer_lines": ["当前更像泛政策问题，能判断方向，但还不足以下结论到具体标的或主题。"],
             "evidence_lines": ["[政策原文] 当前未命中本地政策模板，后续需要人工补充政策类型和受益链条。"] if context.text else [],
+            "provenance_lines": [f"[政策口径] 当前来源 `{context.source}`，还没有形成可稳定映射的原文模板。"],
             "risk_lines": ["如果没有明确政策类型、执行阶段和受益链条，就不适合直接把它当成交易催化。"],
         }
 
@@ -816,6 +829,9 @@ def _policy_payload(question: str, holdings: Sequence[Mapping[str, Any]]) -> Dic
     return {
         "answer_lines": answer_lines,
         "evidence_lines": evidence_lines,
+        "provenance_lines": [
+            f"[政策口径] 当前来源 `{context.source}`；如果不是完整 URL / 正文审读，就只能先按主题解释，不等于逐段原文解读。",
+        ],
         "risk_lines": risk_lines,
     }
 
@@ -1045,6 +1061,12 @@ def _asset_trade_plan_payload(
     return {
         "answer_lines": answer_lines[:2],
         "evidence_lines": evidence_lines,
+        "provenance_lines": [
+            f"[交易时点] 行情 as_of `{decision.get('market_data_as_of') or '—'}`，来源 `{decision.get('market_data_source') or symbol}`。",
+            "[时点边界] 仓位和执行预演只使用当时可见的日线、持仓和 thesis 快照，不回看未来新闻或财报。"
+            if decision
+            else "[时点边界] 当前仓位预演只能按现有缓存与配置理解，缺少更完整时点快照。",
+        ],
         "risk_lines": risk_lines,
         "action_lines": action_lines,
     }
@@ -1149,6 +1171,7 @@ def _render_research_markdown(
     symbols: List[str],
     direct_answer_lines: List[str],
     evidence_lines: List[str],
+    provenance_lines: List[str],
     risk_lines: List[str],
     action_lines: List[str],
 ) -> str:
@@ -1166,6 +1189,10 @@ def _render_research_markdown(
 
     lines.extend(["", "## 证据"])
     for item in evidence_lines or ["当前没有拿到足够证据，建议先缩小问题范围或指定标的。"]:
+        lines.append(f"- {item}")
+
+    lines.extend(["", "## 证据时点与来源"])
+    for item in provenance_lines or ["当前还没有补齐统一的证据时点与来源说明，先把这次回答当成辅助研究结果。"]:
         lines.append(f"- {item}")
 
     lines.extend(["", "## 风险与不确定性"])
@@ -1194,6 +1221,9 @@ def main() -> None:
     evidence_groups: "OrderedDict[str, List[str]]" = OrderedDict(
         [("market", []), ("regime", []), ("flow", []), ("snapshot", []), ("risk", []), ("policy", [])]
     )
+    provenance_groups: "OrderedDict[str, List[str]]" = OrderedDict(
+        [("market", []), ("snapshot", []), ("risk", []), ("policy", [])]
+    )
     risk_lines: List[str] = []
     action_lines: List[str] = []
     regime_lines: List[str] = _regime_lines(config) if intent.needs_regime else []
@@ -1209,6 +1239,7 @@ def main() -> None:
             market_payload = _market_diagnosis_payload(config)
             contextual_answer_lines = list(market_payload.get("answer_lines") or [])
             evidence_groups["market"].extend(list(market_payload.get("evidence_lines") or []))
+            provenance_groups["market"].extend(list(market_payload.get("provenance_lines") or []))
             risk_lines.extend(list(market_payload.get("risk_lines") or []))
         except Exception as exc:
             risk_lines.append(f"市场诊断上下文暂时拉取失败，当前先回退到宏观框架判断。{exc}")
@@ -1220,6 +1251,7 @@ def main() -> None:
                 snapshots.append(snapshot)
                 evidence_groups["snapshot"].extend(f"[行情/技术] {item}" for item in snapshot["evidence_lines"])
                 evidence_groups["snapshot"].extend(list(snapshot.get("scenario_lines") or []))
+                provenance_groups["snapshot"].extend(list(snapshot.get("provenance_lines") or []))
                 risk_lines.extend(snapshot["risks"])
             except Exception as exc:
                 risk_lines.append(f"{symbol}: 数据拉取失败，暂时无法做研究快照。{exc}")
@@ -1235,6 +1267,7 @@ def main() -> None:
             contextual_answer_lines = list(trade_payload.get("answer_lines") or contextual_answer_lines)
             prefer_contextual_for_asset = True
             evidence_groups["risk"].extend(list(trade_payload.get("evidence_lines") or []))
+            provenance_groups["risk"].extend(list(trade_payload.get("provenance_lines") or []))
             risk_lines.extend(list(trade_payload.get("risk_lines") or []))
             action_lines.extend(list(trade_payload.get("action_lines") or []))
 
@@ -1259,6 +1292,7 @@ def main() -> None:
             if intent.kind == "portfolio_risk":
                 contextual_answer_lines = list(portfolio_payload.get("answer_lines") or contextual_answer_lines)
             evidence_groups["risk"].extend(list(portfolio_payload.get("evidence_lines") or []))
+            provenance_groups["risk"].extend(list(portfolio_payload.get("provenance_lines") or []))
             risk_lines.extend(list(portfolio_payload.get("risk_lines") or []))
             action_lines.extend(list(portfolio_payload.get("action_lines") or []))
             risk_lines.append(report["max_drawdown"]["interpretation"])
@@ -1284,13 +1318,16 @@ def main() -> None:
         policy_payload = _policy_payload(question, holdings)
         contextual_answer_lines = list(policy_payload.get("answer_lines") or contextual_answer_lines)
         evidence_groups["policy"].extend(list(policy_payload.get("evidence_lines") or []))
+        provenance_groups["policy"].extend(list(policy_payload.get("provenance_lines") or []))
         risk_lines.extend(list(policy_payload.get("risk_lines") or []))
     elif _contains_policy_keywords(question):
         policy_payload = _policy_payload(question, holdings)
         evidence_groups["policy"].extend(list(policy_payload.get("evidence_lines") or []))
+        provenance_groups["policy"].extend(list(policy_payload.get("provenance_lines") or []))
         risk_lines.extend(list(policy_payload.get("risk_lines") or []))
 
     evidence_lines = _pick_evidence_lines(intent, evidence_groups)
+    provenance_lines = _pick_evidence_lines(intent, provenance_groups, limit=5)
 
     if not evidence_lines:
         if symbols:
@@ -1332,6 +1369,7 @@ def main() -> None:
     if not action_lines:
         action_lines.append("如果你给出更明确的标的或场景，研究回答会更聚焦。")
     evidence_lines = _dedupe_lines(evidence_lines, max_items=6)
+    provenance_lines = _dedupe_lines(provenance_lines, max_items=5)
     risk_lines = _dedupe_lines(risk_lines, max_items=6)
     action_lines = _dedupe_lines(action_lines, max_items=5)
     print(
@@ -1341,6 +1379,7 @@ def main() -> None:
             symbols=symbols[:3],
             direct_answer_lines=direct_answer_lines,
             evidence_lines=evidence_lines,
+            provenance_lines=provenance_lines,
             risk_lines=risk_lines,
             action_lines=action_lines,
         )
