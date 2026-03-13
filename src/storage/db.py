@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -65,9 +65,13 @@ class DatabaseManager:
                 """
             )
 
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(UTC).isoformat(timespec="seconds")
+
     def save_market_data(self, symbol: str, asset_type: str, df: pd.DataFrame, interval: str = "1d") -> int:
         normalized = normalize_ohlcv_frame(df)
-        now = datetime.utcnow().isoformat(timespec="seconds")
+        now = self._utc_now_iso()
         rows = [
             (
                 symbol,
@@ -115,7 +119,7 @@ class DatabaseManager:
         source: str,
         metadata: Optional[dict] = None,
     ) -> None:
-        now = datetime.utcnow().isoformat(timespec="seconds")
+        now = self._utc_now_iso()
         metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
         with self.connect() as connection:
             connection.execute(
