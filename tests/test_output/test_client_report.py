@@ -17,6 +17,13 @@ def _sample_analysis(symbol: str, name: str, asset_type: str = "cn_stock", rank:
             "target": "先看前高",
             "max_portfolio_exposure": "单标的 ≤6%",
             "timeframe": "中线配置(1-3月)" if rank >= 3 else "短线交易(1-2周)" if rank >= 2 else "等待更好窗口",
+            "horizon": {
+                "code": "position_trade" if rank >= 3 else "short_term" if rank >= 2 else "watch",
+                "label": "中线配置（1-3月）" if rank >= 3 else "短线交易（3-10日）" if rank >= 2 else "观察期",
+                "style": "更像 1-3 个月的分批配置或波段跟踪，不按隔日涨跌去做快进快出。" if rank >= 3 else "更看催化、趋势和执行节奏，适合盯右侧确认和止损，不适合当成长线底仓。" if rank >= 2 else "先看窗口和确认信号，不建议急着把它定义成短线执行仓或长线配置仓。",
+                "fit_reason": "基本面、风险收益和趋势至少有两项站得住，更适合按一段完整主线去拿，而不是只博短催化。" if rank >= 3 else "当前更强的是催化、相对强弱和执行节奏，优势主要集中在接下来几个交易日到一两周内。" if rank >= 2 else "当前信号还没共振到足以支撑正式动作，继续观察比仓促出手更重要。",
+                "misfit_reason": "现在不适合当成纯隔夜交易，也还没强到可以长期不复核地持有一年以上。" if rank >= 3 else "现在不适合直接当成长线底仓，一旦催化和强势股状态失效要更快处理。" if rank >= 2 else "现在不适合直接按短线执行仓或长线配置仓去理解。",
+            },
         },
         "narrative": {
             "headline": "这是一个趋势启动的标的。",
@@ -97,6 +104,8 @@ def test_render_stock_picks_has_client_table_and_reasoning() -> None:
     assert "| 标的 | 技术 | 基本面 | 催化 | 相对强弱 | 风险 | 结论 |" in rendered
     assert "为什么能进正式推荐" in rendered
     assert "持有周期：中线配置（1-3月）" in rendered
+    assert "为什么按这个周期理解" in rendered
+    assert "现在不适合的打法" in rendered
     assert "## 仓位管理" in rendered
 
 
@@ -127,6 +136,7 @@ def test_render_stock_picks_detailed_keeps_analysis_but_hides_internal_trace() -
     assert "95%区间" in rendered
     assert "样本质量" in rendered
     assert "持有周期：中线配置（1-3月）" in rendered
+    assert "为什么按这个周期理解" in rendered
     assert "这层只反映历史相似量价/技术场景的样本置信度" in rendered
     assert "模型版本" not in rendered
     assert "当日基准版" not in rendered
@@ -236,6 +246,13 @@ def test_render_fund_pick_has_alternatives() -> None:
             "action": {
                 "direction": "继续持有",
                 "timeframe": "中线配置(1-3月)",
+                "horizon": {
+                    "code": "position_trade",
+                    "label": "中线配置（1-3月）",
+                    "style": "更像 1-3 个月的分批配置或波段跟踪，不按隔日涨跌去做快进快出。",
+                    "fit_reason": "基本面、风险收益和趋势至少有两项站得住，更适合按一段完整主线去拿，而不是只博短催化。",
+                    "misfit_reason": "现在不适合当成纯隔夜交易，也还没强到可以长期不复核地持有一年以上。",
+                },
                 "entry": "等回撤再看",
                 "position": "计划仓位的 1/3 - 1/2",
                 "scaling_plan": "确认后再加",
@@ -265,6 +282,7 @@ def test_render_fund_pick_has_alternatives() -> None:
     assert "覆盖率的分母是今天进入完整分析的 `5` 只基金" in rendered
     assert "当前更合适的持有周期：**`中线配置（1-3月）`**" in rendered
     assert "| 持有周期 | 中线配置（1-3月） |" in rendered
+    assert "| 为什么按这个周期看 | 基本面、风险收益和趋势至少有两项站得住，更适合按一段完整主线去拿，而不是只博短催化。 |" in rendered
     assert "## 标准化分类" in rendered
     assert "ETF联接" in rendered
     assert "## 跟今天首个快照版相比" in rendered
@@ -310,6 +328,13 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
             "action": {
                 "direction": "观望偏多",
                 "timeframe": "短线交易(1-2周)",
+                "horizon": {
+                    "code": "short_term",
+                    "label": "短线交易（3-10日）",
+                    "style": "更看催化、趋势和执行节奏，适合盯右侧确认和止损，不适合当成长线底仓。",
+                    "fit_reason": "当前更强的是催化、相对强弱和执行节奏，优势主要集中在接下来几个交易日到一两周内。",
+                    "misfit_reason": "现在不适合直接当成长线底仓，一旦催化和强势股状态失效要更快处理。",
+                },
                 "entry": "等回踩再看",
                 "position": "首次建仓 ≤3%",
                 "scaling_plan": "分 2-3 批建仓",
@@ -342,8 +367,9 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     assert "## 为什么先看它" in rendered
     assert "## 为什么推荐它" not in rendered
     assert "覆盖率的分母是今天进入完整分析的 `5` 只 ETF" in rendered
-    assert "当前更合适的持有周期：**`短线交易（1-2周）`**" in rendered
-    assert "| 持有周期 | 短线交易（1-2周） |" in rendered
+    assert "当前更合适的持有周期：**`短线交易（3-10日）`**" in rendered
+    assert "| 持有周期 | 短线交易（3-10日） |" in rendered
+    assert "现在不适合：现在不适合直接当成长线底仓" in rendered
     assert "## 这只ETF为什么是这个分" in rendered
     assert "## 标准化分类" in rendered
     assert "场内ETF" in rendered

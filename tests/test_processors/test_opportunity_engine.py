@@ -2216,7 +2216,16 @@ def test_risk_dimension_uses_recent_high_recovery_signal():
     assert recovery_factor["awarded"] > 0
 
 
-def _make_action_plan_analysis(rating_rank, tech, risk, relative, catalyst, macro_reverse=False, asset_type="cn_stock"):
+def _make_action_plan_analysis(
+    rating_rank,
+    tech,
+    risk,
+    relative,
+    catalyst,
+    macro_reverse=False,
+    asset_type="cn_stock",
+    fundamental=50,
+):
     return {
         "rating": {"rank": rating_rank},
         "asset_type": asset_type,
@@ -2226,7 +2235,7 @@ def _make_action_plan_analysis(rating_rank, tech, risk, relative, catalyst, macr
             "relative_strength": {"score": relative},
             "catalyst": {"score": catalyst},
             "macro": {"score": 20, "macro_reverse": macro_reverse},
-            "fundamental": {"score": 50},
+            "fundamental": {"score": fundamental},
             "chips": {"score": None},
             "seasonality": {"score": 40},
         },
@@ -2278,6 +2287,8 @@ def test_action_plan_portfolio_management_fields():
     assert "分" in result["scaling_plan"]
     assert result["stop_loss_pct"] == "-5%"
     assert "0.85" in result["correlated_warning"]
+    assert result["horizon"]["code"] in {"position_trade", "swing"}
+    assert result["horizon"]["fit_reason"]
 
 
 def test_action_plan_uses_watchful_bullish_direction_when_odds_are_low():
@@ -2333,6 +2344,24 @@ def test_action_plan_validates_stop_and_target_against_current_price():
     assert stop_ref < 50.0
     assert target_ref > 50.0
     assert stop_ref <= 49.0
+
+
+def test_action_plan_marks_long_term_when_fundamental_and_risk_are_strong():
+    analysis = _make_action_plan_analysis(
+        rating_rank=4,
+        tech=52,
+        risk=72,
+        relative=58,
+        catalyst=48,
+        fundamental=78,
+        asset_type="cn_etf",
+    )
+    history = _make_simple_history()
+    technical = {"rsi": {"RSI": 49.0}, "fibonacci": {"levels": {}}, "ma_system": {"mas": {"MA20": 10.0, "MA60": 9.8}}}
+    result = _action_plan(analysis, history, technical, None, {"volatility_percentile_1y": 0.4, "return_5d": 0.01})
+    assert result["horizon"]["code"] == "long_term_allocation"
+    assert "长线配置" in result["horizon"]["label"]
+    assert "不适合按纯短线追价" in result["horizon"]["misfit_reason"]
 
 
 def test_build_stock_pool_warns_when_cn_snapshot_missing_required_columns(monkeypatch):

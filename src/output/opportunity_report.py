@@ -805,6 +805,9 @@ class OpportunityReportRenderer:
                 [
                     ["当前动作", f"{action['direction']} / {narrative['judgment']['state']}"],
                     ["适合谁", f"左侧型：{narrative['playbook']['allocation']} / 右侧型：{narrative['playbook']['trend']}"],
+                    ["持有周期", str(dict(action.get("horizon") or {}).get("label", action["timeframe"]))],
+                    ["周期理由", str(dict(action.get("horizon") or {}).get("fit_reason", dict(action.get("horizon") or {}).get("style", "按当前动作和仓位框架理解即可")))],
+                    ["不适合打法", str(dict(action.get("horizon") or {}).get("misfit_reason", "不要自动切换成另一种更长或更短的打法。"))],
                     ["介入条件", action["entry"]],
                     ["仓位", action["position"]],
                     ["止损", action["stop"]],
@@ -1150,6 +1153,9 @@ class OpportunityReportRenderer:
                 [
                     "",
                     "**建议操作：**",
+                    f"- 持有周期：{dict(action.get('horizon') or {}).get('label', action.get('timeframe', '未标注'))}",
+                    f"- 周期理由：{dict(action.get('horizon') or {}).get('fit_reason', dict(action.get('horizon') or {}).get('style', '按当前动作和仓位框架理解即可'))}",
+                    f"- 不适合打法：{dict(action.get('horizon') or {}).get('misfit_reason', '不要自动切换成另一种更长或更短的打法。')}",
                     f"- 介入条件：{action['entry']}",
                     f"- 建议仓位：{action['position']}",
                     f"- 单标的上限：{action.get('max_portfolio_exposure', '—')}",

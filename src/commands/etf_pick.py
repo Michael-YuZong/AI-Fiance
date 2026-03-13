@@ -98,6 +98,9 @@ def _winner_reason_lines(analysis: Dict[str, Any]) -> List[str]:
     narrative = dict(analysis.get("narrative") or {})
     reasons: List[str] = []
     reasons.extend(str(item).strip() for item in (narrative.get("positives") or []) if str(item).strip())
+    horizon = dict(dict(analysis.get("action") or {}).get("horizon") or {})
+    if horizon.get("fit_reason"):
+        reasons.append(f"更适合按 `{horizon.get('label', '当前周期')}` 理解：{horizon.get('fit_reason')}")
     dimension_order = [
         ("relative_strength", "相对强弱"),
         ("technical", "技术面"),
@@ -122,6 +125,9 @@ def _winner_reason_lines(analysis: Dict[str, Any]) -> List[str]:
 def _alternative_cautions(analysis: Dict[str, Any]) -> List[str]:
     narrative = dict(analysis.get("narrative") or {})
     cautions = [str(item).strip() for item in (narrative.get("cautions") or []) if str(item).strip()]
+    horizon = dict(dict(analysis.get("action") or {}).get("horizon") or {})
+    if horizon.get("misfit_reason"):
+        cautions.append(f"周期上更像 `{horizon.get('label', '观察期')}`：{horizon.get('misfit_reason')}")
     for key, label in (("technical", "技术面"), ("catalyst", "催化面"), ("risk", "风险特征")):
         score = _score_of(analysis, key)
         summary = str(dict(analysis.get("dimensions", {}).get(key) or {}).get("summary", "")).strip()
@@ -276,12 +282,14 @@ def _candidate_summary_rows(analyses: Sequence[Dict[str, Any]]) -> List[List[str
     for item in analyses:
         rating = dict(item.get("rating") or {})
         narrative = dict(item.get("narrative") or {})
+        horizon = dict(dict(item.get("action") or {}).get("horizon") or {})
         rows.append(
             [
                 f"{item.get('name', '—')} ({item.get('symbol', '—')})",
                 f"{rating.get('stars', '—')} {rating.get('label', '未评级')}",
                 f"{_rank_score(item):.1f}",
                 str(dict(narrative.get('judgment') or {}).get("state", "观察为主")),
+                str(horizon.get("label", dict(item.get("action") or {}).get("timeframe", "观察期"))).replace("(", "（").replace(")", "）"),
             ]
         )
     return rows
@@ -326,7 +334,7 @@ def _detail_markdown(
         for item in selection.get("blind_spots", [])[:4]:
             lines.append(f"- {item}")
     lines.extend(["", "## 候选池摘要", ""])
-    lines.extend(_table(["标的", "评级", "排序分", "交易状态"], _candidate_summary_rows(ranked[:5])))
+    lines.extend(_table(["标的", "评级", "排序分", "交易状态", "周期"], _candidate_summary_rows(ranked[:5])))
     lines.extend(
         [
             "",

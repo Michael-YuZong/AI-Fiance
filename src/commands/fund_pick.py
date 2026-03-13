@@ -149,6 +149,7 @@ def _winner_reason_lines(analysis: Dict[str, Any], defensive_mode: bool) -> List
     lines: List[str] = []
     sector = str(dict(analysis.get("metadata") or {}).get("sector", "")).strip()
     action = dict(analysis.get("action") or {})
+    horizon = dict(action.get("horizon") or {})
     trade_state = str(dict(analysis.get("narrative") or {}).get("judgment", {}).get("state", "")).strip()
     catalyst = _score_of(analysis, "catalyst")
     risk = _score_of(analysis, "risk")
@@ -171,6 +172,8 @@ def _winner_reason_lines(analysis: Dict[str, Any], defensive_mode: bool) -> List
         lines.append(f"宏观敏感度 `{int(macro)}` 分。{macro_reason or '宏观环境没有明显逆风，这点比单纯看净值涨跌更重要。'}".strip())
     if technical < 50 or trade_state:
         lines.append(f"但这不是追涨型机会，当前更适合按 `{trade_state or action.get('direction', '持有优于追高')}`` 去做，而不是直接重仓。".replace("``", "`"))
+    if horizon.get("fit_reason"):
+        lines.append(f"周期上更适合按 `{horizon.get('label', '当前周期')}` 理解：{horizon.get('fit_reason')}")
 
     if len(lines) < 3:
         relative = _score_of(analysis, "relative_strength")
@@ -198,6 +201,7 @@ def _winner_reason_lines(analysis: Dict[str, Any], defensive_mode: bool) -> List
 
 def _alternative_cautions(analysis: Dict[str, Any], winner: Dict[str, Any], defensive_mode: bool) -> List[str]:
     cautions = list(dict(analysis.get("narrative") or {}).get("cautions") or [])
+    horizon = dict(dict(analysis.get("action") or {}).get("horizon") or {})
     technical = _score_of(analysis, "technical")
     catalyst = _score_of(analysis, "catalyst")
     risk = _score_of(analysis, "risk")
@@ -213,6 +217,8 @@ def _alternative_cautions(analysis: Dict[str, Any], winner: Dict[str, Any], defe
         extra.append("短线催化还不足以把下一段行情真正推起来。")
     if risk < 60 and defensive_mode:
         extra.append("回撤和波动承受度不如防守型方案，今天不适合把它放在第一位。")
+    if horizon.get("misfit_reason"):
+        extra.append(f"周期上更像 `{horizon.get('label', '观察期')}`：{horizon.get('misfit_reason')}")
 
     merged = []
     seen = set()
@@ -235,12 +241,14 @@ def _candidate_summary_rows(analyses: Sequence[Dict[str, Any]], defensive_mode: 
     for item in analyses:
         rating = dict(item.get("rating") or {})
         narrative = dict(item.get("narrative") or {})
+        horizon = dict(dict(item.get("action") or {}).get("horizon") or {})
         rows.append(
             [
                 f"{item.get('name', '—')} ({item.get('symbol', '—')})",
                 f"{rating.get('stars', '—')} {rating.get('label', '未评级')}",
                 f"{_rank_score(item, defensive_mode):.1f}",
                 str(dict(narrative.get('judgment') or {}).get("state", "观察为主")),
+                str(horizon.get("label", dict(item.get("action") or {}).get("timeframe", "观察期"))).replace("(", "（").replace(")", "）"),
             ]
         )
     return rows
@@ -350,7 +358,7 @@ def _detail_markdown(
         for item in selection.get("blind_spots", [])[:4]:
             lines.append(f"- {item}")
     lines.extend(["", "## 候选池摘要", ""])
-    lines.extend(_table(["标的", "评级", "排序分", "交易状态"], _candidate_summary_rows(ranked[:5], defensive_mode)))
+    lines.extend(_table(["标的", "评级", "排序分", "交易状态", "周期"], _candidate_summary_rows(ranked[:5], defensive_mode)))
     lines.extend(
         [
             "",

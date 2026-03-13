@@ -447,6 +447,10 @@ def _analysis_section_lines(
     )
     if horizon:
         lines.append(f"- 持有周期：{horizon['label']}。{horizon['style']}")
+        if horizon.get("fit_reason"):
+            lines.append(f"- 为什么按这个周期理解：{horizon['fit_reason']}")
+        if horizon.get("misfit_reason"):
+            lines.append(f"- 现在不适合的打法：{horizon['misfit_reason']}")
     lines.extend(
         [
             f"- 介入条件：{action.get('entry', '等待进一步确认')}",
@@ -627,6 +631,21 @@ def _bucket_summary_text(bucket: str, analysis: Mapping[str, Any]) -> str:
 
 
 def _pick_horizon_profile(action: Mapping[str, Any], trade_state: str = "") -> Dict[str, str]:
+    structured = dict(action.get("horizon") or {})
+    if structured:
+        label = str(structured.get("label", "")).strip().replace("(", "（").replace(")", "）")
+        style = str(structured.get("style", "")).strip()
+        fit_reason = str(structured.get("fit_reason", "")).strip()
+        misfit_reason = str(structured.get("misfit_reason", "")).strip()
+        if label:
+            return {
+                "code": str(structured.get("code", "")).strip(),
+                "label": label,
+                "style": style,
+                "fit_reason": fit_reason,
+                "misfit_reason": misfit_reason,
+            }
+
     raw = str(action.get("timeframe", "")).strip()
     trade_state = str(trade_state).strip()
     direction = str(action.get("direction", "")).strip()
@@ -634,25 +653,45 @@ def _pick_horizon_profile(action: Mapping[str, Any], trade_state: str = "") -> D
 
     if "长线" in label:
         return {
+            "code": "long_term_allocation",
             "label": label,
             "style": "更适合作为中长期底仓来跟踪，允许短线波动，但要持续复核主线、基本面和风险预算。",
+            "fit_reason": "更依赖中长期逻辑，而不是一两天的节奏变化。",
+            "misfit_reason": "不适合按纯短线追涨杀跌来理解。",
         }
     if "中线" in label:
         return {
+            "code": "position_trade",
             "label": label,
             "style": "更像 1-3 个月的分批配置或波段跟踪，不按隔日涨跌去做快进快出。",
+            "fit_reason": "更适合围绕一段完整主线分批拿，而不是只看日内波动。",
+            "misfit_reason": "不适合直接当成超短节奏仓，也别默认长到长期不复核。",
         }
     if "短线" in label:
         return {
+            "code": "short_term",
             "label": label,
             "style": "更看催化、趋势和执行节奏，适合盯右侧确认和止损，不适合当成长线底仓。",
+            "fit_reason": "当前优势更多集中在催化和节奏，不在长周期基本面。",
+            "misfit_reason": "不适合当成长线配置仓。",
+        }
+    if "波段" in label:
+        return {
+            "code": "swing",
+            "label": label,
+            "style": "更适合按几周级别的波段节奏去跟踪，等确认和回踩，不靠单日冲动去追。",
+            "fit_reason": "趋势和轮动有基础，但还更依赖未来几周节奏。",
+            "misfit_reason": "不适合当长期底仓，也不适合只按隔夜消息去赌超短。",
         }
 
     fallback_blob = " ".join(part for part in (raw, trade_state, direction) if part)
     if any(token in fallback_blob for token in ("等待", "观察", "回避", "暂不出手")):
         return {
+            "code": "watch",
             "label": "观察期",
             "style": "现在先看窗口和确认信号，不建议急着把它定义成短线执行仓或长线配置仓。",
+            "fit_reason": "当前信号还没共振到足以支撑正式动作，先观察更稳妥。",
+            "misfit_reason": "不适合直接按明确的长线或短线打法去执行。",
         }
     return {}
 
@@ -1019,6 +1058,7 @@ class ClientReportRenderer:
         bucket = _recommendation_bucket(analysis)
         narrative = dict(analysis.get("narrative") or {})
         action = dict(analysis.get("action") or {})
+        horizon = _pick_horizon_profile(action, str(dict(narrative.get("judgment") or {}).get("state", "")))
         notes = [str(item).strip() for item in (analysis.get("notes") or []) if str(item).strip()]
         lines = [
             f"# {name} ({symbol}) | 客户版分析 | {generated_at}",
@@ -1095,6 +1135,9 @@ class ClientReportRenderer:
                 ["项目", "建议"],
                 [
                     ["当前动作", action.get("direction", "观察为主")],
+                    ["持有周期", horizon.get("label", "未单独标注")],
+                    ["周期理由", horizon.get("fit_reason", horizon.get("style", "先按当前动作、仓位和止损框架理解。"))],
+                    ["现在不适合", horizon.get("misfit_reason", "不要把当前动作自动理解成另一种更长或更短的打法。")],
                     ["介入条件", action.get("entry", "等待进一步确认")],
                     ["首次仓位", action.get("position", "小仓位分批")],
                     ["加仓节奏", action.get("scaling_plan", "确认后再考虑第二笔")],
@@ -1313,6 +1356,12 @@ class ClientReportRenderer:
                     "",
                 ]
             )
+            if horizon.get("fit_reason"):
+                lines.append(f"为什么按这个周期看：{horizon.get('fit_reason')}")
+                lines.append("")
+            if horizon.get("misfit_reason"):
+                lines.append(f"现在不适合：{horizon.get('misfit_reason')}")
+                lines.append("")
         if selection_context:
             lines.extend(
                 [
@@ -1375,6 +1424,8 @@ class ClientReportRenderer:
                     ["当前动作", winner.get("action", {}).get("direction", "观察为主")],
                     ["持有周期", horizon.get("label", "未单独标注")],
                     ["适用打法", horizon.get("style", "先按当前动作、仓位和止损框架理解，不把它默认当成长线配置。")],
+                    ["为什么按这个周期看", horizon.get("fit_reason", "当前更适合按已有动作和仓位框架理解。")],
+                    ["现在不适合", horizon.get("misfit_reason", "不要把它自动理解成另一种更长或更短的打法。")],
                     ["介入条件", winner.get("action", {}).get("entry", "等回撤再看")],
                     ["首次仓位", winner.get("action", {}).get("position", "计划仓位的 1/3 - 1/2")],
                     ["加仓节奏", winner.get("action", {}).get("scaling_plan", "确认后再考虑第二笔")],
@@ -1450,6 +1501,12 @@ class ClientReportRenderer:
                     "",
                 ]
             )
+            if horizon.get("fit_reason"):
+                lines.append(f"为什么按这个周期看：{horizon.get('fit_reason')}")
+                lines.append("")
+            if horizon.get("misfit_reason"):
+                lines.append(f"现在不适合：{horizon.get('misfit_reason')}")
+                lines.append("")
         if selection_context:
             lines.extend(
                 [
@@ -1511,6 +1568,8 @@ class ClientReportRenderer:
                     ["当前动作", winner.get("action", {}).get("direction", "观察为主")],
                     ["持有周期", horizon.get("label", "未单独标注")],
                     ["适用打法", horizon.get("style", "先按当前动作、仓位和止损框架理解，不把它默认当成长线配置。")],
+                    ["为什么按这个周期看", horizon.get("fit_reason", "当前更适合按已有动作和仓位框架理解。")],
+                    ["现在不适合", horizon.get("misfit_reason", "不要把它自动理解成另一种更长或更短的打法。")],
                     ["介入条件", winner.get("action", {}).get("entry", "等回撤再看")],
                     ["首次仓位", winner.get("action", {}).get("position", "计划仓位的 1/3 - 1/2")],
                     ["加仓节奏", winner.get("action", {}).get("scaling_plan", "确认后再考虑第二笔")],

@@ -13,9 +13,9 @@
 - `src/commands/stock_pick.py`
   This is the most productized feature: scoring, daily baseline snapshots, diffing, internal/client outputs. As of 2026-03-13 the client-facing pick sections also surface explicit holding-period / execution-horizon language instead of only saying whether chasing is appropriate.
 - `src/commands/fund_pick.py`
-  As of 2026-03-13 this is no longer just a fixed-candidate comparer. It now does full-universe open-end fund pre-screening, explicit theme/style/manager filters, client/detail output, release gating, and same-day baseline-vs-rerun score diffing.
+  As of 2026-03-13 this is no longer just a fixed-candidate comparer. It now does full-universe open-end fund pre-screening, explicit theme/style/manager filters, client/detail output, release gating, same-day baseline-vs-rerun score diffing, and a structured `action.horizon` contract that explains why a candidate is better treated as observation / short-term / swing / medium-term / long-term.
 - `src/commands/etf_pick.py`
-  ETF pick now shares the same coverage disclosure, score-history snapshotting, rerun diffing, and release-guard workflow as the stronger pick pipelines, and its client output now exposes the intended holding period / play style more explicitly.
+  ETF pick now shares the same coverage disclosure, score-history snapshotting, rerun diffing, and release-guard workflow as the stronger pick pipelines, and its client output now exposes the intended holding period / play style through the same structured `action.horizon` contract.
 - `src/commands/risk.py`
   Risk report, correlation, VaR/CVaR, drawdown, scenario stress are already coherent.
 - `src/commands/portfolio.py`
@@ -82,11 +82,13 @@ When in doubt, optimize for:
    Keep improving official-source extraction, especially for longer raw pages/PDF-like content and stricter policy taxonomy.
 6. Pick pipeline consolidation
    `src/commands/pick_history.py` now holds shared snapshot/history helpers. Continue consolidating ETF/fund/stock pick contracts there instead of duplicating scoring-history and coverage logic per command.
+7. Horizon propagation
+   ETF/fund/stock pick now carry structured horizon reasoning; next step is to propagate the same vocabulary into `research`, `portfolio`, and retrospective review instead of letting modules fall back to raw `timeframe` strings.
 
 ## Recent Changes
 
 - 2026-03-13
-  Pick renderers (`stock_pick` client sections, `fund_pick`, `etf_pick`) now surface explicit holding-period / execution-horizon labels such as `短线交易（1-2周）` / `中线配置（1-3月）` / `观察期`, instead of only saying whether the setup is suitable for chasing.
+  Pick renderers now use a structured `action.horizon` contract with explicit fit / misfit language, so ETF/fund/stock outputs can distinguish `观察期` / `短线交易（3-10日）` / `波段跟踪（2-6周）` / `中线配置（1-3月）` / `长线配置（6-12月）` instead of only printing a flat timeframe string.
 - 2026-03-13
   `etf_pick`/shared pick-history coverage disclosure now uses the full set of completed analyses instead of the truncated `top` list, and single-candidate client copy no longer auto-downgrades a still-`标准推荐稿` report.
 - 2026-03-13
