@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import re
 from dataclasses import dataclass, field
 from html import unescape
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -80,6 +81,13 @@ class PolicyTemplateMatch:
     score: int
     matched_aliases: List[str]
     confidence_label: str
+
+
+@dataclass
+class AttachmentResource:
+    title: str
+    url: str
+    kind: str
 
 
 class PolicyEngine:
@@ -186,7 +194,7 @@ class PolicyEngine:
         if context.content_kind == "url" and context.title:
             body_facts.append(f"原文标题：{context.title}")
         body_facts.extend(f"原文元信息：{line}" for line in metadata_lines[:3])
-        if context.attachment_titles:
+        if context.attachment_titles and not context.source.lower().endswith(".pdf"):
             body_facts.append(f"页面附件：{'；'.join(context.attachment_titles[:2])}")
         for sentence in self.extract_policy_facts(context.text, template):
             body_facts.append(f"原文明确动作：{sentence}")
@@ -209,8 +217,11 @@ class PolicyEngine:
             inference_lines.append(f"风险映射：{'; '.join(risk_points[:3])}。")
 
         unconfirmed_lines = list(context.extraction_notes)
-        if context.content_kind == "url" and context.extraction_quality != "正文抽取较完整":
-            unconfirmed_lines.append("当前 URL 抽取仍可能漏掉附件、表格、折叠区或 PDF 原件，不能替代完整原文复核。")
+        if context.content_kind == "url":
+            if context.source.lower().endswith(".pdf"):
+                unconfirmed_lines.append("PDF 正文已抽取，但表格、扫描页、图片页和版式内容仍可能存在漏提。")
+            elif context.extraction_quality != "正文抽取较完整":
+                unconfirmed_lines.append("当前 URL 抽取仍可能漏掉附件、表格、折叠区或 PDF 原件，不能替代完整原文复核。")
         if context.content_kind == "keyword":
             unconfirmed_lines.append("当前没有正文事实，政策方向、受益链条和风险点主要来自模板/规则推断。")
         if context.content_kind == "text":
@@ -227,6 +238,12 @@ class PolicyEngine:
             template=template,
             support_points=support_points,
             timeline_points=timeline_points,
+        )
+        policy_taxonomy = self._build_policy_taxonomy(
+            context=context,
+            template=template,
+            direction=direction,
+            stage=stage,
         )
 
         watchlist_policy = {
@@ -257,6 +274,7 @@ class PolicyEngine:
             "raw_excerpt": self._build_excerpt(context.text),
             "metadata_lines": metadata_lines,
             "body_facts": body_facts,
+            "policy_taxonomy": policy_taxonomy,
             "inference_lines": inference_lines,
             "unconfirmed_lines": self._merge_unique(unconfirmed_lines),
             "extraction_status": context.extraction_quality,
@@ -421,23 +439,30 @@ class PolicyEngine:
         notes: List[str] = []
         if "pdf" in content_type or target.lower().endswith(".pdf"):
             authority = self._assess_source_authority(target, {})
+            text, metadata, pdf_title = self._extract_pdf_text(response.content, target, notes)
+            title = pdf_title or urlparse(target).path.rsplit("/", 1)[-1] or urlparse(target).netloc
+            quality = "PDF正文已抽取" if text else "仅识别到 PDF 链接，正文未抽取"
+            if text:
+                notes.append("已抽取 PDF 原文，可用于正文事实、时间线和方向判断。")
             return PolicyContext(
-                title=urlparse(target).path.rsplit("/", 1)[-1] or urlparse(target).netloc,
+                title=title,
                 source=target,
-                text="",
-                extraction_quality="仅识别到 PDF 链接，正文未抽取",
-                extraction_notes=["当前链接是 PDF 或类 PDF 原件，项目内暂未接入稳定的 PDF 正文抽取。"],
+                text=text,
+                metadata=metadata,
+                extraction_quality=quality,
+                extraction_notes=notes or ["当前链接是 PDF 或类 PDF 原件，正文仍未抽取。"],
                 content_kind="url",
                 source_authority=authority,
-                coverage_scope=["仅识别到附件链接"],
-                attachment_titles=[urlparse(target).path.rsplit("/", 1)[-1] or "附件原件"],
+                coverage_scope=["PDF正文"] if text else ["仅识别到附件链接"],
+                attachment_titles=[title or "附件原件"],
             )
 
         html = self._decode_response_text(response, notes)
         soup = BeautifulSoup(html, "html.parser")
         self._strip_noise_tags(soup)
         metadata = self._extract_metadata(soup)
-        attachment_titles = self._extract_attachment_titles(soup, target)
+        attachments = self._extract_attachment_resources(soup, target)
+        attachment_titles = [item.title for item in attachments]
         title = self._extract_html_title(soup, metadata, target)
         text, selector = self._extract_body_text(soup)
         if selector:
@@ -445,13 +470,36 @@ class PolicyEngine:
         if not text and metadata:
             text = "\n".join(f"{label}：{value}" for label, value in metadata.items() if value)
         quality = "正文抽取较完整" if title and len(text) >= 120 else "正文抽取部分成功" if title or text else "仅抽到页面元信息"
+        pdf_attachments = [item for item in attachments if item.kind == "pdf"]
+        ofd_attachments = [item for item in attachments if item.kind == "ofd"]
+        pdf_text = ""
+        if pdf_attachments:
+            pdf_text, pdf_metadata, pdf_title = self._extract_pdf_attachment_text(pdf_attachments[0], notes)
+            if pdf_text:
+                text = self._merge_unique_text(text, pdf_text)
+                metadata = self._merge_metadata(metadata, pdf_metadata)
+                if pdf_title and pdf_title not in attachment_titles:
+                    attachment_titles.insert(0, pdf_title)
+                quality = "公告页正文 + PDF附件已补抽"
+                notes.append(f"已补抽 PDF 附件正文 `{pdf_attachments[0].title}`。")
+            else:
+                notes.append(f"检测到 PDF 附件（{pdf_attachments[0].title}），但当前未抽到可用正文。")
         if attachment_titles:
-            quality = "正文抽取部分成功"
-            notes.append(f"检测到 PDF/OFD 附件（{'; '.join(attachment_titles[:2])}），当前只抽取了公告页正文，未展开附件原文。")
+            if not pdf_text:
+                quality = "正文抽取部分成功"
+            notes.append(f"检测到 PDF/OFD 附件（{'; '.join(attachment_titles[:2])}），当前只抽取了公告页正文，未展开全部附件原文。")
+        if ofd_attachments:
+            notes.append("检测到 OFD 附件，当前仍未接入稳定的 OFD 原文抽取。")
         if not text:
             notes.append("当前没有抽到足够正文，只能基于标题和元信息做弱判断。")
         source_authority = self._assess_source_authority(target, metadata)
-        coverage_scope = self._build_coverage_scope(title, metadata, text, attachment_titles)
+        coverage_scope = self._build_coverage_scope(
+            title,
+            metadata,
+            text,
+            attachment_titles,
+            pdf_text_extracted=bool(pdf_text),
+        )
         return PolicyContext(
             title=title,
             source=target,
@@ -514,20 +562,89 @@ class PolicyEngine:
             return self._normalize_title(soup.title.text)
         return urlparse(target).netloc
 
-    def _extract_attachment_titles(self, soup: BeautifulSoup, target: str) -> List[str]:
-        titles: List[str] = []
-        base_url = urlparse(target)
+    def _extract_attachment_resources(self, soup: BeautifulSoup, target: str) -> List[AttachmentResource]:
+        attachments: List[AttachmentResource] = []
         for node in soup.select("a[href]"):
             href = str(node.get("href", "")).strip()
-            if not href.lower().endswith((".pdf", ".ofd")):
+            lowered = href.lower()
+            if not lowered.endswith((".pdf", ".ofd")):
                 continue
             title = self._normalize_text(node.get_text(" ", strip=True))
             if not title:
                 filename = href.rsplit("/", 1)[-1]
-                title = filename or base_url.path.rsplit("/", 1)[-1]
-            if title and title not in titles:
-                titles.append(title)
-        return titles[:3]
+                title = filename or urlparse(target).path.rsplit("/", 1)[-1]
+            resource = AttachmentResource(
+                title=title,
+                url=urljoin(target, href),
+                kind="pdf" if lowered.endswith(".pdf") else "ofd",
+            )
+            if resource.title and not any(
+                item.title == resource.title and item.url == resource.url for item in attachments
+            ):
+                attachments.append(resource)
+        return attachments[:4]
+
+    def _extract_attachment_titles(self, soup: BeautifulSoup, target: str) -> List[str]:
+        return [item.title for item in self._extract_attachment_resources(soup, target)]
+
+    def _extract_pdf_attachment_text(
+        self,
+        attachment: AttachmentResource,
+        notes: List[str],
+    ) -> Tuple[str, Dict[str, str], str]:
+        try:
+            response = requests.get(attachment.url, timeout=20)
+            response.raise_for_status()
+        except Exception as exc:
+            notes.append(f"尝试补抽 PDF 附件 `{attachment.title}` 失败：{exc.__class__.__name__}。")
+            return "", {}, attachment.title
+        text, metadata, pdf_title = self._extract_pdf_text(response.content, attachment.url, notes)
+        return text, metadata, pdf_title or attachment.title
+
+    def _extract_pdf_text(
+        self,
+        content: bytes,
+        source: str,
+        notes: List[str],
+    ) -> Tuple[str, Dict[str, str], str]:
+        try:
+            from pypdf import PdfReader
+        except Exception:
+            notes.append("当前环境未安装 `pypdf`，PDF 原文仍未抽取。")
+            return "", {}, ""
+
+        try:
+            reader = PdfReader(io.BytesIO(content))
+        except Exception as exc:
+            notes.append(f"PDF 原文抽取失败：{exc.__class__.__name__}。")
+            return "", {}, ""
+
+        text_blocks: List[str] = []
+        page_limit = min(len(reader.pages), 8)
+        for idx in range(page_limit):
+            try:
+                page_text = self._clean_extracted_text(reader.pages[idx].extract_text() or "")
+            except Exception:
+                page_text = ""
+            if page_text:
+                text_blocks.append(page_text)
+        if len(reader.pages) > page_limit:
+            notes.append(f"PDF 共 {len(reader.pages)} 页，当前只抽取前 {page_limit} 页。")
+        if not text_blocks:
+            notes.append("PDF 可能是扫描版或图片版，当前没有抽到可用文本。")
+        metadata: Dict[str, str] = {}
+        title = ""
+        pdf_meta = getattr(reader, "metadata", None)
+        if pdf_meta:
+            title = self._normalize_text(getattr(pdf_meta, "title", "") or pdf_meta.get("/Title", ""))
+            if title:
+                metadata["标题"] = title
+            author = self._normalize_text(getattr(pdf_meta, "author", "") or pdf_meta.get("/Author", ""))
+            if author and author.lower() not in {"user", "anonymous", "acrobat", "microsoft", "wps"}:
+                metadata["来源"] = author
+        if not title:
+            title = urlparse(source).path.rsplit("/", 1)[-1]
+        return "\n".join(text_blocks).strip(), metadata, title
 
     def _extract_body_text(self, soup: BeautifulSoup) -> Tuple[str, str]:
         candidates: List[Tuple[str, str, int]] = []
@@ -797,7 +914,7 @@ class PolicyEngine:
         support_text = "、".join(support_points[:2]) if support_points else template.get("policy_goal", "")
         timeline_text = f"，并已抽到 `{timeline_points[0]}` 这类时间线" if timeline_points else ""
         attachment_text = ""
-        if context.attachment_titles:
+        if context.attachment_titles and not context.source.lower().endswith(".pdf"):
             attachment_text = f"，页面还挂有 `{context.attachment_titles[0]}` 这类附件但未展开原文"
         return (
             f"原文主要围绕 `{support_text}` 展开，当前判断为 `{direction}`，阶段偏 `{stage}`"
@@ -822,6 +939,10 @@ class PolicyEngine:
 
     def _describe_context_kind(self, context: PolicyContext) -> str:
         if context.content_kind == "url":
+            if context.source.lower().endswith(".pdf"):
+                if "官方" in context.source_authority or "政府" in context.source_authority:
+                    return "官方 PDF / URL"
+                return "PDF / URL"
             if "官方" in context.source_authority or "政府" in context.source_authority:
                 return "官方页面 / URL"
             return "网页 / URL"
@@ -843,6 +964,25 @@ class PolicyEngine:
                     continue
                 seen.add(value)
                 merged.append(value)
+        return merged
+
+    def _merge_unique_text(self, left: str, right: str) -> str:
+        left_norm = self._normalize_text(left)
+        right_norm = self._normalize_text(right)
+        if not left_norm:
+            return right_norm
+        if not right_norm or right_norm in left_norm:
+            return left_norm
+        if left_norm in right_norm:
+            return right_norm
+        return f"{left_norm}\n{right_norm}".strip()
+
+    def _merge_metadata(self, primary: Dict[str, str], secondary: Dict[str, str]) -> Dict[str, str]:
+        merged = dict(primary)
+        for key, value in secondary.items():
+            normalized = self._normalize_text(value)
+            if normalized and not merged.get(key):
+                merged[key] = normalized
         return merged
 
     def _assess_source_authority(self, target: str, metadata: Dict[str, str]) -> str:
@@ -867,6 +1007,8 @@ class PolicyEngine:
         metadata: Dict[str, str],
         text: str,
         attachment_titles: Sequence[str],
+        *,
+        pdf_text_extracted: bool = False,
     ) -> List[str]:
         scope: List[str] = []
         if title:
@@ -875,6 +1017,29 @@ class PolicyEngine:
             scope.append(f"元信息（{min(len(metadata), 4)}项）")
         if text:
             scope.append("页面正文")
+        if pdf_text_extracted:
+            scope.append("PDF附件正文")
         if attachment_titles:
             scope.append(f"附件标题（{len(attachment_titles)}个）")
         return scope or ["覆盖范围待确认"]
+
+    def _build_policy_taxonomy(
+        self,
+        *,
+        context: PolicyContext,
+        template: Dict[str, Any],
+        direction: str,
+        stage: str,
+    ) -> Dict[str, str]:
+        taxonomy = dict(template.get("taxonomy") or {})
+        source_bucket = "中央/官方原发" if "官方" in context.source_authority or "政府" in context.source_authority else (
+            "用户提供正文" if context.content_kind == "text" else "主题关键词/待确认"
+        )
+        taxonomy.setdefault("source_level", source_bucket)
+        taxonomy.setdefault(
+            "evidence_mode",
+            "已覆盖正文" if any(item in {"页面正文", "PDF正文", "PDF附件正文"} for item in context.coverage_scope) else "主题推断",
+        )
+        taxonomy["policy_tone"] = direction
+        taxonomy["policy_stage"] = stage
+        return {key: value for key, value in taxonomy.items() if str(value).strip()}

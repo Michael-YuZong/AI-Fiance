@@ -43,7 +43,10 @@ class PolicyReportRenderer:
             if coverage_scope:
                 lines.append(f"- 当前已覆盖: {', '.join(coverage_scope)}")
             if attachment_titles:
-                lines.append(f"- 检测到附件: {'；'.join(attachment_titles)}")
+                if "PDF" in str(payload.get("input_type", "")):
+                    lines.append(f"- 当前文档: {'；'.join(attachment_titles)}")
+                else:
+                    lines.append(f"- 检测到附件: {'；'.join(attachment_titles)}")
             lines.append("")
 
         lines.extend(["## 已抽取的正文事实"])
@@ -69,6 +72,25 @@ class PolicyReportRenderer:
             lines.append(f"- 重点支持方向: {', '.join(support_points)}")
         for item in payload.get("inference_lines", []):
             lines.append(f"- {item}")
+
+        taxonomy = payload.get("policy_taxonomy", {})
+        if taxonomy:
+            label_map = {
+                "policy_family": "政策族群",
+                "driver_type": "驱动方式",
+                "implementation_path": "落地路径",
+                "market_style": "市场映射",
+                "base_horizon": "基础周期",
+                "source_level": "来源层级",
+                "evidence_mode": "证据模式",
+                "policy_tone": "政策口径",
+                "policy_stage": "阶段口径",
+            }
+            lines.extend(["", "## 政策分类法"])
+            for key, label in label_map.items():
+                value = str(taxonomy.get(key, "")).strip()
+                if value:
+                    lines.append(f"- {label}: {value}")
 
         numbers = payload.get("headline_numbers", [])
         if numbers:

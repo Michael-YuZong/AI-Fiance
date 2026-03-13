@@ -51,6 +51,21 @@ class FakeResponse:
         return None
 
 
+class FakeBinaryResponse:
+    def __init__(self, body: bytes, content_type: str = "application/pdf") -> None:
+        self.content = body
+        self.encoding = "utf-8"
+        self.apparent_encoding = "utf-8"
+        self.headers = {"content-type": content_type}
+
+    @property
+    def text(self) -> str:
+        return self.content.decode(self.encoding or "utf-8", errors="replace")
+
+    def raise_for_status(self) -> None:
+        return None
+
+
 def test_policy_engine_matches_keyword():
     engine = PolicyEngine()
     match = engine.best_match("电网和特高压投资")
@@ -144,6 +159,64 @@ def test_policy_engine_analyze_context_separates_facts_inference_and_unknowns(mo
     assert any("提出推进特高压和配电网改造" in item for item in analysis["body_facts"])
     assert any("受益链条映射" in item for item in analysis["inference_lines"])
     assert any("PDF/OFD 附件" in item for item in analysis["unconfirmed_lines"])
+
+
+def test_policy_engine_load_context_extracts_pdf_attachment_text(monkeypatch):
+    def fake_get(url: str, *args, **kwargs):
+        if url.endswith(".pdf"):
+            return FakeBinaryResponse(b"%PDF-1.4")
+        return FakeResponse(OFFICIAL_NOTICE_HTML)
+
+    monkeypatch.setattr(policy_engine_module.requests, "get", fake_get)
+    monkeypatch.setattr(
+        PolicyEngine,
+        "_extract_pdf_text",
+        lambda self, content, source, notes: (
+            "提出推进特高压和配电网改造，要求在2026年6月30日前形成首批重点项目清单。",
+            {"标题": "加快构建新型电力系统行动方案"},
+            "加快构建新型电力系统行动方案",
+        ),
+    )
+    engine = PolicyEngine()
+
+    context = engine.load_context("https://www.gov.cn/zhengce/zhengceku/202408/content_6966863.htm")
+
+    assert context.extraction_quality == "公告页正文 + PDF附件已补抽"
+    assert "PDF附件正文" in context.coverage_scope
+    assert "提出推进特高压和配电网改造" in context.text
+    assert any("已补抽 PDF 附件正文" in item for item in context.extraction_notes)
+
+
+def test_policy_engine_load_context_supports_direct_pdf(monkeypatch):
+    monkeypatch.setattr(policy_engine_module.requests, "get", lambda *args, **kwargs: FakeBinaryResponse(b"%PDF-1.4"))
+    monkeypatch.setattr(
+        PolicyEngine,
+        "_extract_pdf_text",
+        lambda self, content, source, notes: (
+            "推进特高压和配电网改造，年内启动示范工程申报。",
+            {"标题": "新型电力系统行动方案", "来源": "国家发展改革委"},
+            "新型电力系统行动方案",
+        ),
+    )
+    engine = PolicyEngine()
+
+    context = engine.load_context("https://www.gov.cn/policy/power-grid.pdf")
+
+    assert context.title == "新型电力系统行动方案"
+    assert context.extraction_quality == "PDF正文已抽取"
+    assert context.coverage_scope == ["PDF正文"]
+    assert "推进特高压和配电网改造" in context.text
+    assert any("已抽取 PDF 原文" in item for item in context.extraction_notes)
+
+
+def test_policy_engine_analysis_includes_policy_taxonomy():
+    engine = PolicyEngine()
+
+    analysis = engine.analyze_context(engine.load_context("电网"), [])
+
+    assert analysis["policy_taxonomy"]["policy_family"] == "能源基础设施 / 新型电力系统"
+    assert analysis["policy_taxonomy"]["source_level"] == "主题关键词/待确认"
+    assert analysis["policy_taxonomy"]["policy_tone"] == "偏支持"
 
 
 def test_policy_engine_watchlist_impact_matches_asset_name_alias():

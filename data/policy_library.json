@@ -8,6 +8,13 @@
     "support_points": ["特高压", "配电网改造", "储能并网", "电力数字化"],
     "beneficiary_nodes": ["电力需求", "电网设备", "铜铝"],
     "risk_nodes": ["高估值追涨", "落地节奏低于预期"],
+    "taxonomy": {
+      "policy_family": "能源基础设施 / 新型电力系统",
+      "driver_type": "CapEx 扩张 / 电网投资",
+      "implementation_path": "规划立项 -> 项目审批 -> 招标开工 -> 投资兑现",
+      "market_style": "顺周期设备 + 电力基础设施链",
+      "base_horizon": "中线到长线"
+    },
     "mapped_assets": ["561380"],
     "headline_numbers": ["电网投资强度提升", "关注年度投资完成额和项目开工节奏"]
   },
@@ -20,6 +27,13 @@
     "support_points": ["设备", "材料", "EDA/IP", "先进封装"],
     "beneficiary_nodes": ["半导体自主可控", "半导体设备", "半导体材料", "EDA/IP"],
     "risk_nodes": ["海外限制升级", "景气下行阶段估值压缩"],
+    "taxonomy": {
+      "policy_family": "科技安全 / 国产替代",
+      "driver_type": "产业扶持 / 自主可控",
+      "implementation_path": "专项资金 -> 设备扩产 -> 订单验证 -> 国产化率提升",
+      "market_style": "成长科技 / 自主可控链",
+      "base_horizon": "中线到长线"
+    },
     "mapped_assets": ["芯片ETF"],
     "headline_numbers": ["产线扩产节奏", "专项资金投向", "国产化率提升目标"]
   },
@@ -32,6 +46,13 @@
     "support_points": ["数据确权", "流通平台", "数据安全", "信创", "国产算力"],
     "beneficiary_nodes": ["数据要素", "数据安全", "信创", "国产算力"],
     "risk_nodes": ["订单兑现慢", "主题过热"],
+    "taxonomy": {
+      "policy_family": "制度建设 / 数字治理",
+      "driver_type": "规则建设 / IT 国产化",
+      "implementation_path": "制度试点 -> 平台建设 -> 预算落地 -> 订单兑现",
+      "market_style": "成长软件 + 数字基础设施",
+      "base_horizon": "中线"
+    },
     "mapped_assets": ["中概互联", "HSTECH"],
     "headline_numbers": ["地方试点范围", "预算安排", "订单转化速度"]
   },
@@ -44,6 +65,13 @@
     "support_points": ["算力租赁", "液冷", "数据中心", "电力配套"],
     "beneficiary_nodes": ["AI算力", "电力需求", "电网设备"],
     "risk_nodes": ["资本开支放缓", "需求兑现低于预期"],
+    "taxonomy": {
+      "policy_family": "AI 基础设施 / 新质生产力",
+      "driver_type": "算力建设 / 基建配套",
+      "implementation_path": "项目立项 -> CapEx 投放 -> 配套电力扩容 -> 需求兑现",
+      "market_style": "成长科技 + 基建配套链",
+      "base_horizon": "短中结合"
+    },
     "mapped_assets": ["561380", "HSTECH"],
     "headline_numbers": ["算力中心建设节奏", "服务器与电力配套投资"]
   },
@@ -56,6 +84,13 @@
     "support_points": ["医疗器械", "医疗服务", "康复养老"],
     "beneficiary_nodes": ["老龄化", "医疗器械", "医疗服务"],
     "risk_nodes": ["集采压价", "需求恢复不及预期"],
+    "taxonomy": {
+      "policy_family": "民生服务 / 医疗供给",
+      "driver_type": "支付规则 / 服务扩容",
+      "implementation_path": "规则调整 -> 采购招标 -> 医疗服务扩容 -> 业绩兑现",
+      "market_style": "防御消费 + 医疗服务链",
+      "base_horizon": "中线到长线"
+    },
     "mapped_assets": ["医药ETF"],
     "headline_numbers": ["设备更新节奏", "医保支付政策", "服务扩容节奏"]
   }
