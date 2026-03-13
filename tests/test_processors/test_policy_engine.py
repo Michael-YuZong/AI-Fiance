@@ -102,6 +102,10 @@ def test_policy_engine_load_context_repairs_encoding_and_extracts_notice_page(mo
     assert context.metadata["来源"] == "国家发展改革委网站"
     assert "加快推进新型电力系统建设" in context.text
     assert context.extraction_quality == "正文抽取部分成功"
+    assert context.source_authority == "官方政府站点，且页面含发文机关元信息"
+    assert "页面正文" in context.coverage_scope
+    assert "附件标题（1个）" in context.coverage_scope
+    assert "《加快构建新型电力系统行动方案（2024—2027年）》.pdf" in context.attachment_titles
     assert any("网页编码按 `utf-8` 自动修正。" == item for item in context.extraction_notes)
     assert any("PDF/OFD 附件" in item for item in context.extraction_notes)
 
@@ -133,8 +137,11 @@ def test_policy_engine_analyze_context_separates_facts_inference_and_unknowns(mo
 
     assert analysis["policy_direction"] == "偏支持"
     assert analysis["policy_stage"] == "顶层规划/行动方案"
+    assert analysis["source_authority"] == "官方政府站点，且页面含发文机关元信息"
+    assert "附件标题（1个）" in analysis["coverage_scope"]
     assert any("原文元信息：发文机关" in item for item in analysis["body_facts"])
-    assert any("加快推进新型电力系统建设" in item for item in analysis["body_facts"])
+    assert any("页面附件：" in item for item in analysis["body_facts"])
+    assert any("提出推进特高压和配电网改造" in item for item in analysis["body_facts"])
     assert any("受益链条映射" in item for item in analysis["inference_lines"])
     assert any("PDF/OFD 附件" in item for item in analysis["unconfirmed_lines"])
 

@@ -69,6 +69,9 @@ class PolicyContext:
     extraction_notes: List[str] = field(default_factory=list)
     content_kind: str = "keyword"
     body_selector: str = ""
+    source_authority: str = "待确认"
+    coverage_scope: List[str] = field(default_factory=list)
+    attachment_titles: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -97,6 +100,8 @@ class PolicyEngine:
                 extraction_quality="已抽到用户提供长正文",
                 extraction_notes=["当前输入为用户提供长正文片段，未核对是否覆盖附件、表格和落款。"],
                 content_kind="text",
+                source_authority="用户提供文本，未自动核验发文机关和发布日期",
+                coverage_scope=["用户提供正文片段"],
             )
         return PolicyContext(
             title=normalized_target,
@@ -105,6 +110,8 @@ class PolicyEngine:
             extraction_quality="仅关键词，无正文事实",
             extraction_notes=["当前输入为关键词，正文事实、时间线和发文机关都未确认。"],
             content_kind="keyword",
+            source_authority="待确认（仅关键词）",
+            coverage_scope=["仅关键词"],
         )
 
     def match_policy(self, text: str) -> Optional[PolicyTemplateMatch]:
@@ -179,6 +186,8 @@ class PolicyEngine:
         if context.content_kind == "url" and context.title:
             body_facts.append(f"原文标题：{context.title}")
         body_facts.extend(f"原文元信息：{line}" for line in metadata_lines[:3])
+        if context.attachment_titles:
+            body_facts.append(f"页面附件：{'；'.join(context.attachment_titles[:2])}")
         for sentence in self.extract_policy_facts(context.text, template):
             body_facts.append(f"原文明确动作：{sentence}")
         if explicit_risk_sentences:
@@ -251,6 +260,9 @@ class PolicyEngine:
             "inference_lines": inference_lines,
             "unconfirmed_lines": self._merge_unique(unconfirmed_lines),
             "extraction_status": context.extraction_quality,
+            "source_authority": context.source_authority,
+            "coverage_scope": context.coverage_scope,
+            "attachment_titles": context.attachment_titles,
         }
 
     def extract_numbers(self, text: str) -> List[str]:
@@ -315,6 +327,27 @@ class PolicyEngine:
         return seen[:5]
 
     def extract_policy_facts(self, text: str, template: Dict[str, Any]) -> List[str]:
+        candidates: List[Tuple[int, str]] = []
+        fragments = self._merge_unique(self._split_clauses(text), self._split_sentences(text))
+        for sentence in fragments:
+            trimmed = self._trim_sentence(sentence)
+            if self._is_low_signal_fragment(trimmed):
+                continue
+            score = self._score_fact_sentence(trimmed, template)
+            if score >= 3:
+                candidates.append((score, trimmed))
+        if candidates:
+            ranked: List[str] = []
+            for _, sentence in sorted(candidates, key=lambda item: (-item[0], len(item[1]))):
+                if any(sentence in existing or existing in sentence for existing in ranked):
+                    continue
+                if sentence not in ranked:
+                    ranked.append(sentence)
+                if len(ranked) >= 2:
+                    break
+            if ranked:
+                return ranked
+
         primary_tokens = list(template.get("support_points", [])) + list(_SUPPORT_TOKENS)
         facts = self._find_sentences(text, primary_tokens, limit=2)
         if facts:
@@ -387,6 +420,7 @@ class PolicyEngine:
         content_type = str(response.headers.get("content-type", "")).lower()
         notes: List[str] = []
         if "pdf" in content_type or target.lower().endswith(".pdf"):
+            authority = self._assess_source_authority(target, {})
             return PolicyContext(
                 title=urlparse(target).path.rsplit("/", 1)[-1] or urlparse(target).netloc,
                 source=target,
@@ -394,17 +428,16 @@ class PolicyEngine:
                 extraction_quality="仅识别到 PDF 链接，正文未抽取",
                 extraction_notes=["当前链接是 PDF 或类 PDF 原件，项目内暂未接入稳定的 PDF 正文抽取。"],
                 content_kind="url",
+                source_authority=authority,
+                coverage_scope=["仅识别到附件链接"],
+                attachment_titles=[urlparse(target).path.rsplit("/", 1)[-1] or "附件原件"],
             )
 
         html = self._decode_response_text(response, notes)
         soup = BeautifulSoup(html, "html.parser")
         self._strip_noise_tags(soup)
         metadata = self._extract_metadata(soup)
-        attachment_links = [
-            href
-            for href in (node.get("href", "") for node in soup.select("a[href]"))
-            if str(href).lower().endswith((".pdf", ".ofd"))
-        ]
+        attachment_titles = self._extract_attachment_titles(soup, target)
         title = self._extract_html_title(soup, metadata, target)
         text, selector = self._extract_body_text(soup)
         if selector:
@@ -412,11 +445,13 @@ class PolicyEngine:
         if not text and metadata:
             text = "\n".join(f"{label}：{value}" for label, value in metadata.items() if value)
         quality = "正文抽取较完整" if title and len(text) >= 120 else "正文抽取部分成功" if title or text else "仅抽到页面元信息"
-        if attachment_links:
+        if attachment_titles:
             quality = "正文抽取部分成功"
-            notes.append("检测到 PDF/OFD 附件，当前只抽取了公告页正文，未展开附件原文。")
+            notes.append(f"检测到 PDF/OFD 附件（{'; '.join(attachment_titles[:2])}），当前只抽取了公告页正文，未展开附件原文。")
         if not text:
             notes.append("当前没有抽到足够正文，只能基于标题和元信息做弱判断。")
+        source_authority = self._assess_source_authority(target, metadata)
+        coverage_scope = self._build_coverage_scope(title, metadata, text, attachment_titles)
         return PolicyContext(
             title=title,
             source=target,
@@ -426,6 +461,9 @@ class PolicyEngine:
             extraction_notes=notes,
             content_kind="url",
             body_selector=selector,
+            source_authority=source_authority,
+            coverage_scope=coverage_scope,
+            attachment_titles=attachment_titles,
         )
 
     def _decode_response_text(self, response: requests.Response, notes: List[str]) -> str:
@@ -475,6 +513,21 @@ class PolicyEngine:
         if soup.title and soup.title.text:
             return self._normalize_title(soup.title.text)
         return urlparse(target).netloc
+
+    def _extract_attachment_titles(self, soup: BeautifulSoup, target: str) -> List[str]:
+        titles: List[str] = []
+        base_url = urlparse(target)
+        for node in soup.select("a[href]"):
+            href = str(node.get("href", "")).strip()
+            if not href.lower().endswith((".pdf", ".ofd")):
+                continue
+            title = self._normalize_text(node.get_text(" ", strip=True))
+            if not title:
+                filename = href.rsplit("/", 1)[-1]
+                title = filename or base_url.path.rsplit("/", 1)[-1]
+            if title and title not in titles:
+                titles.append(title)
+        return titles[:3]
 
     def _extract_body_text(self, soup: BeautifulSoup) -> Tuple[str, str]:
         candidates: List[Tuple[str, str, int]] = []
@@ -635,11 +688,54 @@ class PolicyEngine:
                 break
         return matched
 
+    def _score_fact_sentence(self, sentence: str, template: Dict[str, Any]) -> int:
+        normalized = self._normalize_text(sentence)
+        lowered = normalized.lower()
+        if re.fullmatch(r"\d{4}年\d{1,2}月\d{1,2}日", normalized):
+            return -5
+        action_hits = sum(lowered.count(token) for token in ("提出", "要求", "推进", "加快", "建设", "实施", "形成", "启动", "申报"))
+        support_hits = sum(lowered.count(str(item).lower()) for item in template.get("support_points", []))
+        alias_hits = sum(lowered.count(str(item).lower()) for item in template.get("aliases", []))
+        beneficiary_hits = sum(lowered.count(str(item).lower()) for item in template.get("beneficiary_nodes", []))
+        timeline_hits = sum(1 for pattern in _TIMELINE_PATTERNS if re.search(pattern, normalized))
+        restrict_hits = sum(lowered.count(token) for token in _RESTRICT_TOKENS)
+        boilerplate_hits = sum(
+            lowered.count(token)
+            for token in (
+                "贯彻落实",
+                "总书记",
+                "党中央",
+                "国务院办公厅",
+                "有关要求",
+                "重要指示精神",
+                "指导思想",
+                "现印发给你们",
+                "请认真组织实施",
+                "因地制宜",
+            )
+        )
+        return (
+            action_hits * 4
+            + support_hits * 6
+            + alias_hits * 3
+            + beneficiary_hits * 3
+            + timeline_hits * 5
+            + restrict_hits * 2
+            + min(len(normalized) // 25, 4)
+            - boilerplate_hits * 4
+        )
+
     def _is_low_signal_fragment(self, text: str) -> bool:
         lowered = text.lower()
         if len(text) <= 4:
             return True
         if lowered.endswith((".pdf", ".ofd")):
+            return True
+        if re.fullmatch(r"\d{4}年\d{1,2}月\d{1,2}日", text):
+            return True
+        if text in {"现印发给你们", "请认真组织实施"}:
+            return True
+        if any(token in text for token in ("贯彻落实习近平总书记", "有关要求")) and len(text) <= 80:
             return True
         if "关于印发《" in text and "通知" in text:
             return True
@@ -700,7 +796,13 @@ class PolicyEngine:
             )
         support_text = "、".join(support_points[:2]) if support_points else template.get("policy_goal", "")
         timeline_text = f"，并已抽到 `{timeline_points[0]}` 这类时间线" if timeline_points else ""
-        return f"原文主要围绕 `{support_text}` 展开，当前判断为 `{direction}`，阶段偏 `{stage}`{timeline_text}。"
+        attachment_text = ""
+        if context.attachment_titles:
+            attachment_text = f"，页面还挂有 `{context.attachment_titles[0]}` 这类附件但未展开原文"
+        return (
+            f"原文主要围绕 `{support_text}` 展开，当前判断为 `{direction}`，阶段偏 `{stage}`"
+            f"{timeline_text}{attachment_text}。"
+        )
 
     def _build_timeline_summary(
         self,
@@ -720,7 +822,9 @@ class PolicyEngine:
 
     def _describe_context_kind(self, context: PolicyContext) -> str:
         if context.content_kind == "url":
-            return "官方页面 / URL"
+            if "官方" in context.source_authority or "政府" in context.source_authority:
+                return "官方页面 / URL"
+            return "网页 / URL"
         if context.content_kind == "text":
             return "用户提供长正文"
         return "关键词"
@@ -740,3 +844,37 @@ class PolicyEngine:
                 seen.add(value)
                 merged.append(value)
         return merged
+
+    def _assess_source_authority(self, target: str, metadata: Dict[str, str]) -> str:
+        domain = urlparse(target).netloc.lower()
+        issuer = self._normalize_text(metadata.get("发文机关", ""))
+        source = self._normalize_text(metadata.get("来源", ""))
+        if domain.endswith(".gov.cn") or domain.endswith(".gov"):
+            if issuer:
+                return "官方政府站点，且页面含发文机关元信息"
+            if source:
+                return "官方政府站点，来源字段已抽到"
+            return "官方政府站点"
+        if issuer or source:
+            return "机构页面，含来源/发文机关线索"
+        if domain:
+            return "普通网页来源，未确认是否官方原发"
+        return "待确认"
+
+    def _build_coverage_scope(
+        self,
+        title: str,
+        metadata: Dict[str, str],
+        text: str,
+        attachment_titles: Sequence[str],
+    ) -> List[str]:
+        scope: List[str] = []
+        if title:
+            scope.append("标题")
+        if metadata:
+            scope.append(f"元信息（{min(len(metadata), 4)}项）")
+        if text:
+            scope.append("页面正文")
+        if attachment_titles:
+            scope.append(f"附件标题（{len(attachment_titles)}个）")
+        return scope or ["覆盖范围待确认"]

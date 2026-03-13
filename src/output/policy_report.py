@@ -14,7 +14,9 @@ class PolicyReportRenderer:
             "",
             f"- 来源: `{payload['source']}`",
             f"- 输入类型: `{payload.get('input_type', '关键词')}`",
+            f"- 来源判断: `{payload.get('source_authority', '待确认')}`",
             f"- 抽取状态: `{payload.get('extraction_status', '待确认')}`",
+            f"- 抽取覆盖: `{', '.join(payload.get('coverage_scope', []) or ['待确认'])}`",
             f"- 主题: `{payload['theme']}`",
             f"- 模板置信度: `{payload.get('match_confidence', '低')}`",
             f"- 政策方向: `{payload.get('policy_direction', '中性/待原文确认')}`",
@@ -33,6 +35,16 @@ class PolicyReportRenderer:
                     "",
                 ]
             )
+
+        coverage_scope = payload.get("coverage_scope", [])
+        attachment_titles = payload.get("attachment_titles", [])
+        if coverage_scope or attachment_titles:
+            lines.extend(["## 原文覆盖与附件"])
+            if coverage_scope:
+                lines.append(f"- 当前已覆盖: {', '.join(coverage_scope)}")
+            if attachment_titles:
+                lines.append(f"- 检测到附件: {'；'.join(attachment_titles)}")
+            lines.append("")
 
         lines.extend(["## 已抽取的正文事实"])
         body_facts = payload.get("body_facts", [])

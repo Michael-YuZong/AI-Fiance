@@ -36,7 +36,7 @@
 - `src/processors/decision_review.py` + `src/output/retrospect_report.py`
   As of 2026-03-13 monthly review is no longer just path replay. It now includes benchmark-relative excess return, simple setup-bucket calibration, first-pass result attribution, explicit horizon calibration, and renders stored timing/execution snapshots. It is still v1 and only partially solves project-wide point-in-time correctness / calibration.
 - `src/commands/policy.py` and `src/processors/policy_engine.py`
-  Useful for keyword/URL interpretation. As of 2026-03-13 it now exposes template confidence, matched aliases, policy direction, stage, timeline cues, and more explicit watchlist mapping. It also separates extracted正文事实、模板/规则推断、未确认项 for official long-form notice pages, with stronger HTML公告页标题/元信息/时间线抽取 and explicit attachment downgrade notes. It is still template and rule heavy, and attached PDF/OFD originals are not fully parsed yet.
+  Useful for keyword/URL interpretation. As of 2026-03-13 it now exposes template confidence, matched aliases, policy direction, stage, timeline cues, and more explicit watchlist mapping. It also separates extracted正文事实、模板/规则推断、未确认项 for official long-form notice pages, reports `来源判断 / 抽取覆盖 / 附件标题`, ranks正文事实 away from pure date tags and boilerplate notice copy, and explicitly downgrades when extraction still depends on attached PDF/OFD originals. It is still template and rule heavy, and attached PDF/OFD originals are not fully parsed yet.
 - `src/scheduler.py`
   As of 2026-03-13 it is no longer a placeholder. It can list jobs, run one-off tasks, and start APScheduler with configured jobs. It is still v1: no persistent job state, alerting, or automation UI integration.
 
@@ -71,7 +71,7 @@ When in doubt, optimize for:
 ## Current Priority Backlog
 
 1. Policy v2
-   Keep improving official-source extraction, especially for longer raw pages/PDF-like content and stricter policy taxonomy.
+   Keep improving official-source extraction, especially attached PDF/OFD originals, longer raw pages, and stricter policy taxonomy.
 2. Proxy signals
    Finish propagating confidence and downgrade-impact wording into all pick outputs plus release/review guards.
 3. Scheduler v2
@@ -96,7 +96,7 @@ When in doubt, optimize for:
 - 2026-03-13
   `policy` now reports template confidence, matched aliases, policy direction, stage, timeline cues, and stronger watchlist impact reasons.
 - 2026-03-13
-  `policy` now repairs common official-page encoding issues, extracts title/metadata/body facts more reliably from long-form notice pages, separates正文事实 vs 模板/规则推断 vs 待确认项 in the renderer, and explicitly downgrades when an announcement page still depends on attached PDF/OFD originals.
+  `policy` now repairs common official-page encoding issues, extracts title/metadata/body facts more reliably from long-form notice pages, separates正文事实 vs 模板/规则推断 vs 待确认项 in the renderer, reports source-authority + coverage-scope + attachment-title contracts, ranks正文事实 away from pure date tags / notice boilerplate, and explicitly downgrades when an announcement page still depends on attached PDF/OFD originals.
 - 2026-03-13
   `research` now classifies question type and renders structured answers with a direct answer, evidence, uncertainty, and next-step sections.
 - 2026-03-13
