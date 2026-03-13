@@ -110,6 +110,13 @@ def infer_horizon_code_from_period(period_text: str) -> Optional[str]:
     return None
 
 
+def get_horizon_contract(code: str, *, source: str = "") -> Dict[str, str]:
+    normalized = str(code or "").strip()
+    if normalized not in {"watch", "short_term", "swing", "position_trade", "long_term_allocation"}:
+        normalized = "watch"
+    return _base_contract(normalized, source=source)
+
+
 def build_analysis_horizon_profile(
     *,
     rating: int,

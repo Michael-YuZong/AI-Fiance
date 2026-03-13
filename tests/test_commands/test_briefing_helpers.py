@@ -7,15 +7,18 @@ from types import SimpleNamespace
 import src.commands.briefing as briefing_module
 from src.commands.briefing import (
     _appendix_derivative_lines,
+    _action_lines,
     _briefing_a_share_watch_rows,
     _briefing_internal_dir,
     _coverage_metadata,
     _flow_lines,
     _load_same_day_briefing,
+    _noon_action_lines,
     _monitor_alerts,
     _persist_briefing,
     _quality_lines,
     _sentiment_lines,
+    _tomorrow_action_lines,
 )
 
 
@@ -147,3 +150,27 @@ def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> 
         "report_top_n": 1,
         "blind_spot": "部分样本缺少完整事件覆盖。",
     }
+
+
+def test_briefing_action_helpers_include_portfolio_whatif_handoff() -> None:
+    snapshot = SimpleNamespace(
+        symbol="561380",
+        name="电网ETF",
+        asset_type="cn_etf",
+        sector="电网",
+        signal_score=5,
+        return_1d=0.012,
+        return_20d=0.11,
+        latest_price=2.234,
+        trend="多头",
+        technical={"rsi": {"RSI": 61.0}},
+    )
+    narrative = {"theme": "china_policy", "label": "电网投资主线"}
+
+    daily_lines = _action_lines([snapshot], narrative, [])
+    noon_lines = _noon_action_lines([], [snapshot], narrative, [], {}, {})
+    tomorrow_lines = _tomorrow_action_lines([["验证", "条件", "实际", "✅"]], [snapshot], narrative)
+
+    assert any("portfolio whatif buy 561380 2.2340 计划金额" in item for item in daily_lines)
+    assert any("portfolio whatif buy 561380 2.2340 计划金额" in item for item in noon_lines)
+    assert any("portfolio whatif buy 561380 2.2340 计划金额" in item for item in tomorrow_lines)

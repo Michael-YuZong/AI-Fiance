@@ -33,9 +33,11 @@ from src.output.client_report import ClientReportRenderer
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
 from src.commands.release_check import check_generic_client_report
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
+from src.processors.horizon import get_horizon_contract
 from src.processors.opportunity_engine import _client_safe_issue, analyze_opportunity, build_market_context, build_stock_pool
 from src.processors.regime import RegimeDetector
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
+from src.processors.trade_handoff import portfolio_whatif_handoff
 from src.storage.portfolio import PortfolioRepository
 from src.storage.thesis import ThesisRepository
 from src.utils.config import load_config, resolve_project_path
@@ -2019,6 +2021,40 @@ def _coverage_metadata(
     return " | ".join(coverage_parts), " / ".join(missing_parts) if missing_parts else "无"
 
 
+def _briefing_horizon(snapshot: BriefingSnapshot, narrative: Dict[str, Any]) -> Dict[str, str]:
+    theme = str(narrative.get("theme", "")).strip()
+    rsi = float(snapshot.technical.get("rsi", {}).get("RSI", 0.0) or 0.0)
+    if snapshot.trend != "多头" or snapshot.signal_score <= 1:
+        return get_horizon_contract("watch", source="briefing_inferred")
+    if rsi >= 68 or snapshot.return_1d >= 0.025:
+        return get_horizon_contract("short_term", source="briefing_inferred")
+    if theme in {"china_policy", "rate_growth", "ai_semis"} and snapshot.signal_score >= 4 and snapshot.return_20d >= 0.08:
+        return get_horizon_contract("position_trade", source="briefing_inferred")
+    if snapshot.signal_score >= 3 and snapshot.return_20d >= 0.04:
+        return get_horizon_contract("swing", source="briefing_inferred")
+    return get_horizon_contract("watch", source="briefing_inferred")
+
+
+def _briefing_preflight_line(snapshot: BriefingSnapshot, narrative: Dict[str, Any], *, stage: str) -> str:
+    horizon = _briefing_horizon(snapshot, narrative)
+    handoff = portfolio_whatif_handoff(
+        symbol=snapshot.symbol,
+        horizon=horizon,
+        direction="做多",
+        asset_type=snapshot.asset_type,
+        reference_price=snapshot.latest_price,
+    )
+    stage_prefix = {
+        "today": "如果今天还要沿",
+        "afternoon": "如果下午还要沿",
+        "tomorrow": "如果明天还要沿",
+    }.get(stage, "如果还要沿")
+    return (
+        f"{stage_prefix} {snapshot.name}({snapshot.symbol}) 做新仓/加仓，"
+        f"先按 `{horizon.get('label', '观察期')}` 跑一遍组合预演：`{handoff.get('command', f'portfolio whatif buy {snapshot.symbol} 最新价 计划金额')}`。"
+    )
+
+
 def _action_lines(
     snapshots: List[BriefingSnapshot],
     narrative: Dict[str, Any],
@@ -2046,8 +2082,9 @@ def _action_lines(
     lines.append(f"谨慎对待 {weakest.symbol}：它当前最弱，更适合等确认而不是抢反弹。")
     if gold and theme in {"energy_shock", "defensive_riskoff"}:
         lines.append(f"把 {gold.symbol} 当作防守情绪验证器，观察避险需求是否继续抬头。")
+    lines.append(_briefing_preflight_line(strongest, narrative, stage="today"))
     lines.append("执行节奏: 先观察开盘 30 分钟风格延续性，确认后再执行。")
-    return lines[:5]
+    return lines[:6]
 
 
 def _judgement_mark(passed: bool) -> str:
@@ -3255,8 +3292,9 @@ def _noon_action_lines(
         if elastic_leader.return_1d > trend_anchor.return_1d + 0.015:
             lines.append("弹性方向明显强于趋势锚，盘中风格可能在切换，留意是否扩散。")
 
+    lines.append(_briefing_preflight_line(trend_anchor, narrative, stage="afternoon"))
     lines.append("执行节奏: 13:00 开盘后先观察 15 分钟延续性，再决定动作。")
-    return lines[:4]
+    return lines[:5]
 
 
 def _noon_verification_rows(
@@ -3385,8 +3423,9 @@ def _tomorrow_action_lines(
     if snapshots:
         strongest = max(snapshots, key=lambda s: s.signal_score)
         lines.append(f"明日优先方向: {strongest.name}，当前信号评分最高。")
+        lines.append(_briefing_preflight_line(strongest, narrative, stage="tomorrow"))
     lines.append("执行节奏: 明天开盘前先看外盘和早报更新，再决定是否调整。")
-    return lines[:4]
+    return lines[:5]
 
 
 def _watchlist_change_lines(snapshots: List[BriefingSnapshot], prior_md: Optional[str]) -> List[str]:

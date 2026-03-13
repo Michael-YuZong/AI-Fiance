@@ -33,7 +33,10 @@ def test_briefing_renderer_outputs_core_sections():
         "portfolio_lines": ["组合市值 100000。"],
         "portfolio_table_rows": [["561380", "多", "2.10", "2.23", "+6.0%", "电网投资", "持有观察"]],
         "verification_rows": [["1", "原油", "收盘 < 开盘", "主线强化", "主线降温"]],
-        "action_lines": ["今天先按防守优先处理。"],
+        "action_lines": [
+            "今天先按防守优先处理。",
+            "如果今天还要沿 电网ETF(561380) 做新仓/加仓，先按 `波段跟踪（2-6周）` 跑一遍组合预演：`portfolio whatif buy 561380 2.2340 计划金额`。",
+        ],
         "appendix_technical_rows": [["561380", "多头", "金叉", "66.0", "上轨", "均线上", "30.0", "高位区"]],
         "appendix_lhb_lines": ["机构净买额靠前: 兖矿能源(6.53亿)。"],
         "appendix_flow_lines": ["国内 vs 海外相对强弱: 国内更稳。", "561380: 情绪代理中性。"],
@@ -70,6 +73,7 @@ def test_briefing_renderer_outputs_core_sections():
     assert "<details>" in rendered
     assert "561380" in rendered
     assert "组合市值 100000。" in rendered
+    assert "portfolio whatif buy 561380" in rendered
 
 
 def test_noon_renderer_outputs_core_sections():
@@ -84,7 +88,10 @@ def test_noon_renderer_outputs_core_sections():
         "industry_rows": [["1", "半导体", "+2.50%", "AI算力催化"]],
         "watchlist_rows": [["561380", "2.234", "+1.00%", "+2.00%", "+3.00%", "多头", "66"]],
         "strategy_adjustment_lines": ["晨报主线: 偏防守", "上午验证 1/1 未兑现，需修正。"],
-        "afternoon_action_lines": ["下午偏防守，减少追高操作。"],
+        "afternoon_action_lines": [
+            "下午偏防守，减少追高操作。",
+            "如果下午还要沿 电网ETF(561380) 做新仓/加仓，先按 `波段跟踪（2-6周）` 跑一遍组合预演：`portfolio whatif buy 561380 2.2340 计划金额`。",
+        ],
         "afternoon_verification_rows": [["1", "561380延续", "下午涨幅不回吐超过一半", "主线确认", "谨慎持有"]],
         "afternoon_event_rows": [["14:00", "盘中检查", "关注资金流向"]],
         "portfolio_lines": ["组合市值 100000。"],
@@ -105,6 +112,7 @@ def test_noon_renderer_outputs_core_sections():
     assert "### 3.2 操作提醒" in rendered
     assert "## 4. 组合与持仓" in rendered
     assert "561380" in rendered
+    assert "portfolio whatif buy 561380" in rendered
 
 
 def test_evening_renderer_outputs_core_sections():
@@ -126,7 +134,10 @@ def test_evening_renderer_outputs_core_sections():
         "overnight_rows": [["美股", "标普500", "5100.00", "+0.50%", "偏强"]],
         "tomorrow_outlook_lines": ["今日主线 AI算力 的延续性需要明天开盘验证。"],
         "tomorrow_verification_rows": [["1", "人工智能ETF延续", "明日涨幅 > 0", "主线持续", "考虑止盈"]],
-        "tomorrow_action_lines": ["今日框架有效，明天可延续策略方向。"],
+        "tomorrow_action_lines": [
+            "今日框架有效，明天可延续策略方向。",
+            "如果明天还要沿 人工智能ETF(515070) 做新仓/加仓，先按 `短线交易（3-10日）` 跑一遍组合预演：`portfolio whatif buy 515070 1.2340 计划金额`。",
+        ],
         "portfolio_lines": ["组合市值 105000。"],
         "portfolio_table_rows": [["515070", "多", "1.15", "1.23", "+7.0%", "AI投资", "持有"]],
         "appendix_technical_rows": [["515070", "多头", "金叉", "72.0", "上轨", "均线上", "28.0", "高位区"]],
@@ -154,3 +165,4 @@ def test_evening_renderer_outputs_core_sections():
     assert "## 4. 组合与持仓" in rendered
     assert "## 附录（折叠，按需展开）" in rendered
     assert "515070" in rendered
+    assert "portfolio whatif buy 515070" in rendered

@@ -128,6 +128,8 @@ When in doubt, optimize for:
 - 2026-03-13
   `src/commands/pick_history.py` was introduced to centralize pick coverage summaries, baseline snapshots, score-change explanations, and degraded-news catalyst fallback.
 - 2026-03-13
+  `discover` and `briefing` now hand opportunities off to `portfolio whatif`, so the first-touch discovery/briefing surfaces no longer stop at "watch this" and instead point into the same pre-trade risk-budget workflow as pick reports.
+- 2026-03-13
   `briefing daily` now has a real finalization chain: internal reports archive to `reports/briefings/internal`, client output must include `宏观领先指标 + 数据完整度 + 重点观察`, macro-monitor refresh failures downgrade coverage instead of silently using old cached prices, and the daily client-final can ship through external review + manifest like the stronger pick pipelines.
 - 2026-03-13
   `briefing daily` now also uses a Tushare-priority full-A-share pre-screen for its client/detail `A股观察池`, and both the rendered copy and manifest disclose that this is `全市场初筛 -> 少量样本完整分析`, not a full per-stock deep scan.

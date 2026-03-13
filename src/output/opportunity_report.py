@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+import pandas as pd
+
+from src.processors.trade_handoff import portfolio_whatif_handoff
+
 
 DIMENSION_ORDER = [
     ("technical", "技术面"),
@@ -263,6 +267,54 @@ def _discovery_status_label(candidate: Mapping[str, Any]) -> str:
     return "可进入下一步候选" if bucket == "next_step" else "先列入观察"
 
 
+def _discovery_reference_price(candidate: Mapping[str, Any]) -> Any:
+    intraday = dict(candidate.get("intraday") or {})
+    for key in ("current", "price", "latest"):
+        if intraday.get(key) is not None:
+            return intraday.get(key)
+    metrics = dict(candidate.get("metrics") or {})
+    for key in ("last_close", "latest_price", "current_price"):
+        if metrics.get(key) is not None:
+            return metrics.get(key)
+    history = candidate.get("history")
+    if isinstance(history, pd.DataFrame) and not history.empty and "close" in history.columns:
+        try:
+            return float(history["close"].iloc[-1])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _discovery_horizon(candidate: Mapping[str, Any]) -> Dict[str, str]:
+    action = dict(candidate.get("action") or {})
+    structured = dict(action.get("horizon") or {})
+    if structured:
+        return {
+            "code": str(structured.get("code", "")).strip(),
+            "label": str(structured.get("label", "观察期")).strip() or "观察期",
+        }
+    label = str(dict(candidate.get("discovery") or {}).get("horizon_label", "")).strip() or str(action.get("timeframe", "")).strip() or "观察期"
+    code_map = {
+        "短线": "short_term",
+        "波段": "swing",
+        "中线": "position_trade",
+        "长线": "long_term_allocation",
+        "观察期": "watch",
+    }
+    return {"code": code_map.get(label, "watch"), "label": label}
+
+
+def _discovery_whatif_handoff(candidate: Mapping[str, Any]) -> Dict[str, str]:
+    action = dict(candidate.get("action") or {})
+    return portfolio_whatif_handoff(
+        symbol=str(candidate.get("symbol", "")),
+        horizon=_discovery_horizon(candidate),
+        direction=str(action.get("direction", "")),
+        asset_type=str(candidate.get("asset_type", "")),
+        reference_price=_discovery_reference_price(candidate),
+    )
+
+
 def _render_discovery_candidate(
     lines: List[str],
     *,
@@ -271,6 +323,8 @@ def _render_discovery_candidate(
 ) -> None:
     discovery = dict(candidate.get("discovery") or {})
     rating = dict(candidate.get("rating") or {})
+    handoff = _discovery_whatif_handoff(candidate)
+    fallback_command = f"portfolio whatif buy {candidate.get('symbol', '标的')} 最新价 计划金额"
     lines.extend(
         [
             "",
@@ -294,6 +348,15 @@ def _render_discovery_candidate(
     lines.extend(["", "**下一步怎么接**"])
     for step in discovery.get("next_steps", []) or []:
         lines.append(f"- `{step.get('command', '继续观察')}`: {step.get('reason', '继续跟踪。')}")
+
+    lines.extend(
+        [
+            "",
+            "**组合落单前怎么预演**",
+            f"- {handoff.get('summary', '先跑组合预演，再决定真实金额。')}",
+            f"- 预演命令: `{handoff.get('command', fallback_command)}`",
+        ]
+    )
 
     lines.extend(["", "**关键信号摘要**"])
     lines.extend(_table(["维度", "分数", "当前信号"], _discovery_signal_rows(candidate)))

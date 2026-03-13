@@ -224,6 +224,8 @@ def test_opportunity_renderer_discovery_and_compare():
     assert "## 已足够进入下一步 pick / deep scan 的候选" in discovery
     assert "## 只是值得继续观察的发现" in discovery
     assert "发现类型: `主线驱动`" in discovery
+    assert "组合落单前怎么预演" in discovery
+    assert "portfolio whatif buy 561380" in discovery
     assert "python -m src.commands.etf_pick 电网" in discovery
     assert "python -m src.commands.fund_pick --theme 电网" in discovery
     assert "## discover 之后怎么接" in discovery

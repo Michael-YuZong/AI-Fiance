@@ -13,6 +13,7 @@ from src.output.opportunity_report import (
     _hard_check_inline,
     _hard_check_rows,
 )
+from src.processors.trade_handoff import portfolio_whatif_handoff
 from src.utils.fund_taxonomy import taxonomy_rows
 
 GENERIC_DIMENSION_SUMMARIES = {
@@ -255,44 +256,6 @@ def _position_management_lines(action: Mapping[str, Any]) -> List[str]:
     return lines
 
 
-def _reference_price_text(asset_type: str, reference_price: Any) -> str:
-    try:
-        price = float(reference_price)
-    except (TypeError, ValueError):
-        price = 0.0
-    if price > 0:
-        return f"{price:.4f}"
-    return "最新净值" if asset_type == "cn_fund" else "最新价"
-
-
-def _portfolio_whatif_handoff(
-    *,
-    symbol: str,
-    action: Mapping[str, Any],
-    horizon: Mapping[str, Any],
-    asset_type: str = "",
-    reference_price: Any = None,
-) -> Dict[str, str]:
-    code = str(horizon.get("code", "")).strip()
-    label = str(horizon.get("label", "观察期")).strip() or "观察期"
-    direction = str(action.get("direction", "")).strip()
-    trade_action = "sell" if any(token in direction for token in ("卖", "减仓", "止盈", "止损", "回收")) else "buy"
-    price_text = _reference_price_text(asset_type, reference_price)
-    command = f"portfolio whatif {trade_action} {symbol} {price_text} 计划金额"
-
-    if code == "short_term":
-        summary = f"把它当 `{label}` 的交易仓处理：先预演首笔金额落下去后，仓位、执行成本和止损纪律是否还成立。"
-    elif code == "swing":
-        summary = f"把它当 `{label}` 的波段仓处理：先看首笔落下去后，单票权重、行业暴露和后续第二笔空间还剩多少。"
-    elif code == "position_trade":
-        summary = f"把它当 `{label}` 的配置仓处理：落单前先看加仓后是否仍在组合风险预算和行业/地区上限内。"
-    elif code == "long_term_allocation":
-        summary = f"把它当 `{label}` 的底仓处理：先看长期目标权重和风险预算能否承受，而不是只盯一次下单的短期波动。"
-    else:
-        summary = f"当前更像 `{label}`，先别急着落单；如果你坚持试仓，至少先预演这笔单会不会把组合推过上限。"
-    return {"summary": summary, "command": command}
-
-
 def _evidence_lines(items: Sequence[Mapping[str, Any]], *, max_items: int = 3) -> List[str]:
     lines: List[str] = []
     priority = {
@@ -428,10 +391,10 @@ def _analysis_section_lines(
     action = dict(analysis.get("action") or {})
     narrative = dict(analysis.get("narrative") or {})
     horizon = _pick_horizon_profile(action, str(dict(narrative.get("judgment") or {}).get("state", "")))
-    handoff = _portfolio_whatif_handoff(
+    handoff = portfolio_whatif_handoff(
         symbol=symbol,
-        action=action,
         horizon=horizon,
+        direction=str(action.get("direction", "")),
         asset_type=str(analysis.get("asset_type", "")),
         reference_price=dict(analysis.get("metrics") or {}).get("last_close"),
     )
@@ -1106,10 +1069,10 @@ class ClientReportRenderer:
         narrative = dict(analysis.get("narrative") or {})
         action = dict(analysis.get("action") or {})
         horizon = _pick_horizon_profile(action, str(dict(narrative.get("judgment") or {}).get("state", "")))
-        handoff = _portfolio_whatif_handoff(
+        handoff = portfolio_whatif_handoff(
             symbol=symbol,
-            action=action,
             horizon=horizon,
+            direction=str(action.get("direction", "")),
             asset_type=str(analysis.get("asset_type", "")),
             reference_price=dict(analysis.get("metrics") or {}).get("last_close"),
         )
@@ -1388,10 +1351,10 @@ class ClientReportRenderer:
             dict(winner.get("action") or {}),
             str(winner.get("trade_state", "")),
         )
-        handoff = _portfolio_whatif_handoff(
+        handoff = portfolio_whatif_handoff(
             symbol=str(winner.get("symbol", "")),
-            action=dict(winner.get("action") or {}),
             horizon=horizon,
+            direction=str(dict(winner.get("action") or {}).get("direction", "")),
             asset_type=str(winner.get("asset_type", "")),
             reference_price=winner.get("reference_price"),
         )
@@ -1545,10 +1508,10 @@ class ClientReportRenderer:
             dict(winner.get("action") or {}),
             str(winner.get("trade_state", "")),
         )
-        handoff = _portfolio_whatif_handoff(
+        handoff = portfolio_whatif_handoff(
             symbol=str(winner.get("symbol", "")),
-            action=dict(winner.get("action") or {}),
             horizon=horizon,
+            direction=str(dict(winner.get("action") or {}).get("direction", "")),
             asset_type=str(winner.get("asset_type", "")),
             reference_price=winner.get("reference_price"),
         )
