@@ -819,8 +819,13 @@
 
 - 计划设计已完成。
 - `strategy` 计划专项外审已收敛，可进入 `I-1`。
+- `I-1` prediction ledger 已完成：
+  - `strategy predict`
+  - `strategy list`
+  - `no_prediction` gating
+  - 因子快照、provenance、固定 benchmark / horizon / overlap 合同已入账本
 - 当前下一步应做：
-  - `I-1` prediction ledger
+  - `I-2` result validate
   - lag / visibility fixture
   - overlap / benchmark / promotion gate fixture
 - 仍然不允许跳过 `I-1 / I-2 / I-3` 直接做自动候选因子发现。
@@ -917,6 +922,36 @@
 - 当时的 regime / 市场背景
 
 没有这层，就不存在真正可验证的 `strategy`。
+
+#### `I-1` 当前已落地的最小实现
+
+当前仓库里已经有一版可用的 `I-1`：
+
+- `python -m src.commands.strategy predict 600519`
+  会写入单标的预测账本
+- `python -m src.commands.strategy list`
+  会列出最近预测样本
+- 当前实现默认只支持：
+  - `A 股普通股票`
+  - `20` 个交易日主 horizon
+  - `中证800` 价格基准
+  - 当前/最新可见快照，不回填伪历史样本
+- 当前实现已固定保存：
+  - `prediction_id`
+  - `as_of`
+  - `visibility_class`
+  - `prediction_target`
+  - `prediction_value`
+  - `confidence / confidence_type`
+  - `key_factors`
+  - `factor_snapshot`
+  - `weight_scheme`
+  - `regime`
+  - `evidence_sources`
+  - `downgrade_flags`
+  - `no_prediction` 与原因
+
+这版的目标不是“证明策略有效”，而是先把预测账本合同做实。
 
 #### `I-1` 标签与调仓合同
 

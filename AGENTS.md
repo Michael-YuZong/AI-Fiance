@@ -73,8 +73,8 @@ When in doubt, optimize for:
 
 ## Current Priority Backlog
 
-1. `strategy` v1 implementation
-   The `strategy` plan gate is now passed. Start with `I-1` prediction ledger only: keep the approved A-share liquid-stock universe, `20`-day benchmark-relative excess-return target, fixed overlap contract, point-in-time lag rules, `no_prediction` cases, and champion/challenger gate. Do not widen scope to ETF/fund/multi-asset or auto-factor discovery yet.
+1. `strategy` v1 validation and fixtures
+   `I-1` prediction ledger is now landed. Next step is `I-2` validation plus the supporting lag / visibility / overlap fixture set. Keep the approved A-share liquid-stock universe, `20`-day benchmark-relative excess-return target, fixed overlap contract, point-in-time lag rules, and `no_prediction` cases. Do not widen scope to ETF/fund/multi-asset or auto-factor discovery yet.
 2. Policy v2
    Keep improving official-source extraction, especially scanned/table-heavy PDF/OFD handling, and deepen the policy taxonomy beyond the current first-pass contract.
 3. Proxy signals
@@ -90,6 +90,8 @@ When in doubt, optimize for:
 
 - 2026-03-14
   `strategy` now has a dedicated phase in `plan.md`, a dedicated plan reviewer prompt, and a completed round-based external-review loop under `reports/reviews/strategy_plan_review_2026-03-14_round{1,2,3}.md`. The plan gate passed after locking `v1` target/universe/overlap/lag/champion-challenger contracts, so the next allowed step is `I-1` prediction ledger implementation rather than more plan design.
+- 2026-03-14
+  `src/commands/strategy.py`, `src/processors/strategy.py`, `src/storage/strategy.py`, and `src/output/strategy_report.py` now implement `strategy I-1` prediction ledger. v1 is intentionally narrow: single-symbol `predict` + `list`, fixed A-share liquid-stock universe, fixed `20`-day benchmark-relative excess-return target against CSI800, explicit `no_prediction` gating, and persisted factor/provenance snapshots.
 - 2026-03-14
   Client-facing analysis/pick reports now expose disabled intraday provenance as `分钟级快照 as_of`, and `release_check` no longer mistakes that metadata row for unsupported intraday execution language.
 - 2026-03-13
@@ -153,6 +155,8 @@ When in doubt, optimize for:
   `python -m src.commands.scan 561380`
   `python -m src.commands.stock_analysis 300750`
   `python -m src.commands.compare 561380 GLD QQQM`
+  `python -m src.commands.strategy predict 600519 --preview`
+  `python -m src.commands.strategy list --limit 10`
 - Reports
   `python -m src.commands.briefing daily`
   `python -m src.commands.briefing noon`

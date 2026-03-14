@@ -75,8 +75,9 @@ def test_briefing_internal_dir_and_same_day_loader_use_internal_path(tmp_path, m
     monkeypatch.setattr(briefing_module, "_export_pdf", lambda markdown_text, pdf_path: None)  # noqa: ARG005
 
     detail_path = _persist_briefing("# demo", "daily")
+    expected_date = briefing_module.datetime.now().strftime("%Y-%m-%d")
 
-    assert detail_path == tmp_path / "reports/briefings/internal/daily_briefing_2026-03-13.md"
+    assert detail_path == tmp_path / f"reports/briefings/internal/daily_briefing_{expected_date}.md"
     assert _briefing_internal_dir() == tmp_path / "reports/briefings/internal"
     assert _load_same_day_briefing("daily") == "# demo"
 
