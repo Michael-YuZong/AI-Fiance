@@ -2624,6 +2624,7 @@ def test_discover_stock_opportunities_includes_watch_positive(monkeypatch):
         },
     )
     payload = discover_stock_opportunities({}, top_n=5, market="cn")
+    assert len(payload["coverage_analyses"]) == 1
     assert len(payload["watch_positive"]) == 1
     assert payload["watch_positive"][0]["symbol"] == "300750"
 

@@ -3535,7 +3535,8 @@ def _catalyst_dimension(
     structured_direct_pool = [
         item
         for item in structured_event_pool
-        if str(item.get("category", "")).lower() != "earnings_calendar" and not _is_non_positive_company_statement(item)
+        if str(item.get("category", "")).lower() not in {"earnings_calendar", "stock_disclosure_calendar"}
+        and not _is_non_positive_company_statement(item)
     ]
     structured_pick = _pick_best_structured_item(
         structured_direct_pool or structured_event_pool,
@@ -6826,6 +6827,7 @@ def discover_stock_opportunities(
         "regime": context.get("regime", {}),
         "day_theme": context.get("day_theme", {}),
         "data_coverage": _coverage_state(analyses),
+        "coverage_analyses": analyses,
         "top": analyses[:top_n],
         "watch_positive": watch_positive[:6],
         "blind_spots": blind_spots[:10],

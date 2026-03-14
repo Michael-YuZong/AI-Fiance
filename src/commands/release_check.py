@@ -742,16 +742,17 @@ def check_generic_client_report(client_text: str, report_type: str, source_text:
 
 def _intraday_claim_findings(text: str) -> List[str]:
     findings: List[str] = []
+    normalized = re.sub(r"^\|\s*盘中快照 as_of\s*\|.*$", "", text, flags=re.M)
     risky_opening_patterns = (
         r"开盘.{0,8}(做|买|追|加仓|执行|跟随|介入)",
         r"明天开盘.{0,8}(做|买|追|加仓|执行|跟随|介入)",
     )
-    has_intraday_claim = any(term in text for term in INTRADAY_CLAIM_TERMS) or any(
-        re.search(pattern, text) for pattern in risky_opening_patterns
+    has_intraday_claim = any(term in normalized for term in INTRADAY_CLAIM_TERMS) or any(
+        re.search(pattern, normalized) for pattern in risky_opening_patterns
     )
-    if has_intraday_claim and not any(term in text for term in INTRADAY_EVIDENCE_TERMS):
+    if has_intraday_claim and not any(term in normalized for term in INTRADAY_EVIDENCE_TERMS):
         findings.append(format_lesson_finding("L004", "[P1] 报告使用盘中/开盘执行语言，但没有展示对应盘中因子或数据依据（如 VWAP、相对今开、日内位置、开盘缺口、首30分钟）。"))
-    if "集合竞价" in text and not any(term in text for term in AUCTION_EVIDENCE_TERMS):
+    if "集合竞价" in normalized and not any(term in normalized for term in AUCTION_EVIDENCE_TERMS):
         findings.append(format_lesson_finding("L004", "[P2] 报告提到集合竞价，但没有对应竞价因子依据；当前不应把普通日线结论写成竞价判断。"))
     return findings
 

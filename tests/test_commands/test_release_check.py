@@ -365,6 +365,21 @@ def test_release_check_does_not_mistake_open_price_reference_for_intraday_claim(
     assert not any("盘中/开盘执行语言" in item for item in findings)
 
 
+def test_release_check_ignores_disabled_intraday_metadata_row() -> None:
+    client = """# 今日个股推荐
+
+## 证据时点与来源
+
+| 项目 | 说明 |
+| --- | --- |
+| 分析生成时间 | 2026-03-14 01:23 |
+| 盘中快照 as_of | 未启用 |
+| 时点边界 | 默认只使用生成时点前可见信息。 |
+"""
+    findings = check_generic_client_report(client, "scan")
+    assert not any("盘中/开盘执行语言" in item for item in findings)
+
+
 def test_release_check_flags_empty_fund_profile_table() -> None:
     client = """# 今日 ETF 分析
 

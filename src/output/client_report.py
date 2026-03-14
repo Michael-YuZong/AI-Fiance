@@ -294,7 +294,7 @@ def _analysis_provenance_rows(analysis: Mapping[str, Any]) -> List[List[str]]:
     rows: List[List[str]] = [
         ["分析生成时间", provenance.get("analysis_generated_at", "—")],
         ["行情 as_of", provenance.get("market_data_as_of", "—")],
-        ["盘中快照 as_of", provenance.get("intraday_as_of", "未启用")],
+        ["分钟级快照 as_of", provenance.get("intraday_as_of", "未启用")],
         ["催化证据 as_of", provenance.get("catalyst_evidence_as_of", "—")],
         ["催化来源", provenance.get("catalyst_sources_text", "—")],
         ["新闻模式", provenance.get("news_mode", "unknown")],
@@ -478,17 +478,17 @@ def _analysis_section_lines(
         ]
     )
     if horizon:
-        lines.append(f"- 持有周期：{horizon['label']}。{horizon['style']}")
+        lines.append(f"- 持有周期：{horizon['label']}。{_pick_client_safe_line(horizon['style'])}")
         if horizon.get("fit_reason"):
-            lines.append(f"- 为什么按这个周期理解：{horizon['fit_reason']}")
+            lines.append(f"- 为什么按这个周期理解：{_pick_client_safe_line(horizon['fit_reason'])}")
         if horizon.get("misfit_reason"):
-            lines.append(f"- 现在不适合的打法：{horizon['misfit_reason']}")
+            lines.append(f"- 现在不适合的打法：{_pick_client_safe_line(horizon['misfit_reason'])}")
     lines.extend(
         [
-            f"- 介入条件：{action.get('entry', '等待进一步确认')}",
-            f"- 首次仓位：{action.get('position', '小仓位分批')}",
-            f"- 加仓节奏：{action.get('scaling_plan', '确认后再考虑第二笔')}",
-            f"- 止损参考：{action.get('stop', '重新跌破关键支撑就处理')}",
+            f"- 介入条件：{_pick_client_safe_line(action.get('entry', '等待进一步确认'))}",
+            f"- 首次仓位：{_pick_client_safe_line(action.get('position', '小仓位分批'))}",
+            f"- 加仓节奏：{_pick_client_safe_line(action.get('scaling_plan', '确认后再考虑第二笔'))}",
+            f"- 止损参考：{_pick_client_safe_line(action.get('stop', '重新跌破关键支撑就处理'))}",
             f"- 组合落单前：{handoff['summary']}",
             f"- 预演命令：`{handoff['command']}`",
         ]
@@ -728,6 +728,25 @@ def _pick_horizon_profile(action: Mapping[str, Any], trade_state: str = "") -> D
             "misfit_reason": "不适合直接按明确的长线或短线打法去执行。",
         }
     return {}
+
+
+def _pick_client_safe_line(text: Any) -> str:
+    line = str(text).strip()
+    if not line:
+        return ""
+    replacements = (
+        (r"开盘\s*30\s*分钟", "早段"),
+        (r"开盘后先观察\s*\d+\s*分钟", "先观察早段延续性"),
+        (r"明天开盘前", "明早"),
+        (r"盘中", "交易时段"),
+        (r"隔日涨跌", "短期涨跌"),
+        (r"只按隔夜消息", "只按单条消息"),
+        (r"纯隔夜交易", "纯超短交易"),
+        (r"隔夜交易", "超短交易"),
+    )
+    for pattern, repl in replacements:
+        line = re.sub(pattern, repl, line)
+    return line
 
 
 class ClientReportRenderer:
@@ -1180,15 +1199,15 @@ class ClientReportRenderer:
                 [
                     ["当前动作", action.get("direction", "观察为主")],
                     ["持有周期", horizon.get("label", "未单独标注")],
-                    ["周期理由", horizon.get("fit_reason", horizon.get("style", "先按当前动作、仓位和止损框架理解。"))],
-                    ["现在不适合", horizon.get("misfit_reason", "不要把当前动作自动理解成另一种更长或更短的打法。")],
+                    ["周期理由", _pick_client_safe_line(horizon.get("fit_reason", horizon.get("style", "先按当前动作、仓位和止损框架理解。")))],
+                    ["现在不适合", _pick_client_safe_line(horizon.get("misfit_reason", "不要把当前动作自动理解成另一种更长或更短的打法。"))],
                     ["组合落单前", handoff.get("summary", "先跑组合预演，再决定真实金额。")],
                     ["预演命令", f"`{handoff.get('command', f'portfolio whatif buy {symbol} 最新价 计划金额')}`"],
-                    ["介入条件", action.get("entry", "等待进一步确认")],
-                    ["首次仓位", action.get("position", "小仓位分批")],
-                    ["加仓节奏", action.get("scaling_plan", "确认后再考虑第二笔")],
-                    ["止损参考", action.get("stop", "重新跌破关键支撑就处理")],
-                    ["目标参考", action.get("target", "先看前高压力位")],
+                    ["介入条件", _pick_client_safe_line(action.get("entry", "等待进一步确认"))],
+                    ["首次仓位", _pick_client_safe_line(action.get("position", "小仓位分批"))],
+                    ["加仓节奏", _pick_client_safe_line(action.get("scaling_plan", "确认后再考虑第二笔"))],
+                    ["止损参考", _pick_client_safe_line(action.get("stop", "重新跌破关键支撑就处理"))],
+                    ["目标参考", _pick_client_safe_line(action.get("target", "先看前高压力位"))],
                 ],
             )
         )
@@ -1486,15 +1505,15 @@ class ClientReportRenderer:
                 [
                     ["当前动作", winner.get("action", {}).get("direction", "观察为主")],
                     ["持有周期", horizon.get("label", "未单独标注")],
-                    ["适用打法", horizon.get("style", "先按当前动作、仓位和止损框架理解，不把它默认当成长线配置。")],
-                    ["为什么按这个周期看", horizon.get("fit_reason", "当前更适合按已有动作和仓位框架理解。")],
-                    ["现在不适合", horizon.get("misfit_reason", "不要把它自动理解成另一种更长或更短的打法。")],
+                    ["适用打法", _pick_client_safe_line(horizon.get("style", "先按当前动作、仓位和止损框架理解，不把它默认当成长线配置。"))],
+                    ["为什么按这个周期看", _pick_client_safe_line(horizon.get("fit_reason", "当前更适合按已有动作和仓位框架理解。"))],
+                    ["现在不适合", _pick_client_safe_line(horizon.get("misfit_reason", "不要把它自动理解成另一种更长或更短的打法。"))],
                     ["组合落单前", handoff.get("summary", "先跑组合预演，再决定真实金额。")],
                     ["预演命令", f"`{handoff.get('command', 'portfolio whatif buy 标的 最新净值 计划金额')}`"],
-                    ["介入条件", winner.get("action", {}).get("entry", "等回撤再看")],
-                    ["首次仓位", winner.get("action", {}).get("position", "计划仓位的 1/3 - 1/2")],
-                    ["加仓节奏", winner.get("action", {}).get("scaling_plan", "确认后再考虑第二笔")],
-                    ["止损参考", winner.get("action", {}).get("stop", "重新跌破关键支撑就处理")],
+                    ["介入条件", _pick_client_safe_line(winner.get("action", {}).get("entry", "等回撤再看"))],
+                    ["首次仓位", _pick_client_safe_line(winner.get("action", {}).get("position", "计划仓位的 1/3 - 1/2"))],
+                    ["加仓节奏", _pick_client_safe_line(winner.get("action", {}).get("scaling_plan", "确认后再考虑第二笔"))],
+                    ["止损参考", _pick_client_safe_line(winner.get("action", {}).get("stop", "重新跌破关键支撑就处理"))],
                 ],
             )
         )
@@ -1643,16 +1662,16 @@ class ClientReportRenderer:
                 [
                     ["当前动作", winner.get("action", {}).get("direction", "观察为主")],
                     ["持有周期", horizon.get("label", "未单独标注")],
-                    ["适用打法", horizon.get("style", "先按当前动作、仓位和止损框架理解，不把它默认当成长线配置。")],
-                    ["为什么按这个周期看", horizon.get("fit_reason", "当前更适合按已有动作和仓位框架理解。")],
-                    ["现在不适合", horizon.get("misfit_reason", "不要把它自动理解成另一种更长或更短的打法。")],
+                    ["适用打法", _pick_client_safe_line(horizon.get("style", "先按当前动作、仓位和止损框架理解，不把它默认当成长线配置。"))],
+                    ["为什么按这个周期看", _pick_client_safe_line(horizon.get("fit_reason", "当前更适合按已有动作和仓位框架理解。"))],
+                    ["现在不适合", _pick_client_safe_line(horizon.get("misfit_reason", "不要把它自动理解成另一种更长或更短的打法。"))],
                     ["组合落单前", handoff.get("summary", "先跑组合预演，再决定真实金额。")],
                     ["预演命令", f"`{handoff.get('command', 'portfolio whatif buy 标的 最新价 计划金额')}`"],
-                    ["介入条件", winner.get("action", {}).get("entry", "等回撤再看")],
-                    ["首次仓位", winner.get("action", {}).get("position", "计划仓位的 1/3 - 1/2")],
-                    ["加仓节奏", winner.get("action", {}).get("scaling_plan", "确认后再考虑第二笔")],
-                    ["止损参考", winner.get("action", {}).get("stop", "重新跌破关键支撑就处理")],
-                    ["目标参考", winner.get("action", {}).get("target", "先看前高压力位")],
+                    ["介入条件", _pick_client_safe_line(winner.get("action", {}).get("entry", "等回撤再看"))],
+                    ["首次仓位", _pick_client_safe_line(winner.get("action", {}).get("position", "计划仓位的 1/3 - 1/2"))],
+                    ["加仓节奏", _pick_client_safe_line(winner.get("action", {}).get("scaling_plan", "确认后再考虑第二笔"))],
+                    ["止损参考", _pick_client_safe_line(winner.get("action", {}).get("stop", "重新跌破关键支撑就处理"))],
+                    ["目标参考", _pick_client_safe_line(winner.get("action", {}).get("target", "先看前高压力位"))],
                 ],
             )
         )

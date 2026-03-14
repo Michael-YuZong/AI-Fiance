@@ -140,6 +140,9 @@ def test_render_stock_picks_detailed_keeps_analysis_but_hides_internal_trace() -
     assert "持有周期：中线配置（1-3月）" in rendered
     assert "为什么按这个周期理解" in rendered
     assert "这层只反映历史相似量价/技术场景的样本置信度" in rendered
+    assert "分钟级快照 as_of" in rendered
+    assert "盘中快照 as_of" not in rendered
+    assert "隔夜交易" not in rendered
     assert "模型版本" not in rendered
     assert "当日基准版" not in rendered
     assert "本版口径变更" not in rendered

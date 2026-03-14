@@ -187,3 +187,33 @@ def test_enrich_payload_with_score_history_applies_catalyst_fallback_when_news_d
     assert catalyst["score"] > 11
     assert catalyst["coverage"]["fallback_applied"] is True
     assert any(f["name"] == "历史催化回退" for f in catalyst["factors"])
+
+
+def test_enrich_payload_with_score_history_prefers_full_coverage_population(tmp_path: Path):
+    snapshot_path = tmp_path / "stock_pick_score_history.json"
+    payload = _sample_payload(55, "催化不足", "2026-03-10 20:00:00")
+    payload["top"][0]["asset_type"] = "hk"
+    extra = json.loads(json.dumps(payload["top"][0], ensure_ascii=False))
+    extra["symbol"] = "300750"
+    extra["name"] = "宁德时代"
+    extra["asset_type"] = "cn_stock"
+    extra["dimensions"]["catalyst"]["coverage"] = {
+        "news_mode": "live",
+        "high_confidence_company_news": False,
+        "structured_event": True,
+        "forward_event": False,
+        "degraded": False,
+    }
+    payload["coverage_analyses"] = [payload["top"][0], extra]
+
+    enriched = enrich_payload_with_score_history(
+        payload,
+        market="all",
+        sector_filter="",
+        snapshot_path=snapshot_path,
+    )
+
+    coverage = enriched["stock_pick_coverage"]
+    assert coverage["total"] == 2
+    assert any("A股 结构化事件覆盖 100%" in item for item in coverage["lines"])
+    assert any("港股 结构化事件覆盖 0%" in item for item in coverage["lines"])

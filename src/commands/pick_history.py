@@ -1,4 +1,4 @@
-"""Shared snapshot/history helpers for non-stock pick pipelines."""
+"""Shared snapshot/history helpers for pick pipelines."""
 
 from __future__ import annotations
 
@@ -178,6 +178,7 @@ def enrich_pick_payload_with_score_history(
     payload["model_version"] = model_version
     payload["comparison_basis_label"] = comparison_basis_label
     payload["comparison_basis_at"] = comparison_basis_at
+    payload["comparison_model_version"] = comparison_model_version
     payload["previous_snapshot_at"] = comparison_basis_at
     payload["baseline_snapshot_at"] = str(baseline_scope.get("generated_at", "")) if baseline_scope else str(current_snapshot.get("generated_at", ""))
     payload["baseline_model_version"] = str(baseline_scope.get("model_version", "")) if baseline_scope else model_version
