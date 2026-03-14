@@ -59,12 +59,17 @@ class StrategyReportRenderer:
         lines.append("## 因子快照")
         snapshot = dict(payload.get("factor_snapshot") or {})
         momentum = dict(snapshot.get("price_momentum") or {})
+        relative = dict(snapshot.get("benchmark_relative") or {})
         technical = dict(snapshot.get("technical") or {})
         liquidity = dict(snapshot.get("liquidity") or {})
         risk = dict(snapshot.get("risk") or {})
         lines.append(
             f"- 动量: 5日 `{_pct(momentum.get('return_5d'))}` | 20日 `{_pct(momentum.get('return_20d'))}` | 60日 `{_pct(momentum.get('return_60d'))}`"
         )
+        if relative:
+            lines.append(
+                f"- 相对基准: 20日超额 `{_pct(relative.get('relative_return_20d'))}` | 60日超额 `{_pct(relative.get('relative_return_60d'))}`"
+            )
         lines.append(
             f"- 技术: MA `{technical.get('ma_signal', '—')}` | MACD `{technical.get('macd_signal', '—')}` | RSI `{technical.get('rsi', '—')}`"
         )
@@ -108,6 +113,18 @@ class StrategyReportRenderer:
             lines.append("## 备注")
             for note in list(payload.get("notes") or []):
                 lines.append(f"- {note}")
+        validation = dict(payload.get("validation") or {})
+        if validation.get("validation_status") == "validated":
+            lines.append("")
+            lines.append("## 后验验证")
+            lines.append(
+                f"- 区间: `{validation.get('window_start', '—')}` -> `{validation.get('window_end', '—')}` | "
+                f"超额收益 `{_pct(validation.get('excess_return'))}` | 成本后方向收益 `{_pct(validation.get('cost_adjusted_directional_return'))}`"
+            )
+            lines.append(
+                f"- 结果: `{'命中' if validation.get('hit') else '未命中'}` | "
+                f"最大回撤 `{_pct(validation.get('max_drawdown'))}` | 验证方向 `{validation.get('direction_checked', '—')}`"
+            )
         return "\n".join(lines).rstrip() + "\n"
 
     def render_prediction_list(self, rows: Sequence[Mapping[str, Any]]) -> str:
@@ -120,6 +137,7 @@ class StrategyReportRenderer:
         lines.append("| --- | --- | --- | --- | --- | --- |")
         for row in rows:
             prediction_value = dict(row.get("prediction_value") or {})
+            validation = dict(row.get("validation") or {})
             lines.append(
                 "| "
                 + " | ".join(
@@ -134,4 +152,106 @@ class StrategyReportRenderer:
                 )
                 + " |"
             )
+        return "\n".join(lines).rstrip() + "\n"
+
+    def render_replay_summary(self, payload: Mapping[str, Any], *, persisted: bool) -> str:
+        rows = list(payload.get("rows") or [])
+        lines: List[str] = ["# Strategy Replay", ""]
+        lines.append(
+            f"- 标的: `{payload.get('symbol', '')}` | 区间: `{payload.get('start', '—')}` -> `{payload.get('end', '—')}` | "
+            f"样本数: `{len(rows)}` | {'已写入账本' if persisted else '仅预览'}"
+        )
+        lines.append(
+            f"- 合同: `single-symbol historical replay` | 资产重入间隔 `{payload.get('asset_gap_days', '—')}` 个交易日 | 主 horizon `20个交易日`"
+        )
+        for note in list(payload.get("notes") or []):
+            lines.append(f"- 说明: {note}")
+        lines.append("")
+        if not rows:
+            lines.append("- 当前区间内没有生成可用 replay 样本。")
+            return "\n".join(lines).rstrip() + "\n"
+        lines.append("| as_of | status | rank bucket | confidence | score |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for row in rows:
+            prediction_value = dict(row.get("prediction_value") or {})
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(row.get("as_of", "—")),
+                        str(row.get("status", "—")),
+                        str(prediction_value.get("expected_rank_bucket", "—")),
+                        str(row.get("confidence_label", "—")),
+                        f"{float(row.get('seed_score', 0.0)):.2f}",
+                    ]
+                )
+                + " |"
+            )
+        return "\n".join(lines).rstrip() + "\n"
+
+    def render_validation_summary(self, payload: Mapping[str, Any], *, persisted: bool) -> str:
+        lines: List[str] = ["# Strategy Validation", ""]
+        lines.append(
+            f"- 样本总数: `{payload.get('total_rows', 0)}` | 已验证: `{payload.get('validated_rows', 0)}` | "
+            f"待未来窗口: `{payload.get('pending_rows', 0)}` | {'已回写账本' if persisted else '仅预览'}"
+        )
+        lines.append(
+            f"- predicted: `{payload.get('predicted_rows', 0)}` | no_prediction: `{payload.get('no_prediction_rows', 0)}` | "
+            f"skipped: `{payload.get('skipped_rows', 0)}`"
+        )
+        lines.append("")
+        lines.append("## 总体结果")
+        lines.append(f"- hit rate: `{float(payload.get('hit_rate', 0.0)):.1%}`")
+        lines.append(f"- 平均超额收益: `{_pct(payload.get('avg_excess_return'))}`")
+        lines.append(f"- 平均成本后方向收益: `{_pct(payload.get('avg_cost_adjusted_directional_return'))}`")
+        lines.append(f"- 平均窗口最大回撤: `{_pct(payload.get('avg_max_drawdown'))}`")
+        bucket_rows = list(payload.get("bucket_rows") or [])
+        if bucket_rows:
+            lines.append("")
+            lines.append("## 置信度分桶")
+            lines.append("| bucket | count | hit rate | avg excess | avg net directional |")
+            lines.append("| --- | --- | --- | --- | --- |")
+            for row in bucket_rows:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            str(row.get("bucket", "—")),
+                            str(row.get("count", 0)),
+                            f"{float(row.get('hit_rate', 0.0)):.1%}",
+                            _pct(row.get("avg_excess_return")),
+                            _pct(row.get("avg_net_directional_return")),
+                        ]
+                    )
+                    + " |"
+                )
+        recent_rows = list(payload.get("recent_rows") or [])
+        if recent_rows:
+            lines.append("")
+            lines.append("## 最近样本")
+            lines.append("| as_of | symbol | direction | confidence | excess | net directional | hit | status |")
+            lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+            for row in recent_rows:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            str(row.get("as_of", "—")),
+                            f"`{row.get('symbol', '')}`",
+                            str(row.get("direction", "—")),
+                            str(row.get("confidence_label", "—")),
+                            _pct(row.get("excess_return")),
+                            _pct(row.get("net_directional_return")),
+                            "✅" if bool(row.get("hit")) else "❌",
+                            str(row.get("validation_status", "—")),
+                        ]
+                    )
+                    + " |"
+                )
+        notes = list(payload.get("notes") or [])
+        if notes:
+            lines.append("")
+            lines.append("## 边界")
+            for note in notes:
+                lines.append(f"- {note}")
         return "\n".join(lines).rstrip() + "\n"

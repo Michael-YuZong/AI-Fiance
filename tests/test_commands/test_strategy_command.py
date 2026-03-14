@@ -89,3 +89,84 @@ def test_strategy_list_main_renders_rows(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "| as_of | symbol | status | rank bucket | confidence | score |" in captured.out
     assert "`600519`" in captured.out
+
+
+def test_strategy_replay_main_persists_rows(monkeypatch, capsys) -> None:
+    saved = []
+
+    class _Repo:
+        def upsert_prediction(self, payload):
+            saved.append(payload["prediction_id"])
+
+    monkeypatch.setattr(strategy_module, "load_config", lambda _path=None: {})
+    monkeypatch.setattr(
+        strategy_module,
+        "generate_strategy_replay_predictions",
+        lambda symbol, config, **kwargs: {
+            "symbol": symbol,
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+            "asset_gap_days": 20,
+            "notes": ["单标的 replay。"],
+            "rows": [
+                {
+                    "prediction_id": "stratv1_replay_600519_2024-06-28",
+                    "as_of": "2024-06-28",
+                    "status": "predicted",
+                    "prediction_value": {"expected_rank_bucket": "upper_quintile_candidate"},
+                    "confidence_label": "中",
+                    "seed_score": 64.0,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(strategy_module, "StrategyRepository", lambda: _Repo())
+    monkeypatch.setattr(sys, "argv", ["strategy", "replay", "600519", "--max-samples", "1"])
+
+    strategy_module.main()
+
+    captured = capsys.readouterr()
+    assert saved == ["stratv1_replay_600519_2024-06-28"]
+    assert "# Strategy Replay" in captured.out
+    assert "单标的 replay" in captured.out
+
+
+def test_strategy_validate_main_renders_summary(monkeypatch, capsys) -> None:
+    class _Repo:
+        def list_predictions(self, **kwargs):
+            return [{"prediction_id": "pred_1", "symbol": "600519"}]
+
+        def upsert_prediction(self, payload):
+            return payload
+
+    monkeypatch.setattr(strategy_module, "load_config", lambda _path=None: {})
+    monkeypatch.setattr(
+        strategy_module,
+        "validate_strategy_rows",
+        lambda rows, config: (
+            rows,
+            {
+                "total_rows": 1,
+                "validated_rows": 1,
+                "pending_rows": 0,
+                "predicted_rows": 1,
+                "no_prediction_rows": 0,
+                "skipped_rows": 0,
+                "hit_rate": 1.0,
+                "avg_excess_return": 0.06,
+                "avg_cost_adjusted_directional_return": 0.055,
+                "avg_max_drawdown": -0.03,
+                "bucket_rows": [{"bucket": "中", "count": 1, "hit_rate": 1.0, "avg_excess_return": 0.06, "avg_net_directional_return": 0.055}],
+                "recent_rows": [{"as_of": "2024-06-28", "symbol": "600519", "direction": "positive", "confidence_label": "中", "excess_return": 0.06, "net_directional_return": 0.055, "hit": True, "validation_status": "validated"}],
+                "notes": ["单标的时间序列口径。"],
+            },
+        ),
+    )
+    monkeypatch.setattr(strategy_module, "StrategyRepository", lambda: _Repo())
+    monkeypatch.setattr(sys, "argv", ["strategy", "validate", "--symbol", "600519"])
+
+    strategy_module.main()
+
+    captured = capsys.readouterr()
+    assert "# Strategy Validation" in captured.out
+    assert "单标的时间序列口径" in captured.out

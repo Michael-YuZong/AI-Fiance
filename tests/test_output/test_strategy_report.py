@@ -24,6 +24,7 @@ def test_strategy_report_renderer_renders_prediction_sections() -> None:
         "key_factors": [{"label": "技术/趋势", "factor": "technical", "score": 76, "direction": "supportive", "summary": "趋势保持偏强。"}],
         "factor_snapshot": {
             "price_momentum": {"return_5d": 0.03, "return_20d": 0.11, "return_60d": 0.22},
+            "benchmark_relative": {"relative_return_20d": 0.05, "relative_return_60d": 0.08},
             "technical": {"ma_signal": "bullish", "macd_signal": "bullish", "rsi": 63.0},
             "liquidity": {"avg_turnover_20d": 1.6e8, "median_turnover_60d": 1.5e8},
             "risk": {"volatility_20d": 0.24, "max_drawdown_1y": -0.18},
@@ -51,6 +52,7 @@ def test_strategy_report_renderer_renders_prediction_sections() -> None:
     assert "## 证据时点与来源" in rendered
     assert "## 降级与边界" in rendered
     assert "更像 20 日超额收益的上层候选" in rendered
+    assert "相对基准" in rendered
 
 
 def test_strategy_report_renderer_renders_no_prediction_reasons() -> None:
@@ -97,3 +99,55 @@ def test_strategy_report_renderer_renders_prediction_list() -> None:
 
     assert "| as_of | symbol | status | rank bucket | confidence | score |" in rendered
     assert "`600519`" in rendered
+
+
+def test_strategy_report_renderer_renders_replay_summary() -> None:
+    rendered = StrategyReportRenderer().render_replay_summary(
+        {
+            "symbol": "600519",
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+            "asset_gap_days": 20,
+            "notes": ["单标的 replay。"],
+            "rows": [
+                {
+                    "as_of": "2024-06-28",
+                    "status": "predicted",
+                    "prediction_value": {"expected_rank_bucket": "upper_quintile_candidate"},
+                    "confidence_label": "中",
+                    "seed_score": 64.0,
+                }
+            ],
+        },
+        persisted=True,
+    )
+
+    assert "# Strategy Replay" in rendered
+    assert "单标的 replay" in rendered
+    assert "upper_quintile_candidate" in rendered
+
+
+def test_strategy_report_renderer_renders_validation_summary() -> None:
+    rendered = StrategyReportRenderer().render_validation_summary(
+        {
+            "total_rows": 2,
+            "validated_rows": 1,
+            "pending_rows": 1,
+            "predicted_rows": 2,
+            "no_prediction_rows": 0,
+            "skipped_rows": 0,
+            "hit_rate": 1.0,
+            "avg_excess_return": 0.06,
+            "avg_cost_adjusted_directional_return": 0.055,
+            "avg_max_drawdown": -0.03,
+            "bucket_rows": [{"bucket": "中", "count": 1, "hit_rate": 1.0, "avg_excess_return": 0.06, "avg_net_directional_return": 0.055}],
+            "recent_rows": [{"as_of": "2024-06-28", "symbol": "600519", "direction": "positive", "confidence_label": "中", "excess_return": 0.06, "net_directional_return": 0.055, "hit": True, "validation_status": "validated"}],
+            "notes": ["当前还是单标的时间序列口径。"],
+        },
+        persisted=True,
+    )
+
+    assert "# Strategy Validation" in rendered
+    assert "## 总体结果" in rendered
+    assert "## 置信度分桶" in rendered
+    assert "当前还是单标的时间序列口径" in rendered

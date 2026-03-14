@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 
 from src.output.strategy_report import StrategyReportRenderer
-from src.processors.strategy import generate_strategy_prediction
+from src.processors.strategy import generate_strategy_prediction, generate_strategy_replay_predictions, validate_strategy_rows
 from src.storage.strategy import StrategyRepository
 from src.utils.config import load_config
 from src.utils.logger import setup_logger
@@ -20,6 +20,22 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("--note", default="", help="Optional note to persist with the prediction snapshot")
     predict_parser.add_argument("--config", default="", help="Optional path to config YAML")
     predict_parser.add_argument("--preview", action="store_true", help="Render prediction but do not persist it")
+
+    replay_parser = subparsers.add_parser("replay", help="Generate historical replay samples for strategy v1")
+    replay_parser.add_argument("symbol", help="A-share stock symbol")
+    replay_parser.add_argument("--start", default="", help="Replay start date (YYYY-MM-DD)")
+    replay_parser.add_argument("--end", default="", help="Replay end date (YYYY-MM-DD)")
+    replay_parser.add_argument("--asset-gap-days", type=int, default=20, help="Minimum trading-day gap between replay samples for the same asset")
+    replay_parser.add_argument("--max-samples", type=int, default=12, help="Maximum replay samples to generate")
+    replay_parser.add_argument("--note", default="", help="Optional note to persist with the replay samples")
+    replay_parser.add_argument("--config", default="", help="Optional path to config YAML")
+    replay_parser.add_argument("--preview", action="store_true", help="Render replay summary but do not persist samples")
+
+    validate_parser = subparsers.add_parser("validate", help="Validate stored strategy samples against realized forward windows")
+    validate_parser.add_argument("--symbol", default="", help="Optional symbol filter")
+    validate_parser.add_argument("--limit", type=int, default=100, help="Maximum stored rows to validate")
+    validate_parser.add_argument("--config", default="", help="Optional path to config YAML")
+    validate_parser.add_argument("--preview", action="store_true", help="Render validation summary but do not persist validation snapshots")
 
     list_parser = subparsers.add_parser("list", help="List recent prediction ledger rows")
     list_parser.add_argument("--symbol", default="", help="Optional symbol filter")
@@ -42,6 +58,37 @@ def main() -> None:
         if persisted:
             repository.upsert_prediction(payload)
         print(renderer.render_prediction(payload, persisted=persisted))
+        return
+
+    if args.subcommand == "replay":
+        setup_logger("ERROR")
+        config = load_config(args.config or None)
+        payload = generate_strategy_replay_predictions(
+            args.symbol,
+            config,
+            start=args.start,
+            end=args.end,
+            note=args.note,
+            asset_gap_days=args.asset_gap_days,
+            max_samples=args.max_samples,
+        )
+        persisted = not args.preview
+        if persisted:
+            for row in payload.get("rows", []):
+                repository.upsert_prediction(row)
+        print(renderer.render_replay_summary(payload, persisted=persisted))
+        return
+
+    if args.subcommand == "validate":
+        setup_logger("ERROR")
+        config = load_config(args.config or None)
+        rows = repository.list_predictions(symbol=args.symbol, status="all", limit=args.limit)
+        updated_rows, summary = validate_strategy_rows(rows, config)
+        persisted = not args.preview
+        if persisted:
+            for row in updated_rows:
+                repository.upsert_prediction(row)
+        print(renderer.render_validation_summary(summary, persisted=persisted))
         return
 
     rows = repository.list_predictions(symbol=args.symbol, status=args.status, limit=args.limit)

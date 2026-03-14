@@ -818,14 +818,19 @@
 ### 当前推进状态（2026-03-14）
 
 - 计划设计已完成。
-- `strategy` 计划专项外审已收敛，可进入 `I-1`。
+- `strategy` 计划专项外审已收敛。
 - `I-1` prediction ledger 已完成：
   - `strategy predict`
   - `strategy list`
   - `no_prediction` gating
   - 因子快照、provenance、固定 benchmark / horizon / overlap 合同已入账本
+- `I-2` 已有第一轮可用实现：
+  - `strategy replay`
+  - `strategy validate`
+  - 单标的时间序列 non-overlap 历史样本
+  - hit rate / avg excess / cost-adjusted directional return / confidence bucket summary
 - 当前下一步应做：
-  - `I-2` result validate
+  - `I-3` error attribution
   - lag / visibility fixture
   - overlap / benchmark / promotion gate fixture
 - 仍然不允许跳过 `I-1 / I-2 / I-3` 直接做自动候选因子发现。
@@ -996,6 +1001,33 @@
 - 不同资产类型
 
 输出分层验证结果。
+
+#### `I-2` 当前已落地的最小实现
+
+当前仓库里已经有一版可用的 `I-2`：
+
+- `python -m src.commands.strategy replay 600519 --start 2024-01-01 --end 2024-12-31 --max-samples 6`
+  生成历史时间点 replay 样本
+- `python -m src.commands.strategy validate --symbol 600519 --limit 20 --preview`
+  对已存样本做后验验证
+
+当前验证口径刻意收窄为：
+
+- 单标的时间序列 replay
+- 默认 non-overlap 主样本
+- 核心看：
+  - `hit_rate`
+  - `avg_excess_return`
+  - `avg_cost_adjusted_directional_return`
+  - `avg_max_drawdown`
+  - `confidence bucket` 校准
+
+当前还没有完成的部分：
+
+- 全市场截面 rank 质量验证
+- 多标的 cohort 同步验证
+- attribution label 自动化
+- champion / challenger promotion gate 的真正落地
 
 ### `I-3` 错误归因
 

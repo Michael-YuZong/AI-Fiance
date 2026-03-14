@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.processors.strategy import build_strategy_prediction_from_analysis
+import src.processors.strategy as strategy_module
+from src.processors.strategy import build_strategy_prediction_from_analysis, generate_strategy_replay_predictions, validate_strategy_rows
 
 
-def _history(days: int = 260, *, amount: float = 1.6e8) -> pd.DataFrame:
+def _history(days: int = 260, *, amount: float = 1.6e8, start: str = "2025-01-01") -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "date": pd.bdate_range("2025-01-01", periods=days),
+            "date": pd.bdate_range(start, periods=days),
             "open": [10.0 + index * 0.01 for index in range(days)],
             "high": [10.2 + index * 0.01 for index in range(days)],
             "low": [9.8 + index * 0.01 for index in range(days)],
@@ -92,3 +93,57 @@ def test_build_strategy_prediction_from_analysis_marks_no_prediction_when_liquid
     assert "low_liquidity" in payload["no_prediction_reason_codes"]
     assert "history_fallback_mode" in payload["no_prediction_reason_codes"]
     assert "benchmark_missing" in payload["no_prediction_reason_codes"]
+
+
+def test_generate_strategy_replay_predictions_respects_asset_gap(monkeypatch) -> None:
+    asset_history = _history(days=520, amount=1.8e8, start="2024-01-01")
+    benchmark_history = _history(days=520, amount=2.2e8, start="2024-01-01")
+    monkeypatch.setattr(strategy_module, "detect_asset_type", lambda symbol, config: "cn_stock")
+    monkeypatch.setattr(
+        strategy_module,
+        "fetch_asset_history",
+        lambda symbol, asset_type, config: benchmark_history if symbol == "000906.SH" else asset_history,
+    )
+
+    payload = generate_strategy_replay_predictions(
+        "600519",
+        {},
+        start="2025-01-01",
+        end="2025-12-31",
+        asset_gap_days=20,
+        max_samples=3,
+    )
+
+    assert len(payload["rows"]) == 3
+    assert all(row["prediction_mode"] == "historical_replay_v1" for row in payload["rows"])
+    as_of_values = [row["as_of"] for row in payload["rows"]]
+    assert as_of_values == sorted(as_of_values)
+
+
+def test_validate_strategy_rows_adds_validation_snapshot(monkeypatch) -> None:
+    asset_history = _history(days=320, amount=1.8e8)
+    benchmark_history = _history(days=320, amount=2.0e8)
+    benchmark_history["close"] = benchmark_history["close"] * 0.995
+    monkeypatch.setattr(
+        strategy_module,
+        "fetch_asset_history",
+        lambda symbol, asset_type, config: benchmark_history if symbol == "000906.SH" else asset_history,
+    )
+    rows = [
+        {
+            "prediction_id": "pred_1",
+            "symbol": "600519",
+            "asset_type": "cn_stock",
+            "status": "predicted",
+            "as_of": str(asset_history["date"].iloc[260].date()),
+            "prediction_value": {"expected_excess_direction": "positive"},
+            "horizon": {"days": 20},
+            "confidence_label": "中",
+        }
+    ]
+
+    updated_rows, summary = validate_strategy_rows(rows, {})
+
+    assert updated_rows[0]["validation"]["validation_status"] == "validated"
+    assert summary["validated_rows"] == 1
+    assert "单标的时间序列口径" in summary["notes"][0]
