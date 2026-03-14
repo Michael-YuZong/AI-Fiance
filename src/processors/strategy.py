@@ -23,6 +23,13 @@ STRATEGY_V1_REPLAY_FACTOR_VERSION = "strategy_v1_replay_price_only_2026-03-14"
 STRATEGY_V1_DIRECTIONAL_COST_BPS = 0.005
 STRATEGY_V1_NEUTRAL_BAND = 0.02
 STRATEGY_V1_ASSET_GAP_DAYS = 20
+STRATEGY_V1_REPLAY_WEIGHT_SCHEME = {
+    "medium_term_momentum": 0.28,
+    "benchmark_relative": 0.30,
+    "technical_confirmation": 0.20,
+    "risk_efficiency": 0.17,
+    "liquidity_profile": 0.05,
+}
 STRATEGY_V1_WEIGHT_SCHEME = {
     "technical": 0.22,
     "relative_strength": 0.20,
@@ -32,6 +39,46 @@ STRATEGY_V1_WEIGHT_SCHEME = {
     "macro": 0.08,
     "seasonality": 0.05,
     "chips": 0.03,
+}
+STRATEGY_V1_EXPERIMENT_VARIANTS = {
+    "baseline": {
+        "label": "baseline",
+        "hypothesis": "沿用当前 replay v1 默认权重，作为所有 challenger 的基线。",
+        "weight_scheme": STRATEGY_V1_REPLAY_WEIGHT_SCHEME,
+    },
+    "momentum_tilt": {
+        "label": "momentum_tilt",
+        "hypothesis": "提高中周期动量和相对基准强弱权重，测试更激进的趋势跟随。",
+        "weight_scheme": {
+            "medium_term_momentum": 0.34,
+            "benchmark_relative": 0.31,
+            "technical_confirmation": 0.20,
+            "risk_efficiency": 0.10,
+            "liquidity_profile": 0.05,
+        },
+    },
+    "defensive_tilt": {
+        "label": "defensive_tilt",
+        "hypothesis": "提高风险效率和流动性约束权重，测试更保守的防守框架。",
+        "weight_scheme": {
+            "medium_term_momentum": 0.20,
+            "benchmark_relative": 0.24,
+            "technical_confirmation": 0.18,
+            "risk_efficiency": 0.28,
+            "liquidity_profile": 0.10,
+        },
+    },
+    "confirmation_tilt": {
+        "label": "confirmation_tilt",
+        "hypothesis": "提高技术确认权重，避免只有相对强弱而缺乏确认时过早出手。",
+        "weight_scheme": {
+            "medium_term_momentum": 0.24,
+            "benchmark_relative": 0.26,
+            "technical_confirmation": 0.30,
+            "risk_efficiency": 0.15,
+            "liquidity_profile": 0.05,
+        },
+    },
 }
 
 _DIMENSION_LABELS = {
@@ -197,7 +244,21 @@ def _technical_snapshot(history: pd.DataFrame) -> Dict[str, Any]:
     return analyzer.generate_scorecard({})
 
 
-def _replay_factor_engine(asset_history: pd.DataFrame, benchmark_history: pd.DataFrame) -> Dict[str, Any]:
+def _normalize_weight_scheme(weight_scheme: Mapping[str, Any]) -> Dict[str, float]:
+    weights = {str(key): max(_safe_float(value), 0.0) for key, value in dict(weight_scheme or {}).items()}
+    total = sum(weights.values())
+    if total <= 0:
+        weights = dict(STRATEGY_V1_REPLAY_WEIGHT_SCHEME)
+        total = sum(weights.values())
+    return {key: round(value / total, 6) for key, value in weights.items()}
+
+
+def _replay_factor_engine(
+    asset_history: pd.DataFrame,
+    benchmark_history: pd.DataFrame,
+    *,
+    weight_scheme: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
     metrics = compute_history_metrics(asset_history)
     benchmark_metrics = compute_history_metrics(benchmark_history) if not benchmark_history.empty else {}
     technical = _technical_snapshot(asset_history)
@@ -248,18 +309,14 @@ def _replay_factor_engine(asset_history: pd.DataFrame, benchmark_history: pd.Dat
         "risk_efficiency": risk_efficiency,
         "liquidity_profile": liquidity_profile,
     }
-    weight_scheme = {
-        "medium_term_momentum": 0.28,
-        "benchmark_relative": 0.30,
-        "technical_confirmation": 0.20,
-        "risk_efficiency": 0.17,
-        "liquidity_profile": 0.05,
-    }
+    normalized_weights = _normalize_weight_scheme(weight_scheme or STRATEGY_V1_REPLAY_WEIGHT_SCHEME)
     seed_score = round(
-        sum(float(factor_scores[key]) * float(weight_scheme[key]) for key in factor_scores) / sum(weight_scheme.values()),
+        sum(float(factor_scores[key]) * float(normalized_weights.get(key, 0.0)) for key in factor_scores)
+        / sum(normalized_weights.values()),
         2,
     )
     factor_snapshot = {
+        "factor_scores": {key: round(float(value), 2) for key, value in factor_scores.items()},
         "price_momentum": {
             "return_5d": _safe_float(metrics.get("return_5d")),
             "return_20d": return_20d,
@@ -327,7 +384,7 @@ def _replay_factor_engine(asset_history: pd.DataFrame, benchmark_history: pd.Dat
     key_factors.sort(key=lambda row: float(row.get("score", 0.0)), reverse=True)
     return {
         "seed_score": seed_score,
-        "weight_scheme": weight_scheme,
+        "weight_scheme": normalized_weights,
         "factor_snapshot": factor_snapshot,
         "key_factors": key_factors,
     }
@@ -559,6 +616,10 @@ def _build_replay_prediction(
     asset_history: pd.DataFrame,
     benchmark_history: pd.DataFrame,
     note: str = "",
+    weight_scheme: Mapping[str, Any] | None = None,
+    factor_version: str = STRATEGY_V1_REPLAY_FACTOR_VERSION,
+    prediction_mode: str = "historical_replay_v1",
+    experiment_variant: str = "",
 ) -> Dict[str, Any]:
     as_of = _safe_history_as_of(asset_history)
     base_payload = {
@@ -573,10 +634,11 @@ def _build_replay_prediction(
         analysis=base_payload,
         benchmark_history=benchmark_history,
     )
-    scorecard = _replay_factor_engine(asset_history, benchmark_history) if not no_prediction_codes else {
+    scorecard = {
+        "weight_scheme": dict(weight_scheme or STRATEGY_V1_REPLAY_WEIGHT_SCHEME),
         "seed_score": 50.0,
-        "weight_scheme": {},
         "factor_snapshot": {
+            "factor_scores": {},
             "price_momentum": {},
             "benchmark_relative": {},
             "technical": {},
@@ -585,6 +647,8 @@ def _build_replay_prediction(
         },
         "key_factors": [],
     }
+    if not no_prediction_codes:
+        scorecard = _replay_factor_engine(asset_history, benchmark_history, weight_scheme=weight_scheme)
     seed_score = float(scorecard.get("seed_score", 50.0))
     confidence = _confidence_payload(seed_score)
     prediction_value = _prediction_value(seed_score)
@@ -600,7 +664,8 @@ def _build_replay_prediction(
         "as_of": as_of,
         "effective_from": _candidate_effective_from(as_of),
         "visibility_class": "historical_replay_post_close_v1",
-        "prediction_mode": "historical_replay_v1",
+        "prediction_mode": prediction_mode,
+        "experiment_variant": experiment_variant,
         "symbol": symbol,
         "name": name,
         "asset_type": asset_type,
@@ -615,7 +680,7 @@ def _build_replay_prediction(
         "confidence_type": "rank_confidence_v1",
         "key_factors": list(scorecard.get("key_factors") or []),
         "factor_snapshot": dict(scorecard.get("factor_snapshot") or {}),
-        "factor_version": STRATEGY_V1_REPLAY_FACTOR_VERSION,
+        "factor_version": factor_version,
         "weight_scheme": dict(scorecard.get("weight_scheme") or {}),
         "benchmark": {
             "symbol": STRATEGY_V1_BENCHMARK_SYMBOL,
@@ -653,6 +718,35 @@ def _build_replay_prediction(
     }
 
 
+def _replay_sample_indices(
+    asset_history: pd.DataFrame,
+    *,
+    start: str = "",
+    end: str = "",
+    asset_gap_days: int = STRATEGY_V1_ASSET_GAP_DAYS,
+    max_samples: int = 12,
+) -> Tuple[pd.Timestamp, pd.Timestamp, List[int]]:
+    if asset_history.empty:
+        raise ValueError("asset history is empty")
+    start_stamp = pd.Timestamp(start) if start else pd.Timestamp(asset_history["date"].iloc[min(len(asset_history) - 1, 249)])
+    end_stamp = pd.Timestamp(end) if end else pd.Timestamp(asset_history["date"].iloc[-1])
+    indices: List[int] = []
+    last_used_index = -10_000
+    eligible_indices = [
+        index
+        for index, stamp in enumerate(asset_history["date"])
+        if index >= 249 and pd.Timestamp(stamp) >= start_stamp and pd.Timestamp(stamp) <= end_stamp
+    ]
+    for index in eligible_indices:
+        if index - last_used_index < max(int(asset_gap_days), 1):
+            continue
+        indices.append(index)
+        last_used_index = index
+        if max_samples and len(indices) >= max(int(max_samples), 1):
+            break
+    return start_stamp, end_stamp, indices
+
+
 def generate_strategy_replay_predictions(
     symbol: str,
     config: Mapping[str, Any],
@@ -668,18 +762,15 @@ def generate_strategy_replay_predictions(
     benchmark_history = _safe_normalize_history(fetch_asset_history(STRATEGY_V1_BENCHMARK_SYMBOL, "cn_index", dict(config)))
     if asset_history.empty:
         raise ValueError(f"无法生成历史 replay，缺少 {symbol} 的完整日线。")
-    start_stamp = pd.Timestamp(start) if start else pd.Timestamp(asset_history["date"].iloc[min(len(asset_history) - 1, 249)])
-    end_stamp = pd.Timestamp(end) if end else pd.Timestamp(asset_history["date"].iloc[-1])
+    start_stamp, end_stamp, sample_indices = _replay_sample_indices(
+        asset_history,
+        start=start,
+        end=end,
+        asset_gap_days=asset_gap_days,
+        max_samples=max_samples,
+    )
     rows: List[Dict[str, Any]] = []
-    last_used_index = -10_000
-    eligible_indices = [
-        index
-        for index, stamp in enumerate(asset_history["date"])
-        if index >= 249 and pd.Timestamp(stamp) >= start_stamp and pd.Timestamp(stamp) <= end_stamp
-    ]
-    for index in eligible_indices:
-        if index - last_used_index < max(int(asset_gap_days), 1):
-            continue
+    for index in sample_indices:
         asset_slice = asset_history.iloc[: index + 1].copy()
         as_of = pd.Timestamp(asset_slice["date"].iloc[-1])
         benchmark_slice = benchmark_history[benchmark_history["date"] <= as_of].copy()
@@ -692,9 +783,6 @@ def generate_strategy_replay_predictions(
             note=note,
         )
         rows.append(prediction)
-        last_used_index = index
-        if max_samples and len(rows) >= max(int(max_samples), 1):
-            break
     return {
         "symbol": symbol,
         "asset_type": asset_type,
@@ -873,3 +961,327 @@ def validate_strategy_rows(
         ],
     }
     return updated_rows, summary
+
+
+def _factor_direction_counts(row: Mapping[str, Any]) -> Tuple[int, int]:
+    supportive = 0
+    drag = 0
+    for factor in list(row.get("key_factors") or []):
+        direction = str(factor.get("direction", ""))
+        if direction == "supportive":
+            supportive += 1
+        elif direction == "drag":
+            drag += 1
+    return supportive, drag
+
+
+def _attribute_prediction_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    validation = dict(row.get("validation") or {})
+    validation_status = str(validation.get("validation_status", ""))
+    status = str(row.get("status", ""))
+    downgrade_flags = {str(flag) for flag in list(row.get("downgrade_flags") or [])}
+    direction = str(dict(row.get("prediction_value") or {}).get("expected_excess_direction", "neutral"))
+    asset_return = _safe_float(validation.get("realized_return"))
+    excess_return = _safe_float(validation.get("excess_return"))
+    net_directional = _safe_float(validation.get("cost_adjusted_directional_return"))
+    neutral_band = max(_safe_float(validation.get("neutral_band"), STRATEGY_V1_NEUTRAL_BAND), STRATEGY_V1_NEUTRAL_BAND)
+    seed_score = _safe_float(row.get("seed_score"), 50.0)
+    confidence_label = str(row.get("confidence_label", ""))
+    supportive_count, drag_count = _factor_direction_counts(row)
+
+    if status == "no_prediction":
+        return {
+            "status": "not_applicable",
+            "label": "gated_out",
+            "summary": "这个样本本来就被 strategy v1 门槛拒绝，不进入主归因。",
+            "next_action": "先解决 universe / 流动性 / point-in-time 门槛，再谈策略有效性。",
+            "severity": "info",
+        }
+    if validation_status == "pending_future_window":
+        return {
+            "status": "pending",
+            "label": "pending_future_window",
+            "summary": "未来 20 个交易日窗口还没走完，当前不能做后验归因。",
+            "next_action": "等窗口结束后再跑 validate / attribute。",
+            "severity": "info",
+        }
+    if validation_status != "validated":
+        return {
+            "status": "not_evaluable",
+            "label": "data_not_evaluable",
+            "summary": "当前样本缺少可验证的历史窗口或 benchmark 对照，无法做有效归因。",
+            "next_action": "先补齐 point-in-time 数据，再重跑 replay / validate。",
+            "severity": "warning",
+        }
+    if bool(validation.get("hit")):
+        if net_directional <= 0:
+            return {
+                "status": "attributed",
+                "label": "execution_cost_drag",
+                "summary": "方向并不算错，但扣掉成本后边际收益被明显吃掉了。",
+                "next_action": "收紧流动性门槛，或提高信号强度阈值再出手。",
+                "severity": "warning",
+            }
+        return {
+            "status": "attributed",
+            "label": "confirmed_edge",
+            "summary": "方向和相对收益都兑现了，当前更像保留为基线样本。",
+            "next_action": "保留这类样本，后续拿来校准置信度分桶和 champion baseline。",
+            "severity": "info",
+        }
+
+    if downgrade_flags & {"history_fallback_mode", "catalyst_coverage_degraded", "benchmark_history_missing"}:
+        return {
+            "status": "attributed",
+            "label": "data_degradation_or_proxy_limit",
+            "summary": "失败发生在降级/代理链路下，当前还不能直接把它认定为策略逻辑错误。",
+            "next_action": "先补完整的 point-in-time 原始链路，再重跑历史验证。",
+            "severity": "warning",
+        }
+    if direction in {"positive", "negative"}:
+        if (direction == "positive" and asset_return > 0 and excess_return < 0) or (
+            direction == "negative" and asset_return < 0 and excess_return > 0
+        ):
+            return {
+                "status": "attributed",
+                "label": "universe_bias",
+                "summary": "标的绝对方向没有完全错，但 benchmark-relative 目标没跑赢，更多像相对收益目标设定问题。",
+                "next_action": "增加行业/风格相对 benchmark 切片，别只看标的绝对涨跌。",
+                "severity": "warning",
+            }
+    if abs(excess_return) <= max(neutral_band * 1.5, 0.03):
+        return {
+            "status": "attributed",
+            "label": "horizon_mismatch",
+            "summary": "20 日窗口里的结果更接近噪音或延迟兑现，当前更像周期错配而不是主逻辑被完全推翻。",
+            "next_action": "补 5 / 60 日切片，检查当前 20 日 horizon 是否合适。",
+            "severity": "warning",
+        }
+    if confidence_label == "低" or abs(seed_score - 50.0) <= 8.0 or (supportive_count >= 2 and drag_count >= 2):
+        return {
+            "status": "attributed",
+            "label": "weight_misallocation",
+            "summary": "支撑和拖累信号本来就混在一起，但当前权重仍把它推成单边预测，更像权重失衡。",
+            "next_action": "先做权重实验，再考虑扩很多新因子。",
+            "severity": "warning",
+        }
+    if abs(excess_return) >= 0.08:
+        return {
+            "status": "attributed",
+            "label": "missing_factor",
+            "summary": "结果和预测方向偏离明显，当前因子族很可能缺了关键解释变量。",
+            "next_action": "优先补新的候选因子或更完整的事件/盈利代理，再重跑 replay。",
+            "severity": "warning",
+        }
+    return {
+        "status": "attributed",
+        "label": "regime_shift",
+        "summary": "这次失败更像市场环境切换，原来的权重在这一段窗口失灵。",
+        "next_action": "按 regime 切片做 validate / experiment，避免把单一环境里的最优权重推广到所有阶段。",
+        "severity": "warning",
+    }
+
+
+def _attribute_recommendations(label_counts: Mapping[str, int]) -> List[str]:
+    recommendations: List[str] = []
+    if int(label_counts.get("weight_misallocation", 0)) > 0:
+        recommendations.append("`weight_misallocation` 偏多：下一轮优先跑 `strategy experiment` 比较 baseline / momentum_tilt / defensive_tilt。")
+    if int(label_counts.get("missing_factor", 0)) > 0:
+        recommendations.append("`missing_factor` 已出现：下一轮优先补候选因子池，而不是继续细调现有权重。")
+    if int(label_counts.get("horizon_mismatch", 0)) > 0:
+        recommendations.append("`horizon_mismatch` 偏多：先补 5 日 / 60 日验证切片，别急着宣判当前因子失效。")
+    if int(label_counts.get("universe_bias", 0)) > 0:
+        recommendations.append("`universe_bias` 已出现：要把相对基准和绝对方向拆开看，避免只因为个股上涨就误判相对收益目标。")
+    if int(label_counts.get("data_degradation_or_proxy_limit", 0)) > 0:
+        recommendations.append("`data_degradation_or_proxy_limit` 偏多：这批样本先不该拿来改权重，应优先补 point-in-time 数据链。")
+    if int(label_counts.get("execution_cost_drag", 0)) > 0:
+        recommendations.append("`execution_cost_drag` 已出现：需要收紧流动性门槛或提高出手阈值。")
+    if not recommendations:
+        recommendations.append("当前归因没有暴露明显结构性缺口，下一轮优先扩大 replay 样本而不是盲目改规则。")
+    return recommendations
+
+
+def attribute_strategy_rows(rows: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    updated_rows: List[Dict[str, Any]] = []
+    attributed_rows: List[Dict[str, Any]] = []
+    label_counts: Dict[str, int] = {}
+
+    for row in rows:
+        cloned = dict(row)
+        attribution = _attribute_prediction_row(cloned)
+        cloned["attribution"] = attribution
+        updated_rows.append(cloned)
+        label = str(attribution.get("label", ""))
+        label_counts[label] = label_counts.get(label, 0) + 1
+        if str(attribution.get("status", "")) == "attributed":
+            attributed_rows.append(cloned)
+
+    label_rows: List[Dict[str, Any]] = []
+    for label, count in sorted(label_counts.items(), key=lambda item: (-item[1], item[0])):
+        rows_for_label = [row for row in updated_rows if str(dict(row.get("attribution") or {}).get("label", "")) == label]
+        validated_rows = [row for row in rows_for_label if str(dict(row.get("validation") or {}).get("validation_status", "")) == "validated"]
+        hit_rate = (
+            sum(1 for row in validated_rows if bool(dict(row.get("validation") or {}).get("hit"))) / len(validated_rows)
+            if validated_rows
+            else 0.0
+        )
+        avg_excess = (
+            sum(_safe_float(dict(row.get("validation") or {}).get("excess_return")) for row in validated_rows) / len(validated_rows)
+            if validated_rows
+            else 0.0
+        )
+        avg_net = (
+            sum(_safe_float(dict(row.get("validation") or {}).get("cost_adjusted_directional_return")) for row in validated_rows) / len(validated_rows)
+            if validated_rows
+            else 0.0
+        )
+        label_rows.append(
+            {
+                "label": label,
+                "count": count,
+                "share": count / len(updated_rows) if updated_rows else 0.0,
+                "hit_rate": hit_rate,
+                "avg_excess_return": avg_excess,
+                "avg_net_directional_return": avg_net,
+            }
+        )
+
+    recent_rows = []
+    for row in updated_rows[:10]:
+        attribution = dict(row.get("attribution") or {})
+        validation = dict(row.get("validation") or {})
+        recent_rows.append(
+            {
+                "as_of": str(row.get("as_of", "")),
+                "symbol": str(row.get("symbol", "")),
+                "label": str(attribution.get("label", "")),
+                "summary": str(attribution.get("summary", "")),
+                "next_action": str(attribution.get("next_action", "")),
+                "excess_return": _safe_float(validation.get("excess_return")),
+                "hit": bool(validation.get("hit")),
+                "status": str(attribution.get("status", "")),
+            }
+        )
+
+    summary = {
+        "total_rows": len(updated_rows),
+        "attributed_rows": len(attributed_rows),
+        "pending_rows": sum(1 for row in updated_rows if str(dict(row.get("attribution") or {}).get("label", "")) == "pending_future_window"),
+        "not_applicable_rows": sum(1 for row in updated_rows if str(dict(row.get("attribution") or {}).get("status", "")) == "not_applicable"),
+        "label_rows": label_rows,
+        "recent_rows": recent_rows,
+        "recommendations": _attribute_recommendations(label_counts),
+        "notes": [
+            "当前 attribution 还是 v1 窄标签集，重点先区分权重失衡、缺因子、周期错配、数据降级和执行拖累。",
+            "它的目标不是一次讲完所有故事，而是给下一轮 experiment / factor backlog 一个明确起点。",
+        ],
+    }
+    return updated_rows, summary
+
+
+def _experiment_primary_score(summary: Mapping[str, Any]) -> float:
+    return (
+        _safe_float(summary.get("avg_excess_return")) * 100.0
+        + _safe_float(summary.get("avg_cost_adjusted_directional_return")) * 60.0
+        + _safe_float(summary.get("hit_rate")) * 10.0
+        + _safe_float(summary.get("avg_max_drawdown")) * 20.0
+    )
+
+
+def generate_strategy_experiment(
+    symbol: str,
+    config: Mapping[str, Any],
+    *,
+    start: str = "",
+    end: str = "",
+    asset_gap_days: int = STRATEGY_V1_ASSET_GAP_DAYS,
+    max_samples: int = 12,
+    variants: Sequence[str] | None = None,
+) -> Dict[str, Any]:
+    asset_type = detect_asset_type(symbol, config)
+    asset_history = _safe_normalize_history(fetch_asset_history(symbol, asset_type, dict(config)))
+    benchmark_history = _safe_normalize_history(fetch_asset_history(STRATEGY_V1_BENCHMARK_SYMBOL, "cn_index", dict(config)))
+    if asset_history.empty:
+        raise ValueError(f"无法生成 strategy experiment，缺少 {symbol} 的完整日线。")
+    start_stamp, end_stamp, sample_indices = _replay_sample_indices(
+        asset_history,
+        start=start,
+        end=end,
+        asset_gap_days=asset_gap_days,
+        max_samples=max_samples,
+    )
+    variant_names = [str(item).strip() for item in (variants or ["baseline", "momentum_tilt", "defensive_tilt", "confirmation_tilt"]) if str(item).strip()]
+    variant_rows: List[Dict[str, Any]] = []
+
+    for variant_name in variant_names:
+        variant = dict(STRATEGY_V1_EXPERIMENT_VARIANTS.get(variant_name) or {})
+        if not variant:
+            raise ValueError(f"未知 experiment variant: {variant_name}")
+        replay_rows: List[Dict[str, Any]] = []
+        for index in sample_indices:
+            asset_slice = asset_history.iloc[: index + 1].copy()
+            as_of = pd.Timestamp(asset_slice["date"].iloc[-1])
+            benchmark_slice = benchmark_history[benchmark_history["date"] <= as_of].copy()
+            replay_rows.append(
+                _build_replay_prediction(
+                    symbol=symbol,
+                    name=str(symbol),
+                    asset_type=asset_type,
+                    asset_history=asset_slice,
+                    benchmark_history=benchmark_slice,
+                    note=f"experiment variant={variant_name}",
+                    weight_scheme=dict(variant.get("weight_scheme") or {}),
+                    factor_version=f"{STRATEGY_V1_REPLAY_FACTOR_VERSION}:{variant_name}",
+                    prediction_mode="historical_experiment_v1",
+                    experiment_variant=variant_name,
+                )
+            )
+        validated_rows, validation_summary = validate_strategy_rows(replay_rows, config)
+        _, attribution_summary = attribute_strategy_rows(validated_rows)
+        dominant_label = ""
+        dominant_count = 0
+        if attribution_summary.get("label_rows"):
+            dominant = list(attribution_summary.get("label_rows") or [])[0]
+            dominant_label = str(dominant.get("label", ""))
+            dominant_count = int(dominant.get("count", 0))
+        variant_rows.append(
+            {
+                "variant": variant_name,
+                "hypothesis": str(variant.get("hypothesis", "")),
+                "sample_count": len(replay_rows),
+                "hit_rate": _safe_float(validation_summary.get("hit_rate")),
+                "avg_excess_return": _safe_float(validation_summary.get("avg_excess_return")),
+                "avg_cost_adjusted_directional_return": _safe_float(validation_summary.get("avg_cost_adjusted_directional_return")),
+                "avg_max_drawdown": _safe_float(validation_summary.get("avg_max_drawdown")),
+                "dominant_attribution": dominant_label,
+                "dominant_attribution_count": dominant_count,
+                "primary_score": _experiment_primary_score(validation_summary),
+            }
+        )
+
+    variant_rows.sort(key=lambda row: (float(row.get("primary_score", 0.0)), float(row.get("avg_excess_return", 0.0))), reverse=True)
+    baseline_row = next((row for row in variant_rows if str(row.get("variant", "")) == "baseline"), None)
+    champion_row = variant_rows[0] if variant_rows else None
+    challenger_row = next((row for row in variant_rows if str(row.get("variant", "")) != "baseline"), None)
+    notes = [
+        "experiment v1 当前仍是单标的时间序列 replay，对比的是同一批历史时点下不同权重方案，不代表已经通过全 universe promotion gate。",
+        "这里的 champion / challenger 只用于研究优先级，不允许直接改生产链路。",
+    ]
+    if baseline_row and champion_row and champion_row is not baseline_row:
+        notes.append(
+            f"当前样本里 `{champion_row.get('variant')}` 的 primary score 暂时高于 baseline，但还需要扩大样本并过外审，不能直接 promotion。"
+        )
+    summary = {
+        "symbol": symbol,
+        "asset_type": asset_type,
+        "start": str(start_stamp.date()),
+        "end": str(end_stamp.date()),
+        "asset_gap_days": max(int(asset_gap_days), 1),
+        "sample_count": len(sample_indices),
+        "variant_rows": variant_rows,
+        "baseline_variant": "baseline",
+        "champion_variant": str(champion_row.get("variant", "")) if champion_row else "",
+        "challenger_variant": str(challenger_row.get("variant", "")) if challenger_row else "",
+        "notes": notes,
+    }
+    return summary

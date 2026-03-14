@@ -5,7 +5,13 @@ from __future__ import annotations
 import argparse
 
 from src.output.strategy_report import StrategyReportRenderer
-from src.processors.strategy import generate_strategy_prediction, generate_strategy_replay_predictions, validate_strategy_rows
+from src.processors.strategy import (
+    attribute_strategy_rows,
+    generate_strategy_experiment,
+    generate_strategy_prediction,
+    generate_strategy_replay_predictions,
+    validate_strategy_rows,
+)
 from src.storage.strategy import StrategyRepository
 from src.utils.config import load_config
 from src.utils.logger import setup_logger
@@ -36,6 +42,24 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument("--limit", type=int, default=100, help="Maximum stored rows to validate")
     validate_parser.add_argument("--config", default="", help="Optional path to config YAML")
     validate_parser.add_argument("--preview", action="store_true", help="Render validation summary but do not persist validation snapshots")
+
+    attribute_parser = subparsers.add_parser("attribute", help="Attribute validated strategy samples into structured error buckets")
+    attribute_parser.add_argument("--symbol", default="", help="Optional symbol filter")
+    attribute_parser.add_argument("--limit", type=int, default=100, help="Maximum stored rows to attribute")
+    attribute_parser.add_argument("--preview", action="store_true", help="Render attribution summary but do not persist attribution snapshots")
+
+    experiment_parser = subparsers.add_parser("experiment", help="Compare predefined replay weight variants on the same historical sample set")
+    experiment_parser.add_argument("symbol", help="A-share stock symbol")
+    experiment_parser.add_argument("--start", default="", help="Replay start date (YYYY-MM-DD)")
+    experiment_parser.add_argument("--end", default="", help="Replay end date (YYYY-MM-DD)")
+    experiment_parser.add_argument("--asset-gap-days", type=int, default=20, help="Minimum trading-day gap between replay samples for the same asset")
+    experiment_parser.add_argument("--max-samples", type=int, default=12, help="Maximum replay samples to generate")
+    experiment_parser.add_argument(
+        "--variants",
+        default="baseline,momentum_tilt,defensive_tilt,confirmation_tilt",
+        help="Comma-separated variant names",
+    )
+    experiment_parser.add_argument("--config", default="", help="Optional path to config YAML")
 
     list_parser = subparsers.add_parser("list", help="List recent prediction ledger rows")
     list_parser.add_argument("--symbol", default="", help="Optional symbol filter")
@@ -89,6 +113,31 @@ def main() -> None:
             for row in updated_rows:
                 repository.upsert_prediction(row)
         print(renderer.render_validation_summary(summary, persisted=persisted))
+        return
+
+    if args.subcommand == "attribute":
+        rows = repository.list_predictions(symbol=args.symbol, status="all", limit=args.limit)
+        updated_rows, summary = attribute_strategy_rows(rows)
+        persisted = not args.preview
+        if persisted:
+            for row in updated_rows:
+                repository.upsert_prediction(row)
+        print(renderer.render_attribute_summary(summary, persisted=persisted))
+        return
+
+    if args.subcommand == "experiment":
+        setup_logger("ERROR")
+        config = load_config(args.config or None)
+        payload = generate_strategy_experiment(
+            args.symbol,
+            config,
+            start=args.start,
+            end=args.end,
+            asset_gap_days=args.asset_gap_days,
+            max_samples=args.max_samples,
+            variants=[item.strip() for item in str(args.variants or "").split(",") if item.strip()],
+        )
+        print(renderer.render_experiment_summary(payload))
         return
 
     rows = repository.list_predictions(symbol=args.symbol, status=args.status, limit=args.limit)

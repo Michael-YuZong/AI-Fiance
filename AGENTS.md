@@ -73,8 +73,8 @@ When in doubt, optimize for:
 
 ## Current Priority Backlog
 
-1. `strategy` v1 attribution and fixtures
-   `I-1` prediction ledger plus a narrow `replay + validate` loop are now landed. Next step is `I-3` attribution plus the supporting lag / visibility / overlap fixture set. Keep the approved A-share liquid-stock universe, `20`-day benchmark-relative excess-return target, fixed overlap contract, point-in-time lag rules, and `no_prediction` cases. Do not widen scope to ETF/fund/multi-asset or auto-factor discovery yet.
+1. `strategy` fixtures and governance
+   `strategy` now has a usable `predict / list / replay / validate / attribute / experiment` loop. Next step is not widening scope, but hardening lag / visibility / overlap / benchmark fixtures, then adding champion-challenger promotion and rollback gates. Keep the approved A-share liquid-stock universe, fixed `20`-day benchmark-relative excess-return target, fixed overlap contract, point-in-time lag rules, and `no_prediction` cases. Do not widen scope to ETF/fund/multi-asset or auto-factor discovery yet.
 2. Policy v2
    Keep improving official-source extraction, especially scanned/table-heavy PDF/OFD handling, and deepen the policy taxonomy beyond the current first-pass contract.
 3. Proxy signals
@@ -94,6 +94,8 @@ When in doubt, optimize for:
   `src/commands/strategy.py`, `src/processors/strategy.py`, `src/storage/strategy.py`, and `src/output/strategy_report.py` now implement `strategy I-1` prediction ledger. v1 is intentionally narrow: single-symbol `predict` + `list`, fixed A-share liquid-stock universe, fixed `20`-day benchmark-relative excess-return target against CSI800, explicit `no_prediction` gating, and persisted factor/provenance snapshots.
 - 2026-03-14
   `strategy` now also has a narrow `replay + validate` loop: historical single-symbol non-overlap replay samples, persisted validation snapshots, hit-rate / avg excess / cost-adjusted directional return / confidence-bucket summary, and explicit disclosure that this is still time-series validation rather than full cross-sectional rank validation.
+- 2026-03-14
+  `strategy` now also has first-pass `attribute + experiment`: validated samples can be bucketed into structured labels such as `weight_misallocation / execution_cost_drag / universe_bias / confirmed_edge`, and predefined replay challengers (`baseline / momentum_tilt / defensive_tilt / confirmation_tilt`) can be compared on the same historical sample set without feeding production chains directly.
 - 2026-03-14
   Client-facing analysis/pick reports now expose disabled intraday provenance as `分钟级快照 as_of`, and `release_check` no longer mistakes that metadata row for unsupported intraday execution language.
 - 2026-03-13
@@ -160,6 +162,8 @@ When in doubt, optimize for:
   `python -m src.commands.strategy predict 600519 --preview`
   `python -m src.commands.strategy replay 600519 --start 2024-01-01 --end 2024-12-31 --max-samples 6`
   `python -m src.commands.strategy validate --symbol 600519 --limit 20 --preview`
+  `python -m src.commands.strategy attribute --symbol 600519 --limit 20 --preview`
+  `python -m src.commands.strategy experiment 600519 --start 2024-01-01 --end 2024-12-31 --max-samples 6`
   `python -m src.commands.strategy list --limit 10`
 - Reports
   `python -m src.commands.briefing daily`

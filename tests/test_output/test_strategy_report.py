@@ -151,3 +151,53 @@ def test_strategy_report_renderer_renders_validation_summary() -> None:
     assert "## 总体结果" in rendered
     assert "## 置信度分桶" in rendered
     assert "当前还是单标的时间序列口径" in rendered
+
+
+def test_strategy_report_renderer_renders_attribute_summary() -> None:
+    rendered = StrategyReportRenderer().render_attribute_summary(
+        {
+            "total_rows": 3,
+            "attributed_rows": 2,
+            "pending_rows": 1,
+            "not_applicable_rows": 0,
+            "label_rows": [{"label": "weight_misallocation", "count": 1, "share": 0.5, "hit_rate": 0.0, "avg_excess_return": -0.04, "avg_net_directional_return": -0.045}],
+            "recent_rows": [{"as_of": "2024-06-28", "symbol": "600519", "label": "weight_misallocation", "summary": "更像权重失衡。", "next_action": "先做权重实验。", "excess_return": -0.04, "hit": False, "status": "attributed"}],
+            "recommendations": ["先做权重实验。"],
+            "notes": ["v1 窄标签集。"],
+        },
+        persisted=True,
+    )
+
+    assert "# Strategy Attribution" in rendered
+    assert "## 归因分桶" in rendered
+    assert "先做权重实验" in rendered
+
+
+def test_strategy_report_renderer_renders_experiment_summary() -> None:
+    rendered = StrategyReportRenderer().render_experiment_summary(
+        {
+            "symbol": "600519",
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+            "sample_count": 6,
+            "baseline_variant": "baseline",
+            "champion_variant": "defensive_tilt",
+            "challenger_variant": "defensive_tilt",
+            "variant_rows": [
+                {
+                    "variant": "baseline",
+                    "hit_rate": 0.5,
+                    "avg_excess_return": -0.01,
+                    "avg_cost_adjusted_directional_return": -0.015,
+                    "avg_max_drawdown": -0.05,
+                    "dominant_attribution": "weight_misallocation",
+                    "hypothesis": "基线。",
+                }
+            ],
+            "notes": ["只用于研究。"],
+        }
+    )
+
+    assert "# Strategy Experiment" in rendered
+    assert "## 变体对比" in rendered
+    assert "weight_misallocation" in rendered

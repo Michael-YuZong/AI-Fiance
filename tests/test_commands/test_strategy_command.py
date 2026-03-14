@@ -170,3 +170,77 @@ def test_strategy_validate_main_renders_summary(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "# Strategy Validation" in captured.out
     assert "单标的时间序列口径" in captured.out
+
+
+def test_strategy_attribute_main_persists_rows(monkeypatch, capsys) -> None:
+    saved = []
+
+    class _Repo:
+        def list_predictions(self, **kwargs):
+            return [{"prediction_id": "pred_1", "symbol": "600519", "validation": {"validation_status": "validated"}}]
+
+        def upsert_prediction(self, payload):
+            saved.append(payload["prediction_id"])
+
+    monkeypatch.setattr(
+        strategy_module,
+        "attribute_strategy_rows",
+        lambda rows: (
+            [{"prediction_id": "pred_1", "symbol": "600519", "attribution": {"label": "weight_misallocation"}}],
+            {
+                "total_rows": 1,
+                "attributed_rows": 1,
+                "pending_rows": 0,
+                "not_applicable_rows": 0,
+                "label_rows": [{"label": "weight_misallocation", "count": 1, "share": 1.0, "hit_rate": 0.0, "avg_excess_return": -0.04, "avg_net_directional_return": -0.045}],
+                "recent_rows": [{"as_of": "2024-06-28", "symbol": "600519", "label": "weight_misallocation", "excess_return": -0.04, "hit": False, "status": "attributed"}],
+                "recommendations": ["先做权重实验。"],
+                "notes": ["v1 窄标签集。"],
+            },
+        ),
+    )
+    monkeypatch.setattr(strategy_module, "StrategyRepository", lambda: _Repo())
+    monkeypatch.setattr(sys, "argv", ["strategy", "attribute", "--symbol", "600519"])
+
+    strategy_module.main()
+
+    captured = capsys.readouterr()
+    assert saved == ["pred_1"]
+    assert "# Strategy Attribution" in captured.out
+    assert "先做权重实验" in captured.out
+
+
+def test_strategy_experiment_main_renders_summary(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(strategy_module, "load_config", lambda _path=None: {})
+    monkeypatch.setattr(
+        strategy_module,
+        "generate_strategy_experiment",
+        lambda symbol, config, **kwargs: {
+            "symbol": symbol,
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+            "sample_count": 6,
+            "baseline_variant": "baseline",
+            "champion_variant": "defensive_tilt",
+            "challenger_variant": "defensive_tilt",
+            "variant_rows": [
+                {
+                    "variant": "baseline",
+                    "hit_rate": 0.5,
+                    "avg_excess_return": -0.01,
+                    "avg_cost_adjusted_directional_return": -0.015,
+                    "avg_max_drawdown": -0.05,
+                    "dominant_attribution": "weight_misallocation",
+                    "hypothesis": "基线。",
+                }
+            ],
+            "notes": ["只用于研究，不直接 promotion。"],
+        },
+    )
+    monkeypatch.setattr(sys, "argv", ["strategy", "experiment", "600519", "--variants", "baseline"])
+
+    strategy_module.main()
+
+    captured = capsys.readouterr()
+    assert "# Strategy Experiment" in captured.out
+    assert "只用于研究，不直接 promotion" in captured.out

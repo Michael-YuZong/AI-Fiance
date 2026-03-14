@@ -829,10 +829,18 @@
   - `strategy validate`
   - 单标的时间序列 non-overlap 历史样本
   - hit rate / avg excess / cost-adjusted directional return / confidence bucket summary
+- `I-3` 已有第一轮可用实现：
+  - `strategy attribute`
+  - `confirmed_edge / execution_cost_drag / weight_misallocation / universe_bias / horizon_mismatch / missing_factor / regime_shift / data_degradation_or_proxy_limit`
+  - 给下一轮实验和 backlog 的结构化建议
+- `I-4` 已有第一轮可用实现：
+  - `strategy experiment`
+  - baseline vs predefined challenger replay comparison
+  - 同一批历史样本上的权重方案对照
 - 当前下一步应做：
-  - `I-3` error attribution
   - lag / visibility fixture
   - overlap / benchmark / promotion gate fixture
+  - 更严格的 out-of-sample / cohort / cross-sectional validate
 - 仍然不允许跳过 `I-1 / I-2 / I-3` 直接做自动候选因子发现。
 
 ### 为什么必须单独成阶段
@@ -1026,7 +1034,7 @@
 
 - 全市场截面 rank 质量验证
 - 多标的 cohort 同步验证
-- attribution label 自动化
+- lag / visibility fixture 的系统化覆盖
 - champion / challenger promotion gate 的真正落地
 
 ### `I-3` 错误归因
@@ -1047,6 +1055,33 @@
 
 并要求系统给出“下一轮更应该补什么”的建议，而不是只做事后解释。
 
+#### `I-3` 当前已落地的最小实现
+
+当前仓库里已经有一版可用的 `I-3`：
+
+- `python -m src.commands.strategy attribute --symbol 600519 --limit 20 --preview`
+  会对已验证样本做结构化归因
+- 当前归因标签仍是 v1 窄集合，但已经可以把样本分到：
+  - `confirmed_edge`
+  - `execution_cost_drag`
+  - `weight_misallocation`
+  - `universe_bias`
+  - `horizon_mismatch`
+  - `missing_factor`
+  - `regime_shift`
+  - `data_degradation_or_proxy_limit`
+- 当前产物不是自由文本，而是：
+  - 标签
+  - 一句话归因
+  - 下一轮更该做什么
+  - 标签分桶统计
+
+当前还没有完成的部分：
+
+- `point_in_time_contamination / factor_sign_wrong` 等更细标签
+- 按 regime / horizon 的切片归因
+- 把归因结果自动沉淀到 fixture / promotion gate
+
 ### `I-4` 因子 / 权重实验台
 
 在 ledger、validate、attribute 稳定后，再做统一实验台。
@@ -1060,6 +1095,31 @@
 - 不同 horizon / regime 下的稳定性
 - 扣掉成本后的真实表现
 - 和基线方案的比较
+
+#### `I-4` 当前已落地的最小实现
+
+当前仓库里已经有一版可用的 `I-4`：
+
+- `python -m src.commands.strategy experiment 600519 --start 2024-01-01 --end 2024-12-31 --max-samples 6`
+  会在同一批历史 replay 样本上比较预定义 challenger
+- 当前 challenger 仍是窄集合：
+  - `baseline`
+  - `momentum_tilt`
+  - `defensive_tilt`
+  - `confirmation_tilt`
+- 当前会输出：
+  - 每个变体的 `hit rate`
+  - `avg excess return`
+  - `avg cost-adjusted directional return`
+  - `avg max drawdown`
+  - `dominant attribution`
+- 当前只把它当作研究优先级排序，不允许直接 promotion 到生产链路
+
+当前还没有完成的部分：
+
+- 更广的因子候选池
+- 多 horizon / regime 的系统实验
+- out-of-sample promotion / rollback gate
 
 第一批建议纳入的候选因子：
 

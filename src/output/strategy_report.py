@@ -125,6 +125,15 @@ class StrategyReportRenderer:
                 f"- 结果: `{'命中' if validation.get('hit') else '未命中'}` | "
                 f"最大回撤 `{_pct(validation.get('max_drawdown'))}` | 验证方向 `{validation.get('direction_checked', '—')}`"
             )
+        attribution = dict(payload.get("attribution") or {})
+        if attribution:
+            lines.append("")
+            lines.append("## 归因")
+            lines.append(
+                f"- 标签: `{attribution.get('label', '—')}` | 状态 `{attribution.get('status', '—')}` | {attribution.get('summary', '')}"
+            )
+            if attribution.get("next_action"):
+                lines.append(f"- 下一步: {attribution.get('next_action')}")
         return "\n".join(lines).rstrip() + "\n"
 
     def render_prediction_list(self, rows: Sequence[Mapping[str, Any]]) -> str:
@@ -248,6 +257,113 @@ class StrategyReportRenderer:
                     )
                     + " |"
                 )
+        notes = list(payload.get("notes") or [])
+        if notes:
+            lines.append("")
+            lines.append("## 边界")
+            for note in notes:
+                lines.append(f"- {note}")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def render_attribute_summary(self, payload: Mapping[str, Any], *, persisted: bool) -> str:
+        lines: List[str] = ["# Strategy Attribution", ""]
+        lines.append(
+            f"- 样本总数: `{payload.get('total_rows', 0)}` | 已归因: `{payload.get('attributed_rows', 0)}` | "
+            f"待未来窗口: `{payload.get('pending_rows', 0)}` | 不适用: `{payload.get('not_applicable_rows', 0)}` | "
+            f"{'已回写账本' if persisted else '仅预览'}"
+        )
+        label_rows = list(payload.get("label_rows") or [])
+        if label_rows:
+            lines.append("")
+            lines.append("## 归因分桶")
+            lines.append("| label | count | share | hit rate | avg excess | avg net directional |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
+            for row in label_rows:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            str(row.get("label", "—")),
+                            str(row.get("count", 0)),
+                            f"{float(row.get('share', 0.0)):.1%}",
+                            f"{float(row.get('hit_rate', 0.0)):.1%}",
+                            _pct(row.get("avg_excess_return")),
+                            _pct(row.get("avg_net_directional_return")),
+                        ]
+                    )
+                    + " |"
+                )
+        recent_rows = list(payload.get("recent_rows") or [])
+        if recent_rows:
+            lines.append("")
+            lines.append("## 最近样本")
+            lines.append("| as_of | symbol | label | excess | hit | status |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
+            for row in recent_rows:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            str(row.get("as_of", "—")),
+                            f"`{row.get('symbol', '')}`",
+                            str(row.get("label", "—")),
+                            _pct(row.get("excess_return")),
+                            "✅" if bool(row.get("hit")) else "❌",
+                            str(row.get("status", "—")),
+                        ]
+                    )
+                    + " |"
+                )
+                if row.get("summary"):
+                    lines.append(f"  说明: {row.get('summary')}")
+                if row.get("next_action"):
+                    lines.append(f"  下一步: {row.get('next_action')}")
+        recommendations = list(payload.get("recommendations") or [])
+        if recommendations:
+            lines.append("")
+            lines.append("## 下一轮建议")
+            for item in recommendations:
+                lines.append(f"- {item}")
+        notes = list(payload.get("notes") or [])
+        if notes:
+            lines.append("")
+            lines.append("## 边界")
+            for note in notes:
+                lines.append(f"- {note}")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def render_experiment_summary(self, payload: Mapping[str, Any]) -> str:
+        lines: List[str] = ["# Strategy Experiment", ""]
+        lines.append(
+            f"- 标的: `{payload.get('symbol', '')}` | 区间: `{payload.get('start', '—')}` -> `{payload.get('end', '—')}` | "
+            f"样本数: `{payload.get('sample_count', 0)}` | baseline: `{payload.get('baseline_variant', '')}`"
+        )
+        lines.append(
+            f"- 当前 champion: `{payload.get('champion_variant', '—') or '—'}` | challenger: `{payload.get('challenger_variant', '—') or '—'}`"
+        )
+        variant_rows = list(payload.get("variant_rows") or [])
+        if variant_rows:
+            lines.append("")
+            lines.append("## 变体对比")
+            lines.append("| variant | hit rate | avg excess | avg net directional | avg drawdown | dominant attribution |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
+            for row in variant_rows:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            str(row.get("variant", "—")),
+                            f"{float(row.get('hit_rate', 0.0)):.1%}",
+                            _pct(row.get("avg_excess_return")),
+                            _pct(row.get("avg_cost_adjusted_directional_return")),
+                            _pct(row.get("avg_max_drawdown")),
+                            str(row.get("dominant_attribution", "—")),
+                        ]
+                    )
+                    + " |"
+                )
+                if row.get("hypothesis"):
+                    lines.append(f"  假设: {row.get('hypothesis')}")
         notes = list(payload.get("notes") or [])
         if notes:
             lines.append("")

@@ -3,7 +3,13 @@ from __future__ import annotations
 import pandas as pd
 
 import src.processors.strategy as strategy_module
-from src.processors.strategy import build_strategy_prediction_from_analysis, generate_strategy_replay_predictions, validate_strategy_rows
+from src.processors.strategy import (
+    attribute_strategy_rows,
+    build_strategy_prediction_from_analysis,
+    generate_strategy_experiment,
+    generate_strategy_replay_predictions,
+    validate_strategy_rows,
+)
 
 
 def _history(days: int = 260, *, amount: float = 1.6e8, start: str = "2025-01-01") -> pd.DataFrame:
@@ -147,3 +153,87 @@ def test_validate_strategy_rows_adds_validation_snapshot(monkeypatch) -> None:
     assert updated_rows[0]["validation"]["validation_status"] == "validated"
     assert summary["validated_rows"] == 1
     assert "单标的时间序列口径" in summary["notes"][0]
+
+
+def test_attribute_strategy_rows_labels_weight_misallocation_for_mixed_low_confidence_miss() -> None:
+    rows = [
+        {
+            "symbol": "600519",
+            "status": "predicted",
+            "seed_score": 56.0,
+            "confidence_label": "低",
+            "prediction_value": {"expected_excess_direction": "positive"},
+            "key_factors": [
+                {"direction": "supportive"},
+                {"direction": "supportive"},
+                {"direction": "drag"},
+                {"direction": "drag"},
+            ],
+            "downgrade_flags": [],
+            "validation": {
+                "validation_status": "validated",
+                "hit": False,
+                "realized_return": -0.01,
+                "excess_return": -0.06,
+                "cost_adjusted_directional_return": -0.065,
+                "neutral_band": 0.02,
+            },
+        }
+    ]
+
+    updated_rows, summary = attribute_strategy_rows(rows)
+
+    assert updated_rows[0]["attribution"]["label"] == "weight_misallocation"
+    assert summary["label_rows"][0]["label"] == "weight_misallocation"
+    assert "strategy experiment" in summary["recommendations"][0]
+
+
+def test_attribute_strategy_rows_labels_universe_bias_when_absolute_direction_right_but_relative_wrong() -> None:
+    rows = [
+        {
+            "symbol": "600519",
+            "status": "predicted",
+            "seed_score": 68.0,
+            "confidence_label": "中",
+            "prediction_value": {"expected_excess_direction": "positive"},
+            "key_factors": [{"direction": "supportive"}],
+            "downgrade_flags": [],
+            "validation": {
+                "validation_status": "validated",
+                "hit": False,
+                "realized_return": 0.03,
+                "excess_return": -0.02,
+                "cost_adjusted_directional_return": -0.025,
+                "neutral_band": 0.01,
+            },
+        }
+    ]
+
+    updated_rows, _ = attribute_strategy_rows(rows)
+
+    assert updated_rows[0]["attribution"]["label"] == "universe_bias"
+
+
+def test_generate_strategy_experiment_compares_variants(monkeypatch) -> None:
+    asset_history = _history(days=520, amount=1.8e8, start="2024-01-01")
+    benchmark_history = _history(days=520, amount=2.2e8, start="2024-01-01")
+    benchmark_history["close"] = benchmark_history["close"] * 0.997
+    monkeypatch.setattr(strategy_module, "detect_asset_type", lambda symbol, config: "cn_stock")
+    monkeypatch.setattr(
+        strategy_module,
+        "fetch_asset_history",
+        lambda symbol, asset_type, config: benchmark_history if symbol == "000906.SH" else asset_history,
+    )
+
+    payload = generate_strategy_experiment(
+        "600519",
+        {},
+        start="2025-01-01",
+        end="2025-12-31",
+        max_samples=3,
+        variants=["baseline", "defensive_tilt"],
+    )
+
+    assert payload["sample_count"] == 3
+    assert len(payload["variant_rows"]) == 2
+    assert payload["variant_rows"][0]["variant"] in {"baseline", "defensive_tilt"}
