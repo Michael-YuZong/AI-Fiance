@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -107,6 +107,152 @@ def _seeded_recursive_average(values: pd.Series, alpha: float, seed: float) -> p
         prev = (1 - alpha) * prev + alpha * float(value)
         result.loc[idx] = prev
     return result
+
+
+def _pivot_extrema(series: pd.Series, *, kind: str, order: int = 3, lookback: int = 120) -> List[Tuple[int, float]]:
+    values = pd.to_numeric(series, errors="coerce").astype(float).to_numpy()
+    if len(values) < max(order * 2 + 1, 10):
+        return []
+
+    start = max(order, len(values) - max(lookback, order * 4))
+    end = len(values) - order
+    pivots: List[Tuple[int, float]] = []
+
+    def _valid(window: np.ndarray) -> np.ndarray:
+        return window[~np.isnan(window)]
+
+    for idx in range(start, end):
+        current = values[idx]
+        if np.isnan(current):
+            continue
+        left = _valid(values[idx - order : idx])
+        right = _valid(values[idx + 1 : idx + order + 1])
+        if len(left) < order or len(right) < order:
+            continue
+        if kind == "high":
+            if current > float(left.max()) and current >= float(right.max()):
+                pivots.append((idx, float(current)))
+        else:
+            if current < float(left.min()) and current <= float(right.min()):
+                pivots.append((idx, float(current)))
+
+    last_idx = len(values) - 1
+    trailing = _valid(values[max(start, last_idx - order) : last_idx])
+    last_value = values[last_idx]
+    if len(trailing) >= max(1, order - 1) and not np.isnan(last_value):
+        if kind == "high" and last_value > float(trailing.max()):
+            if not pivots or pivots[-1][0] != last_idx:
+                pivots.append((last_idx, float(last_value)))
+        if kind == "low" and last_value < float(trailing.min()):
+            if not pivots or pivots[-1][0] != last_idx:
+                pivots.append((last_idx, float(last_value)))
+
+    return pivots[-6:]
+
+
+def _indicator_divergence_threshold(indicator: str, previous: float, current: float) -> float:
+    name = str(indicator).upper()
+    magnitude = max(abs(previous), abs(current), 1e-9)
+    if name == "RSI":
+        return 2.5
+    if name == "MACD":
+        return max(0.02, magnitude * 0.12)
+    if name == "OBV":
+        return max(1.0, magnitude * 0.02)
+    return max(0.01, magnitude * 0.05)
+
+
+def _candle_snapshot(row: pd.Series) -> Dict[str, float | bool]:
+    open_price = float(row["open"])
+    high = float(row["high"])
+    low = float(row["low"])
+    close = float(row["close"])
+    total_range = max(high - low, 1e-9)
+    body = abs(close - open_price)
+    upper_shadow = max(0.0, high - max(open_price, close))
+    lower_shadow = max(0.0, min(open_price, close) - low)
+    midpoint = (open_price + close) / 2
+    return {
+        "open": open_price,
+        "high": high,
+        "low": low,
+        "close": close,
+        "body": body,
+        "upper_shadow": upper_shadow,
+        "lower_shadow": lower_shadow,
+        "range": total_range,
+        "body_ratio": body / total_range if total_range > 0 else 0.0,
+        "midpoint": midpoint,
+        "bullish": close > open_price,
+        "bearish": close < open_price,
+    }
+
+
+def _prior_return(close: pd.Series, bars: int, *, window: int = 5) -> float:
+    if len(close) <= bars + 1:
+        return 0.0
+    end = len(close) - bars - 1
+    start = max(0, end - window)
+    if end <= start:
+        return 0.0
+    start_price = float(close.iloc[start])
+    end_price = float(close.iloc[end])
+    if start_price <= 0:
+        return 0.0
+    return end_price / start_price - 1.0
+
+
+def _detect_price_indicator_divergence(
+    *,
+    price_series: pd.Series,
+    indicator_series: pd.Series,
+    dates: Sequence[pd.Timestamp],
+    indicator_name: str,
+    mode: str,
+    order: int = 3,
+    lookback: int = 120,
+) -> Optional[Dict[str, Any]]:
+    pivot_kind = "low" if mode == "bullish" else "high"
+    pivots = _pivot_extrema(price_series, kind=pivot_kind, order=order, lookback=lookback)
+    if len(pivots) < 2:
+        return None
+
+    prev_idx, prev_price = pivots[-2]
+    curr_idx, curr_price = pivots[-1]
+    indicator_values = pd.to_numeric(indicator_series, errors="coerce")
+    prev_indicator = float(indicator_values.iloc[prev_idx]) if pd.notna(indicator_values.iloc[prev_idx]) else np.nan
+    curr_indicator = float(indicator_values.iloc[curr_idx]) if pd.notna(indicator_values.iloc[curr_idx]) else np.nan
+    if np.isnan(prev_indicator) or np.isnan(curr_indicator):
+        return None
+
+    price_threshold = max(abs(prev_price), abs(curr_price), 1e-9) * 0.005
+    indicator_threshold = _indicator_divergence_threshold(indicator_name, prev_indicator, curr_indicator)
+    if mode == "bullish":
+        price_condition = curr_price < prev_price - price_threshold
+        indicator_condition = curr_indicator > prev_indicator + indicator_threshold
+    else:
+        price_condition = curr_price > prev_price + price_threshold
+        indicator_condition = curr_indicator < prev_indicator - indicator_threshold
+    if not (price_condition and indicator_condition):
+        return None
+
+    prev_date = pd.Timestamp(dates[prev_idx]).date().isoformat()
+    curr_date = pd.Timestamp(dates[curr_idx]).date().isoformat()
+    price_phrase = "价格低点下移" if mode == "bullish" else "价格高点抬升"
+    indicator_phrase = "低点抬高" if mode == "bullish" else "高点回落"
+    return {
+        "indicator": indicator_name,
+        "mode": mode,
+        "previous_index": prev_idx,
+        "current_index": curr_idx,
+        "previous_price": float(prev_price),
+        "current_price": float(curr_price),
+        "previous_indicator": float(prev_indicator),
+        "current_indicator": float(curr_indicator),
+        "previous_date": prev_date,
+        "current_date": curr_date,
+        "detail": f"{prev_date} -> {curr_date} {price_phrase}，但 {indicator_name} {indicator_phrase}",
+    }
 
 
 class TechnicalAnalyzer:
@@ -357,6 +503,113 @@ class TechnicalAnalyzer:
             "signal": signal,
         }
 
+    def divergence_analysis(self, order: int = 3, lookback: int = 120) -> Dict[str, Any]:
+        price_high = self.df["high"].astype(float)
+        price_low = self.df["low"].astype(float)
+        dates = list(self.df["date"])
+        macd = self._macd_series()
+        rsi = self._rsi_series()
+        obv = self._obv_series()
+
+        bullish_hits = [
+            hit
+            for hit in [
+                _detect_price_indicator_divergence(
+                    price_series=price_low,
+                    indicator_series=rsi,
+                    dates=dates,
+                    indicator_name="RSI",
+                    mode="bullish",
+                    order=order,
+                    lookback=lookback,
+                ),
+                _detect_price_indicator_divergence(
+                    price_series=price_low,
+                    indicator_series=macd["DIF"],
+                    dates=dates,
+                    indicator_name="MACD",
+                    mode="bullish",
+                    order=order,
+                    lookback=lookback,
+                ),
+                _detect_price_indicator_divergence(
+                    price_series=price_low,
+                    indicator_series=obv["OBV"],
+                    dates=dates,
+                    indicator_name="OBV",
+                    mode="bullish",
+                    order=order,
+                    lookback=lookback,
+                ),
+            ]
+            if hit
+        ]
+        bearish_hits = [
+            hit
+            for hit in [
+                _detect_price_indicator_divergence(
+                    price_series=price_high,
+                    indicator_series=rsi,
+                    dates=dates,
+                    indicator_name="RSI",
+                    mode="bearish",
+                    order=order,
+                    lookback=lookback,
+                ),
+                _detect_price_indicator_divergence(
+                    price_series=price_high,
+                    indicator_series=macd["DIF"],
+                    dates=dates,
+                    indicator_name="MACD",
+                    mode="bearish",
+                    order=order,
+                    lookback=lookback,
+                ),
+                _detect_price_indicator_divergence(
+                    price_series=price_high,
+                    indicator_series=obv["OBV"],
+                    dates=dates,
+                    indicator_name="OBV",
+                    mode="bearish",
+                    order=order,
+                    lookback=lookback,
+                ),
+            ]
+            if hit
+        ]
+
+        if bullish_hits and len(bullish_hits) >= len(bearish_hits):
+            indicators = [str(item["indicator"]) for item in bullish_hits]
+            return {
+                "signal": "bullish",
+                "kind": "底背离",
+                "label": f"价格低点下移，但 {' / '.join(indicators)} 低点抬高（底背离）",
+                "indicators": indicators,
+                "strength": len(indicators),
+                "detail": "；".join(str(item["detail"]) for item in bullish_hits[:3]),
+                "hits": bullish_hits,
+            }
+        if bearish_hits:
+            indicators = [str(item["indicator"]) for item in bearish_hits]
+            return {
+                "signal": "bearish",
+                "kind": "顶背离",
+                "label": f"价格高点抬升，但 {' / '.join(indicators)} 未同步创新高（顶背离）",
+                "indicators": indicators,
+                "strength": len(indicators),
+                "detail": "；".join(str(item["detail"]) for item in bearish_hits[:3]),
+                "hits": bearish_hits,
+            }
+        return {
+            "signal": "neutral",
+            "kind": "无明确背离",
+            "label": "未识别到明确顶/底背离",
+            "indicators": [],
+            "strength": 0,
+            "detail": "当前按最近两组确认摆点检查 RSI / MACD / OBV，未识别到明确背离。",
+            "hits": [],
+        }
+
     def fibonacci(self, lookback: int = 60) -> Dict[str, Any]:
         window = self.df.tail(max(lookback, 20)).copy()
         high = float(window["high"].max())
@@ -496,23 +749,134 @@ class TechnicalAnalyzer:
         }
 
     def candlestick_patterns(self) -> list:
-        """识别最近一根 K 线的形态特征。"""
-        row = self.df.iloc[-1]
-        open_price, high, low, close = row["open"], row["high"], row["low"], row["close"]
-        body = abs(close - open_price)
-        upper_shadow = high - max(open_price, close)
-        lower_shadow = min(open_price, close) - low
-        total_range = high - low
-        patterns = []
-        if total_range > 0:
-            if lower_shadow > 2 * body and upper_shadow < max(body * 0.3, total_range * 0.05):
-                patterns.append("hammer" if close >= open_price else "inverted_hammer")
-            if upper_shadow > 2 * body and lower_shadow < max(body * 0.3, total_range * 0.05):
-                patterns.append("shooting_star")
-            if body <= total_range * 0.1:
-                patterns.append("doji")
-            if body >= total_range * 0.7:
-                patterns.append("marubozu")
+        """识别最近 1-3 根 K 线的常见形态特征。"""
+        close = self.df["close"]
+        latest = _candle_snapshot(self.df.iloc[-1])
+        patterns: list[str] = []
+
+        def _append(name: str) -> None:
+            if name not in patterns:
+                patterns.append(name)
+
+        single_trend = _prior_return(close, 1, window=5)
+        two_bar_trend = _prior_return(close, 2, window=5)
+        three_bar_trend = _prior_return(close, 3, window=5)
+
+        if len(self.df) >= 3:
+            first = _candle_snapshot(self.df.iloc[-3])
+            second = _candle_snapshot(self.df.iloc[-2])
+            third = latest
+            if (
+                three_bar_trend <= -0.02
+                and first["bearish"]
+                and float(first["body_ratio"]) >= 0.45
+                and float(second["body_ratio"]) <= 0.35
+                and third["bullish"]
+                and float(third["body_ratio"]) >= 0.35
+                and float(third["close"]) > float(first["midpoint"])
+            ):
+                _append("morning_star")
+            if (
+                three_bar_trend >= 0.02
+                and first["bullish"]
+                and float(first["body_ratio"]) >= 0.45
+                and float(second["body_ratio"]) <= 0.35
+                and third["bearish"]
+                and float(third["body_ratio"]) >= 0.35
+                and float(third["close"]) < float(first["midpoint"])
+            ):
+                _append("evening_star")
+            if (
+                all(bar["bullish"] for bar in (first, second, third))
+                and float(first["body_ratio"]) >= 0.35
+                and float(second["body_ratio"]) >= 0.35
+                and float(third["body_ratio"]) >= 0.35
+                and float(first["close"]) < float(second["close"]) < float(third["close"])
+                and float(first["open"]) <= float(second["open"]) <= float(first["close"])
+                and float(second["open"]) <= float(third["open"]) <= float(second["close"])
+            ):
+                _append("three_white_soldiers")
+            if (
+                all(bar["bearish"] for bar in (first, second, third))
+                and float(first["body_ratio"]) >= 0.35
+                and float(second["body_ratio"]) >= 0.35
+                and float(third["body_ratio"]) >= 0.35
+                and float(first["close"]) > float(second["close"]) > float(third["close"])
+                and float(first["close"]) <= float(second["open"]) <= float(first["open"])
+                and float(second["close"]) <= float(third["open"]) <= float(second["open"])
+            ):
+                _append("three_black_crows")
+
+        if len(self.df) >= 2:
+            previous = _candle_snapshot(self.df.iloc[-2])
+            current = latest
+            if (
+                two_bar_trend <= -0.01
+                and previous["bearish"]
+                and current["bullish"]
+                and float(current["open"]) <= float(previous["close"])
+                and float(current["close"]) >= float(previous["open"])
+                and float(current["body"]) >= float(previous["body"]) * 0.9
+            ):
+                _append("bullish_engulfing")
+            if (
+                two_bar_trend >= 0.01
+                and previous["bullish"]
+                and current["bearish"]
+                and float(current["open"]) >= float(previous["close"])
+                and float(current["close"]) <= float(previous["open"])
+                and float(current["body"]) >= float(previous["body"]) * 0.9
+            ):
+                _append("bearish_engulfing")
+            if (
+                two_bar_trend <= -0.015
+                and previous["bearish"]
+                and float(previous["body_ratio"]) >= 0.45
+                and current["bullish"]
+                and float(current["open"]) <= float(previous["close"]) + float(previous["range"]) * 0.15
+                and float(current["close"]) > float(previous["midpoint"])
+                and float(current["close"]) < float(previous["open"])
+            ):
+                _append("piercing_line")
+            if (
+                two_bar_trend >= 0.015
+                and previous["bullish"]
+                and float(previous["body_ratio"]) >= 0.45
+                and current["bearish"]
+                and float(current["open"]) >= float(previous["close"]) - float(previous["range"]) * 0.15
+                and float(current["close"]) < float(previous["midpoint"])
+                and float(current["close"]) > float(previous["open"])
+            ):
+                _append("dark_cloud_cover")
+
+        if float(latest["range"]) > 0:
+            if (
+                single_trend <= -0.01
+                and float(latest["lower_shadow"]) >= max(float(latest["body"]) * 2.2, float(latest["range"]) * 0.45)
+                and float(latest["upper_shadow"]) <= max(float(latest["body"]) * 0.6, float(latest["range"]) * 0.15)
+            ):
+                _append("hammer")
+            if (
+                single_trend <= -0.01
+                and float(latest["upper_shadow"]) >= max(float(latest["body"]) * 2.2, float(latest["range"]) * 0.45)
+                and float(latest["lower_shadow"]) <= max(float(latest["body"]) * 0.6, float(latest["range"]) * 0.15)
+            ):
+                _append("inverted_hammer")
+            if (
+                single_trend >= 0.01
+                and float(latest["upper_shadow"]) >= max(float(latest["body"]) * 2.2, float(latest["range"]) * 0.45)
+                and float(latest["lower_shadow"]) <= max(float(latest["body"]) * 0.6, float(latest["range"]) * 0.15)
+            ):
+                _append("shooting_star")
+            if float(latest["body"]) <= float(latest["range"]) * 0.1:
+                _append("doji")
+            if (
+                float(latest["body"]) >= float(latest["range"]) * 0.8
+                and float(latest["upper_shadow"]) <= float(latest["range"]) * 0.1
+                and float(latest["lower_shadow"]) <= float(latest["range"]) * 0.1
+            ):
+                _append("bullish_marubozu" if bool(latest["bullish"]) else "bearish_marubozu")
+                _append("marubozu")
         return patterns
 
     def ma_system(self, periods: Optional[Iterable[int]] = None) -> Dict[str, Any]:
@@ -547,4 +911,5 @@ class TechnicalAnalyzer:
             "volatility": self.volatility_profile(**technical_config.get("atr", {})),
             "candlestick": self.candlestick_patterns(),
             "ma_system": self.ma_system(technical_config.get("ma_periods")),
+            "divergence": self.divergence_analysis(**technical_config.get("divergence", {})),
         }

@@ -2738,6 +2738,21 @@ def _technical_dimension(history: pd.DataFrame, technical: Mapping[str, Any]) ->
     available += 10
     factors.append(_factor_row("OBV", f"OBV {'站上' if obv_value >= obv_ma else '跌破'}均线 · 5日斜率 {obv_slope:.0f}", obv_award, 10, "OBV 更像量价同向的确认因子；价格涨而 OBV 不跟，通常说明承接并不扎实"))
 
+    divergence = technical.get("divergence", {})
+    divergence_signal = str(divergence.get("signal", "neutral"))
+    divergence_label = str(divergence.get("label", "未识别到明确顶/底背离"))
+    divergence_detail = str(divergence.get("detail", "当前按最近两组确认摆点检查 RSI / MACD / OBV，未识别到明确背离。"))
+    divergence_strength = int(divergence.get("strength", 0) or 0)
+    if divergence_signal == "bullish":
+        divergence_award = 10 if divergence_strength >= 2 else 6
+    elif divergence_signal == "bearish":
+        divergence_award = -8 if divergence_strength >= 2 else -4
+    else:
+        divergence_award = 0
+    raw += divergence_award
+    available += 10
+    factors.append(_factor_row("量价/动量背离", divergence_label, divergence_award, 10, f"背离按最近两组确认摆点识别，主要看价格与 RSI / MACD / OBV 是否同向。{divergence_detail}"))
+
     rsi = float(technical.get("rsi", {}).get("RSI", 50.0))
     if 30 <= rsi <= 50:
         rsi_award = 15
@@ -2756,12 +2771,66 @@ def _technical_dimension(history: pd.DataFrame, technical: Mapping[str, Any]) ->
     available += 20
     factors.append(_factor_row("支撑位", support_detail, support_award, 20, "优先看前低 / MA60 / 斐波那契 0.382-0.618"))
 
+    pattern_labels = {
+        "morning_star": "早晨之星",
+        "evening_star": "黄昏之星",
+        "three_white_soldiers": "红三兵",
+        "three_black_crows": "三只乌鸦",
+        "bullish_engulfing": "看涨吞没",
+        "bearish_engulfing": "看跌吞没",
+        "piercing_line": "曙光初现",
+        "dark_cloud_cover": "乌云盖顶",
+        "hammer": "锤头线",
+        "inverted_hammer": "倒锤头",
+        "shooting_star": "流星线",
+        "bullish_marubozu": "光头光脚长阳",
+        "bearish_marubozu": "光头光脚长阴",
+        "marubozu": "长实体 K 线",
+        "doji": "十字星",
+    }
+    pattern_scores = {
+        "morning_star": 10,
+        "three_white_soldiers": 10,
+        "bullish_engulfing": 8,
+        "piercing_line": 7,
+        "hammer": 6,
+        "inverted_hammer": 5,
+        "bullish_marubozu": 6,
+        "evening_star": -10,
+        "three_black_crows": -10,
+        "bearish_engulfing": -8,
+        "dark_cloud_cover": -7,
+        "shooting_star": -6,
+        "bearish_marubozu": -6,
+        "doji": 0,
+        "marubozu": 0,
+    }
     patterns = list(technical.get("candlestick", []) or [])
-    bullish_patterns = [item for item in patterns if item in {"hammer", "inverted_hammer", "marubozu"}]
-    candle_award = 10 if bullish_patterns else 0
+    if "bullish_marubozu" in patterns or "bearish_marubozu" in patterns:
+        patterns = [item for item in patterns if item != "marubozu"]
+    recognized_patterns = [item for item in patterns if item in pattern_scores]
+    bullish_scores = [pattern_scores[item] for item in recognized_patterns if pattern_scores[item] > 0]
+    bearish_scores = [pattern_scores[item] for item in recognized_patterns if pattern_scores[item] < 0]
+    strongest_bullish = max(bullish_scores, default=0)
+    strongest_bearish = min(bearish_scores, default=0)
+    if abs(strongest_bearish) > abs(strongest_bullish):
+        candle_award = strongest_bearish
+    elif strongest_bullish > abs(strongest_bearish):
+        candle_award = strongest_bullish
+    else:
+        candle_award = strongest_bullish if strongest_bullish and not bearish_scores else 0
     raw += candle_award
     available += 10
-    factors.append(_factor_row("K线形态", " / ".join(bullish_patterns) if bullish_patterns else "无明显看涨形态", candle_award, 10, "当前只识别最近一根 K 线"))
+    pattern_signal = " / ".join(pattern_labels.get(item, item) for item in recognized_patterns[:3]) if recognized_patterns else "无明确组合形态"
+    factors.append(
+        _factor_row(
+            "K线形态",
+            pattern_signal,
+            candle_award,
+            10,
+            "当前按最近 1-3 根 K 线识别单根、双根、三根组合形态；吞没/星形/三兵三鸦等反转形态会结合前序 5 日趋势过滤。",
+        )
+    )
 
     volume_block = technical.get("volume", {})
     vol_ratio = float(volume_block.get("vol_ratio", technical.get("volume_ratio", 1.0)))
@@ -4796,6 +4865,12 @@ def _build_narrative(
     commodity_like_fund = _is_commodity_like_fund(asset_type, metadata, fund_profile)
     support_signal = _find_factor(dimensions["technical"], "支撑位").get("signal", "关键支撑未明确")
     macd_signal = _find_factor(dimensions["technical"], "MACD 金叉").get("signal", "MACD 方向一般")
+    candle_factor = _find_factor(dimensions["technical"], "K线形态")
+    candle_signal = str(candle_factor.get("signal", "")).strip()
+    candle_award = int(candle_factor.get("awarded", 0) or 0)
+    divergence_factor = _find_factor(dimensions["technical"], "量价/动量背离")
+    divergence_signal = str(divergence_factor.get("signal", "")).strip()
+    divergence_award = int(divergence_factor.get("awarded", 0) or 0)
     rsi = float(technical.get("rsi", {}).get("RSI", 50.0))
     ma20 = float(technical.get("ma_system", {}).get("mas", {}).get("MA20", 0.0))
     ma60 = float(technical.get("ma_system", {}).get("mas", {}).get("MA60", ma20))
@@ -4838,6 +4913,16 @@ def _build_narrative(
         technical_driver = f"技术面最值得看的不是强趋势，而是价格已经回到 `{support_signal}` 附近；但 `{macd_signal}`，短线动能还需要再修复。"
     else:
         technical_driver = f"技术面当前最大问题不是完全破位，而是 `{macd_signal}`，趋势确认不足。"
+    if divergence_signal and "未识别到明确顶/底背离" not in divergence_signal:
+        if divergence_award > 0:
+            technical_driver += f" 同时出现 `{divergence_signal}`，说明价格回撤和动量/量能没有同步恶化，这更像止跌修复的辅助确认。"
+        elif divergence_award < 0:
+            technical_driver += f" 当前还叠加 `{divergence_signal}`，说明价格和动量/量能并没有完全同步，短线更需要等背离消化。"
+    if candle_signal and "无明确组合形态" not in candle_signal:
+        if candle_award >= 7:
+            technical_driver += f" 最近 1-3 根 K 线还出现 `{candle_signal}`，说明短线承接开始改善。"
+        elif candle_award <= -7:
+            technical_driver += f" 但最近 1-3 根 K 线出现 `{candle_signal}`，说明反弹结构还没有真正站稳。"
     if asset_type == "cn_fund" and fund_profile:
         selection = str(dict(fund_profile.get("style") or {}).get("selection", "")).strip()
         if selection:
@@ -5039,6 +5124,17 @@ def _action_plan(
     catalyst_score = analysis["dimensions"]["catalyst"]["score"] or 0
     macro_reverse = analysis["dimensions"]["macro"].get("macro_reverse", False)
     rsi = float(technical.get("rsi", {}).get("RSI", 50.0))
+    divergence = dict(technical.get("divergence") or {})
+    divergence_signal = str(divergence.get("signal", "neutral"))
+    candlestick_patterns = set(technical.get("candlestick", []) or [])
+    bearish_candle = any(
+        pattern in candlestick_patterns
+        for pattern in {"evening_star", "three_black_crows", "bearish_engulfing", "dark_cloud_cover", "shooting_star", "bearish_marubozu"}
+    )
+    bullish_candle = any(
+        pattern in candlestick_patterns
+        for pattern in {"morning_star", "three_white_soldiers", "bullish_engulfing", "piercing_line", "hammer", "inverted_hammer", "bullish_marubozu"}
+    )
     fib_levels = technical.get("fibonacci", {}).get("levels", {})
     ma20 = float(technical.get("ma_system", {}).get("mas", {}).get("MA20", history["close"].iloc[-1]))
     ma60 = float(technical.get("ma_system", {}).get("mas", {}).get("MA60", history["close"].iloc[-1]))
@@ -5058,8 +5154,12 @@ def _action_plan(
         direction = "回避"
 
     # --- Entry conditions: incorporate risk and relative strength ---
-    if rsi > 70:
+    if divergence_signal == "bearish" or bearish_candle:
+        entry = "先等顶背离消化、MACD/OBV 重新同步，再考虑分批介入"
+    elif rsi > 70:
         entry = "等 RSI 回落到 60 附近且 MACD 不死叉，再考虑分批介入"
+    elif (divergence_signal == "bullish" or bullish_candle) and tech is not None and tech >= 40:
+        entry = "已有底背离雏形，更适合等价格重新站回 MA20 或 MACD 继续走强后小仓试探"
     elif tech is not None and tech >= 55 and ma20_gap >= 0.05 and return_5d >= 0.05:
         entry = "短线已明显抬离 MA20，优先等回踩 MA20 附近企稳后再分批，不追高"
     elif tech is not None and tech >= 55 and return_5d >= 0.07:

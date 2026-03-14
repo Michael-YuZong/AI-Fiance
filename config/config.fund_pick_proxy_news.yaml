@@ -1,2 +1,4 @@
+# 基金 pick 代理新闻 profile。
+# 只在测试“无实时新闻、靠代理链路降级”时再打开。
 news_feeds_file: config/news_feeds.empty.yaml
 news_topic_search_enabled: false

@@ -115,8 +115,27 @@ class ScorecardBuilder:
             }
         )
 
-        patterns = technical.get("candlestick", [])
-        pattern_reason = "最近一根 K 线未识别出明显形态。" if not patterns else f"最近形态：{', '.join(patterns)}。"
+        pattern_labels = {
+            "morning_star": "早晨之星",
+            "evening_star": "黄昏之星",
+            "three_white_soldiers": "红三兵",
+            "three_black_crows": "三只乌鸦",
+            "bullish_engulfing": "看涨吞没",
+            "bearish_engulfing": "看跌吞没",
+            "piercing_line": "曙光初现",
+            "dark_cloud_cover": "乌云盖顶",
+            "hammer": "锤头线",
+            "inverted_hammer": "倒锤头",
+            "shooting_star": "流星线",
+            "bullish_marubozu": "光头光脚长阳",
+            "bearish_marubozu": "光头光脚长阴",
+            "marubozu": "长实体 K 线",
+            "doji": "十字星",
+        }
+        patterns = list(technical.get("candlestick", []) or [])
+        if "bullish_marubozu" in patterns or "bearish_marubozu" in patterns:
+            patterns = [item for item in patterns if item != "marubozu"]
+        pattern_reason = "最近 1-3 根 K 线未识别出明显组合形态。" if not patterns else f"最近形态：{', '.join(pattern_labels.get(item, item) for item in patterns)}。"
         items.append({"name": "K 线形态", "icon": "⚠️", "reason": pattern_reason})
 
         overall = _icon_from_score(score)

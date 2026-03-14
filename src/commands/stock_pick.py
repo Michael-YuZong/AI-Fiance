@@ -16,7 +16,7 @@ from src.utils.logger import setup_logger
 SNAPSHOT_PATH = PROJECT_ROOT / "data" / "stock_pick_score_history.json"
 FINAL_DIR = PROJECT_ROOT / "reports" / "stock_picks" / "final"
 INTERNAL_DIR = PROJECT_ROOT / "reports" / "stock_picks" / "internal"
-MODEL_VERSION = "stock-pick-2026-03-11-indicator-sanity-v6"
+MODEL_VERSION = "stock-pick-2026-03-14-candlestick-v8"
 MODEL_CHANGELOG = [
     "A 股估值口径统一为 `PE_TTM`；动态 PE 不再混入滚动 PE。",
     "个股负面事件窗口扩展为 `30` 日衰减，并补了英文监管/稀释关键词。",
@@ -26,6 +26,8 @@ MODEL_CHANGELOG = [
     "RSI 改为 Wilder 初始均值口径，KDJ 改为以 `50` 为种子递推，避免和主流行情软件出现系统性偏差。",
     "图表层不再重复自算技术指标，统一复用 `TechnicalAnalyzer` 输出，避免图表和报告口径分叉。",
     "技术面里的 `量比` 文案改为 `量能比`，明确表示这里使用的是日成交量相对 5 日均量。",
+    "技术面新增 `量价/动量背离` 因子，按最近两组确认摆点检查 RSI / MACD / OBV 与价格是否出现顶/底背离。",
+    "K 线形态从“单根 K”升级到“最近 1-3 根组合形态”，会识别吞没、星形、三兵三鸦等常见反转/延续信号，并结合前序 5 日趋势过滤误报。",
     "催化面核心信号优先展示个股直连标题，减少所有股票都显示同一组市场新闻的问题。",
     "HK/US 个股前瞻事件改为优先读取公司级财报日历；未来 `14` 日财报日会进入催化和风险窗口。",
     "交易参数增加硬校验，默认满足 `止损价 < 当前价 < 目标价`，避免把阻力位误标成止损。",

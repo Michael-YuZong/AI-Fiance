@@ -92,6 +92,7 @@ def test_technical_analyzer_generates_bullish_ma_signal():
     assert 0 <= scorecard["fibonacci"]["position_pct"] <= 1.2
     assert scorecard["volatility"]["signal"] in {"compressed", "neutral", "expanding"}
     assert "candlestick" in scorecard
+    assert "divergence" in scorecard
 
 
 def test_volume_analysis_detects_breakout_structure():
@@ -228,6 +229,110 @@ def test_indicator_series_matches_latest_scorecard_values():
     assert float(series["kdj_d"].iloc[-1]) == pytest.approx(scorecard["kdj"]["D"], rel=1e-6)
     assert float(series["kdj_j"].iloc[-1]) == pytest.approx(scorecard["kdj"]["J"], rel=1e-6)
     assert float(series["obv"].iloc[-1]) == pytest.approx(scorecard["obv"]["OBV"], rel=1e-6)
+
+
+def test_divergence_analysis_detects_bullish_macd_divergence():
+    close = np.concatenate(
+        [
+            np.linspace(100, 80, 12),
+            np.linspace(80, 96, 10)[1:],
+            np.linspace(96, 78.5, 22)[1:],
+            np.linspace(78.5, 88, 10)[1:],
+        ]
+    )
+    volume = np.concatenate(
+        [
+            np.full(12, 2200.0),
+            np.full(9, 1500.0),
+            np.full(21, 900.0),
+            np.full(9, 1200.0),
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=len(close), freq="D"),
+            "open": close - 0.3,
+            "high": close + 0.6,
+            "low": close - 0.7,
+            "close": close,
+            "volume": volume,
+        }
+    )
+
+    divergence = TechnicalAnalyzer(frame).divergence_analysis()
+
+    assert divergence["signal"] == "bullish"
+    assert divergence["kind"] == "底背离"
+    assert "MACD" in divergence["indicators"]
+
+
+def test_divergence_analysis_detects_bearish_macd_divergence():
+    close = np.concatenate(
+        [
+            np.linspace(50, 72, 14),
+            np.linspace(72, 64, 8)[1:],
+            np.linspace(64, 73, 20)[1:],
+            np.linspace(73, 68, 10)[1:],
+        ]
+    )
+    volume = np.concatenate(
+        [
+            np.full(14, 1800.0),
+            np.full(7, 1200.0),
+            np.full(19, 700.0),
+            np.full(9, 900.0),
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=len(close), freq="D"),
+            "open": close - 0.3,
+            "high": close + 0.6,
+            "low": close - 0.7,
+            "close": close,
+            "volume": volume,
+        }
+    )
+
+    divergence = TechnicalAnalyzer(frame).divergence_analysis()
+
+    assert divergence["signal"] == "bearish"
+    assert divergence["kind"] == "顶背离"
+    assert "MACD" in divergence["indicators"]
+
+
+def test_candlestick_patterns_detect_bullish_engulfing():
+    frame = _sample_price_frame(35).copy()
+    close = [18.0, 17.5, 17.0, 16.6, 16.2, 15.8, 15.2, 14.8, 14.3, 13.8, 13.0, 14.5]
+    open_ = [18.2, 17.7, 17.2, 16.9, 16.5, 16.1, 15.5, 15.0, 14.5, 14.3, 13.7, 12.8]
+    high = [max(o, c) + 0.3 for o, c in zip(open_, close)]
+    low = [min(o, c) - 0.3 for o, c in zip(open_, close)]
+    frame.loc[23:, "close"] = close
+    frame.loc[23:, "open"] = open_
+    frame.loc[23:, "high"] = high
+    frame.loc[23:, "low"] = low
+    frame.loc[23:, "volume"] = np.linspace(1000, 1500, len(close))
+
+    patterns = TechnicalAnalyzer(frame).candlestick_patterns()
+
+    assert "bullish_engulfing" in patterns
+
+
+def test_candlestick_patterns_detect_evening_star():
+    frame = _sample_price_frame(35).copy()
+    close = [10.0, 10.4, 10.8, 11.2, 11.7, 12.1, 12.5, 12.9, 13.3, 14.4, 14.6, 13.5]
+    open_ = [9.8, 10.1, 10.5, 10.9, 11.4, 11.8, 12.2, 12.6, 13.0, 13.2, 14.55, 14.4]
+    high = [max(o, c) + 0.25 for o, c in zip(open_, close)]
+    low = [min(o, c) - 0.25 for o, c in zip(open_, close)]
+    frame.loc[23:, "close"] = close
+    frame.loc[23:, "open"] = open_
+    frame.loc[23:, "high"] = high
+    frame.loc[23:, "low"] = low
+    frame.loc[23:, "volume"] = np.linspace(1000, 1500, len(close))
+
+    patterns = TechnicalAnalyzer(frame).candlestick_patterns()
+
+    assert "evening_star" in patterns
 
 
 def test_ma_system_omits_unavailable_long_averages():

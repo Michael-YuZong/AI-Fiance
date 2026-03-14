@@ -18,11 +18,13 @@ from src.utils.data import load_watchlist
 from src.utils.logger import setup_logger
 
 SNAPSHOT_PATH = resolve_project_path("data/etf_pick_score_history.json")
-MODEL_VERSION = "etf-pick-2026-03-13-coverage-history-v2"
+MODEL_VERSION = "etf-pick-2026-03-14-candlestick-v4"
 MODEL_CHANGELOG = [
     "ETF 推荐现在记录同日基准版和重跑快照，后续重跑会展示分数变化而不是静态覆盖旧稿。",
     "催化面在新闻/事件覆盖降级时会按最近一次有效快照做衰减回退，避免把 ETF 催化打成假阴性。",
     "客户稿和内部详细稿都会披露扫描池来源、覆盖率和分母定义，外审门禁同步要求这些章节存在。",
+    "技术面新增 `量价/动量背离` 因子，按最近两组确认摆点检查 RSI / MACD / OBV 与价格是否出现顶/底背离。",
+    "K 线形态从“单根 K”升级到“最近 1-3 根组合形态”，会识别吞没、星形、三兵三鸦等常见信号，并结合前序 5 日趋势过滤误报。",
 ]
 
 

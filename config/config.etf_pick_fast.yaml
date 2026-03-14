@@ -1,3 +1,5 @@
+# ETF pick 快速 profile。
+# 只在你明确要跑快速 / 降级版 ETF 推荐时再用，不是默认配置。
 news_feeds_file: config/news_feeds.empty.yaml
 news_topic_search_enabled: false
 

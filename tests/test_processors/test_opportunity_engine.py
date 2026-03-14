@@ -479,6 +479,115 @@ def test_technical_dimension_rewards_volume_structure_obv_kdj_and_compression():
     assert factors["波动压缩"]["display_score"] == "10/10"
 
 
+def test_technical_dimension_penalizes_bearish_divergence():
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=40, freq="B"),
+            "open": [10.0 + i * 0.05 for i in range(40)],
+            "high": [10.4 + i * 0.05 for i in range(40)],
+            "low": [9.7 + i * 0.05 for i in range(40)],
+            "close": [10.1 + i * 0.05 for i in range(40)],
+            "volume": [1_000_000] * 40,
+            "amount": [100_000_000.0] * 40,
+        }
+    )
+    technical = {
+        "macd": {"DIF": 0.2, "DEA": 0.1},
+        "dmi": {"ADX": 28.0, "DI+": 31.0, "DI-": 19.0},
+        "kdj": {"K": 68.0, "D": 62.0, "J": 80.0, "cross": "golden_cross", "zone": "overbought"},
+        "obv": {"OBV": 12_000_000, "MA": 11_500_000, "slope_5d": 300_000, "signal": "bullish"},
+        "divergence": {
+            "signal": "bearish",
+            "kind": "顶背离",
+            "label": "价格高点抬升，但 RSI / MACD 未同步创新高（顶背离）",
+            "indicators": ["RSI", "MACD"],
+            "strength": 2,
+            "detail": "最近两组高点里价格创新高，但 RSI / MACD 没有同步创新高。",
+        },
+        "rsi": {"RSI": 63.0},
+        "fibonacci": {"levels": {"0.382": 11.8, "0.500": 11.4, "0.618": 11.0}},
+        "candlestick": [],
+        "volume": {"vol_ratio": 1.1, "vol_ratio_20": 1.0, "price_change_1d": 0.008, "structure": "量价中性"},
+        "ma_system": {"mas": {"MA5": 11.7, "MA20": 11.3, "MA60": 10.8}, "signal": "bullish"},
+        "bollinger": {"signal": "near_upper"},
+        "volatility": {"NATR": 0.026, "atr_ratio_20": 1.02, "boll_width_percentile": 0.55, "signal": "neutral"},
+    }
+
+    dimension = _technical_dimension(history, technical)
+    divergence_factor = next(f for f in dimension["factors"] if f["name"] == "量价/动量背离")
+
+    assert divergence_factor["display_score"] == "-8/10"
+    assert "顶背离" in divergence_factor["signal"]
+
+
+def test_technical_dimension_rewards_bullish_multi_candle_pattern():
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=40, freq="B"),
+            "open": [10.0 + i * 0.05 for i in range(40)],
+            "high": [10.4 + i * 0.05 for i in range(40)],
+            "low": [9.7 + i * 0.05 for i in range(40)],
+            "close": [10.1 + i * 0.05 for i in range(40)],
+            "volume": [1_000_000] * 40,
+            "amount": [100_000_000.0] * 40,
+        }
+    )
+    technical = {
+        "macd": {"DIF": 0.1, "DEA": 0.05},
+        "dmi": {"ADX": 24.0, "DI+": 30.0, "DI-": 19.0},
+        "kdj": {"K": 52.0, "D": 50.0, "J": 56.0, "cross": "neutral", "zone": "neutral"},
+        "obv": {"OBV": 10_000_000, "MA": 9_900_000, "slope_5d": 120_000, "signal": "bullish"},
+        "divergence": {"signal": "neutral", "label": "未识别到明确顶/底背离", "detail": "无", "strength": 0},
+        "rsi": {"RSI": 48.0},
+        "fibonacci": {"levels": {"0.382": 11.8, "0.500": 11.4, "0.618": 11.0}},
+        "candlestick": ["morning_star", "hammer"],
+        "volume": {"vol_ratio": 1.0, "vol_ratio_20": 1.0, "price_change_1d": 0.008, "structure": "量价中性"},
+        "ma_system": {"mas": {"MA5": 11.7, "MA20": 11.3, "MA60": 10.8}, "signal": "bullish"},
+        "bollinger": {"signal": "neutral"},
+        "volatility": {"NATR": 0.025, "atr_ratio_20": 0.95, "boll_width_percentile": 0.42, "signal": "neutral"},
+    }
+
+    dimension = _technical_dimension(history, technical)
+    candle_factor = next(f for f in dimension["factors"] if f["name"] == "K线形态")
+
+    assert candle_factor["display_score"] == "10/10"
+    assert "早晨之星" in candle_factor["signal"]
+
+
+def test_technical_dimension_penalizes_bearish_multi_candle_pattern():
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=40, freq="B"),
+            "open": [10.0 + i * 0.05 for i in range(40)],
+            "high": [10.4 + i * 0.05 for i in range(40)],
+            "low": [9.7 + i * 0.05 for i in range(40)],
+            "close": [10.1 + i * 0.05 for i in range(40)],
+            "volume": [1_000_000] * 40,
+            "amount": [100_000_000.0] * 40,
+        }
+    )
+    technical = {
+        "macd": {"DIF": 0.1, "DEA": 0.05},
+        "dmi": {"ADX": 24.0, "DI+": 30.0, "DI-": 19.0},
+        "kdj": {"K": 70.0, "D": 67.0, "J": 76.0, "cross": "golden_cross", "zone": "overbought"},
+        "obv": {"OBV": 10_000_000, "MA": 9_900_000, "slope_5d": 120_000, "signal": "bullish"},
+        "divergence": {"signal": "neutral", "label": "未识别到明确顶/底背离", "detail": "无", "strength": 0},
+        "rsi": {"RSI": 66.0},
+        "fibonacci": {"levels": {"0.382": 11.8, "0.500": 11.4, "0.618": 11.0}},
+        "candlestick": ["evening_star"],
+        "volume": {"vol_ratio": 1.0, "vol_ratio_20": 1.0, "price_change_1d": -0.012, "structure": "量价中性"},
+        "ma_system": {"mas": {"MA5": 11.7, "MA20": 11.3, "MA60": 10.8}, "signal": "bullish"},
+        "bollinger": {"signal": "near_upper"},
+        "volatility": {"NATR": 0.028, "atr_ratio_20": 1.08, "boll_width_percentile": 0.62, "signal": "neutral"},
+    }
+
+    dimension = _technical_dimension(history, technical)
+    candle_factor = next(f for f in dimension["factors"] if f["name"] == "K线形态")
+
+    assert candle_factor["display_score"] == "-10/10"
+    assert "黄昏之星" in candle_factor["signal"]
+
+
 def test_macro_dimension_uses_leading_macro_indicators_for_growth_sector():
     dimension = _macro_dimension(
         {"sector": "科技"},

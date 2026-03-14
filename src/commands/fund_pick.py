@@ -24,11 +24,13 @@ STYLE_LABELS = {
     "commodity": "商品/黄金",
 }
 SNAPSHOT_PATH = resolve_project_path("data/fund_pick_score_history.json")
-MODEL_VERSION = "fund-pick-2026-03-13-full-universe-v3"
+MODEL_VERSION = "fund-pick-2026-03-14-candlestick-v5"
 MODEL_CHANGELOG = [
     "场外基金推荐现在记录同日基准版和重跑快照，后续重跑会展示分数变化而不是静态覆盖旧稿。",
     "全市场发现模式的候选池、覆盖率和分母定义会同步进入客户稿和内部详细稿，外审门禁同步要求这些章节存在。",
     "催化面在新闻/事件覆盖降级时会按最近一次有效快照做衰减回退，避免把场外基金催化打成假阴性。",
+    "技术面新增 `量价/动量背离` 因子，按最近两组确认摆点检查 RSI / MACD / OBV 与价格是否出现顶/底背离。",
+    "K 线形态从“单根 K”升级到“最近 1-3 根组合形态”，会识别吞没、星形、三兵三鸦等常见信号，并结合前序 5 日趋势过滤误报。",
 ]
 
 

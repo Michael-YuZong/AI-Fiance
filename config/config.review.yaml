@@ -1,1 +1,3 @@
+# review / guard 专用 profile。
+# 默认不要读，只有在调 release_check / report_guard / review 候选池时再打开。
 stock_pools_file: "config/stock_pools_review.yaml"

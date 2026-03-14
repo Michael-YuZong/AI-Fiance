@@ -1,3 +1,5 @@
+# 回测 / 规则策略配置。
+# 只有在改 `backtest` 或新增规则时再读，不是日常分析入口。
 rules:
   macd_golden_cross:
     description: "DIF 上穿 DEA 且收盘价站上 20 日均线"
