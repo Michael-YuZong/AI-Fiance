@@ -19,6 +19,7 @@
 - 更强的研究问答能力
 - 更可信的代理信号与降级披露
 - 更完整的事后归因、评分校准和运营闭环
+- 一套真正会记录预测、验证结果、归因错误并持续迭代因子的 `strategy` 研究层
 
 这份计划的目标，是把项目从“高质量投研助手”继续推进到“更接近机构级流程约束的 AI 金融专家”。
 
@@ -147,6 +148,10 @@
   使用 `docs/prompts/external_research_reviewer.md`
 - 报告修订流程说明
   使用 `docs/prompts/report_revision_loop.md`
+- 通用外审收敛循环
+  使用 `docs/prompts/external_review_convergence_loop.md`
+- `strategy` 计划和实验设计
+  使用 `docs/prompts/external_strategy_plan_reviewer.md`
 
 ### 6.3 外审要产出什么
 
@@ -157,10 +162,28 @@
 - 可取之处
 - 独立答案或独立推荐
 - 建议沉淀
+- `框架外问题`
+- `被当前任务定义遮住的风险`
+- `缺失的验证手段`
+
+如果审的是 `strategy` 计划，还必须额外产出：
+
+- 是否允许进入实现阶段的 `go / no-go`
+- 可能存在的数据穿越、样本偏差、过拟合和目标错设风险
+- 缺失的验证手段、缺失的基准线、缺失的反事实实验
+- 哪些内容必须先做成 point-in-time 合同，哪些可以后补
+- 哪些环节需要先停在人工候选因子池，不能直接做自动搜索
 
 ### 6.4 什么时候算通过
 
-只有当外审不再提出新的 P0 / P1 问题时，才允许视为这轮开发收敛。
+普通功能：
+
+- 只有当外审不再提出新的 P0 / P1 问题时，才允许视为这轮开发收敛。
+
+`strategy` 计划：
+
+- 只有当 `strategy` 计划外审不再提出新的 P0 / P1 级计划问题，且关键验证手段、泄漏防线、失败归因分类都已经写进计划，才允许开始实现。
+- 如果外审仍在质疑 `预测目标 / horizon / baseline / point-in-time 合同 / 成本口径 / 验证设计` 中任一核心项，默认继续改计划，不进入代码实现。
 
 ### 6.5 外审意见怎么沉淀
 
@@ -175,6 +198,119 @@
 - `docs/report_review_lessons.md`
 - `AGENTS.md`
 - 本计划的下一轮任务重排
+
+如果问题来自发散审，而且判断成立，默认必须再做一步“固化分流”：
+
+- 写进 prompt
+  适合以后每次都要追问、都要检查的问题
+- 写成硬规则
+  适合用门禁、release check、workflow 规则、结构化字段要求去强制执行的问题
+- 写进 tests / fixtures
+  适合用回归方式防止以后又漏掉的问题
+- 写进 lesson / backlog
+  适合暂时不能硬编码，但必须长期追踪的问题
+
+不能把合理的发散审问题只留在当前一轮反馈里。
+
+### 6.6 `strategy` 计划的专项外审流程
+
+`strategy` 不是普通功能增强，而是一个新研究层。它默认先过计划外审，再开工。
+
+计划外审最少走下面这条链：
+
+1. 先写清 `strategy` 的目标、非目标、数据合同、验证框架和失败归因分类。
+2. 把计划片段和要新增的命令/产物一起交给 `external_strategy_plan_reviewer`。
+3. 先修计划层问题，不修代码层问题。
+4. 把 reviewer 提出的关键缺口沉淀回：
+   - `plan.md`
+   - 需要新增的 prompt
+   - 需要新增的 tests / fixtures / baseline 报表
+5. 只有当 reviewer 连续两轮没有新的 P1 级计划问题时，才允许进入 `strategy` 实现阶段。
+
+这一步的目标不是“把 prompt 跑过一遍”，而是防止项目直接冲进：
+
+- 黑箱自动挖因子
+- 目标定义混乱
+- 过拟合历史
+- 事后归因讲故事
+- 点时污染后看起来很准
+
+### 6.7 所有外审都要做“合同审 + 发散审”双阶段
+
+当前外审不能只完成 prompt 里已经写出来的检查项。
+
+以后默认都要分成两个 pass：
+
+#### Pass 1：合同审
+
+先按当前任务、当前 prompt、当前输出合同去审：
+
+- 任务有没有完成
+- 合同有没有满足
+- 已知风险有没有被控制
+- 已知验证有没有做
+
+#### Pass 2：发散审
+
+然后 reviewer 必须故意脱离当前框架，再做一轮“框架外找问题”：
+
+- 如果完全不受当前 prompt 限制，这个东西最可能漏掉什么
+- 当前任务定义本身有没有把重要问题藏起来
+- 还有哪些应该审、但作者根本没提到
+- 如果结论错了，最可能不是错在当前 checklist，而是错在哪类更根本的问题
+- 还有哪些更科学的验证手段、对照组、反事实实验、本应单列的风险控制
+
+发散审默认至少要覆盖：
+
+- 框架外问题
+- 缺失的控制项
+- 缺失的验证手段
+- 替代性解释
+- 任务边界是否设得太窄
+- 哪些问题值得提前写进 backlog，而不是等出错后再补
+
+如果 reviewer 只复述 prompt 检查项，没有提出任何框架外问题、替代性解释或缺失验证，默认视为这轮外审还不够。
+
+如果 reviewer 提出的框架外问题被判断为合理，但没有被分流到 `prompt / 硬规则 / tests / lesson` 中至少一层，也默认视为这轮外审闭环没有完成。
+
+### 6.8 所有外审都必须按轮次循环到收敛
+
+外审不是“一次审稿动作”，而是一个 round-based 收敛流程。
+
+以后默认所有外审都要这样跑：
+
+1. 生成或更新当前版本输出
+2. 跑第 `N` 轮外审
+3. reviewer 必须对比：
+   - 本轮新增问题
+   - 上一轮遗留问题
+   - 上一轮问题是否已关闭 / 降级 / 仍阻塞
+4. 主执行者修正实现、规则、测试、门禁或文档
+5. 再跑第 `N+1` 轮外审
+6. 直到满足统一收敛条件，才允许停止
+
+默认每轮外审都要有可追踪产物，至少记录：
+
+- `round`
+- `review_target`
+- `previous_round`
+- `new_p0_p1`
+- `carried_p0_p1`
+- `closed_items`
+- `new_divergent_findings`
+- `convergence_status`
+
+### 6.9 统一收敛条件
+
+除非某个专项流程另有更严格要求，否则所有外审默认只有满足下面条件才算收敛：
+
+1. 连续两轮没有新的 `P0 / P1`
+2. 上一轮的 `P0 / P1` 已关闭、降级或被明确解释为误报
+3. 本轮发散审没有再发现新的实质性框架外问题
+4. 合理的发散审问题已经完成固化分流
+5. 剩余问题主要是展示优化、措辞排序或低风险补充项
+
+如果任一条件不满足，默认继续下一轮外审，不允许自称“已经通过”。
 
 ---
 
@@ -265,6 +401,7 @@
 - `decision_review`
 - `pick_history`
 - 回测与评分校准
+- 后续要补的 `strategy`
 
 这层决定项目能不能从“会生成”进化为“会学习”。
 
@@ -670,6 +807,506 @@
 
 ---
 
+## 阶段 I：`strategy` 预测、验证、归因与因子实验室
+
+### 目标
+
+把项目从“会分析、会推荐、会复盘”进一步推进成“会记录预测、验证预测、归因错误，并持续校准因子和权重”的研究系统。
+
+这不是先做一个黑箱自动选股器，而是先建立一套严格的策略研究合同。
+
+### 当前推进状态（2026-03-14）
+
+- 计划设计已完成。
+- `strategy` 计划专项外审已收敛，可进入 `I-1`。
+- 当前下一步应做：
+  - `I-1` prediction ledger
+  - lag / visibility fixture
+  - overlap / benchmark / promotion gate fixture
+- 仍然不允许跳过 `I-1 / I-2 / I-3` 直接做自动候选因子发现。
+
+### 为什么必须单独成阶段
+
+当前项目已经具备：
+
+- 八维分析
+- 推荐与 pick 历史
+- 组合预演
+- 复盘与归因 v1
+- point-in-time provenance v1
+
+但还缺一层更硬的能力：
+
+- 某个历史时点到底预测了什么
+- 预测的 horizon 和 benchmark 是什么
+- 后来结果到底怎样
+- 错在漏因子、权重、regime、执行，还是 horizon 选错
+- 哪些因子真的提供了增量，哪些只是解释历史
+
+如果不把这层显式做出来，项目会一直停在“很会解释”，而不是“会自证和自校准”。
+
+### 范围定义
+
+阶段 I 的正式范围包括：
+
+- `strategy predict`
+  在某个历史时点或当前时点，对未来 `1d / 5d / 20d / 60d` 等 horizon 生成结构化预测。
+- `strategy validate`
+  对一批历史预测做后验验证，输出 hit rate、excess return、drawdown、成本后结果等。
+- `strategy attribute`
+  对预测错误和结果分化做结构化归因。
+- `strategy experiment`
+  对候选因子、权重方案、baseline 和不同 horizon 做对照实验。
+
+阶段 I 的非目标：
+
+- 不直接做自动下单
+- 不先做完全自由的黑箱因子搜索
+- 不先承诺“自动找到 alpha”
+- 不把问答式解释直接冒充策略验证
+
+### `v1` 硬锁定范围
+
+为避免目标漂移，`strategy v1` 先锁定为一个单一研究问题：
+
+- 首发 universe：
+  只做 `A 股流动性较好的普通股票`
+- 初始白名单规则：
+  - 非 `ST`
+  - 非北交所
+  - 上市满 `250` 个交易日
+  - 最近 `60` 个交易日中位日成交额不低于 `1` 亿元人民币
+  - 非长期停牌 / 极端异常状态
+- 主预测目标：
+  `20` 个交易日的 benchmark-relative excess return 排序
+- 主 horizon：
+  `20` 个交易日
+- `1d / 5d / 60d`：
+  只作为诊断、拆解和稳定性切片，不作为 `v1` promotion 的主指标
+- `v1` benchmark：
+  `中证800` 价格基准；若后续接入更可靠 total-return 代理，再升级，但 `v1` 先不混用多个基准
+
+在 `v1` 稳定前：
+
+- 不扩到 ETF / 场外基金 / 多资产混合 universe
+- 不把方向判断、超额收益预测、回撤预测同时并列为主目标
+- 不允许因为某个次级指标好看，就改写 `v1` 的成功定义
+
+### 先后顺序
+
+阶段 I 默认按下面顺序推进：
+
+1. `I-1` 预测账本
+2. `I-2` 结果验证
+3. `I-3` 错误归因
+4. `I-4` 因子/权重实验台
+5. `I-5` 自动候选因子发现（只在前四步稳定后才启动）
+
+### `I-1` 预测账本
+
+先做一个严格的 ledger，记录：
+
+- 预测时间
+- 可见性边界
+- 预测对象
+- 预测 horizon
+- 预测方向 / 期望收益 / 风险判断
+- 当时的关键因子值
+- 当时的证据来源
+- 当时采用的权重方案 / 版本号
+- 当时的 regime / 市场背景
+
+没有这层，就不存在真正可验证的 `strategy`。
+
+#### `I-1` 标签与调仓合同
+
+`strategy v1` 不允许在标签口径上留模糊空间。
+
+必须先锁定：
+
+- 快照频率：
+  每周一次，默认取每周最后一个交易日收盘后可见信息生成下一期预测
+- 调仓频率：
+  每 `5` 个交易日一组 cohort
+- 持有期：
+  主持有期固定为 `20` 个交易日
+- overlap 处理：
+  - `v1` 主验证默认按 cohort 聚合
+  - 同一资产在前一个 `20` 日窗口未结束前，不生成新的独立主样本
+  - 如果后续要做重叠样本，只允许作为扩展验证，并必须单独做 overlap-adjusted 统计
+- 主标签：
+  `20` 日 forward excess return 相对 `中证800`
+- 辅助标签：
+  `hit rate / top-decile hit / max drawdown / stop-hit / target-hit`
+  但这些是补充解释，不改变主目标
+
+没有这份合同，不允许进入 `I-1` 实现。
+
+### `I-2` 结果验证
+
+结果验证必须先回答“到底算对了什么”：
+
+- 方向对不对
+- 是否跑赢 benchmark
+- 最大回撤是否可接受
+- 是否触发止损 / 目标
+- 扣掉成本后是否还成立
+- 在不同 horizon 下是否一致
+
+至少要能按：
+
+- `1d / 5d / 20d / 60d`
+- 不同市场
+- 不同 regime
+- 不同资产类型
+
+输出分层验证结果。
+
+### `I-3` 错误归因
+
+预测错了以后，不能只写“市场变了”。
+
+至少要分类到：
+
+- `point_in_time_contamination`
+- `missing_factor`
+- `factor_sign_wrong`
+- `weight_misallocation`
+- `regime_shift`
+- `execution_cost_drag`
+- `horizon_mismatch`
+- `universe_bias`
+- `data_degradation_or_proxy_limit`
+
+并要求系统给出“下一轮更应该补什么”的建议，而不是只做事后解释。
+
+### `I-4` 因子 / 权重实验台
+
+在 ledger、validate、attribute 稳定后，再做统一实验台。
+
+实验台至少要支持：
+
+- 单因子表现
+- 因子组合表现
+- 新因子的边际增益
+- 不同权重方案的差异
+- 不同 horizon / regime 下的稳定性
+- 扣掉成本后的真实表现
+- 和基线方案的比较
+
+第一批建议纳入的候选因子：
+
+- 中周期价格动量
+- 长周期价格动量
+- 盈利动量 / EPS 修正代理
+- 行业扩散动量
+- 量价结构
+- 波动压缩 / ATR
+- 结构化催化与事件新鲜度
+- 宏观 / 政策敏感度
+
+### `I-5` 自动候选因子发现
+
+只有在前四步稳定以后，才允许碰自动挖因子。
+
+而且第一阶段也不做完全自由搜索，只做：
+
+- 从有金融意义的候选池中自动生成组合
+- 对已有因子做变体实验
+- 自动发现可能需要新建的 proxy，而不是直接把噪音写进评分
+
+### 数据合同
+
+阶段 I 必须先定义清楚下面三类核心数据。
+
+#### 1. 预测快照
+
+至少包含：
+
+- `prediction_id`
+- `as_of`
+- `visibility_class`
+- `asset / universe`
+- `market / asset_type`
+- `horizon`
+- `prediction_target`
+- `prediction_value`
+- `confidence`
+- `confidence_type`
+- `key_factors`
+- `factor_version`
+- `weight_scheme`
+- `regime`
+- `evidence_sources`
+- `downgrade_flags`
+
+#### 2. 结果快照
+
+至少包含：
+
+- `realized_return`
+- `benchmark_return`
+- `excess_return`
+- `max_drawdown`
+- `hit_stop`
+- `hit_target`
+- `cost_adjusted_return`
+- `turnover`
+- `slippage_estimate`
+- `evaluation_window`
+
+#### 3. 归因快照
+
+至少包含：
+
+- `attribution_label`
+- `attribution_notes`
+- `missing_factors`
+- `candidate_weight_changes`
+- `regime_mismatch`
+- `execution_drag`
+- `data_quality_issues`
+
+### `v1` point-in-time 与 lag 硬规则
+
+point-in-time 在阶段 I 里不能只停在原则层，先锁定最危险的几类因子：
+
+- 日线量价因子
+  - 使用 `as_of` 当日收盘后可见数据
+  - 默认只支持下一交易日开始生效
+- 结构化公告 / 公司事件
+  - 严格按公告时间戳归类为：
+    - 当日收盘后可见
+    - 次日盘前可见
+    - 盘中才可见
+- 新闻与政策正文
+  - 必须记录正文抓取时间和原始发布时间
+  - 如果附件正文在预测时点后才补抽成功，不能回填进当时样本
+- 宏观数据
+  - 只允许用官方发布时间当时可见值
+  - 修订值只能在修订发布日期之后进入样本
+- 基金持仓 / 定期披露数据
+  - `v1` 不进入主因子，只允许在实验台中以严格披露滞后规则试验
+- EPS 修正 / 一致预期变动
+  - 如果没有可靠 point-in-time 源，`v1` 不进入主因子
+  - 只能先作为实验台代理变量候选
+
+在实现前，必须先补一份因子族级 `lag / visibility` 表和对应 fixture。
+
+### 科学验证要求
+
+阶段 I 默认必须满足下面这些方法论约束：
+
+- 先定义主预测目标，不能把方向、赔率、超额收益、回撤风险混成一个模糊目标
+- 先定义主 horizon，其他 horizon 是补充，不是混合统计
+- 优先走时间切分或 walk-forward，不允许事后把全样本混一起再挑最好结果
+- 强制做 point-in-time 控制
+- 强制做基线比较，至少包含：
+  - buy and hold
+  - 简单动量 / 简单均线基线
+  - 当前八维原始推荐或原始 action 口径
+- 强制做成本后结果
+- 强制做分 regime、分市场、分资产类型稳定性检查
+- 强制做 ablation，避免“加很多因子看起来更好”却不知道谁真有用
+
+优先看的验证指标包括：
+
+- hit rate
+- average excess return
+- information coefficient / rank IC（适用于截面排序时）
+- max drawdown
+- win/loss ratio
+- cost-adjusted Sharpe / Sortino
+- turnover
+- calibration by confidence bucket
+- stability by regime
+
+#### `confidence` 口径
+
+`v1` 里的 `confidence` 不能是模糊词。
+
+先锁定：
+
+- `confidence` 表示：
+  因子组合对 `20` 日 excess-return 排序信号的相对把握强弱
+- 不表示：
+  - 方向概率的精确概率值
+  - 人工主观置信语气
+  - 多个 horizon 混合后的综合信心
+- `confidence_type` 默认写成：
+  `rank_confidence_v1`
+- 只有同一目标、同一 horizon、同一 universe 下生成的 `confidence` 才允许放进同一校准桶
+
+#### 最小验证套件
+
+`v1` 在进入实现前必须先把下面这些验证写进计划：
+
+- 时间切分或 walk-forward 日历
+- `train / validation / test` 职责边界
+- baseline 套件：
+  - `buy and hold`
+  - 简单动量
+  - 简单均线/趋势
+  - 当前八维原始 pick / action
+- top-decile / top-N / bucket 验证
+- overlap-adjusted cohort 统计
+- 成本敏感性分析
+- 分 regime / 分 liquidity bucket 稳定性切片
+- 至少一版 false-discovery / permutation 风险检查
+
+#### 何时拒绝给预测
+
+`strategy` 不是任何时候都必须吐结果。
+
+如果出现下面情况，默认应返回 `no_prediction`，而不是硬给方向：
+
+- 不满足 `v1` universe 白名单
+- 历史长度不足
+- 流动性低于阈值
+- 关键 point-in-time 数据残缺
+- 因子族 lag 无法确认
+- 重大事件窗口污染过强，导致样本不可比
+- 数据降级严重到无法区分“真实失败”和“输入残缺”
+
+`no_prediction` 本身也要记进 ledger，不能静默跳过。
+
+#### 特殊样本与伪失败处理
+
+下面这些情况不允许静默删样本，也不允许直接混进普通失败样本：
+
+- 退市
+- 长期停牌
+- 重大复权/合并拆分导致路径失真
+- 关键输入在预测时点后才补齐
+- 数据源严重降级导致主因子缺失
+
+`v1` 默认要求：
+
+- 把这类样本单独标成：
+  - `terminal_event_sample`
+  - `data_quality_censored`
+  - `not_evaluable_due_to_data_quality`
+- 在主验证报表里单独披露数量和占比
+- 不允许把 `not_evaluable_due_to_data_quality` 直接记成预测失败
+
+### 与现有模块的联动
+
+阶段 I 不是另起炉灶，要复用和反哺现有能力：
+
+- 从 `scan / opportunity_engine` 继承已有维度因子
+- 从 `pick_history` 获取推荐账本
+- 从 `decision_review / retrospect` 获取已有归因框架
+- 从 `portfolio whatif` 获取执行成本和可成交性口径
+- 从 provenance helper 获取 point-in-time 合同
+- 从 `backtest` 获取最小历史回放能力
+- 最终反哺：
+  - `stock_pick / fund_pick / etf_pick`
+  - `research`
+  - `signal_confidence`
+  - `release_check / report_guard`
+
+#### 自我循环污染防线
+
+阶段 I 不允许用“产品输出证明产品本身有效”。
+
+先锁定：
+
+- `pick_history` 只能作为：
+  - 对照参考
+  - 推荐账本
+  - 结果展示与回放材料
+- `pick_history` 不能作为主标签来源
+- 主标签只能来自 market data + benchmark path + execution-cost contract
+- 在 `strategy` 还处于 challenger 状态时：
+  - 不允许直接改生产 pick 排序
+  - 不允许把实验结果反写成线上推荐逻辑
+
+### 外审要求
+
+阶段 I 有两层外审：
+
+#### 第一层：计划外审
+
+- 实现前必须跑 `docs/prompts/external_strategy_plan_reviewer.md`
+- 必须重点审：
+  - 目标定义是否清楚
+  - horizon 是否混乱
+  - 数据合同是否足以防 future leak
+  - 验证是否科学
+  - 归因分类是否可执行
+  - 是否过早承诺自动挖因子
+- 只有计划外审通过后，才允许进入 `I-1`
+
+#### 第二层：实现后外审
+
+- `strategy` 输出的验证报告、归因报告和实验报告，默认走正式金融外审
+- reviewer 要重点检查：
+  - 是否把解释历史当成预测未来
+  - 是否夸大样本显著性
+  - 是否忽略成本和流动性
+  - 是否把低质量 proxy 写成强因子
+
+### Champion / Challenger 治理
+
+`strategy` 实验结果不能直接改生产链路，必须先经过治理层。
+
+先锁定：
+
+- `champion`
+  当前被允许进入产品链路的规则版本
+- `challenger`
+  新实验出的候选版本，只能在研究层验证
+
+promotion 前必须同时满足：
+
+- 主目标优于当前 `champion`
+- 成本后结果仍优于 `champion`
+- 最大回撤和换手恶化不超过预设阈值
+- 至少跨两个时间切片或两个 regime 仍成立
+- 没有新的 point-in-time 或数据降级硬伤
+- effect size 达到“业务上有意义”的门槛，而不只是统计上略好
+
+`v1` 默认先用下面这组 promotion 门槛，后续如要改，必须先改计划再实现：
+
+- `20` 日 top-decile cohort 的成本后 excess return 至少优于 `champion` `100bp`
+- 或 rank IC 至少优于 `champion` `0.02`
+- 同时最大回撤恶化不超过 `10%`
+- 换手恶化不超过 `15%`
+
+rollback 触发条件至少包括：
+
+- 新版本在后续验证窗显著失效
+- 回撤 / 换手 / 成本显著恶化
+- 发现 point-in-time 污染
+- 发现产品链路与研究链路发生自我循环污染
+
+在 promotion gate 没落地前，`strategy` 不得直接反哺 `pick / research / release_check`。
+
+### 验收标准
+
+阶段 I 进入实现前的 gate：
+
+- 计划已走完专项外审
+- 连续两轮无新的 P1 级计划问题
+- 科学验证方法、基线、成本口径、归因分类已写进计划
+- `v1` 主目标、主 horizon、首发 universe 已锁定
+- 标签 / 调仓 / 持有 / overlap / benchmark 合同已锁定
+- 因子族级 lag / visibility 表已补
+- `champion / challenger` 与 promotion / rollback gate 已写进计划
+- `no_prediction` 条件和数据降级伪失败处理已写进计划
+
+阶段 I v1 完成的标准：
+
+- 能在给定历史时点生成结构化预测账本
+- 能对一批预测输出后验验证报告
+- 能对失败样本给结构化归因
+- 能比较至少两套因子/权重方案
+- 能明确说出哪些结论只在某个 horizon / regime 下成立
+- 没有明显 point-in-time 污染
+- 外审不再反复指出“过拟合、目标不清、验证不科学”
+
+---
+
 ## 9. 跨阶段的硬验收标准
 
 无论做哪一阶段，最终都要过下面这些共同验收。
@@ -700,23 +1337,36 @@
 - 无新的 P0 / P1
 - 值得长期保留的问题已沉淀到代码、测试或门禁
 
+### 9.5 `strategy` 科学验收
+
+如果任务属于 `strategy`，还必须额外满足：
+
+- 目标变量和 horizon 定义清楚
+- 有明确 baseline
+- 有 point-in-time 控制
+- 有成本后结果
+- 有 out-of-sample 或 walk-forward 验证
+- 有错误归因而不只是结果展示
+
 ---
 
 ## 10. 具体推进顺序
 
 后续默认按下面顺序推进，不建议同时大面积改多个阶段。
 
-1. 阶段 C：政策与宏观链路升级
-2. 阶段 B：代理信号升级收尾
-3. 阶段 H：调度与运营闭环
-4. 阶段 F：评分校准、归因与自我学习深化
-5. 阶段 G：执行成本与可成交性深化
-6. 阶段 D：组合预算深化
-7. `discover` v2：把发现链路从规则筛选推进到更像 pick 前置入口的高质量 pre-screen
+1. 阶段 I：`strategy` 计划外审与实现 gate
+2. 阶段 C：政策与宏观链路升级
+3. 阶段 B：代理信号升级收尾
+4. 阶段 H：调度与运营闭环
+5. 阶段 F：评分校准、归因与自我学习深化
+6. 阶段 G：执行成本与可成交性深化
+7. 阶段 D：组合预算深化
+8. `discover` v2：把发现链路从规则筛选推进到更像 pick 前置入口的高质量 pre-screen
 
 这个顺序的理由是：
 
-- 阶段 D / E / F / G 的第一轮闭环已经做出来了，当前不再是“从 0 到 1”
+- `strategy` 是新的核心研究层，必须先把计划和验证方法审对，不能边写边猜
+- 阶段 D / E / F / G 的第一轮闭环已经做出来了，正好可以给 `strategy` 提供底座
 - `policy` 和代理信号仍是最明显的证据层短板，会直接影响研究和推荐可信度
 - `scheduler` 是最清晰的基础设施短板，应该承接已经成熟起来的内容层
 - 后续更值钱的是“深化和统一”，不是继续堆新入口
@@ -746,28 +1396,34 @@
 
 ### 当前第一优先级
 
-阶段 C + 阶段 B + 阶段 H 的下一轮收口
+阶段 I 的 `I-1` prediction ledger 实现准备
 
 #### 本轮子目标
 
-- 把 `policy` 的公告页 / 长正文链路继续收口到复杂 OFD 和 PDF（表格/扫描页）原文层
-- 把代理信号披露接进 `stock_pick / fund_pick / etf_pick` 以及 release guard
-- 给 `scheduler` 补运行历史、失败可见性和最近产物索引
-- 继续保持 D / E / F / G 这套新合同在新增输出里不漂移
+- 按已经通过外审的 `strategy v1` 合同，开始 `I-1` prediction ledger
+- 先补：
+  - `lag / visibility` fixture
+  - `benchmark` 映射 fixture
+  - `overlap` / cohort 验证 fixture
+  - `promotion gate` fixture
+- 不扩边界，不提前进入自动挖因子
 
 #### 本轮验收
 
-- `policy` 官方页 / 长文 / PDF / OFD 输入时，输出质量显著高于关键词问法，并明确写出来源判断、抽取覆盖和附件边界
-- pick 客户稿和详细稿里，代理信号不再像硬证据
-- `scheduler` 可以看见最近任务成功 / 失败情况
-- 全链路继续保留统一的证据时点与来源披露
-- 回归测试补齐
+- `I-1` ledger 数据结构落地
+- 首批 fixture 能防：
+  - point-in-time 回填
+  - overlap 污染
+  - benchmark 映射漂移
+  - promotion gate 漏检
+- 实现仍严格停在 `v1` 范围内
 
 #### 本轮完成后再做
 
+- 进入 `I-2` validator
+- 继续阶段 C / B / H 的后续深化
 - 深化阶段 F：做更正式的评分校准报表
 - 深化阶段 G：做更细的执行压力测试
-- 继续推进 `discover` v2
 
 ---
 
@@ -830,5 +1486,9 @@
   - 评分校准与归因
   - 执行成本 / 可成交性
   - 运营闭环
+- 已进入计划设计 / 外审 gate
+  - 无
+- 已通过计划外审，可进入实现
+  - `strategy`
 
 这也是为什么当前主战场不再是继续堆新的 pick，而是补“可信度和可执行性”的硬骨头。

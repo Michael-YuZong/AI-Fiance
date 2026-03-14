@@ -60,6 +60,9 @@ This project became reliable through repeated cycles, not one-shot generation. K
 3. Add or update tests so the same regression does not return.
 4. Preserve downgrade paths and source-confidence notes when data is incomplete.
 5. Update this file when command contracts, maturity status, or the active backlog changes.
+6. External review is never checklist-only: every review pass must include a divergent pass that deliberately searches for framework-external issues, missing controls, and better validation ideas.
+7. If a divergent-review finding is judged valid, do not leave it as one-off commentary. Route it into at least one durable layer: prompt, hard rule / guard, test / fixture, or a tracked lesson/backlog item.
+8. All external review is round-based: every round must compare against the previous round, record new vs carried P0/P1 items, and continue until the convergence conditions in `plan.md` are met.
 
 When in doubt, optimize for:
 
@@ -70,19 +73,25 @@ When in doubt, optimize for:
 
 ## Current Priority Backlog
 
-1. Policy v2
+1. `strategy` v1 implementation
+   The `strategy` plan gate is now passed. Start with `I-1` prediction ledger only: keep the approved A-share liquid-stock universe, `20`-day benchmark-relative excess-return target, fixed overlap contract, point-in-time lag rules, `no_prediction` cases, and champion/challenger gate. Do not widen scope to ETF/fund/multi-asset or auto-factor discovery yet.
+2. Policy v2
    Keep improving official-source extraction, especially scanned/table-heavy PDF/OFD handling, and deepen the policy taxonomy beyond the current first-pass contract.
-2. Proxy signals
+3. Proxy signals
    Finish propagating confidence and downgrade-impact wording into all pick outputs plus release/review guards.
-3. Scheduler v2
+4. Scheduler v2
    Add persistent run history, failure visibility, and possibly automation integration if the user asks for recurring workflows in the app.
-4. Scoring calibration v2
+5. Scoring calibration v2
    Deepen setup-bucket calibration and attribution beyond the current first-pass monthly review.
-5. Pick pipeline consolidation
+6. Pick pipeline consolidation
    `src/commands/pick_history.py` now holds shared snapshot/history helpers. Continue consolidating ETF/fund/stock pick contracts there instead of duplicating scoring-history and coverage logic per command.
 
 ## Recent Changes
 
+- 2026-03-14
+  `strategy` now has a dedicated phase in `plan.md`, a dedicated plan reviewer prompt, and a completed round-based external-review loop under `reports/reviews/strategy_plan_review_2026-03-14_round{1,2,3}.md`. The plan gate passed after locking `v1` target/universe/overlap/lag/champion-challenger contracts, so the next allowed step is `I-1` prediction ledger implementation rather than more plan design.
+- 2026-03-14
+  Client-facing analysis/pick reports now expose disabled intraday provenance as `分钟级快照 as_of`, and `release_check` no longer mistakes that metadata row for unsupported intraday execution language.
 - 2026-03-13
   Pick renderers now use a structured `action.horizon` contract with explicit fit / misfit language, so ETF/fund/stock outputs can distinguish `观察期` / `短线交易（3-10日）` / `波段跟踪（2-6周）` / `中线配置（1-3月）` / `长线配置（6-12月）` instead of only printing a flat timeframe string.
 - 2026-03-13
@@ -135,6 +144,8 @@ When in doubt, optimize for:
   `briefing daily` now has a real finalization chain: internal reports archive to `reports/briefings/internal`, client output must include `宏观领先指标 + 数据完整度 + 重点观察`, macro-monitor refresh failures downgrade coverage instead of silently using old cached prices, and the daily client-final can ship through external review + manifest like the stronger pick pipelines.
 - 2026-03-13
   `briefing daily` now also uses a Tushare-priority full-A-share pre-screen for its client/detail `A股观察池`, and both the rendered copy and manifest disclose that this is `全市场初筛 -> 少量样本完整分析`, not a full per-stock deep scan.
+- 2026-03-13
+  `stock_pick` history/baseline/catalyst-fallback logic now reuses the shared `src/commands/pick_history.py` layer instead of maintaining a parallel implementation, and its coverage disclosure now prefers the full completed-analysis population when available.
 
 ## Commands You Will Actually Use
 
@@ -184,7 +195,14 @@ If a report contract changes, update both renderer tests and any command/helper 
 - Fix silent behavior mismatches immediately. They are more damaging than obvious TODOs.
 - Keep CLI behavior and rendered markdown aligned. If the parser claims multi-input support, the output layer must honor it.
 - Use the existing loop: real task -> critique -> revise -> test -> document.
+- External review must be two-pass: contract review first, then a divergent review that asks what the current prompt/task definition failed to ask.
+- External review does not stop after one pass. Run it in rounds until convergence: no new P0/P1 across two consecutive rounds, prior blockers closed or downgraded, and no new material divergent findings.
+- `strategy` is gated differently from ordinary feature work: do not start implementation until the plan in `plan.md` has passed the dedicated external plan-review loop.
 - Research Q&A external review prompt:
   `docs/prompts/external_research_reviewer.md`
+- Universal external-review convergence loop:
+  `docs/prompts/external_review_convergence_loop.md`
+- `strategy` plan external review prompt:
+  `docs/prompts/external_strategy_plan_reviewer.md`
 - Fund/ETF pick maturity now depends on four linked contracts staying aligned:
   discovery/pre-screen -> client renderer -> release checks -> review guard/export
