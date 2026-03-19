@@ -403,7 +403,15 @@ def _briefing_a_share_watch_rows(
         return [], ["当前已关闭 A 股全市场观察池。"], {"enabled": False, "mode": "disabled"}
     try:
         shortlist_n = max(int(config.get("briefing_a_share_shortlist", max(top_n * 2, 8)) or max(top_n * 2, 8)), top_n)
-        payload = discover_stock_opportunities(config, top_n=shortlist_n, market="cn", context=shared_context)
+        candidate_cap = max(int(config.get("briefing_a_share_max_candidates", max(top_n * 3, 18)) or max(top_n * 3, 18)), shortlist_n)
+        payload = discover_stock_opportunities(
+            config,
+            top_n=shortlist_n,
+            market="cn",
+            context=shared_context,
+            max_candidates=candidate_cap,
+            attach_signal_confidence=False,
+        )
     except Exception as exc:  # noqa: BLE001
         return [], [f"A 股全市场观察池暂不可用：{exc}"], {"enabled": True, "mode": "unavailable"}
     analyses = list(payload.get("coverage_analyses") or [])
@@ -435,6 +443,7 @@ def _briefing_a_share_watch_rows(
         "A 股观察池来自 `Tushare 优先` 的全市场快照；"
         f"初筛池 `{int(payload.get('scan_pool') or 0)}` 只，完整分析 `{int(payload.get('passed_pool') or len(analyses))}` 只，深分析 shortlist `{len(top_items)}` 只。",
         "这不是对全 A 股逐只深扫，而是全市场初筛后，只对前置筛出的少数样本做完整分析。",
+        f"为控制全市场简报时延，本轮只对成交额靠前且通过基础过滤的候选上限 `{int(payload.get('candidate_limit') or candidate_cap)}` 只做完整分析。",
     ]
     summary = (
         f"全市场初筛 `{int(payload.get('scan_pool') or 0)}`"
@@ -454,6 +463,7 @@ def _briefing_a_share_watch_rows(
         "shortlist_size": len(top_items),
         "complete_analysis_size": int(payload.get("passed_pool") or len(analyses)),
         "report_top_n": len(rows),
+        "candidate_limit": int(payload.get("candidate_limit") or candidate_cap),
         "sector_counts": dict(sector_counter),
         "factor_contract": summarize_factor_contracts_from_analyses(analyses, sample_limit=16),
     }

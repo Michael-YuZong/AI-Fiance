@@ -3128,7 +3128,7 @@ def test_discover_stock_opportunities_limits_context_asset_types_by_market(monke
         return {"notes": [], "regime": {}, "day_theme": {}, "config": dict(config)}
 
     monkeypatch.setattr("src.processors.opportunity_engine.build_market_context", fake_context)
-    monkeypatch.setattr("src.processors.opportunity_engine.build_stock_pool", lambda config, market="all", sector_filter="": ([], []))
+    monkeypatch.setattr("src.processors.opportunity_engine.build_stock_pool", lambda config, market="all", sector_filter="", max_candidates=60: ([], []))
 
     result = discover_stock_opportunities({}, market="cn", top_n=5)
 
@@ -3143,13 +3143,146 @@ def test_discover_stock_opportunities_reuses_provided_context(monkeypatch):
         raise AssertionError("build_market_context should not be called when context is provided")
 
     monkeypatch.setattr("src.processors.opportunity_engine.build_market_context", fail_context)
-    monkeypatch.setattr("src.processors.opportunity_engine.build_stock_pool", lambda config, market="all", sector_filter="": ([], []))
+    monkeypatch.setattr("src.processors.opportunity_engine.build_stock_pool", lambda config, market="all", sector_filter="", max_candidates=60: ([], []))
 
     result = discover_stock_opportunities({}, market="cn", top_n=5, context=shared_context)
 
     assert result["top"] == []
     assert result["regime"]["current_regime"] == "deflation"
     assert result["day_theme"]["label"] == "利率驱动成长修复"
+
+
+def test_discover_stock_opportunities_analyzes_in_parallel(monkeypatch):
+    monkeypatch.setattr("src.processors.opportunity_engine.build_market_context", lambda config, relevant_asset_types=None: {"notes": [], "regime": {}, "day_theme": {}, "config": dict(config)})  # noqa: ARG005
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.build_stock_pool",
+        lambda config, market="all", sector_filter="", max_candidates=60: (  # noqa: ARG005
+            [
+                type(
+                    "PoolItemStub",
+                    (),
+                    {
+                        "symbol": f"30075{i}",
+                        "asset_type": "cn_stock",
+                        "name": f"样本{i}",
+                        "sector": "新能源",
+                        "chain_nodes": [],
+                        "region": "CN",
+                        "in_watchlist": False,
+                        "metadata": {},
+                    },
+                )()
+                for i in range(3)
+            ],
+            [],
+        ),
+    )
+
+    def _slow_analysis(symbol, asset_type, config, context=None, metadata_override=None):  # noqa: ANN001,ARG001
+        time.sleep(0.08)
+        return {
+            "symbol": symbol,
+            "name": symbol,
+            "asset_type": asset_type,
+            "rating": {"rank": 1, "label": "储备机会", "stars": "⭐"},
+            "dimensions": {
+                "technical": {"score": 40},
+                "fundamental": {"score": 60},
+                "catalyst": {"score": 20},
+                "relative_strength": {"score": 30},
+                "chips": {"score": 0},
+                "risk": {"score": 35},
+                "seasonality": {"score": 0},
+                "macro": {"score": 12},
+            },
+            "excluded": False,
+        }
+
+    monkeypatch.setattr("src.processors.opportunity_engine.analyze_opportunity", _slow_analysis)
+    monkeypatch.setattr("src.processors.opportunity_engine._attach_signal_confidence", lambda analyses, config, limit=0: None)  # noqa: ARG005
+
+    start = time.perf_counter()
+    payload = discover_stock_opportunities({"opportunity": {"analysis_workers": 3}}, market="cn", top_n=3)
+    elapsed = time.perf_counter() - start
+
+    assert payload["scan_pool"] == 3
+    assert payload["passed_pool"] == 3
+    assert len(payload["coverage_analyses"]) == 3
+    assert elapsed < 0.20
+
+
+def test_discover_stock_opportunities_forwards_candidate_limit(monkeypatch):
+    captured: list[int] = []
+
+    monkeypatch.setattr("src.processors.opportunity_engine.build_market_context", lambda config, relevant_asset_types=None: {"notes": [], "regime": {}, "day_theme": {}, "config": dict(config)})  # noqa: ARG005
+
+    def _fake_pool(config, market="all", sector_filter="", max_candidates=60):  # noqa: ANN001,ARG001
+        captured.append(max_candidates)
+        return [], []
+
+    monkeypatch.setattr("src.processors.opportunity_engine.build_stock_pool", _fake_pool)
+
+    result = discover_stock_opportunities({}, market="cn", top_n=5, max_candidates=18)
+
+    assert result["candidate_limit"] == 18
+    assert captured == [18]
+
+
+def test_discover_stock_opportunities_can_skip_signal_confidence(monkeypatch):
+    monkeypatch.setattr("src.processors.opportunity_engine.build_market_context", lambda config, relevant_asset_types=None: {"notes": [], "regime": {}, "day_theme": {}, "config": dict(config)})  # noqa: ARG005
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.build_stock_pool",
+        lambda config, market="all", sector_filter="", max_candidates=60: (  # noqa: ARG005
+            [
+                type(
+                    "PoolItemStub",
+                    (),
+                    {
+                        "symbol": "300750",
+                        "asset_type": "cn_stock",
+                        "name": "宁德时代",
+                        "sector": "新能源",
+                        "chain_nodes": [],
+                        "region": "CN",
+                        "in_watchlist": False,
+                        "metadata": {},
+                    },
+                )()
+            ],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.analyze_opportunity",
+        lambda symbol, asset_type, config, context=None, metadata_override=None: {  # noqa: ARG005
+            "symbol": symbol,
+            "name": "宁德时代",
+            "asset_type": asset_type,
+            "rating": {"rank": 2, "label": "储备机会", "stars": "⭐"},
+            "dimensions": {
+                "technical": {"score": 38},
+                "fundamental": {"score": 75},
+                "catalyst": {"score": 35},
+                "relative_strength": {"score": 55},
+                "chips": {"score": 0},
+                "risk": {"score": 65},
+                "seasonality": {"score": 0},
+                "macro": {"score": 30},
+            },
+            "history": _make_simple_history(),
+            "action": {"stop_loss_pct": "-8%", "target_pct": 0.12},
+            "excluded": False,
+        },
+    )
+
+    def _fail_attach(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("_attach_signal_confidence should be skipped")
+
+    monkeypatch.setattr("src.processors.opportunity_engine._attach_signal_confidence", _fail_attach)
+
+    payload = discover_stock_opportunities({}, top_n=5, market="cn", attach_signal_confidence=False)
+
+    assert len(payload["top"]) == 1
 
 
 def test_build_analysis_horizon_profile_varies_swing_contract_by_driver():
@@ -3437,7 +3570,7 @@ def test_discover_stock_opportunities_includes_watch_positive(monkeypatch):
     monkeypatch.setattr("src.processors.opportunity_engine.build_market_context", lambda config, relevant_asset_types=None: {})  # noqa: ARG005
     monkeypatch.setattr(
         "src.processors.opportunity_engine.build_stock_pool",
-        lambda config, market="all", sector_filter="": (  # noqa: ARG005
+        lambda config, market="all", sector_filter="", max_candidates=60: (  # noqa: ARG005
             [
                 type(
                     "PoolItemStub",

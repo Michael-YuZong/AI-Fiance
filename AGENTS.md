@@ -114,7 +114,7 @@
 ## Recent Changes
 
 - 2026-03-19
-  `briefing market` 的 A 股观察池开始复用 `briefing` 主链已经拿到的 `china_macro / global_proxy / monitor_rows / regime / news_report / drivers / pulse / events`，不再在观察池里再建一轮 market context。当前 full market briefing 仍然慢，但瓶颈已从“重复拉上游上下文”收缩到“A 股候选本身的深分析”。
+  `briefing market` 的 A 股观察池开始复用 `briefing` 主链已经拿到的 `china_macro / global_proxy / monitor_rows / regime / news_report / drivers / pulse / events`，不再在观察池里再建一轮 market context。`discover_stock_opportunities` 也已补成受控并发；`briefing` 路径会关闭 `signal_confidence` 并把候选深分析上限收在 `18` 只。当前同环境下 A 股观察池这一步大约从 `79s` 降到 `49s` 左右，瓶颈已从“重复拉上游上下文”收缩到“A 股候选本身的深分析”。
 - 2026-03-19
   `briefing` 的主线 taxonomy 已扩容，不再只在 `能源冲击 / 利率驱动成长 / 中国政策 / AI半导体` 这几个粗桶里来回落；现在新增并区分 `黄金避险 / 红利银行防守 / 宽基修复 / 电网公用事业`，输出也拆成 `背景框架 + 交易主线候选 + 次主线候选`。A 股观察池的行业分布会回灌到主线评分，避免全靠新闻关键词决定当天主线。
 - 2026-03-19
