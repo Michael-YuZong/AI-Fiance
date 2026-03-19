@@ -14,7 +14,7 @@ from src.collectors.market_cn import ChinaMarketCollector
 from src.collectors.market_drivers import MarketDriversCollector
 from src.collectors.valuation import ValuationCollector
 from src.collectors.news import NewsCollector
-from src.processors.opportunity_engine import PoolItem, _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _refresh_action_from_signal_confidence, _relative_strength_dimension, _risk_dimension, _seasonality_dimension, _signal_confidence_warning_line, _stock_name_tokens, _technical_dimension, analyze_opportunity, build_default_pool, build_fund_pool, build_market_context, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities
+from src.processors.opportunity_engine import PoolItem, _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _correlation_to_watchlist, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _refresh_action_from_signal_confidence, _relative_strength_dimension, _risk_dimension, _seasonality_dimension, _signal_confidence_warning_line, _stock_name_tokens, _technical_dimension, analyze_opportunity, build_default_pool, build_fund_pool, build_market_context, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities
 from src.processors.opportunity_engine import _asset_note
 from src.processors.horizon import build_analysis_horizon_profile
 from src.utils.market import compute_history_metrics
@@ -697,6 +697,21 @@ def test_analyze_opportunity_retries_cn_history_before_snapshot_fallback(monkeyp
     assert analysis["history_fallback_mode"] is False
     assert analysis["metadata"]["history_source"] == "tushare"
     assert any("重试中国市场主链" in note for note in analysis["notes"])
+
+
+def test_correlation_to_watchlist_skips_constant_return_series() -> None:
+    dates = pd.date_range("2026-01-01", periods=30, freq="B")
+    asset_returns = pd.Series([0.01] * 30, index=dates)
+    context = {
+        "watchlist_returns": {
+            "CONST": pd.Series([0.02] * 30, index=dates),
+            "VAR": pd.Series(np.linspace(-0.01, 0.02, 30), index=dates),
+        }
+    }
+
+    pair = _correlation_to_watchlist("300308", asset_returns, context)
+
+    assert pair is None
 
 
 def test_macro_dimension_uses_leading_macro_indicators_for_growth_sector():

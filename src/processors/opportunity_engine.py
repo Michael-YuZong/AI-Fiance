@@ -4989,7 +4989,13 @@ def _correlation_to_watchlist(symbol: str, asset_returns: pd.Series, context: Ma
         aligned = pd.concat([asset_returns, peer_returns], axis=1, join="inner").dropna()
         if len(aligned) < 20:
             continue
+        left_std = float(aligned.iloc[:, 0].std(ddof=0) or 0.0)
+        right_std = float(aligned.iloc[:, 1].std(ddof=0) or 0.0)
+        if np.isclose(left_std, 0.0) or np.isclose(right_std, 0.0):
+            continue
         corr = float(aligned.iloc[:, 0].corr(aligned.iloc[:, 1]))
+        if pd.isna(corr):
+            continue
         if best_corr is None or abs(corr) > abs(best_corr):
             best_symbol = peer_symbol
             best_corr = corr
