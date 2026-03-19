@@ -8689,6 +8689,9 @@ def discover_stock_opportunities(
     market: str = "all",
     sector_filter: str = "",
     context: Optional[Mapping[str, Any]] = None,
+    *,
+    max_candidates: Optional[int] = None,
+    attach_signal_confidence: bool = True,
 ) -> Dict[str, Any]:
     """Scan a stock universe and surface top picks."""
     def _coverage_state(analyses: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -8725,35 +8728,73 @@ def discover_stock_opportunities(
     }
     relevant_types = list(dict.fromkeys(relevant_by_market.get(str(market), relevant_by_market["all"])))
     runtime_context = context if context is not None else build_market_context(config, relevant_asset_types=relevant_types)
-    pool, pool_warnings = build_stock_pool(config, market=market, sector_filter=sector_filter)
+    opportunity_cfg = dict(dict(config).get("opportunity") or {})
+    candidate_limit = int(max_candidates or opportunity_cfg.get("stock_max_scan_candidates", 60) or 60)
+    pool, pool_warnings = build_stock_pool(config, market=market, sector_filter=sector_filter, max_candidates=candidate_limit)
     passed = 0
     analyses: List[Dict[str, Any]] = []
     blind_spots: List[str] = list(pool_warnings)
-    for item in pool:
-        try:
-            override: Dict[str, Any] = {
-                "name": item.name,
-                "sector": item.sector,
-                "chain_nodes": item.chain_nodes,
-                "region": item.region,
-                "in_watchlist": item.in_watchlist,
-            }
-            if item.metadata:
-                override.update(item.metadata)
-            analysis = analyze_opportunity(
-                item.symbol,
-                item.asset_type,
-                config,
-                context=runtime_context,
-                metadata_override=override,
-            )
-        except Exception as exc:
-            blind_spots.append(_client_safe_issue(f"{item.symbol} ({item.name}) 扫描失败", exc))
-            continue
-        if analysis["excluded"]:
-            continue
-        passed += 1
-        analyses.append(analysis)
+    analysis_workers = max(1, min(int(opportunity_cfg.get("analysis_workers", 4) or 4), len(pool) or 1, 6))
+    base_context = dict(runtime_context)
+    if analysis_workers > 1 and len(pool) > 1:
+        with ThreadPoolExecutor(max_workers=analysis_workers) as executor:
+            future_map = {}
+            for item in pool:
+                override: Dict[str, Any] = {
+                    "name": item.name,
+                    "sector": item.sector,
+                    "chain_nodes": item.chain_nodes,
+                    "region": item.region,
+                    "in_watchlist": item.in_watchlist,
+                }
+                if item.metadata:
+                    override.update(item.metadata)
+                future = executor.submit(
+                    analyze_opportunity,
+                    item.symbol,
+                    item.asset_type,
+                    config,
+                    context={**base_context, "runtime_caches": {}},
+                    metadata_override=override,
+                )
+                future_map[future] = item
+            for future in as_completed(future_map):
+                item = future_map[future]
+                try:
+                    analysis = future.result()
+                except Exception as exc:
+                    blind_spots.append(_client_safe_issue(f"{item.symbol} ({item.name}) 扫描失败", exc))
+                    continue
+                if analysis["excluded"]:
+                    continue
+                passed += 1
+                analyses.append(analysis)
+    else:
+        for item in pool:
+            try:
+                override: Dict[str, Any] = {
+                    "name": item.name,
+                    "sector": item.sector,
+                    "chain_nodes": item.chain_nodes,
+                    "region": item.region,
+                    "in_watchlist": item.in_watchlist,
+                }
+                if item.metadata:
+                    override.update(item.metadata)
+                analysis = analyze_opportunity(
+                    item.symbol,
+                    item.asset_type,
+                    config,
+                    context=runtime_context,
+                    metadata_override=override,
+                )
+            except Exception as exc:
+                blind_spots.append(_client_safe_issue(f"{item.symbol} ({item.name}) 扫描失败", exc))
+                continue
+            if analysis["excluded"]:
+                continue
+            passed += 1
+            analyses.append(analysis)
     analyses.sort(
         key=lambda a: (
             a["rating"]["rank"],
@@ -8786,7 +8827,8 @@ def discover_stock_opportunities(
                 continue
             confidence_targets.append(analysis)
             seen_symbols.add(symbol)
-    _attach_signal_confidence(confidence_targets, config, limit=len(confidence_targets))
+    if attach_signal_confidence:
+        _attach_signal_confidence(confidence_targets, config, limit=len(confidence_targets))
     market_labels = {"cn": "A 股", "hk": "港股", "us": "美股", "all": "全市场"}
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -8802,4 +8844,5 @@ def discover_stock_opportunities(
         "watch_positive": watch_positive[:6],
         "blind_spots": blind_spots[:10],
         "sector_filter": sector_filter,
+        "candidate_limit": candidate_limit,
     }
