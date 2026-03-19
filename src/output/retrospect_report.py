@@ -166,6 +166,19 @@ class DecisionRetrospectReportRenderer:
             ]
             lines.extend(["", "### 时点与执行快照"])
             lines.extend(_table(["项目", "内容"], timing_rows))
+            factor_contract = dict(decision_snapshot.get("factor_contract") or {})
+            if factor_contract:
+                contract_rows = [
+                    ["family 覆盖", " / ".join(f"{key} {value}" for key, value in dict(factor_contract.get("families") or {}).items()) or "—"],
+                    ["状态分布", " / ".join(f"{key} {value}" for key, value in dict(factor_contract.get("states") or {}).items()) or "—"],
+                    ["strategy 候选", " / ".join(list(factor_contract.get("strategy_candidate_factor_ids") or [])[:6]) or "无"],
+                ]
+                blockers = list(factor_contract.get("point_in_time_blockers") or [])
+                if blockers:
+                    blocker = dict(blockers[0] or {})
+                    contract_rows.append(["PTI blocker", f"{blocker.get('factor_id', '—')} | {blocker.get('reason', 'lag / visibility fixture incomplete')}"])
+                lines.extend(["", "### 因子合同快照"])
+                lines.extend(_table(["项目", "内容"], contract_rows))
             for note in decision_snapshot.get("notes", []) or []:
                 lines.append(f"- {note}")
             liquidity_note = str(execution_snapshot.get("liquidity_note", "") or "").strip()

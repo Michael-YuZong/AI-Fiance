@@ -64,6 +64,8 @@ def build_analysis_provenance(analysis: Mapping[str, Any]) -> Dict[str, Any]:
     evidence = list(catalyst.get("evidence") or [])
     intraday = dict(analysis.get("intraday") or {})
     metadata = dict(analysis.get("metadata") or {})
+    history_source = str(metadata.get("history_source", "")).strip()
+    history_source_label = str(metadata.get("history_source_label", "")).strip()
 
     intraday_as_of = "未启用"
     if intraday.get("enabled"):
@@ -82,8 +84,8 @@ def build_analysis_provenance(analysis: Mapping[str, Any]) -> Dict[str, Any]:
     if intraday.get("enabled") and intraday.get("fallback_mode"):
         notes.append("盘中快照当前退化为最近一根日K快照，盘中时点只适合作参考。")
 
-    market_source = "Tushare 优先日线；失败时 AKShare / Yahoo / 本地实时快照回退"
-    if str(analysis.get("asset_type", "")) == "cn_fund":
+    market_source = history_source_label or "Tushare 优先日线；失败时 AKShare / Yahoo / 本地实时快照回退"
+    if str(analysis.get("asset_type", "")) == "cn_fund" and not history_source_label:
         market_source = "基金净值/日线历史；失败时本地缓存或快照回退"
 
     sources = unique_sources(evidence)
@@ -91,6 +93,7 @@ def build_analysis_provenance(analysis: Mapping[str, Any]) -> Dict[str, Any]:
         "analysis_generated_at": format_as_of(analysis.get("generated_at")),
         "market_data_as_of": history_as_of(analysis.get("history")),
         "market_data_source": market_source,
+        "market_data_source_code": history_source or "unknown",
         "intraday_as_of": intraday_as_of,
         "intraday_source": "AKShare 分钟线 / 实时行情" if intraday.get("enabled") else "未启用",
         "catalyst_evidence_as_of": latest_evidence_as_of(evidence),

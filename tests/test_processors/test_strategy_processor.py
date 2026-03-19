@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 import src.processors.strategy as strategy_module
+from src.processors.factor_meta import factor_meta_payload
 from src.processors.strategy import (
     attribute_strategy_rows,
     build_strategy_prediction_from_analysis,
@@ -49,13 +50,67 @@ def _analysis(asset_type: str = "cn_stock", *, amount: float = 1.6e8, history_fa
             "volume": {"vol_ratio": 1.3},
         },
         "dimensions": {
-            "technical": {"score": 76, "summary": "趋势保持偏强。"},
-            "relative_strength": {"score": 73, "summary": "相对强弱领先。"},
+            "technical": {
+                "score": 76,
+                "summary": "趋势保持偏强。",
+                "factors": [
+                    {
+                        "name": "量价结构",
+                        "signal": "放量突破",
+                        "display_score": "15/15",
+                        "factor_id": "j1_volume_structure",
+                        "factor_meta": factor_meta_payload("j1_volume_structure"),
+                    }
+                ],
+            },
+            "relative_strength": {
+                "score": 73,
+                "summary": "相对强弱领先。",
+                "factors": [
+                    {
+                        "name": "超额拐点",
+                        "signal": "20日超额为正",
+                        "display_score": "20/30",
+                        "factor_id": "j3_benchmark_relative",
+                        "factor_meta": factor_meta_payload("j3_benchmark_relative"),
+                    }
+                ],
+            },
             "catalyst": {"score": 61, "summary": "事件支持仍在。"},
-            "fundamental": {"score": 69, "summary": "基本面质量较稳。"},
+            "fundamental": {
+                "score": 69,
+                "summary": "基本面质量较稳。",
+                "factors": [
+                    {
+                        "name": "盈利动量",
+                        "signal": "观察提示",
+                        "display_score": "观察提示",
+                        "factor_id": "j4_earnings_momentum",
+                        "factor_meta": factor_meta_payload(
+                            "j4_earnings_momentum",
+                            overrides={"degraded": True, "degraded_reason": "缺少 EPS point-in-time 源"},
+                        ),
+                    }
+                ],
+            },
             "risk": {"score": 66, "summary": "风险收益比尚可。"},
             "macro": {"score": 55, "summary": "宏观不逆风。"},
-            "seasonality": {"score": 51, "summary": "季节性中性略正。"},
+            "seasonality": {
+                "score": 51,
+                "summary": "季节性中性略正。",
+                "factors": [
+                    {
+                        "name": "政策事件窗",
+                        "signal": "观察提示：政策窗口",
+                        "display_score": "观察提示",
+                        "factor_id": "j2_policy_event",
+                        "factor_meta": factor_meta_payload(
+                            "j2_policy_event",
+                            overrides={"degraded": True, "degraded_reason": "lag / visibility fixture incomplete"},
+                        ),
+                    }
+                ],
+            },
             "chips": {"score": 48, "summary": "筹码并不算最优。"},
         },
         "regime": {"label": "recovery", "summary": "风险偏好修复。"},
@@ -86,6 +141,9 @@ def test_build_strategy_prediction_from_analysis_records_predicted_snapshot() ->
     assert payload["cohort_contract"]["holding_period_days"] == 20
     assert payload["notes"] == ["首笔预测样本"]
     assert payload["key_factors"]
+    assert "j1_volume_structure" in payload["factor_contract"]["strategy_candidate_factor_ids"]
+    assert any(item["factor_id"] == "j2_policy_event" for item in payload["factor_contract"]["point_in_time_blockers"])
+    assert "factor_contract_pti_blockers" in payload["downgrade_flags"]
 
 
 def test_build_strategy_prediction_from_analysis_marks_no_prediction_when_liquidity_or_asset_type_fail() -> None:

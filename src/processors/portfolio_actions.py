@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Mapping, Optional
 import numpy as np
 import pandas as pd
 
+from src.processors.factor_meta import summarize_factor_contracts_from_analysis
 from src.processors.risk_support import build_blended_benchmark, build_portfolio_risk_context
 from src.processors.horizon import build_trade_plan_horizon
 from src.processors.technical import normalize_ohlcv_frame
@@ -157,6 +158,7 @@ def build_trade_decision_snapshot(
     config: Mapping[str, Any],
     history: pd.DataFrame,
     thesis: Mapping[str, Any] | None = None,
+    factor_contract: Mapping[str, Any] | None = None,
     period: str = "3y",
 ) -> Dict[str, Any]:
     context = get_asset_context(symbol, asset_type, dict(config))
@@ -176,6 +178,7 @@ def build_trade_decision_snapshot(
         "market_data_source": context.source_symbol,
         "history_window": period,
         "thesis_snapshot_at": str(thesis_payload.get("updated_at") or thesis_payload.get("created_at") or ""),
+        "factor_contract": dict(factor_contract or {}),
         "notes": notes,
     }
 
@@ -262,6 +265,7 @@ def build_trade_plan(
     asset_type: str = "",
     repo: PortfolioRepository | None = None,
     thesis_repo: ThesisRepository | None = None,
+    analysis: Mapping[str, Any] | None = None,
     period: str = "3y",
 ) -> Dict[str, Any]:
     """Build a portfolio what-if plan for a proposed trade."""
@@ -274,12 +278,14 @@ def build_trade_plan(
 
     history = normalize_ohlcv_frame(fetch_asset_history(symbol, asset_kind, dict(config), period=period))
     metrics = compute_history_metrics(history)
+    factor_contract = summarize_factor_contracts_from_analysis(analysis) if analysis else {}
     decision_snapshot = build_trade_decision_snapshot(
         symbol=symbol,
         asset_type=asset_kind,
         config=config,
         history=history,
         thesis=thesis_record,
+        factor_contract=factor_contract,
         period=period,
     )
     risk_limits = dict(config.get("risk_limits", {}))

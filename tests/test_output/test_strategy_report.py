@@ -29,6 +29,12 @@ def test_strategy_report_renderer_renders_prediction_sections() -> None:
             "liquidity": {"avg_turnover_20d": 1.6e8, "median_turnover_60d": 1.5e8},
             "risk": {"volatility_20d": 0.24, "max_drawdown_1y": -0.18},
         },
+        "factor_contract": {
+            "families": {"J-1": 1, "J-2": 1, "J-3": 1},
+            "states": {"observation_only": 1, "strategy_challenger": 2},
+            "strategy_candidate_factor_ids": ["j1_volume_structure", "j3_benchmark_relative"],
+            "point_in_time_blockers": [{"factor_id": "j2_policy_event", "reason": "lag / visibility fixture incomplete"}],
+        },
         "evidence_sources": {
             "market_data_as_of": "2026-03-13",
             "market_data_source": "Tushare 优先日线",
@@ -49,10 +55,12 @@ def test_strategy_report_renderer_renders_prediction_sections() -> None:
     assert "## 预测合同" in rendered
     assert "## 关键因子" in rendered
     assert "## 因子快照" in rendered
+    assert "## 因子合同" in rendered
     assert "## 证据时点与来源" in rendered
     assert "## 降级与边界" in rendered
     assert "更像 20 日超额收益的上层候选" in rendered
     assert "相对基准" in rendered
+    assert "j2_policy_event" in rendered
 
 
 def test_strategy_report_renderer_renders_no_prediction_reasons() -> None:

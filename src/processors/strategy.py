@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 import pandas as pd
 
+from src.processors.factor_meta import summarize_factor_contracts_from_analysis
 from src.processors.opportunity_engine import analyze_opportunity, build_market_context
 from src.processors.provenance import history_as_of
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
@@ -437,7 +438,12 @@ def _eligibility_checks(
     return codes, reasons
 
 
-def _downgrade_flags(analysis: Mapping[str, Any], benchmark_history: pd.DataFrame) -> List[str]:
+def _downgrade_flags(
+    analysis: Mapping[str, Any],
+    benchmark_history: pd.DataFrame,
+    *,
+    factor_contract: Mapping[str, Any] | None = None,
+) -> List[str]:
     flags: List[str] = []
     provenance = dict(analysis.get("provenance") or {})
     catalyst = dict(dict(analysis.get("dimensions") or {}).get("catalyst") or {})
@@ -450,6 +456,9 @@ def _downgrade_flags(analysis: Mapping[str, Any], benchmark_history: pd.DataFram
         flags.append("intraday_not_used")
     if _safe_normalize_history(benchmark_history).empty:
         flags.append("benchmark_history_missing")
+    blockers = list(dict(factor_contract or {}).get("point_in_time_blockers") or [])
+    if blockers:
+        flags.append("factor_contract_pti_blockers")
     return flags
 
 
@@ -547,6 +556,7 @@ def build_strategy_prediction_from_analysis(
     seed_score = _seed_rank_score(score_map)
     confidence = _confidence_payload(seed_score)
     prediction_value = _prediction_value(seed_score)
+    factor_contract = summarize_factor_contracts_from_analysis(analysis)
     no_prediction_codes, no_prediction_reasons = _eligibility_checks(
         symbol=symbol,
         analysis=analysis,
@@ -575,6 +585,7 @@ def build_strategy_prediction_from_analysis(
         "confidence_type": "rank_confidence_v1",
         "key_factors": _key_factors(analysis, score_map),
         "factor_snapshot": _factor_snapshot(analysis),
+        "factor_contract": factor_contract,
         "factor_version": STRATEGY_V1_FACTOR_VERSION,
         "weight_scheme": dict(STRATEGY_V1_WEIGHT_SCHEME),
         "benchmark": {
@@ -584,7 +595,7 @@ def build_strategy_prediction_from_analysis(
         },
         "regime": _regime_snapshot(analysis),
         "evidence_sources": _evidence_sources(analysis, benchmark_history),
-        "downgrade_flags": _downgrade_flags(analysis, benchmark_history),
+        "downgrade_flags": _downgrade_flags(analysis, benchmark_history, factor_contract=factor_contract),
         "no_prediction_reason_codes": no_prediction_codes,
         "no_prediction_reasons": no_prediction_reasons,
         "cohort_contract": {
@@ -645,6 +656,17 @@ def _build_replay_prediction(
             "liquidity": {},
             "risk": {},
         },
+        "factor_contract": {
+            "registered_factor_rows": 0,
+            "families": {},
+            "states": {},
+            "visibility_classes": {},
+            "proxy_levels": {},
+            "strategy_candidate_factor_ids": [],
+            "point_in_time_blockers": [],
+            "degraded_factor_ids": [],
+            "sample_rows": [],
+        },
         "key_factors": [],
     }
     if not no_prediction_codes:
@@ -680,6 +702,7 @@ def _build_replay_prediction(
         "confidence_type": "rank_confidence_v1",
         "key_factors": list(scorecard.get("key_factors") or []),
         "factor_snapshot": dict(scorecard.get("factor_snapshot") or {}),
+        "factor_contract": dict(scorecard.get("factor_contract") or {}),
         "factor_version": factor_version,
         "weight_scheme": dict(scorecard.get("weight_scheme") or {}),
         "benchmark": {

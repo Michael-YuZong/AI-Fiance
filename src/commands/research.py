@@ -992,6 +992,7 @@ def _asset_trade_plan_payload(
         asset_type=str(snapshot.get("asset_type") or ""),
         repo=repo,
         thesis_repo=ThesisRepository(),
+        analysis=snapshot,
     )
 
     execution = dict(payload.get("execution") or {})

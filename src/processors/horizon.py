@@ -83,6 +83,129 @@ def _append_sentence(base: str, extra: str) -> str:
     return f"{head} {tail}"
 
 
+def _watch_contract_variant(
+    *,
+    asset_type: str,
+    technical_score: int,
+    fundamental_score: int,
+    catalyst_score: int,
+    relative_score: int,
+    risk_score: int,
+    macro_reverse: bool,
+    stop_hit_rate: float | None = None,
+    win_rate_20d: float | None = None,
+    confidence_score: int | None = None,
+    source: str = "",
+) -> Dict[str, str]:
+    horizon = _base_contract("watch", source=source)
+
+    if stop_hit_rate is not None and stop_hit_rate >= 0.6:
+        horizon["style"] = "这类信号当前更适合只留在观察名单里，先看风险释放和承接修复，不急着预设交易周期。"
+        horizon["fit_reason"] = "历史相似场景里的止损触发率偏高，先观察比提前试错更重要。"
+        horizon["misfit_reason"] = "不适合把它当成反弹试错仓去抢，尤其不适合在没有明确止损纪律时提前下手。"
+        return horizon
+
+    if win_rate_20d is not None and win_rate_20d >= 0.65 and technical_score < 45:
+        horizon["style"] = "这更像历史样本不差、但眼前技术确认还没补齐的观察阶段，先等右侧信号比抢跑更稳。"
+        horizon["fit_reason"] = "历史样本并不差，但价格和动量确认还没补齐，当前更适合先等右侧信号。"
+        horizon["misfit_reason"] = "不适合把历史胜率直接等同成今天就能下手，更不适合在弱技术结构里提前抢跑。"
+        return horizon
+
+    if fundamental_score <= 20:
+        horizon["style"] = "当前更像基本面和赔率都偏弱的防守观察期，优先看风险是否继续出清，而不是先定义持有周期。"
+        horizon["fit_reason"] = "基本面支撑还没站住，先观察财务和景气能否修复，比急着给动作更重要。"
+        horizon["misfit_reason"] = "不适合按长线配置仓去理解，也不适合用“跌多了会反弹”替代真正确认。"
+        return horizon
+
+    if fundamental_score >= 70 and relative_score < 40:
+        horizon["style"] = "更像基本面没有坏，但资金和轮动还没回来的观察阶段，先等强弱修复。"
+        horizon["fit_reason"] = "基本面还站得住，但轮动和承接没有同步回来，观察比抢反弹更重要。"
+        horizon["misfit_reason"] = "不适合把它当成趋势已经重启去理解，也不适合只凭基本面就提前上仓位。"
+        return horizon
+
+    if catalyst_score >= 50 and technical_score < 40:
+        horizon["style"] = "当前更像催化先亮灯、价格确认还没跟上的观察阶段，先看催化能否转成趋势。"
+        horizon["fit_reason"] = "催化有苗头，但价格和量能确认没跟上，先观察比只押单条消息更稳妥。"
+        horizon["misfit_reason"] = "不适合只看一条催化就提前下注，催化没转成价格确认前更像线索而不是动作。"
+        return horizon
+
+    if technical_score < 35:
+        horizon["style"] = "当前还处在弱趋势或修复早期，先等 MA20、MACD 这类确认信号，比抢反弹更重要。"
+        horizon["fit_reason"] = "技术结构还在修复早期，先等趋势确认比仓促出手更重要。"
+        horizon["misfit_reason"] = "不适合把它当成右侧确认已经成立去理解，也不适合按超短抢反弹的思路硬做。"
+        return horizon
+
+    if risk_score >= 70 and technical_score >= 35 and catalyst_score < 20:
+        horizon["style"] = "当前更像防守型观察阶段，风险收益比不算差，但催化和主线推进还没补齐。"
+        horizon["fit_reason"] = "波动和防守属性还在，但催化不足以支撑今天直接升级成正式动作。"
+        horizon["misfit_reason"] = "不适合把它当成进攻型机会去理解，也不适合在缺催化时提前放大仓位。"
+        return horizon
+
+    if catalyst_score < 20 and technical_score >= 35:
+        horizon["style"] = "当前更像结构没完全走坏、但催化和资金确认仍偏弱的观察阶段，先等新触发点。"
+        horizon["fit_reason"] = "价格结构不算最差，但催化和确认都偏弱，继续观察比仓促下手更稳。"
+        horizon["misfit_reason"] = "不适合把它当成高确定性右侧机会，也不适合在缺新催化时直接追进去。"
+        return horizon
+
+    if risk_score < 35:
+        horizon["style"] = "当前更像风险收益比和波动窗口都不占优的观察阶段，先看风险是否重新变得可控。"
+        horizon["fit_reason"] = "风险收益比没有站到有利一侧，先保守观察比急着给动作更合适。"
+        horizon["misfit_reason"] = "不适合在风控边界还没清楚时先下手，也不适合用放大仓位去硬赌赔率修复。"
+        return horizon
+
+    if macro_reverse and asset_type in {"cn_stock", "hk", "us"}:
+        horizon["style"] = "当前更像方向本身未必坏，但宏观和风格逆风还在的观察阶段，先等环境改善。"
+        horizon["fit_reason"] = "主线和宏观顺风还没形成共振，继续观察比提前定义进攻周期更稳妥。"
+        horizon["misfit_reason"] = "不适合把它当成环境已经顺风的进攻仓，也不适合忽视风格逆风去提前提杠杆。"
+        return horizon
+
+    if confidence_score is not None and confidence_score < 40:
+        horizon["style"] = "当前更像线索级观察，先等更多确认信号补齐，再决定是否进入正式动作。"
+        horizon["fit_reason"] = "可参考的历史样本本身也不够扎实，先观察比提前上动作更稳。"
+        horizon["misfit_reason"] = "不适合把它当高确定性机会去理解，也不适合在低样本置信度下主动放大仓位。"
+        return horizon
+
+    return horizon
+
+
+def _swing_contract_variant(
+    *,
+    technical_score: int,
+    fundamental_score: int,
+    catalyst_score: int,
+    relative_score: int,
+    risk_score: int,
+    source: str = "",
+) -> Dict[str, str]:
+    horizon = _base_contract("swing", source=source)
+
+    if catalyst_score >= 60 and relative_score >= 65:
+        horizon["style"] = "当前更像主线轮动和催化共振驱动的波段跟踪，核心在未来几周能否继续得到资金确认。"
+        horizon["fit_reason"] = "催化和相对强弱都在线，优势主要集中在未来几周的轮动延续，而不是长周期兑现。"
+        horizon["misfit_reason"] = "不适合把短期热度直接等同成长线胜率，也不适合在情绪加速段盲目追价。"
+        return horizon
+
+    if fundamental_score >= 80 and risk_score < 40:
+        horizon["style"] = "更像基本面先站住、但波动和风控约束仍偏紧的几周级跟踪，适合分批确认，不适合一次打满。"
+        horizon["fit_reason"] = "基本面和主线没有坏，但回撤和波动压力仍在，当前更适合按几周级别分批确认。"
+        horizon["misfit_reason"] = "不适合直接把它升格成长期底仓，也不适合在高波动阶段一次性重仓。"
+        return horizon
+
+    if risk_score >= 50 and technical_score < 35:
+        horizon["style"] = "更像低波或回撤修复框架里的波段跟踪，先看结构修复能否补齐，再决定是否提到执行层。"
+        horizon["fit_reason"] = "风险收益比相对不差，但技术确认仍偏弱，适合按修复节奏而不是单日强弱去跟。"
+        horizon["misfit_reason"] = "不适合按趋势已经重启去理解，也不适合忽视确认过程提前扩大仓位。"
+        return horizon
+
+    if technical_score >= 55 and relative_score >= 55:
+        horizon["style"] = "当前更像右侧确认刚建立的波段跟踪，适合盯回踩承接，而不是把它当成长期持有逻辑。"
+        horizon["fit_reason"] = "价格和相对强弱已经给出一定确认，优势主要在未来几周顺势跟踪。"
+        horizon["misfit_reason"] = "不适合直接切换成长线底仓，也不适合因为单次回踩就完全按超短思路处理。"
+        return horizon
+
+    return horizon
+
+
 def infer_horizon_code_from_period(period_text: str) -> Optional[str]:
     text = str(period_text or "").strip().lower()
     if not text:
@@ -130,13 +253,28 @@ def build_analysis_horizon_profile(
     trade_state: str,
     direction: str,
     position: str,
+    stop_hit_rate: float | None = None,
+    win_rate_20d: float | None = None,
+    confidence_score: int | None = None,
 ) -> Dict[str, str]:
     trade_state = str(trade_state).strip()
     direction = str(direction).strip()
     position = str(position).strip()
 
     if direction in {"回避", "观望"} and ("暂不出手" in position or rating <= 1):
-        return _base_contract("watch", source="analysis_inferred")
+        return _watch_contract_variant(
+            asset_type=asset_type,
+            technical_score=technical_score,
+            fundamental_score=fundamental_score,
+            catalyst_score=catalyst_score,
+            relative_score=relative_score,
+            risk_score=risk_score,
+            macro_reverse=macro_reverse,
+            stop_hit_rate=stop_hit_rate,
+            win_rate_20d=win_rate_20d,
+            confidence_score=confidence_score,
+            source="analysis_inferred",
+        )
 
     if rating >= 4 and fundamental_score >= 70 and risk_score >= 65 and not macro_reverse:
         return _base_contract("long_term_allocation", source="analysis_inferred")
@@ -148,12 +286,31 @@ def build_analysis_horizon_profile(
         return _base_contract("short_term", source="analysis_inferred")
 
     if rating >= 2 or (risk_score >= 70 and relative_score >= 60) or (technical_score >= 55 and relative_score >= 55):
-        return _base_contract("swing", source="analysis_inferred")
+        return _swing_contract_variant(
+            technical_score=technical_score,
+            fundamental_score=fundamental_score,
+            catalyst_score=catalyst_score,
+            relative_score=relative_score,
+            risk_score=risk_score,
+            source="analysis_inferred",
+        )
 
     if "持有优于追高" in trade_state and asset_type in {"cn_etf", "cn_fund"} and fundamental_score >= 50 and risk_score >= 50:
         return _base_contract("position_trade", source="analysis_inferred")
 
-    return _base_contract("watch", source="analysis_inferred")
+    return _watch_contract_variant(
+        asset_type=asset_type,
+        technical_score=technical_score,
+        fundamental_score=fundamental_score,
+        catalyst_score=catalyst_score,
+        relative_score=relative_score,
+        risk_score=risk_score,
+        macro_reverse=macro_reverse,
+        stop_hit_rate=stop_hit_rate,
+        win_rate_20d=win_rate_20d,
+        confidence_score=confidence_score,
+        source="analysis_inferred",
+    )
 
 
 def build_trade_plan_horizon(

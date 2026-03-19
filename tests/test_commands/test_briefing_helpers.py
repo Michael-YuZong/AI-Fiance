@@ -107,33 +107,28 @@ def test_appendix_derivative_lines_do_not_render_fake_zero_vix() -> None:
 
 
 def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> None:
-    pool = [
-        SimpleNamespace(
-            symbol="300750",
-            name="宁德时代",
-            asset_type="cn_stock",
-            region="CN",
-            sector="新能源",
-            chain_nodes=["新能源"],
-            in_watchlist=False,
-            metadata={"bak_strength": 90, "bak_activity": 80, "bak_attack": 70},
-            turnover=1_000_000_000,
-        )
-    ]
-    monkeypatch.setattr(briefing_module, "build_stock_pool", lambda config, market="cn", max_candidates=60: (pool, ["部分样本缺少完整事件覆盖。"]))  # noqa: ARG005
-    monkeypatch.setattr(briefing_module, "build_market_context", lambda config, relevant_asset_types=None: {"regime": {}, "day_theme": {}, "notes": []})  # noqa: ARG005
     monkeypatch.setattr(
         briefing_module,
-        "analyze_opportunity",
-        lambda symbol, asset_type, config, context=None, metadata_override=None: {  # noqa: ARG005
-            "symbol": symbol,
-            "name": "宁德时代",
-            "metadata": {"sector": "新能源"},
-            "rating": {"label": "较强机会", "rank": 3},
-            "action": {"position": "首次建仓 ≤3%"},
-            "narrative": {"judgment": {"state": "持有优于追高"}},
-            "dimensions": {"risk": {"score": 60}, "relative_strength": {"score": 80}, "technical": {"score": 70}},
-            "excluded": False,
+        "discover_stock_opportunities",
+        lambda config, top_n=8, market="cn": {  # noqa: ARG005
+            "scan_pool": 1,
+            "passed_pool": 1,
+            "blind_spots": ["部分样本缺少完整事件覆盖。"],
+            "top": [
+                {
+                    "symbol": "300750",
+                    "name": "宁德时代",
+                    "metadata": {"sector": "新能源"},
+                    "rating": {"label": "较强机会", "rank": 3},
+                    "action": {"position": "首次建仓 ≤3%"},
+                    "narrative": {"judgment": {"state": "持有优于追高"}},
+                }
+            ],
+            "coverage_analyses": [
+                {
+                    "dimensions": {"risk": {"score": 60}, "relative_strength": {"score": 80}, "technical": {"score": 70}},
+                }
+            ],
         },
     )
 
@@ -142,15 +137,14 @@ def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> 
     assert rows == [["1", "宁德时代 (300750)", "新能源", "较强机会", "持有优于追高", "首次建仓 ≤3%"]]
     assert any("Tushare 优先" in item for item in lines)
     assert any("初筛池 `1`" in item for item in lines)
-    assert meta == {
-        "enabled": True,
-        "mode": "tushare_priority_full_market_prescreen",
-        "pool_size": 1,
-        "shortlist_size": 1,
-        "complete_analysis_size": 1,
-        "report_top_n": 1,
-        "blind_spot": "部分样本缺少完整事件覆盖。",
-    }
+    assert meta["enabled"] is True
+    assert meta["mode"] == "tushare_priority_full_market_prescreen"
+    assert meta["pool_size"] == 1
+    assert meta["shortlist_size"] == 1
+    assert meta["complete_analysis_size"] == 1
+    assert meta["report_top_n"] == 1
+    assert meta["blind_spot"] == "部分样本缺少完整事件覆盖。"
+    assert "factor_contract" in meta
 
 
 def test_briefing_action_helpers_include_portfolio_whatif_handoff() -> None:

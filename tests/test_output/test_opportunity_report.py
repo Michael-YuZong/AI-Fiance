@@ -37,7 +37,7 @@ def _sample_analysis(symbol: str, name: str) -> dict:
         "generated_at": "2026-03-09 08:00:00",
         "regime": {"current_regime": "stagflation"},
         "day_theme": {"label": "能源冲击 + 地缘风险"},
-        "metadata": {"sector": "电网"},
+        "metadata": {"sector": "电网", "history_source": "akshare", "history_source_label": "AKShare 日线回退"},
         "history": history,
         "benchmark_symbol": "000300",
         "benchmark_name": "沪深300ETF",
@@ -50,7 +50,7 @@ def _sample_analysis(symbol: str, name: str) -> dict:
             {"name": "估值极端", "status": "⚠️", "detail": "价格位置代理分位 92%"},
         ],
         "dimensions": {
-            "technical": {"score": 82, "max_score": 100, "summary": "技术信号偏强。", "core_signal": "MACD 零轴上方金叉 · ADX 36", "factors": [{"name": "MACD 金叉", "display_score": "20/20", "signal": "MACD 零轴上方金叉", "detail": "DIF 0.1 / DEA 0.08"}]},
+            "technical": {"score": 82, "max_score": 100, "summary": "技术信号偏强。", "core_signal": "MACD 零轴上方金叉 · ADX 36", "factors": [{"name": "MACD 金叉", "display_score": "20/20", "signal": "MACD 零轴上方金叉", "detail": "DIF 0.1 / DEA 0.08"}, {"name": "假突破识别", "display_score": "0/8", "signal": "未识别到明确假突破形态", "detail": "假突破是多空双方试探失败的信号", "factor_id": "j1_false_break"}, {"name": "压缩启动", "display_score": "0/10", "signal": "量价压缩状态中性", "detail": "压缩后放量启动是最干净的介入 setup", "factor_id": "j1_compression_breakout"}]},
             "fundamental": {"score": 61, "max_score": 100, "summary": "估值代理中性偏正面。", "core_signal": "价格位置代理 28%", "factors": [{"name": "估值代理分位", "display_score": "25/25", "signal": "价格位置代理 28%", "detail": "当前用价格位置代理"}]},
             "catalyst": {"score": 70, "max_score": 100, "summary": "催化偏强。", "core_signal": "政策催化 · 海外映射", "factors": [{"name": "政策催化", "display_score": "30/30", "signal": "电网投资政策", "detail": "近 7 日政策落地"}]},
             "relative_strength": {"score": 65, "max_score": 100, "summary": "轮动有改善。", "core_signal": "超额拐点", "factors": [{"name": "超额拐点", "display_score": "30/30", "signal": "相对基准 5日 +3.2%", "detail": "从负转正"}]},
@@ -144,6 +144,8 @@ def test_opportunity_renderer_scan_sections():
     assert "| 维度 | 得分 | 一句话判断 | 详情 |" in rendered
     assert "| 因子 | 当前值/信号 | 说明 | 得分 |" in rendered
     assert "行情 as_of" in rendered
+    assert "行情来源" in rendered
+    assert "AKShare 日线回退" in rendered
     assert "催化证据 as_of" in rendered
     assert "时点边界" in rendered
 
@@ -164,6 +166,21 @@ def test_opportunity_renderer_scan_visual_section():
     assert "![分析看板](/tmp/demo_dashboard.png)" in rendered
     assert "![阶段走势](/tmp/demo_windows.png)" in rendered
     assert "![技术指标](/tmp/demo_indicators.png)" in rendered
+
+
+def test_opportunity_renderer_scan_visual_section_skips_snapshot_fallback():
+    rendered = OpportunityReportRenderer().render_scan(
+        _sample_analysis("561380", "电网ETF"),
+        visuals={
+            "dashboard": "/tmp/demo_snapshot.png",
+            "mode": "snapshot_fallback",
+            "note": "完整日线历史当前不可用，阶段走势和技术指标图已关闭；这里只展示实时快照降级卡。",
+        },
+    )
+    assert "## 图表速览" not in rendered
+    assert "### 降级快照卡" not in rendered
+    assert "### 阶段走势" not in rendered
+    assert "### 技术指标总览" not in rendered
 
 
 def test_opportunity_renderer_discovery_and_compare():
@@ -306,6 +323,39 @@ def test_opportunity_renderer_stock_picks_includes_explainability_sections():
     assert "| 检查项 | 状态 | 说明 |" in rendered
     assert "**风险拆解：** 当前风险分 `58/100`" in rendered
     assert "| 风险子项 | 当前信号 | 说明 | 得分 |" in rendered
+    # Step 2: 分维度详解折叠区包含新因子
+    assert "<details>" in rendered
+    assert "分维度详解" in rendered
+    assert "#### 技术面 82/100" in rendered
+    assert "假突破识别" in rendered
+    assert "压缩启动" in rendered
+    assert "#### 基本面 61/100" in rendered
+    assert "#### 季节/日历 42/100" in rendered
+    assert "月度胜率" in rendered
+    assert "</details>" in rendered
+
+
+def test_opportunity_renderer_stock_picks_keeps_degraded_history_contract_rows():
+    analysis = _sample_analysis("600989", "宝丰能源")
+    analysis["asset_type"] = "cn_stock"
+    analysis["signal_confidence"] = {
+        "available": False,
+        "reason": "当前用了历史降级快照，不能在低置信历史上继续推导相似样本统计。",
+    }
+    payload = {
+        "generated_at": "2026-03-10 08:00:00",
+        "scan_pool": 12,
+        "passed_pool": 4,
+        "market_label": "A股",
+        "regime": {"current_regime": "stagflation"},
+        "day_theme": {"label": "能源冲击 + 地缘风险"},
+        "top": [analysis],
+        "watch_positive": [analysis],
+    }
+    rendered = OpportunityReportRenderer().render_stock_picks(payload)
+    assert "非重叠样本" in rendered
+    assert "20日胜率区间" in rendered
+    assert "样本质量" in rendered
 
 
 def test_opportunity_renderer_compare_uses_total_score_when_rank_ties():
@@ -363,7 +413,9 @@ def test_opportunity_renderer_includes_fund_profile_sections():
         "asset_allocation": [{"资产类型": "股票", "仓位占比": 80.34}, {"资产类型": "现金", "仓位占比": 18.91}],
         "top_holdings": [{"股票代码": "300738", "股票名称": "奥飞数据", "占净值比例": 9.30, "持仓市值": 2338.66, "季度": "2025年1季度股票投资明细"}],
         "industry_allocation": [{"行业类别": "科技", "占净值比例": 45.2, "截止时间": "2025-12-31"}],
-        "manager": {"name": "任桀", "tenure_days": 495, "aum_billion": 161.72, "best_return_pct": 281.99, "current_fund_count": 2},
+        "manager": {"name": "任桀", "tenure_days": 495, "aum_billion": 161.72, "best_return_pct": 281.99, "current_fund_count": 2, "begin_date": "2024-10-30", "ann_date": "2026-01-10", "education": "硕士", "nationality": "中国"},
+        "company": {"short_name": "永赢", "province": "上海", "city": "上海", "general_manager": "王某", "website": "https://example.com"},
+        "dividends": {"rows": [{"ann_date": "2025-12-20", "ex_date": "2025-12-25", "pay_date": "2025-12-26", "div_cash": 0.12, "progress": "实施"}]},
         "rating": {"five_star_count": 1, "morningstar": 3, "shanghai": 4, "zhaoshang": 5, "jiaan": 4},
         "style": {
             "tags": ["科技主题", "高仓位主动", "高集中选股"],
@@ -379,6 +431,10 @@ def test_opportunity_renderer_includes_fund_profile_sections():
     assert "## 基金画像" in rendered
     assert "## 基金成分分析" in rendered
     assert "## 基金经理风格分析" in rendered
+    assert "### 经理任职补充" not in rendered
+    assert "任桀 · 从业 495 天 · 在管规模 161.72 亿 · 最佳回报 281.99% · 任职起点 2024-10-30 · 硕士 / 中国" in rendered
+    assert "### 基金公司补充" in rendered
+    assert "### 分红记录" in rendered
     assert "### 前十大持仓" in rendered
 
 
@@ -396,7 +452,9 @@ def test_opportunity_renderer_includes_etf_profile_and_intraday_sections():
         "asset_allocation": [{"资产类型": "股票", "仓位占比": 99.83}, {"资产类型": "现金", "仓位占比": 0.40}],
         "top_holdings": [{"股票代码": "300308", "股票名称": "中际旭创", "占净值比例": 10.57, "持仓市值": 230284.94, "季度": "2025年4季度股票投资明细"}],
         "industry_allocation": [{"行业类别": "信息技术", "占净值比例": 88.0, "截止时间": "2025-12-31"}],
-        "manager": {"name": "张湛", "tenure_days": 2160, "aum_billion": 1313.31, "best_return_pct": 57.16, "current_fund_count": 26},
+        "manager": {"name": "张湛", "tenure_days": 2160, "aum_billion": 1313.31, "best_return_pct": 57.16, "current_fund_count": 26, "begin_date": "2020-07-27", "ann_date": "2026-01-05", "education": "硕士", "nationality": "中国"},
+        "company": {"short_name": "易方达", "province": "广东", "city": "广州", "general_manager": "刘某", "website": "https://example.com"},
+        "dividends": {"rows": [{"ann_date": "2025-10-18", "ex_date": "2025-10-22", "pay_date": "2025-10-24", "div_cash": 0.05, "progress": "实施"}]},
         "rating": {},
         "style": {
             "tags": ["科技主题", "被动跟踪"],
@@ -426,4 +484,8 @@ def test_opportunity_renderer_includes_etf_profile_and_intraday_sections():
     assert "## 今日盘中视角" in rendered
     assert "盘中价格弱于 VWAP" in rendered
     assert "## 基金画像" in rendered
+    assert "### 经理任职补充" not in rendered
+    assert "张湛 · 从业 2160 天 · 在管规模 1313.31 亿 · 最佳回报 57.16% · 任职起点 2020-07-27 · 硕士 / 中国" in rendered
+    assert "### 基金公司补充" in rendered
+    assert "### 分红记录" in rendered
     assert "中证人工智能主题指数收益率" in rendered

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from src.commands.pick_history import enrich_pick_payload_with_score_history
@@ -31,7 +32,25 @@ def _sample_payload(score: int, signal: str, generated_at: str, *, degraded: boo
                 "name": "能源化工ETF",
                 "rating": {"rank": 3},
                 "dimensions": {
-                    "technical": {"score": 52, "core_signal": "趋势未坏", "factors": [{"name": "趋势", "display_score": "18/20", "signal": "MA20 上方"}]},
+                    "technical": {
+                        "score": 52,
+                        "core_signal": "趋势未坏",
+                        "factors": [
+                            {
+                                "name": "趋势",
+                                "display_score": "18/20",
+                                "signal": "MA20 上方",
+                                "factor_id": "j1_volume_structure",
+                                "factor_meta": {
+                                    "family": "J-1",
+                                    "state": "strategy_challenger",
+                                    "visibility_class": "daily_close",
+                                    "proxy_level": "direct",
+                                    "supports_strategy_candidate": True,
+                                },
+                            }
+                        ],
+                    },
                     "fundamental": {"score": 20, "core_signal": "指数估值中性", "factors": [{"name": "估值", "display_score": "12/20", "signal": "PB 中位"}]},
                     "catalyst": {
                         "score": score,
@@ -88,6 +107,10 @@ def test_enrich_pick_payload_with_score_history_adds_dimension_change_reason(tmp
     assert changes[0]["dimension"] == "catalyst"
     assert changes[0]["previous"] == 35
     assert changes[0]["current"] == 65
+    history_store = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    latest = history_store["theme:*"]["latest"]["items"]["159981"]["dimensions"]["technical"]["factors"]["趋势"]
+    assert latest["factor_id"] == "j1_volume_structure"
+    assert latest["family"] == "J-1"
 
 
 def test_enrich_pick_payload_with_score_history_applies_catalyst_fallback_when_degraded(tmp_path: Path) -> None:

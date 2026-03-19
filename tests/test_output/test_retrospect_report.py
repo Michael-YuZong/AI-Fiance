@@ -59,6 +59,12 @@ def test_retrospect_report_renders_calibration_attribution_and_snapshot_sections
                     "market_data_source": "561380",
                     "history_window": "3y",
                     "thesis_snapshot_at": "2026-03-09 20:00:00",
+                    "factor_contract": {
+                        "families": {"J-1": 2, "J-3": 1},
+                        "states": {"strategy_challenger": 2, "scoring_supportive": 1},
+                        "strategy_candidate_factor_ids": ["j1_volume_structure"],
+                        "point_in_time_blockers": [],
+                    },
                     "notes": ["只使用当时可见日线。"],
                 },
                 "execution_snapshot": {
@@ -82,6 +88,7 @@ def test_retrospect_report_renders_calibration_attribution_and_snapshot_sections
     assert "## 结果归因" in markdown
     assert "### 周期判断" in markdown
     assert "### 时点与执行快照" in markdown
+    assert "### 因子合同快照" in markdown
     assert "同区基准20日" in markdown
     assert "20日超额" in markdown
     assert "alpha兑现" in markdown

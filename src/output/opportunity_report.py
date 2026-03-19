@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import pandas as pd
@@ -103,6 +104,7 @@ def _catalyst_layer(name: str) -> str:
         "龙头公告/业绩": "个股/产业链",
         "个股公告/事件": "个股直连",
         "负面事件": "个股风险",
+        "主题逆风": "主题逆风",
         "海外映射": "海外映射",
         "研报/新闻密度": "个股热度",
         "新闻热度": "传播热度",
@@ -122,6 +124,31 @@ def _catalyst_factor_rows(dimension: Dict[str, Any]) -> List[List[str]]:
             ]
         )
     return rows
+
+
+def _manager_profile_text(manager: Mapping[str, Any], overview: Optional[Mapping[str, Any]] = None) -> str:
+    manager = dict(manager or {})
+    overview = dict(overview or {})
+    name = str(manager.get("name") or overview.get("基金经理人") or "—").strip() or "—"
+    parts = [name]
+    tenure_days = manager.get("tenure_days")
+    if tenure_days is not None:
+        parts.append(f"从业 {_fmt_number(tenure_days, 0)} 天")
+    aum_billion = manager.get("aum_billion")
+    if aum_billion is not None:
+        parts.append(f"在管规模 {_fmt_number(aum_billion)} 亿")
+    best_return_pct = manager.get("best_return_pct")
+    if best_return_pct is not None:
+        parts.append(f"最佳回报 {_fmt_pct_point(best_return_pct)}")
+    begin_date = str(manager.get("begin_date", "")).strip()
+    if begin_date:
+        parts.append(f"任职起点 {begin_date}")
+    education = str(manager.get("education", "")).strip()
+    nationality = str(manager.get("nationality", "")).strip()
+    edu_text = " / ".join(part for part in (education, nationality) if part)
+    if edu_text:
+        parts.append(edu_text)
+    return " · ".join(parts)
 
 
 def _watch_positive_reason_rows(analyses: Sequence[Dict[str, Any]]) -> List[List[str]]:
@@ -203,6 +230,7 @@ def _analysis_provenance_rows(analysis: Dict[str, Any]) -> List[List[str]]:
     rows = [
         ["分析生成时间", provenance.get("analysis_generated_at", "—")],
         ["行情 as_of", provenance.get("market_data_as_of", "—")],
+        ["行情来源", provenance.get("market_data_source", "—")],
         ["盘中快照 as_of", provenance.get("intraday_as_of", "未启用")],
         ["催化证据 as_of", provenance.get("catalyst_evidence_as_of", "—")],
         ["催化来源", provenance.get("catalyst_sources_text", "—")],
@@ -477,11 +505,19 @@ def _fmt_return(value: Any) -> str:
 def _signal_confidence_rows(analysis: Dict[str, Any]) -> List[List[str]]:
     confidence = dict(analysis.get("signal_confidence") or {})
     if not confidence:
-        return [["状态", "当前未输出历史相似样本统计"]]
+        return [
+            ["状态", "当前未输出历史相似样本统计"],
+            ["非重叠样本", "未输出"],
+            ["20日胜率区间", "95%区间 —"],
+            ["样本质量", "未输出"],
+        ]
     if not confidence.get("available"):
         return [
             ["状态", "当前不给这层置信度"],
             ["原因", str(confidence.get("reason", "样本或数据置信度不足"))],
+            ["非重叠样本", "未输出"],
+            ["20日胜率区间", "95%区间 —"],
+            ["样本质量", "未输出（降级）"],
         ]
     return [
         ["样本范围", str(confidence.get("scope", "同标的日线相似场景"))],
@@ -515,6 +551,8 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
         return []
     overview = dict(profile.get("overview") or {})
     manager = dict(profile.get("manager") or {})
+    company = dict(profile.get("company") or {})
+    dividends = dict(profile.get("dividends") or {})
     style = dict(profile.get("style") or {})
     rating = dict(profile.get("rating") or {})
     top_holdings = list(profile.get("top_holdings") or [])
@@ -554,6 +592,34 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
             ],
         )
     )
+
+    company_rows = [
+        ["公司简称", company.get("short_name", "—")],
+        ["所在城市", " / ".join(part for part in [company.get("province", ""), company.get("city", "")] if part) or "—"],
+        ["总经理", company.get("general_manager", "—")],
+        ["官网", company.get("website", "—")],
+    ]
+    if any(str(row[1]).strip() not in {"", "—"} for row in company_rows):
+        lines.extend(["", "### 基金公司补充"])
+        lines.extend(_table(["维度", "内容"], company_rows))
+    dividend_rows = list(dividends.get("rows") or [])
+    if dividend_rows:
+        lines.extend(["", "### 分红记录"])
+        lines.extend(
+            _table(
+                ["公告日", "除息日", "派息日", "每份分红", "进度"],
+                [
+                    [
+                        item.get("ann_date", "—"),
+                        item.get("ex_date", "—"),
+                        item.get("pay_date", "—"),
+                        _fmt_number(item.get("div_cash"), 4),
+                        item.get("progress", "—"),
+                    ]
+                    for item in dividend_rows[:3]
+                ],
+            )
+        )
 
     if achievement:
         perf_rows = []
@@ -634,16 +700,7 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
                 ["选股方式", style.get("selection", "—")],
                 ["风格一致性", style.get("consistency", "—")],
                 ["基准映射", style.get("benchmark_note", "—")],
-                [
-                    "经理画像",
-                    (
-                        f"{manager.get('name', '—')} | 从业 {_fmt_number(manager.get('tenure_days'), 0)} 天"
-                        f" | 在管规模 {_fmt_number(manager.get('aum_billion'))} 亿"
-                        f" | 最佳回报 {_fmt_pct_point(manager.get('best_return_pct'))}"
-                    )
-                    if manager
-                    else "—"
-                ],
+                ["经理画像", _manager_profile_text(manager, overview)],
             ],
         )
     )
@@ -694,6 +751,10 @@ def _visual_lines(visuals: Optional[Mapping[str, str]]) -> List[str]:
     dashboard = str(visuals.get("dashboard", "")).strip()
     windows = str(visuals.get("windows", "")).strip()
     indicators = str(visuals.get("indicators", "")).strip()
+    mode = str(visuals.get("mode", "")).strip()
+    note = str(visuals.get("note", "")).strip()
+    if mode == "snapshot_fallback":
+        return []
     if not any([dashboard, windows, indicators]):
         return []
     lines = [
@@ -701,8 +762,11 @@ def _visual_lines(visuals: Optional[Mapping[str, str]]) -> List[str]:
         "> 下图由本地 Python 数据管线自动生成，和正文分析使用的是同一份行情与评分结果。",
         "",
     ]
+    if note:
+        lines.extend([f"> {note}", ""])
     if dashboard:
-        lines.extend(["### 总览看板", f"![分析看板]({dashboard})", ""])
+        heading = "### 降级快照卡" if mode == "snapshot_fallback" else "### 总览看板"
+        lines.extend([heading, f"![分析看板]({dashboard})", ""])
     if windows:
         lines.extend(["### 阶段走势", f"![阶段走势]({windows})", ""])
     if indicators:
@@ -931,6 +995,7 @@ class OpportunityReportRenderer:
                 [
                     ["分析时间", analysis["generated_at"]],
                     ["行情 as_of", provenance.get("market_data_as_of", "—")],
+                    ["行情来源", provenance.get("market_data_source", "—")],
                     ["催化证据 as_of", provenance.get("catalyst_evidence_as_of", "—")],
                     ["催化来源", provenance.get("catalyst_sources_text", "—")],
                     ["时点边界", provenance.get("point_in_time_note", "默认只使用生成时点前可见信息。")],
@@ -1213,6 +1278,16 @@ class OpportunityReportRenderer:
                 ]
             )
             lines.extend(_table(["风险子项", "当前信号", "说明", "得分"], _factor_rows(risk_dimension)))
+            lines.extend(["", "<details>", "<summary>分维度详解（点击展开）</summary>", ""])
+            for _dim_key, _dim_label in DIMENSION_ORDER:
+                if _dim_key in ("catalyst", "risk"):
+                    continue
+                _dim = analysis["dimensions"].get(_dim_key, {})
+                _dim_score = "—/100" if _dim.get("score") is None else f"{_dim['score']}/{_dim['max_score']}"
+                lines.extend(["", f"#### {_dim_label} {_dim_score}"])
+                lines.extend(_table(["因子", "当前值/信号", "说明", "得分"], _factor_rows(_dim)))
+                lines.append(f"**小结：** {_dim['summary']}")
+            lines.extend(["", "</details>"])
             lines.extend(
                 [
                     "",
@@ -1225,6 +1300,22 @@ class OpportunityReportRenderer:
                 lines.append(
                     f"> 方法说明：{confidence.get('reason', '仅使用同标的当时可见的日线量价和技术状态，不重建历史新闻与财报快照。')}"
                 )
+                _stop_rate = confidence.get("stop_hit_rate")
+                _target_rate = confidence.get("target_hit_rate")
+                if _stop_rate is not None and _target_rate is not None:
+                    try:
+                        _sr = float(_stop_rate)
+                        _tr = float(_target_rate)
+                        if _sr > 0.5 and _tr < 0.2:
+                            lines.append(
+                                f"> ⚠️ 历史相似样本止损触发率 {_sr:.0%}、目标触达率 {_tr:.0%}，执行风险偏高，请结合实际仓位谨慎评估。"
+                            )
+                        elif _sr > 0.6:
+                            lines.append(
+                                f"> ⚠️ 历史相似样本止损触发率 {_sr:.0%}，历史上该类信号止损频率偏高，请注意控制仓位。"
+                            )
+                    except (ValueError, TypeError):
+                        pass
             lines.extend(
                 [
                     "",
