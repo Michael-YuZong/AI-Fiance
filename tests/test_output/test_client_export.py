@@ -1,8 +1,10 @@
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from src.output.client_export import markdown_to_html
+import src.output.client_export as client_export
+from src.output.client_export import _export_pdf, markdown_to_html
 
 
 _PNG_BYTES = (
@@ -89,3 +91,44 @@ def test_briefing_pdf_accepts_h4(tmp_path: Path) -> None:
     render_briefing_pdf(markdown, output)
     assert output.exists()
     assert output.stat().st_size > 0
+
+
+def test_export_pdf_accepts_edge_timeout_if_pdf_already_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    html_path = tmp_path / "demo.html"
+    pdf_path = tmp_path / "demo.pdf"
+    edge_path = tmp_path / "Microsoft Edge"
+    html_path.write_text("<html><body>demo</body></html>", encoding="utf-8")
+    edge_path.write_text("", encoding="utf-8")
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.terminated = False
+            self.killed = False
+
+        def communicate(self, timeout: float | None = None):  # noqa: ARG002
+            pdf_path.write_bytes(b"%PDF-1.4 demo")
+            raise subprocess.TimeoutExpired(cmd="edge", timeout=timeout or 0)
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+    fake_process = _FakeProcess()
+    monkeypatch.setattr(client_export, "_EDGE_BINARY", edge_path)
+    monkeypatch.setattr(client_export.subprocess, "Popen", lambda *args, **kwargs: fake_process)
+
+    _export_pdf("# demo", html_path, pdf_path)
+
+    assert pdf_path.exists()
+    assert pdf_path.stat().st_size > 0
+    assert fake_process.terminated is True
+    assert fake_process.killed is False

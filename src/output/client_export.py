@@ -630,24 +630,50 @@ def _export_pdf(markdown_text: str, html_path: Path, pdf_path: Path) -> None:
             with tempfile.TemporaryDirectory(prefix="edge-export-", dir="/tmp") as user_data_dir:
                 env = dict(os.environ)
                 env.setdefault("MPLCONFIGDIR", "/tmp/ai-finance-mpl")
-                subprocess.run(
-                    [
-                        str(_EDGE_BINARY),
-                        "--headless=new",
-                        "--disable-gpu",
-                        f"--user-data-dir={user_data_dir}",
-                        "--allow-file-access-from-files",
-                        "--run-all-compositor-stages-before-draw",
-                        "--virtual-time-budget=5000",
-                        f"--print-to-pdf={pdf_path}",
-                        str(html_path),
-                    ],
-                    check=True,
-                    capture_output=True,
+                cmd = [
+                    str(_EDGE_BINARY),
+                    "--headless=new",
+                    "--disable-gpu",
+                    "--disable-background-networking",
+                    "--disable-component-update",
+                    "--disable-domain-reliability",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    f"--user-data-dir={user_data_dir}",
+                    "--allow-file-access-from-files",
+                    "--run-all-compositor-stages-before-draw",
+                    "--virtual-time-budget=5000",
+                    f"--print-to-pdf={pdf_path}",
+                    str(html_path),
+                ]
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=180,
                     env=env,
                 )
+                try:
+                    stdout, stderr = process.communicate(timeout=45)
+                except subprocess.TimeoutExpired:
+                    if pdf_path.exists() and pdf_path.stat().st_size > 0:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                        return
+                    process.kill()
+                    process.wait(timeout=5)
+                    raise
+                finally:
+                    if process.stdout is not None:
+                        process.stdout.close()
+                    if process.stderr is not None:
+                        process.stderr.close()
+                if process.returncode != 0:
+                    raise subprocess.CalledProcessError(process.returncode, cmd, output=stdout, stderr=stderr)
             return
         except Exception:
             pass
