@@ -166,3 +166,50 @@ def test_evening_renderer_outputs_core_sections():
     assert "## 附录（折叠，按需展开）" in rendered
     assert "515070" in rendered
     assert "portfolio whatif buy 515070" in rendered
+
+
+def test_market_renderer_outputs_core_sections():
+    payload = {
+        "title": "全市场行情简报",
+        "generated_at": "2026-03-19 16:10:00",
+        "data_coverage": "中国宏观 | 全市场快照 | RSS新闻",
+        "missing_sources": "跨市场代理部分降级",
+        "headline_lines": ["当前主线候选: `利率驱动成长修复`。", "背景 regime 当前判为 `通缩/偏弱`。"],
+        "action_lines": ["仓位框架: 当前按常规节奏分批确认。", "如果 A 股观察池扩散不足，就按结构性行情处理。"],
+        "macro_items": ["制造业 PMI 50.1，较前值回升。", "当前宏观环境判断: 通缩/偏弱。"],
+        "domestic_index_rows": [["上证指数", "3420.00", "+0.20%", "5200", "+3%", "震荡偏强"]],
+        "domestic_market_lines": ["全市场成交额: 12800亿。", "watchlist 平均 5 日表现 +1.2%。"],
+        "style_rows": [["大盘 vs 小盘", "沪深300 +0.6%", "中证1000 -0.1%", "偏大盘"]],
+        "industry_rows": [["1", "银行", "+1.40%", "红利承接"]],
+        "macro_asset_rows": [["美元指数", "103.200", "-0.20%", "-0.50%", "+1.00%", "中性", "—"]],
+        "overnight_rows": [["美股", "标普500", "5100.00", "+0.40%", "偏强"]],
+        "watchlist_rows": [["510210", "1.026", "-0.20%", "+0.30%", "+1.00%", "震荡", "44", "宽基修复观察"]],
+        "core_event_lines": ["**利率预期回落**\n  → 长久期资产压力缓和"],
+        "theme_tracking_rows": [["宽基", "利率预期回落", "指数修复观察", "短线观察", "量能不足"]],
+        "theme_tracking_lines": ["与主线一致性: 宽基与利率修复方向一致。"],
+        "capital_flow_lines": ["全市场主力资金最新为 `净流入` 23.10亿。"],
+        "quality_lines": ["本次新闻覆盖源: Reuters / 财联社。"],
+        "a_share_watch_rows": [["1", "宁德时代 (300750)", "新能源", "较强机会", "持有优于追高", "首次建仓 ≤3%"]],
+        "a_share_watch_lines": ["A 股观察池来自 `Tushare 优先` 的全市场快照；初筛池 `60` 只，完整分析 `8` 只。"],
+        "verification_rows": [["1", "上证指数", "能否收回 MA20", "修复延续", "继续震荡"]],
+        "alerts": ["当前没有触发额外强提醒，但市场风格切换仍需持续验证。"],
+    }
+    rendered = BriefingRenderer().render_market(payload)
+    assert "# 全市场行情简报" in rendered
+    assert "## 1. 市场结论" in rendered
+    assert "### 1.1 今日主线" in rendered
+    assert "### 1.2 仓位与执行" in rendered
+    assert "## 2. 宏观与市场全景" in rendered
+    assert "### 2.1 宏观框架" in rendered
+    assert "### 2.2 国内市场概览" in rendered
+    assert "### 2.3 风格与行业" in rendered
+    assert "### 2.4 宏观资产" in rendered
+    assert "### 2.5 隔夜外盘" in rendered
+    assert "### 2.6 跨市场观察哨" in rendered
+    assert "## 3. 资金与催化" in rendered
+    assert "### 3.1 核心事件" in rendered
+    assert "### 3.2 主线跟踪" in rendered
+    assert "### 3.3 盘面与资金" in rendered
+    assert "## 4. A股观察池" in rendered
+    assert "## 5. 今日验证点" in rendered
+    assert "### 5.2 风险提醒" in rendered

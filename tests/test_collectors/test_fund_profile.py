@@ -241,6 +241,83 @@ def test_fund_profile_does_not_misclassify_a500_due_to_bank_deposit_tail(monkeyp
     assert "宽基" in profile["style"]["summary"]
 
 
+def test_fund_profile_recognizes_sse_composite_etf_as_broad_index(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+
+    monkeypatch.setattr(
+        collector,
+        "get_overview",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "基金简称": "上证指数ETF",
+                    "基金类型": "股票型 / 被动指数型",
+                    "基金管理人": "富国基金",
+                    "基金经理人": "王保合、方旻",
+                    "业绩比较基准": "上证综合指数",
+                    "跟踪标的": "上证综合指数",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_asset_allocation",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"资产类型": "股票", "仓位占比": 99.86},
+                {"资产类型": "现金", "仓位占比": 0.24},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_portfolio_hold",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"股票代码": "601288", "股票名称": "农业银行", "占净值比例": 3.83, "持股数": 1, "持仓市值": 1, "季度": "2025年4季度股票投资明细"},
+                {"股票代码": "601857", "股票名称": "中国石油", "占净值比例": 3.25, "持股数": 1, "持仓市值": 1, "季度": "2025年4季度股票投资明细"},
+                {"股票代码": "600519", "股票名称": "贵州茅台", "占净值比例": 2.26, "持股数": 1, "持仓市值": 1, "季度": "2025年4季度股票投资明细"},
+                {"股票代码": "601138", "股票名称": "工业富联", "占净值比例": 2.19, "持股数": 1, "持仓市值": 1, "季度": "2025年4季度股票投资明细"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_industry_allocation",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"行业类别": "制造业", "占净值比例": 43.9, "市值": 1, "截止时间": "2025-12-31"},
+                {"行业类别": "金融业", "占净值比例": 23.63, "市值": 1, "截止时间": "2025-12-31"},
+                {"行业类别": "信息传输、软件和信息技术服务业", "占净值比例": 6.1, "市值": 1, "截止时间": "2025-12-31"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_manager_directory",
+        lambda: pd.DataFrame(
+            [
+                {"姓名": "王保合", "所属公司": "富国基金", "现任基金代码": "510210", "现任基金": "上证指数ETF", "累计从业时间": 4000, "现任基金资产总规模": 100.0, "现任基金最佳回报": 200.0},
+                {"姓名": "王保合", "所属公司": "富国基金", "现任基金代码": "588000", "现任基金": "富国上证科创板综合价格指数增强A", "累计从业时间": 4000, "现任基金资产总规模": 100.0, "现任基金最佳回报": 200.0},
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+
+    profile = collector.collect_profile("510210", asset_type="cn_etf")
+    assert profile["style"]["sector"] == "宽基"
+    assert profile["style"]["chain_nodes"] == ["宽基", "大盘蓝筹", "内需"]
+    assert "宽基主题" in profile["style"]["tags"]
+    assert profile["style"]["taxonomy"]["exposure_scope"] == "宽基"
+
+
 def test_fund_profile_industry_allocation_swallows_known_shape_errors(monkeypatch):
     collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
     monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005

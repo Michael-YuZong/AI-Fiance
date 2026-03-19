@@ -81,16 +81,23 @@ REGIME_LABELS = {
 
 THEME_ASSET_PREFERENCES = {
     "energy_shock": ["能源链", "电力电网", "黄金/防守", "现金"],
+    "gold_defense": ["黄金", "现金", "避险资产"],
+    "dividend_defense": ["高股息防守", "银行", "公用事业", "现金"],
     "defensive_riskoff": ["黄金", "现金", "公用事业", "高股息防守"],
+    "broad_market_repair": ["宽基", "券商", "顺周期", "内需核心资产"],
     "rate_growth": ["美股科技", "港股科技", "成长股", "长久期资产"],
+    "power_utilities": ["电力电网", "公用事业", "高股息配套"],
     "china_policy": ["电网基建", "央国企链", "内需顺周期", "高股息配套"],
     "ai_semis": ["半导体", "算力硬件", "通信", "AI应用"],
 }
 
+DEFENSIVE_THEMES = {"energy_shock", "gold_defense", "dividend_defense", "defensive_riskoff"}
+STRUCTURAL_THEMES = {"broad_market_repair", "power_utilities", "china_policy", "rate_growth", "ai_semis"}
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate daily or weekly market briefing.")
-    parser.add_argument("mode", choices=["daily", "weekly", "noon", "evening"], help="Briefing mode")
+    parser.add_argument("mode", choices=["daily", "weekly", "noon", "evening", "market"], help="Briefing mode")
     parser.add_argument("--news-source", action="append", default=[], help="Preferred news source, e.g. Reuters")
     parser.add_argument("--config", default="", help="Optional path to config YAML")
     parser.add_argument("--client-final", action="store_true", help="Render and persist client-facing final markdown/pdf")
@@ -368,17 +375,20 @@ def _briefing_a_share_watch_rows(config: Dict[str, Any]) -> tuple[List[List[str]
     if not analyses:
         return [], ["A 股全市场观察池暂不可用：当前未拿到可用的全市场初筛池。"], {"enabled": True, "mode": "empty_pool"}
     rows: List[List[str]] = []
+    sector_counter: Counter[str] = Counter()
     for index, item in enumerate(top_items, start=1):
         metadata = dict(item.get("metadata") or {})
         rating = dict(item.get("rating") or {})
         action = dict(item.get("action") or {})
         narrative = dict(item.get("narrative") or {})
         state = str(dict(narrative.get("judgment") or {}).get("state", "")).strip() or "观察"
+        sector = str(metadata.get("sector", "综合")).strip() or "综合"
+        sector_counter[sector] += 1
         rows.append(
             [
                 str(index),
                 f"{item.get('name', item.get('symbol', ''))} ({item.get('symbol', '')})",
-                str(metadata.get("sector", "综合")).strip() or "综合",
+                sector,
                 str(rating.get("label", "未评级")).strip() or "未评级",
                 state,
                 str(action.get("position", "先观察")).strip() or "先观察",
@@ -408,6 +418,7 @@ def _briefing_a_share_watch_rows(config: Dict[str, Any]) -> tuple[List[List[str]
         "shortlist_size": len(top_items),
         "complete_analysis_size": int(payload.get("passed_pool") or len(analyses)),
         "report_top_n": len(rows),
+        "sector_counts": dict(sector_counter),
         "factor_contract": summarize_factor_contracts_from_analyses(analyses, sample_limit=16),
     }
     if blind_spots:
@@ -533,6 +544,44 @@ def _find_snapshot(snapshots: List[BriefingSnapshot], symbol: str) -> Optional[B
         if item.symbol == symbol:
             return item
     return None
+
+
+def _sector_avg_return(snapshots: List[BriefingSnapshot], sector: str, *, field: str = "return_1d") -> float:
+    matched = [float(getattr(item, field, 0.0) or 0.0) for item in snapshots if str(getattr(item, "sector", "")).strip() == sector]
+    if not matched:
+        return 0.0
+    return sum(matched) / len(matched)
+
+
+def _a_share_watch_theme_boosts(a_share_watch_meta: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    meta = dict(a_share_watch_meta or {})
+    sector_counts = {str(key).strip(): int(value or 0) for key, value in dict(meta.get("sector_counts") or {}).items()}
+    boosts = {
+        "gold_defense": 0,
+        "dividend_defense": 0,
+        "broad_market_repair": 0,
+        "power_utilities": 0,
+        "china_policy": 0,
+        "ai_semis": 0,
+    }
+    if not sector_counts:
+        return boosts
+
+    for sector, count in sector_counts.items():
+        if sector in {"宽基", "金融", "券商", "保险", "消费", "白酒"}:
+            boosts["broad_market_repair"] += count
+        if sector in {"高股息", "银行", "公用事业", "煤炭"}:
+            boosts["dividend_defense"] += count
+        if sector in {"电网", "电力", "公用事业"}:
+            boosts["power_utilities"] += count * 2
+            boosts["china_policy"] += count
+        if sector in {"黄金", "贵金属"}:
+            boosts["gold_defense"] += count * 2
+        if sector in {"科技", "半导体", "通信", "消费电子"}:
+            boosts["ai_semis"] += count
+        if sector in {"基建", "工程", "建材", "央国企"}:
+            boosts["china_policy"] += count * 2
+    return boosts
 
 
 def _overnight_lines(snapshots: List[BriefingSnapshot]) -> List[str]:
@@ -952,6 +1001,7 @@ def _primary_narrative(
     snapshots: List[BriefingSnapshot],
     drivers: Dict[str, Any],
     regime_result: Dict[str, Any],
+    a_share_watch_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     counter = _news_category_counter(news_report)
     monitor = _monitor_map(monitor_rows)
@@ -960,11 +1010,11 @@ def _primary_narrative(
     vix = monitor.get("VIX波动率", {})
     us10y = monitor.get("美国10Y收益率", {})
 
-    brent_1d = _to_float(brent.get("return_1d"))
-    brent_5d = _to_float(brent.get("return_5d"))
-    dxy_5d = _to_float(dxy.get("return_5d"))
-    vix_latest = _to_float(vix.get("latest"))
-    us10y_1d = _to_float(us10y.get("return_1d"))
+    brent_1d = _to_float(brent.get("return_1d")) or 0.0
+    brent_5d = _to_float(brent.get("return_5d")) or 0.0
+    dxy_5d = _to_float(dxy.get("return_5d")) or 0.0
+    vix_latest = _to_float(vix.get("latest")) or 0.0
+    us10y_1d = _to_float(us10y.get("return_1d")) or 0.0
 
     top_industry_text = _industry_text(
         pulse.get("zt_pool", pd.DataFrame()),
@@ -977,19 +1027,27 @@ def _primary_narrative(
     hstech = _find_snapshot(snapshots, "HSTECH")
     gld = _find_snapshot(snapshots, "GLD")
     grid = _find_snapshot(snapshots, "561380")
+    broad = _find_snapshot(snapshots, "510210") or _find_snapshot(snapshots, "510300")
 
     tech_1d = 0.0
     if qqqm:
         tech_1d += qqqm.return_1d
     if hstech:
         tech_1d += hstech.return_1d
-    gold_1d = gld.return_1d if gld else 0.0
-    grid_1d = grid.return_1d if grid else 0.0
+    gold_1d = gld.return_1d if gld else _sector_avg_return(snapshots, "黄金")
+    grid_1d = grid.return_1d if grid else _sector_avg_return(snapshots, "电网")
+    dividend_1d = _sector_avg_return(snapshots, "高股息")
+    broad_1d = broad.return_1d if broad else _sector_avg_return(snapshots, "宽基")
+    broad_5d = broad.return_5d if broad else _sector_avg_return(snapshots, "宽基", field="return_5d")
 
     scores = {
         "energy_shock": 0,
+        "gold_defense": 0,
+        "dividend_defense": 0,
         "defensive_riskoff": 0,
+        "broad_market_repair": 0,
         "rate_growth": 0,
+        "power_utilities": 0,
         "china_policy": 0,
         "ai_semis": 0,
     }
@@ -1015,6 +1073,23 @@ def _primary_narrative(
     if dxy_5d > 0.005:
         scores["defensive_riskoff"] += 1
 
+    scores["gold_defense"] += counter["geopolitics"] * 2
+    if gold_1d > broad_1d:
+        scores["gold_defense"] += 2
+    if gold_1d > tech_1d:
+        scores["gold_defense"] += 2
+    if vix_latest >= 22:
+        scores["gold_defense"] += 2
+
+    if any(keyword in top_industry_text for keyword in ["银行", "红利", "公用事业", "煤炭"]):
+        scores["dividend_defense"] += 3
+    if dividend_1d >= 0:
+        scores["dividend_defense"] += 2
+    if vix_latest >= 20:
+        scores["dividend_defense"] += 1
+    if broad_1d <= 0 and tech_1d <= 0:
+        scores["dividend_defense"] += 1
+
     scores["rate_growth"] += counter["fed"] * 2
     scores["rate_growth"] += counter["earnings"]
     if us10y_1d < 0:
@@ -1023,6 +1098,27 @@ def _primary_narrative(
         scores["rate_growth"] += 1
     if tech_1d > 0 and vix_latest < 22:
         scores["rate_growth"] += 2
+
+    scores["broad_market_repair"] += counter["fed"] + counter["china_macro"]
+    if us10y_1d < 0:
+        scores["broad_market_repair"] += 2
+    if broad_1d > 0:
+        scores["broad_market_repair"] += 2
+    if broad_5d > 0:
+        scores["broad_market_repair"] += 1
+    if vix_latest < 22:
+        scores["broad_market_repair"] += 1
+    if any(keyword in top_industry_text for keyword in ["银行", "券商", "保险", "非银", "白酒", "家电"]):
+        scores["broad_market_repair"] += 1
+
+    if any(keyword in top_industry_text for keyword in ["电网", "电力", "公用事业", "特高压"]):
+        scores["power_utilities"] += 3
+    if grid_1d >= 0:
+        scores["power_utilities"] += 2
+    if counter["china_macro"] >= 1:
+        scores["power_utilities"] += 1
+    if dividend_1d >= 0:
+        scores["power_utilities"] += 1
 
     scores["china_policy"] += counter["china_macro"] * 2
     if grid_1d >= 0:
@@ -1036,6 +1132,10 @@ def _primary_narrative(
     if tech_1d > 0:
         scores["ai_semis"] += 1
 
+    watch_boosts = _a_share_watch_theme_boosts(a_share_watch_meta)
+    for theme_name, boost in watch_boosts.items():
+        scores[theme_name] += int(boost)
+
     theme = max(scores, key=scores.get)
     score = scores[theme]
     if score < 4:
@@ -1043,8 +1143,12 @@ def _primary_narrative(
 
     theme_labels = {
         "energy_shock": "能源冲击 + 地缘风险",
+        "gold_defense": "黄金避险",
+        "dividend_defense": "红利/银行防守",
         "defensive_riskoff": "防守避险",
+        "broad_market_repair": "宽基修复",
         "rate_growth": "利率驱动成长修复",
+        "power_utilities": "电网/公用事业",
         "china_policy": "中国政策/内需确定性",
         "ai_semis": "AI/半导体催化",
         "macro_background": "背景宏观",
@@ -1052,19 +1156,40 @@ def _primary_narrative(
 
     theme_summaries = {
         "energy_shock": "今天市场主线更像 `能源冲击 + 地缘风险`，应优先放在晨报最前面，而不是被背景 regime 覆盖。",
+        "gold_defense": "今天交易主线更像 `黄金避险`，核心是先看避险需求是否继续抬头，而不是把所有防守资产混成一句风险规避。",
+        "dividend_defense": "今天交易主线更像 `红利/银行防守`，核心是防守资产里的现金流稳定方向在承接，而不是全面 risk-off。",
         "defensive_riskoff": "今天市场主线更像 `防守避险`，核心是先谈波动和回撤控制，再谈进攻。",
+        "broad_market_repair": "今天交易主线更像 `宽基修复`，重点看指数、券商和核心资产是否一起修复，而不是直接等同于科技成长行情。",
         "rate_growth": "今天市场主线更像 `利率预期驱动的成长修复`，重点看科技和估值弹性方向。",
+        "power_utilities": "今天交易主线更像 `电网/公用事业`，重点看高确定性、公用事业和电力设备链是否持续获得资金承接。",
         "china_policy": "今天市场主线更像 `中国政策 / 内需确定性`，重点看基建、电网和稳增长传导。",
         "ai_semis": "今天市场主线更像 `AI / 半导体催化`，重点看算力、芯片和相关硬件链。",
         "macro_background": "今天没有单一事件完全压过其他变量，更适合先以宏观背景和盘面结构来组织晨报。",
     }
+
+    background_label = REGIME_LABELS.get(str(regime_result["current_regime"]), str(regime_result["current_regime"]))
+
+    sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    secondary_themes = [
+        {
+            "theme": key,
+            "label": theme_labels.get(key, key),
+            "score": int(value),
+        }
+        for key, value in sorted_scores[1:4]
+        if int(value) >= max(score - 2, 3)
+    ]
 
     return {
         "theme": theme,
         "label": theme_labels[theme],
         "summary": theme_summaries[theme],
         "scores": scores,
-        "background_regime": REGIME_LABELS.get(str(regime_result["current_regime"]), str(regime_result["current_regime"])),
+        "background_regime": background_label,
+        "background_label": background_label,
+        "trading_theme": theme,
+        "trading_label": theme_labels[theme],
+        "secondary_themes": secondary_themes,
         "preferred_assets": list(regime_result.get("preferred_assets", [])),
         "effective_assets": THEME_ASSET_PREFERENCES.get(theme, list(regime_result.get("preferred_assets", []))),
         "overrides_background": theme != "macro_background",
@@ -1211,17 +1336,41 @@ def _catalyst_rows(news_report: Dict[str, Any], narrative: Dict[str, Any]) -> Li
             "原油 -> 通胀预期 -> 波动率/美元 -> 科技和高估值资产承压。",
             "先看能源、电力电网和防守资产，不把今天当成普通成长修复日。",
         ],
+        "gold_defense": [
+            "黄金避险",
+            "避险需求先集中在黄金和贵金属，而不是所有防守资产一起走强。",
+            "地缘/波动率 -> 黄金相对收益 -> 风险资产仓位收缩。",
+            "重点看黄金是否持续强于宽基和科技，而不是只看 headlines。",
+        ],
+        "dividend_defense": [
+            "红利/银行防守",
+            "防守资金更偏向银行、公用事业和高股息，而不是单纯回避风险。",
+            "防守偏好 -> 现金流稳定资产 -> 红利/银行相对占优。",
+            "重点看防守承接能否持续扩散，而不是一日脉冲。",
+        ],
         "defensive_riskoff": [
             "防守避险",
             "波动率抬升、黄金或防守资产相对更稳。",
             "避险偏好 -> 资金收缩高弹性仓位 -> 防守资产相对占优。",
             "优先控回撤，确认波动降温后再谈进攻。",
         ],
+        "broad_market_repair": [
+            "宽基修复",
+            "指数、券商和核心资产开始修复，但还没完全转成高弹性成长主线。",
+            "利率/风险偏好改善 -> 宽基与核心资产修复 -> 再看是否扩散。",
+            "重点看宽基是否能把修复扩散到更多行业，而不是只靠少数大票托住。",
+        ],
         "rate_growth": [
             "利率预期",
             "Fed/通胀新闻进入头条，长端利率与美元成为关键变量。",
             "利率预期 -> 估值修复 -> 科技/成长弹性扩散。",
             "重点看科技是否跟随利率预期同步走强。",
+        ],
+        "power_utilities": [
+            "电网/公用事业",
+            "电网、公用事业和高确定性链条获得持续承接。",
+            "政策/确定性偏好 -> 电力电网与公用事业相对收益 -> 风格防守但不完全 risk-off。",
+            "重点看电网/公用事业能否继续强于宽基，而不是只看一日板块脉冲。",
         ],
         "china_policy": [
             "政策/内需",
@@ -1707,7 +1856,7 @@ def _positioning_lines(
             "仓位框架: 当前按高波动日处理，总仓位宜控制在 50% 左右，单次新增仓位不超过 10%。",
             "执行上更适合‘先活下来再进攻’，不适合在极端新闻日一次性打满。",
         ]
-    if vix >= 25 or theme == "defensive_riskoff":
+    if vix >= 25 or theme in {"defensive_riskoff", "gold_defense", "dividend_defense"}:
         return [
             "仓位框架: 当前按偏防守处理，总仓位宜控制在 60% 左右，单次新增仓位不超过 15%。",
             "如果验证点继续恶化，应优先降弹性仓位，再讨论抄底。",
@@ -1978,7 +2127,7 @@ def _briefing_horizon(snapshot: BriefingSnapshot, narrative: Dict[str, Any]) -> 
         return get_horizon_contract("watch", source="briefing_inferred")
     if rsi >= 68 or snapshot.return_1d >= 0.025:
         return get_horizon_contract("short_term", source="briefing_inferred")
-    if theme in {"china_policy", "rate_growth", "ai_semis"} and snapshot.signal_score >= 4 and snapshot.return_20d >= 0.08:
+    if theme in {"china_policy", "rate_growth", "ai_semis", "broad_market_repair", "power_utilities"} and snapshot.signal_score >= 4 and snapshot.return_20d >= 0.08:
         return get_horizon_contract("position_trade", source="briefing_inferred")
     if snapshot.signal_score >= 3 and snapshot.return_20d >= 0.04:
         return get_horizon_contract("swing", source="briefing_inferred")
@@ -2020,8 +2169,12 @@ def _action_lines(
     lines: List[str] = []
     if theme == "energy_shock":
         lines.append("今天先按‘能源冲击日’处理，优先做验证和控回撤，不把背景复苏叙事当成日内主导。")
-    elif theme == "defensive_riskoff":
+    elif theme in {"defensive_riskoff", "gold_defense", "dividend_defense"}:
         lines.append("今天先按‘防守优先’处理，动作顺序是减弹性、看验证、再考虑进攻。")
+    elif theme == "broad_market_repair":
+        lines.append("今天更像指数修复日，先看宽基和金融权重能否继续扩散，再决定是否上调风险暴露。")
+    elif theme == "power_utilities":
+        lines.append("今天先按‘电网/公用事业承接’处理，优先看高确定性链条是否继续拿到资金，而不是直接追高高弹性方向。")
     else:
         lines.append(f"今天先围绕 `{narrative['label']}` 做跟踪，动作上先验证主线，再决定是否加大风险暴露。")
 
@@ -2030,7 +2183,7 @@ def _action_lines(
     strongest_tail = "已进入超买区，适合持有观察，不宜新增追高。" if strongest_rsi > 70 else "仍可作为主线验证器。"
     lines.append(f"优先方向: {strongest.symbol} — 它当前最能代表主线延续性；{strongest_tail}")
     lines.append(f"谨慎对待 {weakest.symbol}：它当前最弱，更适合等确认而不是抢反弹。")
-    if gold and theme in {"energy_shock", "defensive_riskoff"}:
+    if gold and theme in {"energy_shock", "defensive_riskoff", "gold_defense"}:
         lines.append(f"把 {gold.symbol} 当作防守情绪验证器，观察避险需求是否继续抬头。")
     lines.append(_briefing_preflight_line(strongest, narrative, stage="today"))
     lines.append("执行节奏: 先观察开盘 30 分钟风格延续性，确认后再执行。")
@@ -2052,11 +2205,14 @@ def _compact_headline_lines(
     background = str(narrative.get("background_regime", "未识别"))
     event_label = str(narrative.get("label", "未识别"))
     lines = [f"**{event_label}**"]
-    lines.append(f"Regime 裁决: 背景宏观为 `{background}`，日内事件主线为 `{event_label}`。")
+    lines.append(f"背景框架: `{background}`；交易主线候选: `{event_label}`。")
+    secondary = [str(item.get("label", "")).strip() for item in list(narrative.get("secondary_themes") or []) if str(item.get("label", "")).strip()]
+    if secondary:
+        lines.append("次主线候选: " + "、".join(secondary[:3]) + "。")
     if narrative.get("overrides_background"):
-        lines.append("若冲突：日内优先服从事件主线，背景 regime 降为中期参考。")
+        lines.append("若冲突：先服从交易主线，背景框架降为中期参考。")
     else:
-        lines.append("若冲突：当前没有更强事件覆盖，先按背景 regime 执行。")
+        lines.append("若冲突：当前没有更强交易主线覆盖，先按背景框架执行。")
     pmi = float(china_macro.get("pmi", 50.0))
     oil_latest = _to_float(brent.get("latest"))
     if oil_latest > 0:
@@ -2465,6 +2621,58 @@ def _theme_tracking_rows(
                 False,
             ),
         ],
+        "gold_defense": [
+            (
+                gold,
+                "地缘/波动率抬升 + 黄金承接",
+                "避险资金优先流向黄金和贵金属，说明市场更偏风险对冲而不是全面进攻。",
+                "防守底仓",
+                "若美元单边走强且黄金跟不上，避险主线会明显走弱。",
+                True,
+            ),
+            (
+                dividend,
+                "防守配套",
+                "高股息和公用事业可以作为黄金之外的低波动配套底仓。",
+                "防守底仓",
+                "若风险偏好快速修复，红利方向会先跑输弹性资产。",
+                True,
+            ),
+            (
+                power,
+                "确定性资产承接",
+                "电力/公用事业在避险阶段常作为低波动承接方向。",
+                "防守底仓 / 观察",
+                "若市场切换成宽基修复，公用事业相对强度会回落。",
+                False,
+            ),
+        ],
+        "dividend_defense": [
+            (
+                dividend,
+                "高股息/银行承接",
+                "防守资金优先回到现金流稳定、估值更低的银行和红利链。",
+                "防守底仓 / 中线配置",
+                "若风险偏好上修，红利/银行会明显跑输成长弹性。",
+                True,
+            ),
+            (
+                power,
+                "公用事业配套",
+                "电力、公用事业和红利资产通常会一起形成防守承接。",
+                "防守底仓",
+                "若主线转向成长，公用事业相对收益会下降。",
+                True,
+            ),
+            (
+                gold,
+                "避险补充",
+                "黄金可以作为更纯粹的避险补充，但不一定是今天最强主线。",
+                "防守底仓",
+                "若地缘溢价回落，黄金弹性会迅速下降。",
+                False,
+            ),
+        ],
         "defensive_riskoff": [
             (
                 gold,
@@ -2499,6 +2707,32 @@ def _theme_tracking_rows(
                 False,
             ),
         ],
+        "broad_market_repair": [
+            (
+                "宽基/核心资产",
+                "指数与核心资产修复",
+                "宽基先修复意味着市场不是只靠单一题材，而是指数层面开始回暖。",
+                "短线交易 / 中线配置",
+                "若宽基修复没有扩散到行业宽度，行情更像指数托底而不是全面回暖。",
+                True,
+            ),
+            (
+                dividend,
+                "银行/券商协同",
+                "银行、券商和非银方向常作为宽基修复的风向标。",
+                "短线交易 / 中线配置",
+                "若金融权重不接力，宽基修复强度会明显不足。",
+                True,
+            ),
+            (
+                power,
+                "确定性方向继续托底",
+                "即使主线偏宽基修复，确定性链条仍可能作为低波动底盘存在。",
+                "背景储备",
+                "若修复扩散到高弹性成长，确定性方向会相对落后。",
+                False,
+            ),
+        ],
         "rate_growth": [
             (
                 "港股科技/美股科技",
@@ -2530,6 +2764,32 @@ def _theme_tracking_rows(
                 "红利仍可持有，但在成长主线下不是日内优先方向。",
                 "背景储备",
                 "若市场再度切回风险规避，红利会重新获得相对优势。",
+                False,
+            ),
+        ],
+        "power_utilities": [
+            (
+                power,
+                "电网/公用事业承接",
+                "高确定性、电力设备和公用事业链获得持续资金承接。",
+                "短线交易 / 中线配置",
+                "若承接只靠个别龙头，板块持续性会打折。",
+                True,
+            ),
+            (
+                dividend,
+                "防守现金流配套",
+                "电网和公用事业主线常伴随银行/红利这类低波动资产一起走强。",
+                "防守底仓 / 中线配置",
+                "若市场突然切向高弹性成长，红利配套会被边缘化。",
+                True,
+            ),
+            (
+                domestic,
+                "政策确定性延伸",
+                "若政策和投资主线同时发力，电网/公用事业可向基建链延伸。",
+                "中线配置",
+                "若政策没有新落地，延伸扩散会弱于预期。",
                 False,
             ),
         ],
@@ -2693,8 +2953,12 @@ def _theme_tracking_lines(
     theme = str(narrative.get("theme", "macro_background"))
     aligned_counts = {
         "energy_shock": 3,
+        "gold_defense": 2,
+        "dividend_defense": 2,
         "defensive_riskoff": 3,
+        "broad_market_repair": 2,
         "rate_growth": 3,
+        "power_utilities": 2,
         "china_policy": 3,
         "ai_semis": 3,
         "macro_background": 2,
@@ -2720,8 +2984,12 @@ def _theme_tracking_lines(
     removed = [item for item in previous if item not in current]
     reason_map = {
         "energy_shock": "因为原油、波动率和电力/能源链共振，日内主线切到能源冲击。",
+        "gold_defense": "因为避险需求更集中地落在黄金上，而不是所有防守资产一起走强，主线切到黄金避险。",
+        "dividend_defense": "因为银行/红利/公用事业承接更稳定，资金优先回到高现金流防守资产。",
         "defensive_riskoff": "因为防守和避险资产相对收益抬升，盘面优先级回到回撤控制。",
+        "broad_market_repair": "因为宽基、金融和核心资产开始一起修复，盘面更像指数层面的修复而不是纯题材行情。",
         "rate_growth": "因为利率与成长风格开始共振，科技与久期资产优先级上升。",
+        "power_utilities": "因为电网、公用事业和确定性链条持续获得承接，主线更像高确定性防守进攻平衡。",
         "china_policy": "因为国内政策和稳增长方向的确定性提升，电网/基建链权重上调。",
         "ai_semis": "因为 AI/半导体催化强化，成长主线重新获得景气验证。",
         "macro_background": "因为当前没有单一事件主线完全压制其他方向，先回到背景配置。",
@@ -3143,9 +3411,13 @@ def _noon_breadth(overview: Dict[str, Any], pulse: Dict[str, Any]) -> Dict[str, 
 # not just one of N equal-weight checks.
 _CORE_VERIFY_KEYWORDS: Dict[str, List[str]] = {
     "energy_shock": ["原油", "黄金"],
+    "gold_defense": ["黄金", "VIX"],
+    "dividend_defense": ["银行", "红利", "公用事业"],
     "defensive_riskoff": ["黄金", "VIX"],
+    "broad_market_repair": ["上证指数", "沪深300", "券商"],
     "rate_growth": ["VIX", "QQQM"],
     "ai_semis": ["HSTECH", "半导体"],
+    "power_utilities": ["561380", "电网", "公用事业"],
     "china_policy": ["561380"],
 }
 
@@ -3497,6 +3769,77 @@ def _build_evening_payload(
     }
 
 
+def _build_market_payload(
+    *,
+    narrative: Dict[str, Any],
+    china_macro: Dict[str, Any],
+    regime_result: Dict[str, Any],
+    overview: Dict[str, Any],
+    pulse: Dict[str, Any],
+    drivers: Dict[str, Any],
+    news_report: Dict[str, Any],
+    monitor_rows: List[Dict[str, Any]],
+    snapshots: List[BriefingSnapshot],
+    anomaly_report: Dict[str, Any],
+    liquidity_lines: List[str],
+    overnight_rows: List[List[str]],
+    watchlist_rows: List[List[str]],
+    a_share_watch_rows: List[List[str]],
+    a_share_watch_lines: List[str],
+    a_share_watch_meta: Dict[str, Any],
+    data_coverage: str,
+    missing_sources: str,
+    macro_items: List[str],
+    alerts: List[str],
+    quality_lines: List[str],
+) -> Dict[str, Any]:
+    domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
+    style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
+    industry_rows = _industry_rank_rows(drivers, narrative, news_report)
+    macro_asset_rows = _macro_asset_rows(monitor_rows, anomaly_report)
+    theme_tracking_rows = _theme_tracking_rows(narrative, drivers)
+    theme_tracking_lines = _theme_tracking_lines(narrative, theme_tracking_rows, "daily")
+    capital_flow_lines = _capital_flow_lines(pulse, drivers, liquidity_lines, snapshots)
+    verification_rows = _verification_rows_v4(snapshots, monitor_rows)
+    headline_lines = (
+        _compact_headline_lines(narrative, china_macro, monitor_rows, pulse)
+        + _regime_explanation_lines(china_macro, regime_result, narrative)
+        + _story_lines(news_report, monitor_rows, snapshots, narrative)
+        + _impact_lines(snapshots, monitor_rows, regime_result)
+    )
+    action_lines = _positioning_lines(narrative, monitor_rows) + [
+        "执行上先看指数、风格和资金是否同向，再决定是顺主线加风险，还是回到防守框架。",
+        "如果 A 股观察池扩散不足，就把今天理解成结构性行情，不按全面 risk-on 处理。",
+    ]
+
+    return {
+        "title": "全市场行情简报",
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "data_coverage": data_coverage,
+        "missing_sources": missing_sources,
+        "headline_lines": headline_lines,
+        "macro_items": macro_items,
+        "action_lines": action_lines,
+        "domestic_index_rows": domestic_index_rows,
+        "domestic_market_lines": domestic_market_lines + _market_overview_lines(snapshots, regime_result),
+        "style_rows": style_rows,
+        "industry_rows": industry_rows,
+        "macro_asset_rows": macro_asset_rows,
+        "overnight_rows": overnight_rows,
+        "watchlist_rows": watchlist_rows,
+        "a_share_watch_rows": a_share_watch_rows,
+        "a_share_watch_lines": a_share_watch_lines,
+        "theme_tracking_rows": theme_tracking_rows,
+        "theme_tracking_lines": theme_tracking_lines,
+        "core_event_lines": _core_event_lines(news_report, _catalyst_rows(news_report, narrative)),
+        "capital_flow_lines": capital_flow_lines,
+        "quality_lines": quality_lines,
+        "verification_rows": verification_rows,
+        "alerts": alerts or ["当前没有触发额外强提醒，但市场风格切换仍需持续验证。"],
+        "a_share_watch_meta": a_share_watch_meta,
+    }
+
+
 def _persist_briefing(markdown: str, mode: str) -> Path:
     reports_dir = _briefing_internal_dir()
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -3582,7 +3925,12 @@ def main() -> None:
     pulse = MarketPulseCollector(config).collect()
     drivers = MarketDriversCollector(config).collect()
     news_report = _news_report(snapshots, china_macro, global_proxy, config, args.news_source)
-    narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime_result)
+    a_share_watch_rows: List[List[str]] = []
+    a_share_watch_lines: List[str] = []
+    a_share_watch_meta: Dict[str, Any] = {}
+    if args.mode in {"daily", "weekly", "market"}:
+        a_share_watch_rows, a_share_watch_lines, a_share_watch_meta = _briefing_a_share_watch_rows(config)
+    narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime_result, a_share_watch_meta)
     anomaly_report = _anomaly_report(snapshots, monitor_rows)
     events = EventsCollector(config).collect(mode=args.mode)
     liquidity_lines = _liquidity_lines(config)
@@ -3616,12 +3964,36 @@ def main() -> None:
             anomaly_report, overnight_rows, liquidity_lines,
         )
         rendered = BriefingRenderer().render_evening(payload)
+    elif args.mode == "market":
+        payload = _build_market_payload(
+            narrative=narrative,
+            china_macro=china_macro,
+            regime_result=regime_result,
+            overview=overview,
+            pulse=pulse,
+            drivers=drivers,
+            news_report=news_report,
+            monitor_rows=monitor_rows,
+            snapshots=snapshots,
+            anomaly_report=anomaly_report,
+            liquidity_lines=liquidity_lines,
+            overnight_rows=overnight_rows,
+            watchlist_rows=watchlist_rows,
+            a_share_watch_rows=a_share_watch_rows,
+            a_share_watch_lines=a_share_watch_lines,
+            a_share_watch_meta=a_share_watch_meta,
+            data_coverage=data_coverage,
+            missing_sources=missing_sources,
+            macro_items=macro_items,
+            alerts=alerts,
+            quality_lines=_quality_lines(news_report, anomaly_report, monitor_rows),
+        )
+        rendered = BriefingRenderer().render_market(payload)
     else:
         yesterday_rows = _yesterday_review_rows(snapshots, monitor_rows)
         yesterday_lines = _yesterday_review_summary_lines(yesterday_rows)
         domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
         style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
-        a_share_watch_rows, a_share_watch_lines, a_share_watch_meta = _briefing_a_share_watch_rows(config)
         industry_rows = _industry_rank_rows(drivers, narrative, news_report)
         macro_asset_rows = _macro_asset_rows(monitor_rows, anomaly_report)
         catalyst_rows = _catalyst_rows(news_report, narrative)

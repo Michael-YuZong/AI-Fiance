@@ -113,6 +113,10 @@
 
 ## Recent Changes
 
+- 2026-03-19
+  `briefing` 的主线 taxonomy 已扩容，不再只在 `能源冲击 / 利率驱动成长 / 中国政策 / AI半导体` 这几个粗桶里来回落；现在新增并区分 `黄金避险 / 红利银行防守 / 宽基修复 / 电网公用事业`，输出也拆成 `背景框架 + 交易主线候选 + 次主线候选`。A 股观察池的行业分布会回灌到主线评分，避免全靠新闻关键词决定当天主线。
+- 2026-03-19
+  `briefing` 新增 `market` 模式，正式把现有 `market_context / 市场全景 / A股初筛观察池` 收成“全市场行情简报”；现在可以直接看当天市场温度、风格、资金、主线和验证点，不必再从晨报里手工拼上下文。
 - 2026-03-18
   ETF / fund discover 链已开始做性能收口：`build_market_context` 改成并行预热独立段，`discover_opportunities / discover_fund_opportunities / etf_pick watchlist fallback` 改成有界并发分析；基金画像里的 `fund_basic / fund_company / manager_directory / rating_all` 也补了进程级共享缓存。当前 7 只 ETF 小样本实测从 `context 19-20s + analysis 43s` 压到 `context 20s + analysis 19s`，瓶颈已从串行扫描转到少数单票新闻/主题抓取。
 - 2026-03-16

@@ -4,21 +4,26 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pandas as pd
+
 import src.commands.briefing as briefing_module
 from src.commands.briefing import (
     _appendix_derivative_lines,
     _action_lines,
     _briefing_a_share_watch_rows,
     _briefing_internal_dir,
+    _compact_headline_lines,
     _coverage_metadata,
     _flow_lines,
     _load_same_day_briefing,
     _noon_action_lines,
     _monitor_alerts,
+    _primary_narrative,
     _persist_briefing,
     _quality_lines,
     _sentiment_lines,
     _tomorrow_action_lines,
+    build_parser,
 )
 
 
@@ -169,3 +174,77 @@ def test_briefing_action_helpers_include_portfolio_whatif_handoff() -> None:
     assert any("portfolio whatif buy 561380 2.2340 计划金额" in item for item in daily_lines)
     assert any("portfolio whatif buy 561380 2.2340 计划金额" in item for item in noon_lines)
     assert any("portfolio whatif buy 561380 2.2340 计划金额" in item for item in tomorrow_lines)
+
+
+def test_briefing_parser_accepts_market_mode() -> None:
+    args = build_parser().parse_args(["market"])
+    assert args.mode == "market"
+
+
+def test_primary_narrative_can_identify_broad_market_repair() -> None:
+    snapshots = [
+        SimpleNamespace(symbol="510210", sector="宽基", return_1d=0.012, return_5d=0.031),
+        SimpleNamespace(symbol="QQQM", sector="科技", return_1d=0.001, return_5d=0.01),
+        SimpleNamespace(symbol="HSTECH", sector="科技", return_1d=-0.002, return_5d=0.0),
+    ]
+    monitor_rows = [
+        {"name": "美国10Y收益率", "return_1d": -0.015},
+        {"name": "美元指数", "return_5d": -0.003},
+        {"name": "VIX波动率", "latest": 18.0},
+    ]
+    drivers = {"industry_spot": pd.DataFrame([{"名称": "银行"}]), "concept_spot": pd.DataFrame()}
+    pulse = {"zt_pool": pd.DataFrame(), "strong_pool": pd.DataFrame()}
+    news_report = {"items": [{"category": "fed"}]}
+    regime = {"current_regime": "recovery", "preferred_assets": ["宽基", "成长股"]}
+    a_share_watch_meta = {"sector_counts": {"宽基": 1, "银行": 1, "电网": 1}}
+
+    narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime, a_share_watch_meta)
+
+    assert narrative["theme"] == "broad_market_repair"
+    assert narrative["label"] == "宽基修复"
+    headline_lines = _compact_headline_lines(narrative, {"pmi": 50.1}, monitor_rows, {})
+    assert "背景框架" in headline_lines[1]
+    assert "交易主线候选" in headline_lines[1]
+
+
+def test_primary_narrative_can_identify_power_utilities_separately_from_policy() -> None:
+    snapshots = [
+        SimpleNamespace(symbol="561380", sector="电网", return_1d=0.015, return_5d=0.04),
+        SimpleNamespace(symbol="510210", sector="宽基", return_1d=0.001, return_5d=0.01),
+        SimpleNamespace(symbol="510880", sector="高股息", return_1d=0.004, return_5d=0.012),
+    ]
+    monitor_rows = [
+        {"name": "VIX波动率", "latest": 19.0},
+        {"name": "美元指数", "return_5d": 0.001},
+    ]
+    drivers = {"industry_spot": pd.DataFrame([{"名称": "电力设备"}, {"名称": "公用事业"}]), "concept_spot": pd.DataFrame()}
+    pulse = {"zt_pool": pd.DataFrame(), "strong_pool": pd.DataFrame()}
+    news_report = {"items": [{"category": "china_macro"}]}
+    regime = {"current_regime": "deflation", "preferred_assets": ["电网", "高股息"]}
+
+    narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime)
+
+    assert narrative["theme"] == "power_utilities"
+    assert narrative["label"] == "电网/公用事业"
+
+
+def test_primary_narrative_uses_a_share_watch_sector_counts_to_boost_theme() -> None:
+    snapshots = [
+        SimpleNamespace(symbol="510210", sector="宽基", return_1d=0.0, return_5d=0.01),
+        SimpleNamespace(symbol="QQQM", sector="科技", return_1d=0.005, return_5d=0.02),
+    ]
+    monitor_rows = [
+        {"name": "美国10Y收益率", "return_1d": -0.005},
+        {"name": "美元指数", "return_5d": -0.001},
+        {"name": "VIX波动率", "latest": 20.0},
+    ]
+    drivers = {"industry_spot": pd.DataFrame(), "concept_spot": pd.DataFrame()}
+    pulse = {"zt_pool": pd.DataFrame(), "strong_pool": pd.DataFrame()}
+    news_report = {"items": []}
+    regime = {"current_regime": "recovery", "preferred_assets": ["宽基"]}
+    a_share_watch_meta = {"sector_counts": {"宽基": 2, "银行": 1}}
+
+    narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime, a_share_watch_meta)
+
+    assert narrative["theme"] == "broad_market_repair"
+    assert narrative["scores"]["broad_market_repair"] > narrative["scores"]["rate_growth"]
