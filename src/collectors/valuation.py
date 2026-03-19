@@ -60,10 +60,23 @@ class ValuationCollector(BaseCollector):
     Tushare 优先（daily_basic / fina_indicator / index_weight），AKShare 兜底。
     """
 
+    _CN_INDEX_MASTER_FRAME: pd.DataFrame | None = None
+
     def _require_ak(self):
         if ak is None:
             raise RuntimeError("akshare is not installed")
         return ak
+
+    def _cn_index_master_frame(self) -> pd.DataFrame:
+        cached = self.__class__._CN_INDEX_MASTER_FRAME
+        if cached is not None and not cached.empty:
+            return cached
+        client = self._require_ak()
+        frame = self.cached_call("valuation:index_all_cni", client.index_all_cni, ttl_hours=12)
+        if frame is None:
+            frame = pd.DataFrame()
+        self.__class__._CN_INDEX_MASTER_FRAME = frame
+        return frame
 
     # ── ETF NAV ──────────────────────────────────────────────
 
@@ -123,12 +136,11 @@ class ValuationCollector(BaseCollector):
 
     def get_cn_index_snapshot(self, keywords: Sequence[str]) -> Optional[Dict[str, Any]]:
         """Find a CSI/CNI index valuation snapshot by keyword heuristics."""
-        client = self._require_ak()
         cleaned = [str(item).strip() for item in keywords if str(item).strip()]
         if not cleaned:
             return None
         normalized_keywords = [(_normalize_index_label(item), index, _keyword_specificity(item), item) for index, item in enumerate(cleaned)]
-        frame = self.cached_call("valuation:index_all_cni", client.index_all_cni, ttl_hours=12)
+        frame = self._cn_index_master_frame()
         if frame is None or frame.empty:
             return None
         if "指数简称" not in frame.columns or "指数代码" not in frame.columns:

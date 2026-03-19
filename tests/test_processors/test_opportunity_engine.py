@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import re
+import time
 
+import numpy as np
 import pandas as pd
 
 from src.collectors.fund_profile import FundProfileCollector
@@ -11,8 +14,9 @@ from src.collectors.market_cn import ChinaMarketCollector
 from src.collectors.market_drivers import MarketDriversCollector
 from src.collectors.valuation import ValuationCollector
 from src.collectors.news import NewsCollector
-from src.processors.opportunity_engine import _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _risk_dimension, _seasonality_dimension, _stock_name_tokens, _technical_dimension, build_default_pool, build_fund_pool, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities
+from src.processors.opportunity_engine import PoolItem, _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _refresh_action_from_signal_confidence, _relative_strength_dimension, _risk_dimension, _seasonality_dimension, _signal_confidence_warning_line, _stock_name_tokens, _technical_dimension, analyze_opportunity, build_default_pool, build_fund_pool, build_market_context, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities
 from src.processors.opportunity_engine import _asset_note
+from src.processors.horizon import build_analysis_horizon_profile
 from src.utils.market import compute_history_metrics
 
 
@@ -520,6 +524,41 @@ def test_technical_dimension_penalizes_bearish_divergence():
     assert "顶背离" in divergence_factor["signal"]
 
 
+def test_technical_dimension_surfaces_nearby_pressure_levels():
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=40, freq="B"),
+            "open": [10.0 + i * 0.04 for i in range(40)],
+            "high": [10.3 + i * 0.04 for i in range(39)] + [11.82],
+            "low": [9.8 + i * 0.04 for i in range(40)],
+            "close": [10.1 + i * 0.04 for i in range(39)] + [11.55],
+            "volume": [1_000_000] * 40,
+            "amount": [100_000_000.0] * 40,
+        }
+    )
+    technical = {
+        "macd": {"DIF": 0.18, "DEA": 0.12},
+        "dmi": {"ADX": 26.0, "DI+": 28.0, "DI-": 18.0},
+        "kdj": {"K": 58.0, "D": 53.0, "J": 68.0, "cross": "neutral", "zone": "neutral"},
+        "obv": {"OBV": 11_500_000, "MA": 11_200_000, "slope_5d": 200_000, "signal": "bullish"},
+        "divergence": {"signal": "neutral", "label": "未识别到明确顶/底背离", "detail": "无", "strength": 0},
+        "rsi": {"RSI": 57.0},
+        "fibonacci": {"levels": {"0.382": 11.0, "0.500": 11.2, "0.618": 11.35, "0.786": 11.72}, "swing_high": 11.82},
+        "candlestick": [],
+        "volume": {"vol_ratio": 1.0, "vol_ratio_20": 1.0, "price_change_1d": 0.006, "structure": "量价中性"},
+        "ma_system": {"mas": {"MA5": 11.45, "MA20": 11.70, "MA60": 10.80}, "signal": "bullish"},
+        "bollinger": {"signal": "neutral"},
+        "volatility": {"NATR": 0.024, "atr_ratio_20": 0.98, "boll_width_percentile": 0.48, "signal": "neutral"},
+    }
+
+    dimension = _technical_dimension(history, technical)
+    pressure_factor = next(f for f in dimension["factors"] if f["name"] == "压力位")
+
+    assert pressure_factor["awarded"] < 0
+    assert "上方存在近端压力" in pressure_factor["signal"]
+    assert any(token in pressure_factor["signal"] for token in ("MA20", "近20日高点", "摆动前高", "斐波那契 0.786"))
+
+
 def test_technical_dimension_rewards_bullish_multi_candle_pattern():
     history = pd.DataFrame(
         {
@@ -586,6 +625,78 @@ def test_technical_dimension_penalizes_bearish_multi_candle_pattern():
 
     assert candle_factor["display_score"] == "-10/10"
     assert "黄昏之星" in candle_factor["signal"]
+
+
+def test_relative_strength_dimension_penalizes_underperformance_and_weak_breadth():
+    dates = pd.date_range("2026-02-01", periods=20, freq="B")
+    asset_returns = pd.Series([-0.006] * 20, index=dates)
+    benchmark_returns = pd.Series([0.002] * 20, index=dates)
+    context = {
+        "benchmark_returns": {"cn_etf": benchmark_returns},
+        "drivers": {
+            "industry_spot": pd.DataFrame(
+                [
+                    {
+                        "板块名称": "科技",
+                        "涨跌幅": -1.8,
+                        "上涨家数": 8,
+                        "下跌家数": 30,
+                    }
+                ]
+            )
+        },
+        "day_theme": {},
+        "regime": {"preferred_assets": []},
+    }
+    dimension = _relative_strength_dimension(
+        "512480",
+        "cn_etf",
+        {"name": "半导体ETF", "sector": "科技", "chain_nodes": ["半导体"]},
+        {"return_5d": -0.040, "return_20d": -0.120},
+        asset_returns,
+        context,
+    )
+    factors = {factor["name"]: factor for factor in dimension["factors"]}
+    assert factors["超额拐点"]["awarded"] < 0
+    assert factors["板块扩散"]["awarded"] < 0
+    assert factors["行业宽度"]["awarded"] < 0
+    assert "相对基准" in dimension["core_signal"]
+
+
+def test_analyze_opportunity_retries_cn_history_before_snapshot_fallback(monkeypatch):
+    sample_history = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=80, freq="B"),
+            "open": np.linspace(10.0, 12.0, 80),
+            "high": np.linspace(10.3, 12.4, 80),
+            "low": np.linspace(9.8, 11.7, 80),
+            "close": np.linspace(10.1, 12.2, 80),
+            "volume": np.linspace(1_000_000, 1_500_000, 80),
+            "amount": np.linspace(100_000_000.0, 150_000_000.0, 80),
+        }
+    )
+    sample_history.attrs["history_source"] = "tushare"
+    sample_history.attrs["history_source_label"] = "Tushare 日线"
+    attempts = {"count": 0}
+
+    def fake_fetch_asset_history(symbol, asset_type, config):  # noqa: ANN001
+        attempts["count"] += 1
+        raise RuntimeError("temporary first-pass failure")
+
+    monkeypatch.setattr("src.processors.opportunity_engine.fetch_asset_history", fake_fetch_asset_history)
+    monkeypatch.setattr("src.processors.opportunity_engine._retry_china_history_after_failure", lambda symbol, asset_type, config: sample_history)  # noqa: ARG005
+    monkeypatch.setattr("src.processors.opportunity_engine.build_market_context", lambda config, relevant_asset_types=None: {})  # noqa: ARG005
+    monkeypatch.setattr("src.processors.opportunity_engine._collect_fund_profile", lambda *args, **kwargs: {})  # noqa: ARG005
+    monkeypatch.setattr("src.processors.opportunity_engine._safe_history", lambda *args, **kwargs: None)  # noqa: ARG005
+    monkeypatch.setattr("src.processors.opportunity_engine._intraday_snapshot", lambda *args, **kwargs: {"enabled": False})  # noqa: ARG005
+    monkeypatch.setattr("src.processors.opportunity_engine._correlation_to_watchlist", lambda *args, **kwargs: None)  # noqa: ARG005
+
+    analysis = analyze_opportunity("300750", "cn_stock", {})
+
+    assert attempts["count"] == 1
+    assert analysis["history_fallback_mode"] is False
+    assert analysis["metadata"]["history_source"] == "tushare"
+    assert any("重试中国市场主链" in note for note in analysis["notes"])
 
 
 def test_macro_dimension_uses_leading_macro_indicators_for_growth_sector():
@@ -1020,6 +1131,38 @@ def test_chips_dimension_for_commodity_etf_avoids_northbound_and_stock_concentra
     assert "ETF" in factors["机构资金承接"]["detail"]
 
 
+def test_chips_dimension_penalizes_outflow_and_crowding(monkeypatch):
+    monkeypatch.setattr(ValuationCollector, "get_cn_index_snapshot", lambda self, keywords: None)  # noqa: ARG005
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_etf_fund_flow",
+        lambda self, symbol: pd.DataFrame([{"净流入": -80_000_000.0}, {"净流入": -60_000_000.0}, {"净流入": -50_000_000.0}]),  # noqa: ARG005
+    )
+    context = {
+        "drivers": {
+            "industry_fund_flow": pd.DataFrame(
+                [{"名称": "科技", "今日主力净流入-净额": -180_000_000, "今日主力净流入-净占比": -2.2}]
+            ),
+            "concept_fund_flow": pd.DataFrame(),
+            "northbound_industry": {"frame": pd.DataFrame([{"名称": "科技", "北向资金今日增持估计-市值": -260_000_000}])},
+            "northbound_concept": {"frame": pd.DataFrame()},
+            "hot_rank": pd.DataFrame([{"名称": "半导体ETF", "排名": 6}]),
+        }
+    }
+    dimension = _chips_dimension(
+        "512480",
+        "cn_etf",
+        {"name": "半导体ETF", "sector": "科技", "chain_nodes": ["半导体"]},
+        context,
+        {},
+    )
+    factors = {factor["name"]: factor for factor in dimension["factors"]}
+    assert factors["公募/热度代理"]["awarded"] < 0
+    assert factors["北向/南向"]["awarded"] < 0
+    assert factors["机构资金承接"]["awarded"] < 0
+    assert "流出" in factors["机构资金承接"]["signal"]
+
+
 def test_catalyst_dimension_uses_sector_profile_mapping(tmp_path):
     profile_path = tmp_path / "catalyst_profiles.yaml"
     profile_path.write_text(
@@ -1058,6 +1201,34 @@ profiles:
     assert "集成电路" in signals["政策催化"]
     assert "中芯国际" in signals["龙头公告/业绩"]
     assert "TSMC" in signals["海外映射"]
+
+
+def test_catalyst_dimension_surfaces_theme_headwind_for_etf():
+    context = {
+        "config": {},
+        "news_report": {
+            "all_items": [
+                {
+                    "title": "半导体库存高企且价格战加剧，芯片链景气承压 - Reuters",
+                    "category": "semiconductor",
+                    "source": "Reuters",
+                    "configured_source": "Reuters",
+                    "must_include": False,
+                    "published_at": "2026-03-10",
+                    "link": "",
+                }
+            ]
+        },
+        "events": [],
+    }
+    dimension = _catalyst_dimension(
+        {"symbol": "512480", "name": "半导体ETF", "asset_type": "cn_etf", "sector": "科技", "chain_nodes": ["半导体", "芯片"]},
+        context,
+    )
+    negative_factor = next(f for f in dimension["factors"] if f["name"] == "主题逆风")
+    assert negative_factor["display_score"] == "-10"
+    assert "价格战" in negative_factor["signal"] or "库存高企" in negative_factor["signal"]
+    assert "价格战" in dimension["core_signal"] or "库存高企" in dimension["core_signal"]
 
 
 def test_catalyst_dimension_uses_derived_profile_and_dynamic_topic_search(monkeypatch):
@@ -1232,6 +1403,69 @@ def test_hard_checks_for_us_stock_do_not_claim_etf_proxy_floor() -> None:
     assert "ETF / 行业代理" not in check_map["基本面底线"]["detail"]
 
 
+def test_hard_checks_for_cn_stock_pass_fundamental_floor_when_financial_snapshot_available(monkeypatch) -> None:
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=120, freq="B"),
+            "open": [100.0] * 120,
+            "high": [101.0] * 120,
+            "low": [99.0] * 120,
+            "close": [100.0 + 0.2 * i for i in range(120)],
+            "volume": [1_000_000] * 120,
+            "amount": [800_000_000.0] * 120,
+        }
+    )
+    metrics = {"avg_turnover_20d": 8e8, "price_percentile_1y": 0.43, "return_5d": -0.01}
+    technical = {"rsi": {"RSI": 50.0}}
+    context = {"config": {"opportunity": {}}}
+    fundamental_dimension = {
+        "valuation_snapshot": {"index_name": "中际旭创", "pe_ttm": 28.0},
+        "valuation_extreme": False,
+        "financial_proxy": {
+            "report_date": "2025-12-31",
+            "profit_yoy": 22.0,
+            "roe": 18.0,
+            "gross_margin": 31.5,
+            "cfps": 1.8,
+            "debt_to_assets": 36.0,
+        },
+    }
+
+    monkeypatch.setattr(
+        ChinaMarketCollector,
+        "get_unlock_pressure",
+        lambda self, symbol, as_of="", lookahead_days=90: {  # noqa: ARG005
+            "status": "✅",
+            "detail": "未来 90 日未见明确限售股解禁安排",
+        },
+    )
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine._cn_pledge_risk_snapshot",
+        lambda metadata, context: {  # noqa: ARG005
+            "status": "✅",
+            "detail": "当前未见明显股权质押风险",
+        },
+    )
+
+    checks, exclusion_reasons, _warnings = _hard_checks(
+        "cn_stock",
+        {"symbol": "300308", "name": "中际旭创"},
+        history,
+        metrics,
+        technical,
+        context,
+        10,
+        None,
+        fundamental_dimension,
+        None,
+    )
+
+    check_map = {item["name"]: item for item in checks}
+    assert check_map["基本面底线"]["status"] == "✅"
+    assert "未见明显底线失守项" in check_map["基本面底线"]["detail"]
+    assert "基本面底线失守" not in exclusion_reasons
+
+
 def test_hard_checks_for_cn_stock_use_unlock_pressure(monkeypatch) -> None:
     history = pd.DataFrame(
         {
@@ -1329,6 +1563,208 @@ def test_hard_checks_for_cn_stock_use_pledge_risk(monkeypatch) -> None:
     assert any("股权质押比例偏高" in item for item in warnings)
 
 
+def test_relative_strength_dimension_uses_concept_spot_for_breadth_and_leader_confirmation() -> None:
+    dates = pd.date_range("2025-01-01", periods=30, freq="B")
+    asset_returns = pd.Series([0.01] * 30, index=dates)
+    benchmark_returns = pd.Series([0.002] * 30, index=dates)
+    context = {
+        "benchmark_returns": {"cn_stock": benchmark_returns},
+        "drivers": {
+            "industry_spot": pd.DataFrame(),
+            "concept_spot": pd.DataFrame(
+                [
+                    {
+                        "板块名称": "光模块",
+                        "涨跌幅": 2.4,
+                        "上涨家数": 8,
+                        "下跌家数": 2,
+                    }
+                ]
+            ),
+        },
+        "day_theme": {"label": "AI算力"},
+        "regime": {},
+        "global_proxy": {},
+    }
+    metadata = {"name": "中际旭创", "sector": "科技", "chain_nodes": ["光模块"]}
+    metrics = {"return_5d": 0.08, "return_20d": 0.12}
+
+    dimension = _relative_strength_dimension("300308", "cn_stock", metadata, metrics, asset_returns, context)
+    factor_map = {factor["name"]: factor for factor in dimension["factors"]}
+
+    assert factor_map["板块扩散"]["signal"] == "板块涨跌幅 +2.40%"
+    assert factor_map["行业宽度"]["signal"] == "行业上涨家数比例 80%"
+    assert factor_map["龙头确认"]["signal"] == "龙头方向与板块一致，扩散结构健康"
+
+
+def test_relative_strength_dimension_prefers_breadth_row_with_counts_over_generic_industry_row() -> None:
+    dates = pd.date_range("2025-01-01", periods=30, freq="B")
+    asset_returns = pd.Series([0.01] * 30, index=dates)
+    benchmark_returns = pd.Series([0.002] * 30, index=dates)
+    context = {
+        "benchmark_returns": {"cn_stock": benchmark_returns},
+        "drivers": {
+            "industry_spot": pd.DataFrame(
+                [
+                    {
+                        "板块名称": "科技",
+                        "涨跌幅": 1.1,
+                    }
+                ]
+            ),
+            "concept_spot": pd.DataFrame(
+                [
+                    {
+                        "板块名称": "光模块",
+                        "涨跌幅": 2.1,
+                        "上涨家数": 9,
+                        "下跌家数": 1,
+                    }
+                ]
+            ),
+        },
+        "day_theme": {"label": "AI算力"},
+        "regime": {},
+        "global_proxy": {},
+    }
+    metadata = {"name": "中际旭创", "sector": "科技", "chain_nodes": ["光模块"]}
+    metrics = {"return_5d": 0.07, "return_20d": 0.10}
+
+    dimension = _relative_strength_dimension("300308", "cn_stock", metadata, metrics, asset_returns, context)
+    factor_map = {factor["name"]: factor for factor in dimension["factors"]}
+
+    assert factor_map["行业宽度"]["display_score"] != "观察提示"
+    assert factor_map["行业宽度"]["signal"] == "行业上涨家数比例 90%"
+    assert factor_map["龙头确认"]["display_score"] != "观察提示"
+    assert factor_map["龙头确认"]["signal"] == "龙头方向与板块一致，扩散结构健康"
+
+
+def test_chips_dimension_uses_index_concentration_proxy_for_cn_stock(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_index_snapshot",
+        lambda self, keywords: {  # noqa: ARG005
+            "index_code": "931160",
+            "index_name": "中证光模块主题指数",
+        },
+    )
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_index_financial_proxies",
+        lambda self, index_code, top_n=5: {  # noqa: ARG005
+            "top_concentration": 42.0,
+            "coverage_weight": 39.5,
+        },
+    )
+
+    dimension = _chips_dimension(
+        "300308",
+        "cn_stock",
+        {"name": "中际旭创", "sector": "科技", "chain_nodes": ["光模块"]},
+        {"drivers": {}, "fund_profile": None},
+        {},
+    )
+    factor_map = {factor["name"]: factor for factor in dimension["factors"]}
+
+    assert factor_map["机构集中度代理"]["signal"] == "前五大成分股权重合计 42.0%"
+    assert "财务覆盖权重约 39.5%" in factor_map["机构集中度代理"]["detail"]
+
+
+def test_chips_dimension_uses_chain_node_keywords_for_index_proxy(monkeypatch) -> None:
+    def _snapshot(self, keywords):  # noqa: ANN001, ARG002
+        if "光模块" in keywords or "通信设备" in keywords:
+            return {"index_code": "931160", "index_name": "中证光模块主题指数"}
+        return None
+
+    monkeypatch.setattr(ValuationCollector, "get_cn_index_snapshot", _snapshot)
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_index_financial_proxies",
+        lambda self, index_code, top_n=5: {  # noqa: ARG005
+            "top_concentration": 41.0,
+            "coverage_weight": 38.0,
+        },
+    )
+
+    dimension = _chips_dimension(
+        "300308",
+        "cn_stock",
+        {"name": "中际旭创", "sector": "科技", "chain_nodes": ["光模块"]},
+        {"drivers": {}, "fund_profile": None, "runtime_caches": {}},
+        {},
+    )
+    factor_map = {factor["name"]: factor for factor in dimension["factors"]}
+
+    assert factor_map["机构集中度代理"]["display_score"] != "缺失"
+    assert factor_map["机构集中度代理"]["signal"] == "前五大成分股权重合计 41.0%"
+
+
+def test_chips_dimension_falls_back_to_secondary_index_proxy_when_primary_proxy_breaks(monkeypatch) -> None:
+    def _snapshot(self, keywords):  # noqa: ANN001, ARG002
+        if "人工智能" in keywords:
+            return {"index_code": "980087", "index_name": "人工智能精选"}
+        if "通信" in keywords:
+            return {"index_code": "399389", "index_name": "国证通信"}
+        return None
+
+    def _financial(self, index_code, top_n=5):  # noqa: ANN001, ARG002
+        if index_code == "980087":
+            raise ValueError("broken theme workbook")
+        if index_code == "399389":
+            return {
+                "top_concentration": 35.2,
+                "coverage_weight": 35.2,
+                "constituents": [{"symbol": "300308", "name": "中际旭创", "weight": 8.1}],
+            }
+        return {}
+
+    monkeypatch.setattr(ValuationCollector, "get_cn_index_snapshot", _snapshot)
+    monkeypatch.setattr(ValuationCollector, "get_cn_index_financial_proxies", _financial)
+
+    dimension = _chips_dimension(
+        "300308",
+        "cn_stock",
+        {"name": "中际旭创", "sector": "通信设备", "chain_nodes": ["AI算力"]},
+        {"drivers": {}, "fund_profile": None, "runtime_caches": {}},
+        {},
+    )
+    factor_map = {factor["name"]: factor for factor in dimension["factors"]}
+
+    assert factor_map["机构集中度代理"]["display_score"] != "缺失"
+    assert factor_map["机构集中度代理"]["signal"] == "前五大成分股权重合计 35.2%"
+
+
+def test_relative_strength_dimension_uses_derived_theme_leaders_when_breadth_counts_missing() -> None:
+    dates = pd.date_range("2025-01-01", periods=30, freq="B")
+    asset_returns = pd.Series([0.01] * 30, index=dates)
+    benchmark_returns = pd.Series([0.002] * 30, index=dates)
+    context = {
+        "benchmark_returns": {"cn_stock": benchmark_returns},
+        "drivers": {
+            "industry_spot": pd.DataFrame(
+                [
+                    {
+                        "板块名称": "通信设备",
+                        "涨跌幅": 0.8,
+                    }
+                ]
+            ),
+            "concept_spot": pd.DataFrame(),
+        },
+        "day_theme": {"label": "AI算力"},
+        "regime": {},
+        "global_proxy": {},
+    }
+    metadata = {"name": "中际旭创", "sector": "通信设备", "chain_nodes": ["AI算力", "成长股估值修复"]}
+    metrics = {"return_5d": 0.08, "return_20d": 0.12}
+
+    dimension = _relative_strength_dimension("300308", "cn_stock", metadata, metrics, asset_returns, context)
+    factor_map = {factor["name"]: factor for factor in dimension["factors"]}
+
+    assert factor_map["龙头确认"]["display_score"] != "观察提示"
+    assert factor_map["龙头确认"]["signal"] == "龙头方向与板块一致，扩散结构健康"
+
+
 def test_catalyst_dimension_cn_stock_includes_structured_event_factor(monkeypatch):
     """cn_stock catalyst should turn direct stock announcements into structured event evidence."""
     monkeypatch.setattr(ValuationCollector, "get_cn_stock_repurchase", lambda self, symbol: [])  # noqa: ARG005
@@ -1358,6 +1794,46 @@ def test_catalyst_dimension_cn_stock_includes_structured_event_factor(monkeypatc
     # Policy max should be 25 (not 30) for cn_stock
     policy_factor = next(f for f in dimension["factors"] if f["name"] == "政策催化")
     assert policy_factor["display_score"].endswith("/25")
+
+
+def test_catalyst_and_risk_dimensions_share_cn_stock_news_cache(monkeypatch):
+    calls = []
+
+    def fake_stock_news(self, symbol, limit=10):  # noqa: ARG001
+        calls.append(symbol)
+        return [
+            {
+                "category": "stock_announcement",
+                "title": "中际旭创 预计于 2026-03-31 披露 2025年年报",
+                "source": "东方财富",
+                "configured_source": "东方财富",
+                "must_include": False,
+                "link": "",
+            }
+        ]
+
+    monkeypatch.setattr(NewsCollector, "get_stock_news", fake_stock_news)
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_disclosure_dates", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_holder_trades", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_repurchase", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_dividend", lambda self, symbol: [])  # noqa: ARG005
+
+    history = pd.DataFrame({"close": np.linspace(100.0, 130.0, 120)})
+    asset_returns = history["close"].pct_change().dropna()
+    context = {
+        "config": {},
+        "news_report": {"all_items": [], "mode": "live"},
+        "events": [],
+        "runtime_caches": {},
+        "benchmark_returns": {},
+        "now": "2026-03-17",
+    }
+    metadata = {"symbol": "300308", "name": "中际旭创", "asset_type": "cn_stock", "sector": "科技", "chain_nodes": ["光模块"]}
+
+    _catalyst_dimension(metadata, context)
+    _risk_dimension("300308", "cn_stock", metadata, history, asset_returns, context, None)
+
+    assert calls == ["300308"]
 
 
 def test_company_forward_events_for_cn_stock_use_tushare_disclosure_date(monkeypatch):
@@ -2039,6 +2515,7 @@ def test_catalyst_dimension_treats_missing_news_as_information_gap_not_negative(
 def test_catalyst_dimension_ignores_non_positive_company_statement_in_positive_awards(monkeypatch):
     monkeypatch.setattr(ValuationCollector, "get_cn_stock_repurchase", lambda self, symbol: [])  # noqa: ARG005
     monkeypatch.setattr(ValuationCollector, "get_cn_stock_dividend", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_disclosure_dates", lambda self, symbol: [])  # noqa: ARG005
     monkeypatch.setattr(ValuationCollector, "get_cn_stock_holder_trades", lambda self, symbol: [])  # noqa: ARG005
     monkeypatch.setattr(NewsCollector, "get_stock_news", lambda self, symbol, limit=10: [])  # noqa: ARG005
     monkeypatch.setattr(NewsCollector, "search_by_keywords", lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: [])  # noqa: ARG005
@@ -2153,6 +2630,24 @@ def test_catalyst_dimension_ignores_unrelated_negative_search_hit(monkeypatch):
     )
     negative_factor = next(f for f in dimension["factors"] if f["name"] == "负面事件")
     assert negative_factor["display_score"] == "信息项"
+
+
+def test_seasonality_dimension_penalizes_poor_same_month_history():
+    current_month = datetime.now().month
+    dates = pd.date_range("2021-01-31", periods=72, freq="ME")
+    level = 100.0
+    closes = []
+    for date in dates:
+        if date.month == current_month:
+            level *= 0.90
+        else:
+            level *= 1.01
+        closes.append(level)
+    history = pd.DataFrame({"date": dates, "close": closes})
+    dimension = _seasonality_dimension({"sector": "科技", "asset_type": "cn_stock"}, history, {})
+    factor = next(f for f in dimension["factors"] if f["name"] == "月度胜率")
+    assert factor["awarded"] < 0
+    assert "同月胜率" in factor["signal"]
 
 
 def test_fundamental_dimension_hk_us_uses_yfinance(monkeypatch):
@@ -2471,6 +2966,241 @@ def test_action_plan_marks_long_term_when_fundamental_and_risk_are_strong():
     assert result["horizon"]["code"] == "long_term_allocation"
     assert "长线配置" in result["horizon"]["label"]
     assert "不适合按纯短线追价" in result["horizon"]["misfit_reason"]
+
+
+def test_refresh_action_from_signal_confidence_differentiates_watch_horizon_and_warning():
+    analysis = _make_action_plan_analysis(rating_rank=0, tech=30, risk=25, relative=22, catalyst=12, fundamental=8)
+    history = _make_simple_history()
+    technical = {"rsi": {"RSI": 48.0}, "fibonacci": {"levels": {}}, "ma_system": {"mas": {"MA20": 10.0, "MA60": 9.8}}}
+    analysis["action"] = _action_plan(analysis, history, technical, None, {"volatility_percentile_1y": 0.5})
+    analysis["narrative"] = {"judgment": {"state": "观察为主"}}
+    analysis["conclusion"] = "技术面有亮点，但还没有形成满配共振。"
+    analysis["signal_confidence"] = {
+        "available": True,
+        "stop_hit_rate": 0.71,
+        "target_hit_rate": 0.41,
+        "win_rate_20d": 0.29,
+        "confidence_score": 34,
+    }
+
+    _refresh_action_from_signal_confidence(analysis)
+
+    assert "止损频率偏高" in analysis["conclusion"]
+    assert "止损触发率偏高" in analysis["action"]["horizon"]["fit_reason"]
+    assert analysis["action"]["scaling_plan"] == "观察名单阶段，不预设加仓"
+    assert any("止损频率偏高" in item for item in analysis["rating"]["warnings"])
+
+
+def test_signal_confidence_warning_line_supports_single_sided_high_stop_warning():
+    warning = _signal_confidence_warning_line(
+        {
+            "available": True,
+            "stop_hit_rate": 0.61,
+            "target_hit_rate": 0.41,
+        }
+    )
+    assert "61%" in warning
+    assert "止损频率偏高" in warning
+
+
+def test_build_market_context_can_skip_global_proxy_and_market_monitor(monkeypatch):
+    monkeypatch.setattr("src.processors.opportunity_engine.load_china_macro_snapshot", lambda cfg: {"pmi": 50.0})
+    monkeypatch.setattr("src.processors.opportunity_engine.load_watchlist", lambda: [])
+    monkeypatch.setattr("src.processors.opportunity_engine.load_global_proxy_snapshot", lambda: (_ for _ in ()).throw(AssertionError("should skip global proxy")))
+    monkeypatch.setattr("src.processors.opportunity_engine.MarketMonitorCollector.collect", lambda self: (_ for _ in ()).throw(AssertionError("should skip market monitor")))
+    monkeypatch.setattr("src.processors.opportunity_engine.derive_regime_inputs", lambda *args, **kwargs: {})
+    monkeypatch.setattr("src.processors.opportunity_engine.RegimeDetector.detect_regime", lambda self: {"current_regime": "recovery", "preferred_assets": []})
+    monkeypatch.setattr("src.processors.opportunity_engine.NewsCollector.collect", lambda self, **kwargs: {"mode": "proxy", "items": [], "lines": [], "note": ""})
+    monkeypatch.setattr("src.processors.opportunity_engine.EventsCollector.collect", lambda self, mode="daily": [])
+    monkeypatch.setattr("src.processors.opportunity_engine.MarketDriversCollector.collect", lambda self: {})
+    monkeypatch.setattr("src.processors.opportunity_engine.MarketPulseCollector.collect", lambda self: {})
+
+    context = build_market_context(
+        {
+            "market_context": {
+                "skip_global_proxy": True,
+                "skip_market_monitor": True,
+            }
+        },
+        relevant_asset_types=["cn_stock"],
+    )
+
+    assert context["global_proxy"] == {}
+    assert context["monitor_rows"] == []
+    assert any("全球代理数据已按运行配置关闭" in note for note in context["notes"])
+    assert any("宏观资产监控已按运行配置关闭" in note for note in context["notes"])
+
+
+def test_build_market_context_prefetches_independent_sections_in_parallel(monkeypatch):
+    def _sleep_and_return(payload):  # noqa: ANN001
+        time.sleep(0.08)
+        return payload
+
+    monkeypatch.setattr("src.processors.opportunity_engine.load_watchlist", lambda: [])
+    monkeypatch.setattr("src.processors.opportunity_engine._safe_history", lambda *args, **kwargs: None)  # noqa: ARG005
+    monkeypatch.setattr("src.processors.opportunity_engine.load_china_macro_snapshot", lambda cfg: _sleep_and_return({"pmi": 50.0}))  # noqa: ARG005
+    monkeypatch.setattr("src.processors.opportunity_engine.derive_regime_inputs", lambda *args, **kwargs: {})
+    monkeypatch.setattr("src.processors.opportunity_engine.RegimeDetector.detect_regime", lambda self: {"current_regime": "recovery", "preferred_assets": []})
+    monkeypatch.setattr("src.processors.opportunity_engine.NewsCollector.collect", lambda self, **kwargs: _sleep_and_return({"mode": "proxy", "items": [], "lines": [], "note": ""}))  # noqa: ARG005,E501
+    monkeypatch.setattr("src.processors.opportunity_engine.EventsCollector.collect", lambda self, mode="daily": _sleep_and_return([]))
+    monkeypatch.setattr("src.processors.opportunity_engine.MarketDriversCollector.collect", lambda self: _sleep_and_return({}))
+    monkeypatch.setattr("src.processors.opportunity_engine.MarketPulseCollector.collect", lambda self: _sleep_and_return({}))
+
+    start = time.perf_counter()
+    context = build_market_context(
+        {
+            "market_context": {
+                "skip_global_proxy": True,
+                "skip_market_monitor": True,
+            }
+        },
+        relevant_asset_types=["cn_etf", "futures"],
+    )
+    elapsed = time.perf_counter() - start
+
+    assert context["drivers"] == {}
+    assert context["pulse"] == {}
+    assert elapsed < 0.30
+
+
+def test_discover_opportunities_analyzes_candidates_in_parallel(monkeypatch):
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.build_market_context",
+        lambda config, relevant_asset_types=None: {"notes": [], "regime": {}, "day_theme": {}, "runtime_caches": {}},  # noqa: ARG005
+    )
+    pool = [
+        PoolItem(symbol="513120", name="港股创新药ETF", asset_type="cn_etf", sector="医药", chain_nodes=["医药"], region="CN", source="watchlist"),
+        PoolItem(symbol="561380", name="电网ETF", asset_type="cn_etf", sector="电网", chain_nodes=["电网"], region="CN", source="watchlist"),
+        PoolItem(symbol="512480", name="半导体ETF", asset_type="cn_etf", sector="科技", chain_nodes=["半导体"], region="CN", source="watchlist"),
+    ]
+    monkeypatch.setattr("src.processors.opportunity_engine.build_default_pool", lambda config, theme_filter="", preferred_sectors=None: (pool, []))  # noqa: ARG005
+
+    def _slow_analysis(symbol, asset_type, config, context=None, metadata_override=None):  # noqa: ANN001, ARG001
+        time.sleep(0.08)
+        return {
+            "symbol": symbol,
+            "name": metadata_override.get("name", symbol),
+            "asset_type": asset_type,
+            "generated_at": "2026-03-18 10:00:00",
+            "excluded": False,
+            "rating": {"rank": 1},
+            "dimensions": {
+                "technical": {"score": 40},
+                "fundamental": {"score": 40},
+                "catalyst": {"score": 40},
+                "relative_strength": {"score": 40},
+                "risk": {"score": 40},
+            },
+        }
+
+    monkeypatch.setattr("src.processors.opportunity_engine.analyze_opportunity", _slow_analysis)
+
+    start = time.perf_counter()
+    payload = discover_opportunities({"opportunity": {"analysis_workers": 3}}, top_n=3)
+    elapsed = time.perf_counter() - start
+
+    assert payload["scan_pool"] == 3
+    assert payload["passed_pool"] == 3
+    assert len(payload["coverage_analyses"]) == 3
+    assert elapsed < 0.20
+
+
+def test_discover_stock_opportunities_limits_context_asset_types_by_market(monkeypatch):
+    captured: list[list[str]] = []
+
+    def fake_context(config, preferred_sources=None, relevant_asset_types=None):  # noqa: ANN001
+        captured.append(list(relevant_asset_types or []))
+        return {"notes": [], "regime": {}, "day_theme": {}, "config": dict(config)}
+
+    monkeypatch.setattr("src.processors.opportunity_engine.build_market_context", fake_context)
+    monkeypatch.setattr("src.processors.opportunity_engine.build_stock_pool", lambda config, market="all", sector_filter="": ([], []))
+
+    result = discover_stock_opportunities({}, market="cn", top_n=5)
+
+    assert result["top"] == []
+    assert captured == [["cn_stock", "cn_etf", "futures"]]
+
+
+def test_discover_stock_opportunities_reuses_provided_context(monkeypatch):
+    shared_context = {"notes": [], "regime": {"current_regime": "deflation"}, "day_theme": {"label": "利率驱动成长修复"}}
+
+    def fail_context(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("build_market_context should not be called when context is provided")
+
+    monkeypatch.setattr("src.processors.opportunity_engine.build_market_context", fail_context)
+    monkeypatch.setattr("src.processors.opportunity_engine.build_stock_pool", lambda config, market="all", sector_filter="": ([], []))
+
+    result = discover_stock_opportunities({}, market="cn", top_n=5, context=shared_context)
+
+    assert result["top"] == []
+    assert result["regime"]["current_regime"] == "deflation"
+    assert result["day_theme"]["label"] == "利率驱动成长修复"
+
+
+def test_build_analysis_horizon_profile_varies_swing_contract_by_driver():
+    fundamental_led = build_analysis_horizon_profile(
+        rating=3,
+        asset_type="cn_stock",
+        technical_score=40,
+        fundamental_score=83,
+        catalyst_score=53,
+        relative_score=50,
+        risk_score=30,
+        macro_reverse=False,
+        trade_state="等右侧确认",
+        direction="观望偏多",
+        position="首次建仓 ≤3%，等结构进一步确认后再加仓",
+    )
+    momentum_led = build_analysis_horizon_profile(
+        rating=2,
+        asset_type="cn_stock",
+        technical_score=30,
+        fundamental_score=80,
+        catalyst_score=65,
+        relative_score=71,
+        risk_score=30,
+        macro_reverse=False,
+        trade_state="等右侧确认",
+        direction="观望",
+        position="先不超过 5% 试错",
+    )
+    repair_led = build_analysis_horizon_profile(
+        rating=2,
+        asset_type="cn_stock",
+        technical_score=29,
+        fundamental_score=68,
+        catalyst_score=65,
+        relative_score=46,
+        risk_score=52,
+        macro_reverse=False,
+        trade_state="风险释放前不宜激进",
+        direction="观望",
+        position="先不超过 5% 试错",
+    )
+
+    assert fundamental_led["code"] == "swing"
+    assert momentum_led["code"] == "swing"
+    assert repair_led["code"] == "swing"
+    assert "基本面和主线没有坏" in fundamental_led["fit_reason"]
+    assert "催化和相对强弱都在线" in momentum_led["fit_reason"]
+    assert "风险收益比相对不差" in repair_led["fit_reason"]
+
+
+def test_action_plan_varies_watch_scaling_by_driver_mix():
+    history = _make_simple_history()
+    technical = {"rsi": {"RSI": 48.0}, "fibonacci": {"levels": {}}, "ma_system": {"mas": {"MA20": 10.0, "MA60": 9.8}}}
+
+    defensive = _make_action_plan_analysis(rating_rank=0, tech=35, risk=85, relative=54, catalyst=15, fundamental=61)
+    weak_fundamental = _make_action_plan_analysis(rating_rank=0, tech=50, risk=25, relative=71, catalyst=58, fundamental=21)
+    plain_watch = _make_action_plan_analysis(rating_rank=0, tech=28, risk=5, relative=2, catalyst=25, fundamental=20)
+
+    defensive_action = _action_plan(defensive, history, technical, None, {"volatility_percentile_1y": 0.4})
+    weak_fundamental_action = _action_plan(weak_fundamental, history, technical, None, {"volatility_percentile_1y": 0.5})
+    plain_watch_action = _action_plan(plain_watch, history, technical, None, {"volatility_percentile_1y": 0.7})
+
+    assert defensive_action["scaling_plan"] == "先按防守观察仓理解，等催化补齐后再讨论第二笔"
+    assert weak_fundamental_action["scaling_plan"] == "先盯基本面约束能否缓解，再决定是否给第二笔"
+    assert plain_watch_action["scaling_plan"] == "不抢反弹，不预设加仓"
 
 
 def test_build_stock_pool_warns_when_cn_snapshot_missing_required_columns(monkeypatch):
@@ -2848,3 +3578,766 @@ def test_discover_opportunities_builds_prepick_candidate_layers(monkeypatch):
     assert any("主题过滤 `黄金`" in item for item in payload["pool_summary"]["filter_rules"])
     assert payload["data_coverage"]["degraded"] is True
     assert any("代理型新闻覆盖" in item for item in payload["ready_candidates"][0]["discovery"]["data_notes"])
+
+
+# ---------------------------------------------------------------------------
+# J-3: Breadth / chips factor tests
+# ---------------------------------------------------------------------------
+
+def test_j3_sector_breadth_detail_returns_structure_when_no_data():
+    """_sector_breadth_detail 在无数据时应返回合法结构，不抛异常。"""
+    from src.processors.opportunity_engine import _sector_breadth_detail
+    result = _sector_breadth_detail({"sector": "科技"}, {})
+    assert "advance_ratio" in result
+    assert "sector_move" in result
+    assert "leader_up" in result
+    assert "proxy_level" in result
+    assert result["proxy_level"] == "sector_proxy"
+
+
+def test_j3_sector_breadth_detail_extracts_advance_ratio():
+    """_sector_breadth_detail 应从 industry_spot 中提取上涨家数比例。"""
+    import pandas as pd
+    import pytest
+    from src.processors.opportunity_engine import _sector_breadth_detail
+    industry_spot = pd.DataFrame([
+        {"板块名称": "科技", "涨跌幅": 1.5, "上涨家数": 60, "下跌家数": 40},
+    ])
+    result = _sector_breadth_detail({"sector": "科技"}, {"industry_spot": industry_spot})
+    assert result["advance_ratio"] == 0.6
+    assert result["sector_move"] == pytest.approx(0.015)
+
+
+def test_j3_relative_strength_dimension_includes_breadth_factors():
+    """相对强弱维度应包含行业宽度和龙头确认因子。"""
+    import pandas as pd
+    from src.processors.opportunity_engine import _relative_strength_dimension
+    history = pd.DataFrame({
+        "date": pd.date_range("2025-01-01", periods=30, freq="B"),
+        "close": [10.0 + i * 0.05 for i in range(30)],
+    })
+    metrics = {"return_5d": 0.02, "return_20d": 0.05}
+    asset_returns = pd.Series([0.001] * 30)
+    dim = _relative_strength_dimension("600519", "cn_stock", {"sector": "消费"}, metrics, asset_returns, {})
+    factor_names = {f["name"] for f in dim["factors"]}
+    assert "行业宽度" in factor_names
+    assert "龙头确认" in factor_names
+
+
+def test_j3_chips_dimension_includes_crowding_risk():
+    """筹码结构维度应包含拥挤度风险因子（observation_only）。"""
+    from src.processors.opportunity_engine import _chips_dimension
+    dim = _chips_dimension("600519", "cn_stock", {"sector": "消费", "name": "贵州茅台"}, {}, {})
+    factor_names = {f["name"] for f in dim["factors"]}
+    assert "拥挤度风险" in factor_names
+    crowding_factor = next(f for f in dim["factors"] if f["name"] == "拥挤度风险")
+    # 拥挤度风险是 observation_only，不进入主评分
+    assert crowding_factor["display_score"] == "观察提示"
+    assert crowding_factor["awarded"] == 0
+
+
+def test_j3_breadth_proxy_level_disclosed():
+    """行业宽度因子的 detail 必须包含代理层级说明。"""
+    import pandas as pd
+    from src.processors.opportunity_engine import _relative_strength_dimension
+    history = pd.DataFrame({
+        "date": pd.date_range("2025-01-01", periods=30, freq="B"),
+        "close": [10.0 + i * 0.05 for i in range(30)],
+    })
+    metrics = {"return_5d": 0.02, "return_20d": 0.05}
+    asset_returns = pd.Series([0.001] * 30)
+    dim = _relative_strength_dimension("600519", "cn_stock", {"sector": "消费"}, metrics, asset_returns, {})
+    breadth_factor = next((f for f in dim["factors"] if f["name"] == "行业宽度"), None)
+    assert breadth_factor is not None
+    # detail 必须包含代理层级说明
+    assert "行业级" in breadth_factor["detail"] or "代理" in breadth_factor["detail"]
+
+
+# ---------------------------------------------------------------------------
+# J-2: Seasonal / calendar / event window factor tests
+# ---------------------------------------------------------------------------
+
+def _make_seasonal_history(years: int = 5, start: str = "2020-01-01") -> pd.DataFrame:
+    """Build multi-year monthly history for seasonality tests."""
+    periods = years * 252  # approx trading days
+    dates = pd.date_range(start, periods=periods, freq="B")
+    close = 10.0 + pd.Series(range(periods)) * 0.01
+    return pd.DataFrame({
+        "date": dates,
+        "open": close - 0.05,
+        "high": close + 0.1,
+        "low": close - 0.1,
+        "close": close.values,
+        "volume": [1_000_000] * periods,
+        "amount": [200_000_000.0] * periods,
+    })
+
+
+def test_j2_seasonality_discloses_sample_size_in_monthly_win_rate():
+    """月度胜率因子必须在 signal 中披露样本年数。"""
+    history = _make_seasonal_history(years=5)
+    dim = _seasonality_dimension({"sector": "科技"}, history, {})
+    monthly_factor = next((f for f in dim["factors"] if f["name"] == "月度胜率"), None)
+    assert monthly_factor is not None
+    # 样本足够时，signal 中应包含样本年数
+    if monthly_factor["display_score"] != "缺失":
+        assert "年样本" in monthly_factor["signal"] or "样本" in monthly_factor["signal"]
+
+
+def test_j2_seasonality_degrades_when_insufficient_samples():
+    """样本不足 3 年时，月度胜率因子应降级为观察提示（display_score=缺失）。"""
+    # 只有 1 年历史，同月样本必然不足 3 年
+    history = _make_seasonal_history(years=1)
+    dim = _seasonality_dimension({"sector": "科技"}, history, {})
+    monthly_factor = next((f for f in dim["factors"] if f["name"] == "月度胜率"), None)
+    assert monthly_factor is not None
+    assert monthly_factor["display_score"] == "缺失"
+    assert monthly_factor["awarded"] == 0
+
+
+def test_j2_seasonality_earnings_window_covers_all_sectors():
+    """财报窗口因子应覆盖所有行业，不只是科技。"""
+    import unittest.mock as mock
+    # 模拟当前月份为 4 月（财报密集期）
+    with mock.patch("src.processors.opportunity_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = mock.Mock(month=4)
+        history = _make_seasonal_history(years=3)
+        for sector in ["科技", "医药", "消费", "军工", "高股息"]:
+            dim = _seasonality_dimension({"sector": sector}, history, {})
+            earnings_factor = next((f for f in dim["factors"] if f["name"] == "财报窗口"), None)
+            assert earnings_factor is not None
+            # 4 月是财报密集期，所有行业都应该有非零加分
+            assert earnings_factor["awarded"] > 0, f"sector={sector} should have earnings award in month 4"
+
+
+def test_j2_seasonality_policy_event_window_is_observation_only():
+    """政策事件窗因子必须是 observation_only，不进入主评分（awarded=0，display_score=观察提示）。"""
+    import unittest.mock as mock
+    # 模拟 3 月（两会窗口）
+    with mock.patch("src.processors.opportunity_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = mock.Mock(month=3)
+        history = _make_seasonal_history(years=3)
+        dim = _seasonality_dimension({"sector": "科技"}, history, {})
+        policy_factor = next((f for f in dim["factors"] if f["name"] == "政策事件窗"), None)
+        assert policy_factor is not None
+        assert policy_factor["display_score"] == "观察提示"
+        assert policy_factor["awarded"] == 0  # 不进入主评分
+
+
+def test_j2_seasonality_holiday_window_applies_to_consumer_sector():
+    """节假日窗口因子应对消费行业在节假日月份加分。"""
+    import unittest.mock as mock
+    # 模拟 10 月（十一黄金周）
+    with mock.patch("src.processors.opportunity_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = mock.Mock(month=10)
+        history = _make_seasonal_history(years=3)
+        dim = _seasonality_dimension({"sector": "消费"}, history, {})
+        holiday_factor = next((f for f in dim["factors"] if f["name"] == "节假日窗口"), None)
+        assert holiday_factor is not None
+        assert holiday_factor["awarded"] > 0
+
+
+def test_j2_seasonality_commodity_window_applies_to_energy_sector():
+    """商品季节性窗口因子应对能源行业在冬季月份加分。"""
+    import unittest.mock as mock
+    # 模拟 11 月（冬季取暖需求）
+    with mock.patch("src.processors.opportunity_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = mock.Mock(month=11)
+        history = _make_seasonal_history(years=3)
+        dim = _seasonality_dimension({"sector": "能源"}, history, {})
+        commodity_factor = next((f for f in dim["factors"] if f["name"] == "商品季节性"), None)
+        assert commodity_factor is not None
+        assert commodity_factor["awarded"] > 0
+
+
+def test_j2_seasonality_index_rebalance_window_june():
+    """指数调整因子在 6 月应给出最高加分。"""
+    import unittest.mock as mock
+    with mock.patch("src.processors.opportunity_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = mock.Mock(month=6)
+        history = _make_seasonal_history(years=3)
+        dim = _seasonality_dimension({"sector": "宽基"}, history, {})
+        rebalance_factor = next((f for f in dim["factors"] if f["name"] == "指数调整"), None)
+        assert rebalance_factor is not None
+        assert rebalance_factor["awarded"] == 15  # 最高加分
+
+
+def test_j2_seasonality_dimension_structure():
+    """季节/日历维度应包含所有必要因子，且结构完整。"""
+    history = _make_seasonal_history(years=4)
+    dim = _seasonality_dimension({"sector": "科技"}, history, {})
+    assert dim["name"] == "季节/日历"
+    assert dim["score"] is not None or dim["missing"]
+    factor_names = {f["name"] for f in dim["factors"]}
+    required = {"月度胜率", "旺季前置", "财报窗口", "指数调整", "节假日窗口", "商品季节性", "政策事件窗", "分红窗口"}
+    assert required.issubset(factor_names), f"Missing factors: {required - factor_names}"
+
+
+# ---------------------------------------------------------------------------
+# J-5: ETF / 基金专属因子
+# ---------------------------------------------------------------------------
+
+def _make_etf_fund_profile(
+    *,
+    benchmark: str = "沪深300ETF",
+    sector: str = "宽基",
+    top5: float = 42.5,
+    tenure_days: float = 1500.0,
+    fee_rate: str = "0.15%（每年）",
+    tags: list | None = None,
+    consistency: str = "",
+) -> dict:
+    return {
+        "overview": {"业绩比较基准": benchmark, "管理费率": fee_rate},
+        "style": {
+            "sector": sector,
+            "tags": tags if tags is not None else ["被动跟踪"],
+            "top5_concentration": top5,
+            "benchmark_note": benchmark,
+            "consistency": consistency,
+        },
+        "manager": {"tenure_days": tenure_days},
+        "rating": {},
+    }
+
+
+def test_j5_etf_tracking_benchmark_clarity_scores_full_when_clear():
+    """被动 ETF 业绩基准清晰、无实际跟踪误差数据时，跟踪误差因子应以代理评分（6 分）。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(benchmark="中证科技50指数收益率", sector="科技")
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {"is_passive_fund": True}, fp)
+    track_factor = next((f for f in factors if f["name"] == "跟踪误差"), None)
+    assert track_factor is not None
+    assert track_factor["factor_id"] == "j5_tracking_error"
+    # 无实际 tracking_error 数据，降级为基准清晰度代理，最多 6 分
+    assert track_factor["awarded"] <= 6
+
+
+def test_j5_etf_tracking_benchmark_missing_scores_zero():
+    """ETF 业绩基准未披露时，跟踪误差因子应得 0 分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(benchmark="")
+    fp["style"]["benchmark_note"] = ""
+    fp["overview"]["业绩比较基准"] = ""
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {}, fp)
+    track_factor = next((f for f in factors if f["name"] == "跟踪误差"), None)
+    assert track_factor is not None
+    assert track_factor["awarded"] == 0
+
+
+def test_j5_component_concentration_moderate_scores_ten():
+    """前五大重仓占比 30%-69% 时，成分集中度应得 10 分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(top5=45.0)
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {}, fp)
+    conc_factor = next((f for f in factors if f["name"] == "成分集中度"), None)
+    assert conc_factor is not None
+    assert conc_factor["awarded"] == 10
+
+
+def test_j5_component_concentration_high_scores_five():
+    """前五大重仓超 70% 时，成分集中度应得 5 分（高度集中风险）。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(top5=75.0)
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {}, fp)
+    conc_factor = next((f for f in factors if f["name"] == "成分集中度"), None)
+    assert conc_factor is not None
+    assert conc_factor["awarded"] == 5
+
+
+def test_j5_theme_purity_sector_clear_passive_benchmark_match():
+    """主题纯度：被动基金行业与基准匹配时应得满分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(benchmark="中证科技50指数", sector="科技", tags=["科技主题", "被动跟踪"])
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {}, fp)
+    purity_factor = next((f for f in factors if f["name"] == "主题纯度"), None)
+    assert purity_factor is not None
+    assert purity_factor["awarded"] == 10
+
+
+def test_j5_theme_purity_sector_undefined_scores_zero():
+    """主题纯度：行业为综合/未识别时应得 0 分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(sector="综合")
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {}, fp)
+    purity_factor = next((f for f in factors if f["name"] == "主题纯度"), None)
+    assert purity_factor is not None
+    assert purity_factor["awarded"] == 0
+
+
+def test_j5_manager_stability_senior_scores_ten():
+    """经理在职 5 年以上应得满分 10 分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(tenure_days=2000.0)  # ~5.5 years
+    factors, raw, available = _j5_etf_fund_factors("cn_fund", {}, fp)
+    mgr_factor = next((f for f in factors if f["name"] == "经理稳定性"), None)
+    assert mgr_factor is not None
+    assert mgr_factor["awarded"] == 10
+
+
+def test_j5_manager_stability_new_scores_low():
+    """经理在职不足 1 年应得低分（1 分）。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(tenure_days=200.0)  # < 1 year
+    factors, raw, available = _j5_etf_fund_factors("cn_fund", {}, fp)
+    mgr_factor = next((f for f in factors if f["name"] == "经理稳定性"), None)
+    assert mgr_factor is not None
+    assert mgr_factor["awarded"] == 1
+
+
+def test_j5_fee_rate_passive_low_scores_ten():
+    """管理费率 ≤ 0.5% 时费率结构应得满分 10 分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(fee_rate="0.15%（每年）")
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {}, fp)
+    fee_factor = next((f for f in factors if f["name"] == "费率结构"), None)
+    assert fee_factor is not None
+    assert fee_factor["awarded"] == 10
+
+
+def test_j5_fee_rate_active_high_scores_zero():
+    """管理费率 > 1.5% 时费率结构应得 0 分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(fee_rate="2.00%（每年）")
+    factors, raw, available = _j5_etf_fund_factors("cn_fund", {}, fp)
+    fee_factor = next((f for f in factors if f["name"] == "费率结构"), None)
+    assert fee_factor is not None
+    assert fee_factor["awarded"] == 0
+
+
+def test_j5_fund_benchmark_disclosure_clear_scores_ten():
+    """场外基金业绩基准清晰披露（>5字符）应得 10 分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(benchmark="沪深300指数收益率×60% + 中债新综合指数收益率×40%", tags=[])
+    factors, raw, available = _j5_etf_fund_factors("cn_fund", {}, fp)
+    bm_factor = next((f for f in factors if f["name"] == "业绩基准披露"), None)
+    assert bm_factor is not None
+    assert bm_factor["awarded"] == 10
+
+
+def test_j5_fund_benchmark_disclosure_missing_scores_zero():
+    """场外基金业绩基准未披露应得 0 分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(benchmark="", tags=[])
+    fp["style"]["benchmark_note"] = ""
+    factors, raw, available = _j5_etf_fund_factors("cn_fund", {}, fp)
+    bm_factor = next((f for f in factors if f["name"] == "业绩基准披露"), None)
+    assert bm_factor is not None
+    assert bm_factor["awarded"] == 0
+
+
+def test_j5_active_fund_style_drift_stable_tag_scores_ten():
+    """主动基金带 '风格稳定' 标签时，风格漂移评估应得 10 分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(tags=["消费主题", "风格稳定"])
+    factors, raw, available = _j5_etf_fund_factors("cn_fund", {}, fp)
+    drift_factor = next((f for f in factors if f["name"] == "风格漂移评估"), None)
+    assert drift_factor is not None
+    assert drift_factor["awarded"] == 10
+
+
+def test_j5_cn_stock_returns_no_j5_factors():
+    """cn_stock 资产类型不应产生任何 J-5 专属因子。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    factors, raw, available = _j5_etf_fund_factors("cn_stock", {}, None)
+    assert factors == []
+    assert raw == 0
+    assert available == 0
+
+
+def test_j5_etf_factors_all_have_proxy_disclosure():
+    """所有 J-5 ETF 因子的 detail 字段应包含数据源说明。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(benchmark="沪深300ETF指数", sector="宽基", top5=40.0, tenure_days=1500.0)
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {}, fp)
+    for f in factors:
+        # Skip observation-only / missing data items — they don't need a full data source note
+        if f["display_score"] in ("信息项", "缺失"):
+            continue
+        assert "数据源" in f["detail"] or "lag" in f["detail"] or "direct" in f["detail"], \
+            f"J-5 factor '{f['name']}' detail is missing data source disclosure: {f['detail']}"
+
+
+def test_j5_etf_share_change_positive_scores_nonzero():
+    """ETF 份额净创设为正时，ETF 份额申赎因子应得分 > 0。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(benchmark="中证500", sector="宽基")
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {"etf_share_change": 8.5}, fp)
+    sc_factor = next((f for f in factors if f["name"] == "ETF 份额申赎"), None)
+    assert sc_factor is not None
+    assert sc_factor["factor_id"] == "j5_etf_share_change"
+    assert sc_factor["awarded"] == 10
+    assert "净创设" in sc_factor["signal"]
+
+
+def test_j5_etf_share_change_negative_scores_zero():
+    """ETF 份额净赎回时，ETF 份额申赎因子应得 0 分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(benchmark="中证500", sector="宽基")
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {"etf_share_change": -5.0}, fp)
+    sc_factor = next((f for f in factors if f["name"] == "ETF 份额申赎"), None)
+    assert sc_factor is not None
+    assert sc_factor["awarded"] == 0
+    assert "赎回" in sc_factor["signal"]
+
+
+def test_j5_etf_share_change_missing_shows_info():
+    """ETF 份额申赎数据缺失时，应显示为信息项。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(benchmark="中证500", sector="宽基")
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {}, fp)
+    sc_factor = next((f for f in factors if f["name"] == "ETF 份额申赎"), None)
+    assert sc_factor is not None
+    assert sc_factor["display_score"] == "信息项"
+    assert sc_factor["factor_id"] == "j5_etf_share_change"
+
+
+def test_j5_tracking_error_actual_data_scores_correctly():
+    """实际年化跟踪误差数据可用时，应基于数值评分（< 0.3% 得满分）。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(benchmark="沪深300", sector="宽基")
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {"tracking_error": 0.2}, fp)
+    te_factor = next((f for f in factors if f["name"] == "跟踪误差"), None)
+    assert te_factor is not None
+    assert te_factor["factor_id"] == "j5_tracking_error"
+    assert te_factor["awarded"] == 10
+    assert "0.20%" in te_factor["signal"]
+
+
+def test_j5_tracking_error_high_scores_low():
+    """年化跟踪误差 ≥ 1% 时应得低分。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    fp = _make_etf_fund_profile(benchmark="沪深300", sector="宽基")
+    factors, raw, available = _j5_etf_fund_factors("cn_etf", {"tracking_error": 1.5}, fp)
+    te_factor = next((f for f in factors if f["name"] == "跟踪误差"), None)
+    assert te_factor is not None
+    assert te_factor["awarded"] == 2
+
+
+def test_j5_cn_stock_has_no_share_change_factor():
+    """cn_stock 不应产生 ETF 份额申赎或跟踪误差因子。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    factors, raw, available = _j5_etf_fund_factors("cn_stock", {"etf_share_change": 5.0, "tracking_error": 0.1}, None)
+    names = [f["name"] for f in factors]
+    assert "ETF 份额申赎" not in names
+    assert "跟踪误差" not in names
+    assert raw == 0
+
+
+def test_j5_factor_ids_all_registered():
+    """_j5_etf_fund_factors 输出中所有非 None 的 factor_id 都应在 FACTOR_REGISTRY 中。"""
+    from src.processors.opportunity_engine import _j5_etf_fund_factors
+    from src.processors.factor_meta import FACTOR_REGISTRY
+    fp = _make_etf_fund_profile(benchmark="中证科技", sector="科技", top5=50.0, tenure_days=2000.0)
+    metadata = {"etf_share_change": 3.0, "tracking_error": 0.4}
+    factors, _, _ = _j5_etf_fund_factors("cn_etf", metadata, fp)
+    for f in factors:
+        fid = f.get("factor_id")
+        if fid is not None:
+            assert fid in FACTOR_REGISTRY, f"factor_id '{fid}' not found in FACTOR_REGISTRY"
+
+
+# ---------------------------------------------------------------------------
+# J-4: 质量 / 盈利修正 / 估值协同 — 补充因子
+# ---------------------------------------------------------------------------
+
+def test_j4_cashflow_quality_positive_cfps_scores_full():
+    """每股经营现金流为正时，现金流质量应得满分 10 分。"""
+    monkeypatch = None  # pure unit test via monkeypatching in function
+    import pytest
+    from src.processors.opportunity_engine import _fundamental_dimension
+
+    class _FakeValuation:
+        def get_cn_stock_financial_proxy(self, symbol):  # noqa: ARG002
+            return {
+                "pe_ttm": 20.0, "roe": 15.0, "gross_margin": 35.0,
+                "revenue_yoy": 12.0, "profit_yoy": 10.0,
+                "cfps": 2.5, "debt_to_assets": 30.0, "current_ratio": 2.0,
+                "report_date": "2025-09-30",
+            }
+        def get_cn_index_snapshot(self, *a, **kw): return None  # noqa: ARG002
+        def get_cn_index_value_history(self, *a, **kw): return __import__("pandas").DataFrame()  # noqa: ARG002
+        def get_cn_index_financial_proxies(self, *a, **kw): return {}  # noqa: ARG002
+
+    import unittest.mock as mock
+    with mock.patch("src.processors.opportunity_engine.ValuationCollector", return_value=_FakeValuation()), \
+         mock.patch("src.processors.opportunity_engine.MarketDriversCollector") as md:
+        md.return_value.collect.return_value = {}
+        dim = _fundamental_dimension("600519", "cn_stock", {"name": "茅台", "sector": "消费"}, {"price_percentile_1y": 0.4}, {})
+    factor_names = {f["name"] for f in dim["factors"]}
+    assert "现金流质量" in factor_names
+    cf_factor = next(f for f in dim["factors"] if f["name"] == "现金流质量")
+    assert cf_factor["awarded"] == 10
+
+
+def test_j4_cashflow_quality_negative_cfps_scores_penalty():
+    """每股经营现金流明显为负时，现金流质量应给出拖累分。"""
+    import unittest.mock as mock
+    from src.processors.opportunity_engine import _fundamental_dimension
+
+    class _FakeV:
+        def get_cn_stock_financial_proxy(self, symbol):  # noqa: ARG002
+            return {"pe_ttm": 20.0, "cfps": -1.5, "report_date": "2025-09-30"}
+        def get_cn_index_snapshot(self, *a, **kw): return None  # noqa: ARG002
+        def get_cn_index_value_history(self, *a, **kw): return __import__("pandas").DataFrame()  # noqa: ARG002
+        def get_cn_index_financial_proxies(self, *a, **kw): return {}  # noqa: ARG002
+
+    with mock.patch("src.processors.opportunity_engine.ValuationCollector", return_value=_FakeV()), \
+         mock.patch("src.processors.opportunity_engine.MarketDriversCollector") as md:
+        md.return_value.collect.return_value = {}
+        dim = _fundamental_dimension("600519", "cn_stock", {"name": "茅台", "sector": "消费"}, {"price_percentile_1y": 0.4}, {})
+    cf_factor = next((f for f in dim["factors"] if f["name"] == "现金流质量"), None)
+    assert cf_factor is not None
+    assert cf_factor["awarded"] < 0
+
+
+def test_j4_leverage_low_debt_ratio_scores_full():
+    """资产负债率 < 40% 时，杠杆压力应得满分 10 分。"""
+    import unittest.mock as mock
+    from src.processors.opportunity_engine import _fundamental_dimension
+
+    class _FakeV:
+        def get_cn_stock_financial_proxy(self, symbol):  # noqa: ARG002
+            return {"pe_ttm": 18.0, "debt_to_assets": 25.0, "current_ratio": 3.0, "report_date": "2025-09-30"}
+        def get_cn_index_snapshot(self, *a, **kw): return None  # noqa: ARG002
+        def get_cn_index_value_history(self, *a, **kw): return __import__("pandas").DataFrame()  # noqa: ARG002
+        def get_cn_index_financial_proxies(self, *a, **kw): return {}  # noqa: ARG002
+
+    with mock.patch("src.processors.opportunity_engine.ValuationCollector", return_value=_FakeV()), \
+         mock.patch("src.processors.opportunity_engine.MarketDriversCollector") as md:
+        md.return_value.collect.return_value = {}
+        dim = _fundamental_dimension("600519", "cn_stock", {"name": "茅台", "sector": "消费"}, {"price_percentile_1y": 0.4}, {})
+    lev_factor = next((f for f in dim["factors"] if f["name"] == "杠杆压力"), None)
+    assert lev_factor is not None
+    assert lev_factor["awarded"] == 10
+
+
+def test_j4_leverage_high_debt_ratio_scores_penalty():
+    """资产负债率 ≥ 80% 时，杠杆压力应给出拖累分。"""
+    import unittest.mock as mock
+    from src.processors.opportunity_engine import _fundamental_dimension
+
+    class _FakeV:
+        def get_cn_stock_financial_proxy(self, symbol):  # noqa: ARG002
+            return {"pe_ttm": 18.0, "debt_to_assets": 85.0, "report_date": "2025-09-30"}
+        def get_cn_index_snapshot(self, *a, **kw): return None  # noqa: ARG002
+        def get_cn_index_value_history(self, *a, **kw): return __import__("pandas").DataFrame()  # noqa: ARG002
+        def get_cn_index_financial_proxies(self, *a, **kw): return {}  # noqa: ARG002
+
+    with mock.patch("src.processors.opportunity_engine.ValuationCollector", return_value=_FakeV()), \
+         mock.patch("src.processors.opportunity_engine.MarketDriversCollector") as md:
+        md.return_value.collect.return_value = {}
+        dim = _fundamental_dimension("600519", "cn_stock", {"name": "茅台", "sector": "消费"}, {"price_percentile_1y": 0.4}, {})
+    lev_factor = next((f for f in dim["factors"] if f["name"] == "杠杆压力"), None)
+    assert lev_factor is not None
+    assert lev_factor["awarded"] < 0
+
+
+def test_fundamental_dimension_penalizes_expensive_and_weak_quality_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_yf_fundamental",
+        lambda self, symbol, asset_type: {  # noqa: ARG005
+            "pe_ttm": 120.0,
+            "revenue_yoy": -6.0,
+            "roe": 3.5,
+            "gross_margin": 8.0,
+            "cfps": -1.2,
+            "debt_to_assets": 86.0,
+            "report_date": "2025-12-31",
+        },
+    )
+
+    dimension = _fundamental_dimension(
+        "BAD",
+        "us",
+        {"name": "BadCo", "sector": "科技"},
+        {"price_percentile_1y": 0.92},
+        {},
+    )
+    factors = {factor["name"]: factor for factor in dimension["factors"]}
+    valuation_factor = next(f for f in dimension["factors"] if "估值" in f["name"] or "PE" in f["signal"])
+    assert valuation_factor["awarded"] < 0
+    assert factors["盈利增速"]["awarded"] < 0
+    assert factors["ROE"]["awarded"] < 0
+    assert factors["毛利率"]["awarded"] < 0
+    assert factors["现金流质量"]["awarded"] < 0
+    assert factors["杠杆压力"]["awarded"] < 0
+    assert dimension["core_signal"]
+
+
+def test_macro_dimension_penalizes_growth_sector_under_macro_headwind():
+    dimension = _macro_dimension(
+        {"sector": "科技"},
+        {
+            "china_macro": {
+                "pmi": 48.6,
+                "pmi_new_orders": 48.1,
+                "pmi_production": 48.9,
+                "demand_state": "weakening",
+                "ppi_yoy": -2.6,
+                "price_state": "disinflation",
+                "credit_impulse": "contracting",
+                "m1_m2_spread": -7.2,
+                "social_financing_3m_avg_text": "2.01 万亿元",
+            },
+            "regime": {"current_regime": "stagflation"},
+            "monitor_rows": [
+                {"name": "布伦特原油", "return_5d": 0.07},
+                {"name": "美国10Y收益率", "return_5d": 0.05},
+                {"name": "美元指数", "return_20d": 0.03},
+                {"name": "USDCNY", "return_20d": 0.02},
+            ],
+        },
+    )
+    factors = {factor["name"]: factor for factor in dimension["factors"]}
+    assert factors["敏感度向量"]["awarded"] < 0
+    assert factors["景气方向"]["awarded"] < 0
+    assert factors["信用脉冲"]["awarded"] < 0
+    assert dimension["score"] is not None
+    assert dimension["score"] <= 15
+
+
+def test_j4_earnings_momentum_always_observation_only():
+    """盈利动量因子始终为 observation_only（display_score 为 观察提示，不进入评分）。"""
+    import unittest.mock as mock
+    from src.processors.opportunity_engine import _fundamental_dimension
+
+    class _FakeV:
+        def get_cn_stock_financial_proxy(self, symbol):  # noqa: ARG002
+            return {
+                "pe_ttm": 20.0, "profit_yoy": 15.0, "profit_dedt_yoy": 20.0, "report_date": "2025-09-30",
+            }
+        def get_cn_index_snapshot(self, *a, **kw): return None  # noqa: ARG002
+        def get_cn_index_value_history(self, *a, **kw): return __import__("pandas").DataFrame()  # noqa: ARG002
+        def get_cn_index_financial_proxies(self, *a, **kw): return {}  # noqa: ARG002
+
+    with mock.patch("src.processors.opportunity_engine.ValuationCollector", return_value=_FakeV()), \
+         mock.patch("src.processors.opportunity_engine.MarketDriversCollector") as md:
+        md.return_value.collect.return_value = {}
+        dim = _fundamental_dimension("600519", "cn_stock", {"name": "茅台", "sector": "消费"}, {"price_percentile_1y": 0.4}, {})
+    ep_factor = next((f for f in dim["factors"] if f["name"] == "盈利动量"), None)
+    assert ep_factor is not None
+    assert ep_factor["display_score"] == "观察提示"
+    assert ep_factor["awarded"] == 0  # observation_only: 不进入评分
+    assert ep_factor["max"] == 0      # max=0 表示该因子不贡献分数
+
+
+def test_fundamental_dimension_uses_context_drivers_without_recollect(monkeypatch):
+    class _FakeV:
+        def get_cn_stock_financial_proxy(self, symbol):  # noqa: ARG002
+            return {"pe_ttm": 18.0, "profit_yoy": 12.0, "roe": 18.0, "report_date": "2025-09-30"}
+
+        def get_cn_index_snapshot(self, *a, **kw):  # noqa: ARG002
+            return None
+
+        def get_cn_index_value_history(self, *a, **kw):  # noqa: ARG002
+            return pd.DataFrame()
+
+        def get_cn_index_financial_proxies(self, *a, **kw):  # noqa: ARG002
+            return {}
+
+    monkeypatch.setattr("src.processors.opportunity_engine.ValuationCollector", lambda config: _FakeV())  # noqa: ARG005
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.MarketDriversCollector.collect",
+        lambda self: (_ for _ in ()).throw(AssertionError("should reuse context drivers")),
+    )
+
+    dimension = _fundamental_dimension(
+        "600519",
+        "cn_stock",
+        {"name": "贵州茅台", "sector": "消费"},
+        {"price_percentile_1y": 0.4},
+        {},
+        context={"drivers": {}, "runtime_caches": {}},
+    )
+
+    assert dimension["score"] is not None
+
+
+def test_chips_dimension_reuses_index_proxy_cache_within_context(monkeypatch):
+    snapshot_calls = []
+    proxy_calls = []
+
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_index_snapshot",
+        lambda self, keywords: snapshot_calls.append(tuple(keywords)) or {  # noqa: ARG005
+            "index_code": "931160",
+            "index_name": "中证光模块主题指数",
+        },
+    )
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_index_financial_proxies",
+        lambda self, index_code, top_n=5: proxy_calls.append((index_code, top_n)) or {  # noqa: ARG005
+            "top_concentration": 42.0,
+            "coverage_weight": 39.5,
+        },
+    )
+
+    context = {"drivers": {}, "fund_profile": None, "runtime_caches": {}}
+    metadata = {"name": "中际旭创", "sector": "科技", "chain_nodes": ["光模块"]}
+
+    _chips_dimension("300308", "cn_stock", metadata, context, {})
+    _chips_dimension("300308", "cn_stock", metadata, context, {})
+
+    assert len(snapshot_calls) == 1
+    assert len(proxy_calls) == 1
+
+
+def test_j4_cn_etf_does_not_include_j4_factors():
+    """ETF 资产类型不应产生 J-4 现金流/杠杆/盈利动量因子（只有股票才有）。"""
+    import unittest.mock as mock
+    from src.processors.opportunity_engine import _fundamental_dimension
+
+    class _FakeV:
+        def get_cn_index_snapshot(self, *a, **kw): return None  # noqa: ARG002
+        def get_cn_index_value_history(self, *a, **kw): return __import__("pandas").DataFrame()  # noqa: ARG002
+        def get_cn_index_financial_proxies(self, *a, **kw): return {}  # noqa: ARG002
+        def get_weighted_stock_financial_proxies(self, *a, **kw): return {}  # noqa: ARG002
+
+    with mock.patch("src.processors.opportunity_engine.ValuationCollector", return_value=_FakeV()), \
+         mock.patch("src.processors.opportunity_engine.MarketDriversCollector") as md, \
+         mock.patch("src.processors.opportunity_engine.ChinaMarketCollector") as cm:
+        md.return_value.collect.return_value = {}
+        cm.return_value.get_etf_fund_flow.return_value = __import__("pandas").DataFrame()
+        dim = _fundamental_dimension(
+            "510300", "cn_etf",
+            {"name": "沪深300ETF", "sector": "宽基", "is_passive_fund": True},
+            {"price_percentile_1y": 0.4}, {},
+            fund_profile={
+                "overview": {"业绩比较基准": "沪深300指数收益率", "管理费率": "0.15%（每年）"},
+                "style": {"sector": "宽基", "tags": ["被动跟踪"], "top5_concentration": 20.0, "benchmark_note": "沪深300指数收益率"},
+                "manager": {}, "rating": {}, "top_holdings": [],
+            },
+        )
+    factor_names = {f["name"] for f in dim["factors"]}
+    assert "现金流质量" not in factor_names
+    assert "杠杆压力" not in factor_names
+    assert "盈利动量" not in factor_names
+
+
+def test_j4_lag_disclosure_in_cashflow_and_leverage_details():
+    """现金流质量和杠杆压力 detail 字段应包含 lag 披露（T+45 天）。"""
+    import unittest.mock as mock
+    from src.processors.opportunity_engine import _fundamental_dimension
+
+    class _FakeV:
+        def get_cn_stock_financial_proxy(self, symbol):  # noqa: ARG002
+            return {
+                "pe_ttm": 20.0, "cfps": 1.2, "debt_to_assets": 40.0,
+                "report_date": "2025-09-30",
+            }
+        def get_cn_index_snapshot(self, *a, **kw): return None  # noqa: ARG002
+        def get_cn_index_value_history(self, *a, **kw): return __import__("pandas").DataFrame()  # noqa: ARG002
+        def get_cn_index_financial_proxies(self, *a, **kw): return {}  # noqa: ARG002
+
+    with mock.patch("src.processors.opportunity_engine.ValuationCollector", return_value=_FakeV()), \
+         mock.patch("src.processors.opportunity_engine.MarketDriversCollector") as md:
+        md.return_value.collect.return_value = {}
+        dim = _fundamental_dimension("600519", "cn_stock", {"name": "茅台", "sector": "消费"}, {"price_percentile_1y": 0.4}, {})
+    cf_factor = next((f for f in dim["factors"] if f["name"] == "现金流质量"), None)
+    lev_factor = next((f for f in dim["factors"] if f["name"] == "杠杆压力"), None)
+    assert cf_factor is not None and "lag" in cf_factor["detail"]
+    assert lev_factor is not None and "lag" in lev_factor["detail"]

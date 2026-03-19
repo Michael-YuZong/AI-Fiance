@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Dict, Tuple
 
-from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
+from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle, exported_bundle_lines
 from src.commands.release_check import check_generic_client_report
 from src.output import AnalysisChartRenderer, ClientReportRenderer, OpportunityReportRenderer
 from src.processors.opportunity_engine import _attach_signal_confidence, analyze_opportunity, build_market_context
@@ -61,7 +61,7 @@ def main() -> None:
     detail_path = _detail_output_path(args.symbol, str(analysis.get("generated_at", "")))
     detail_path.parent.mkdir(parents=True, exist_ok=True)
     detail_path.write_text(report, encoding="utf-8")
-    client_markdown = ClientReportRenderer().render_stock_analysis(analysis)
+    client_markdown = ClientReportRenderer().render_stock_analysis_detailed(analysis)
     findings = check_generic_client_report(client_markdown, "stock_analysis", source_text=report)
     try:
         bundle = export_reviewed_markdown_bundle(
@@ -78,8 +78,8 @@ def main() -> None:
     except ReportGuardError as exc:
         raise SystemExit(str(exc))
     print(client_markdown)
-    print(f"\n[client markdown] {bundle['markdown']}")
-    print(f"[client pdf] {bundle['pdf']}")
+    for index, line in enumerate(exported_bundle_lines(bundle)):
+        print(f"\n{line}" if index == 0 else line)
 
 
 if __name__ == "__main__":

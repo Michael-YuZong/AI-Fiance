@@ -37,6 +37,10 @@
    缺数据时不要装成高确定性结论。
 5. 更新文档
    如果合同、成熟度或 backlog 变了，要同步这份文件和相关专题文档。
+6. 做共享层整理
+   如果出现重复的解析、合同映射、审计逻辑，优先抽共享 helper，不要让外审 / guard / renderer 各长一套。
+7. 默认走快路径
+   新功能先按 [docs/process/feature_fast_loop.md](./docs/process/feature_fast_loop.md) 做 `patch-level -> family-level -> stage-level` 分层推进，不要每个小 patch 都重跑 today final 和外审。
 
 ## Progressive Disclosure Rules
 
@@ -47,6 +51,12 @@
   - 一个短入口文档
   - 一个专题文档
   - 相关代码和测试
+- 功能开发默认先停在 patch-level：
+  - 真实复现
+  - 窄修复
+  - narrow tests
+  - 真实 spot check
+  只有达到 family-level，才重跑 today final / release_check / report_guard / 外审。
 
 ## Maturity Snapshot
 
@@ -84,18 +94,55 @@
 
 ## Current Priority Backlog
 
-1. 强因子工程
-   先按因子家族收口：价量、季节/日历、breadth/chips、质量/盈利修正，再到 ETF / 基金专属因子。
-2. `strategy` fixtures and governance
+1. `strategy` fixtures and governance
    现在已经有 `predict / list / replay / validate / attribute / experiment`，下一步是 lag / visibility / overlap / benchmark fixture，以及 champion-challenger promotion / rollback gate。
-3. `policy` v2
+2. `policy` v2
    继续提升扫描版、表格重 PDF/OFD 的抽取和 taxonomy。
-4. Proxy signals
+3. Proxy signals
    把代理置信度和降级影响完整传到 pick 输出和 release / review guard。
-5. `scheduler` v2
+4. `scheduler` v2
    做持久化 run history、失败可见性和运维状态。
-6. 校准与学习
+5. 校准与学习
    深化 setup bucket、归因、长期月度学习闭环。
+6. 外审能力扩展
+   `review_audit` 已启动，当前只审 `structured-round` 外审协议；旧式 review 文档由 `review_ledger` 收录但不当成 active blocker。下一步再扩 evidence / point-in-time / regression / attribution 审计。
+7. 强因子进入维护
+   - 阶段 J 按 `v1 已收口` 管理，不再作为主开发主线。
+   - 剩余 `J-4 EPS 修正 point-in-time`、`J-2 政策事件窗 lag/visibility` 转入 `strategy fixtures / point-in-time coverage`。
+   - setup / breadth / 质量阈值再校准转入“校准与学习”，不再单独挂在强因子开发下。
+
+## Recent Changes
+
+- 2026-03-18
+  ETF / fund discover 链已开始做性能收口：`build_market_context` 改成并行预热独立段，`discover_opportunities / discover_fund_opportunities / etf_pick watchlist fallback` 改成有界并发分析；基金画像里的 `fund_basic / fund_company / manager_directory / rating_all` 也补了进程级共享缓存。当前 7 只 ETF 小样本实测从 `context 19-20s + analysis 43s` 压到 `context 20s + analysis 19s`，瓶颈已从串行扫描转到少数单票新闻/主题抓取。
+- 2026-03-16
+  `client_export` 的 HTML 导出现在会把本地图片嵌入成 `data:` URI，单文件 HTML 直接发给别人也能看到图，不再依赖本地绝对路径。
+- 2026-03-16
+  `scan / stock_analysis` 的客户 final 已改成“内部详细分析结构 + 客户友好章节名”，不再默认走摘要式客户稿；`client_export` 也补上了 Markdown 图片渲染，图表不会再在 PDF 里退化成普通链接。
+- 2026-03-16
+  `client_export` 的全局 HTML/PDF 主题已升级：标题、表格、引用、列表、强调语句统一用新的 report theme 渲染；支持 `**加粗**`、`*斜体*`、`==高亮==`、代码 chip。当前按 HTML-first 处理，不再做按页自适应缩图，图片统一按稳定宽度渲染，避免同一份报告里出现一大一小。
+- 2026-03-16
+  `stock_pick / fund_pick / etf_pick / briefing` 的 `2026-03-16` final、external review、manifest 已全部重刷；manifest 现在都带 `factor_contract`，`review_audit` 对 `structured-round` 结果为 `0 active findings`。
+- 2026-03-16
+  `briefing` 的 A 股观察池不再自己维护一套平行分析循环，改为复用成熟的个股发现链，输出里继续保留 `全市场初筛 -> shortlist -> 完整分析` 的披露口径。
+- 2026-03-16
+  阶段 J（强因子工程）按 `v1 已收口` 切出主开发主线；`review_audit` 当前对 `structured-round` 审计为 `0 active findings`，剩余 point-in-time / lag / calibration 问题已迁到其他 backlog。
+- 2026-03-16
+  `scan / stock_pick / etf_pick / fund_pick` 的客户口径现在会按 `generated_at` 和持有周期区分“今天剩余交易时段 / 下一个交易日 / 今天申赎决策 / 下一个开放日”，共享合同在 `src/processors/trade_handoff.py`。
+- 2026-03-16
+  `history_fallback` 命中时，图表层现在直接不出图；不再渲染“降级快照卡”或任何占位历史技术图，避免把快照占位样本误读成真实 K 线走势。
+- 2026-03-16
+  单标的分析和客户稿的 `证据时点与来源 / 分析元数据` 现在会显式写出 `行情来源`，并区分 `Tushare / AKShare / Yahoo / 本地实时快照占位 / 代理 ETF` 等历史链路，不再只写泛化的数据源说明。
+- 2026-03-17
+  强因子链路不再偏“只会加分不会扣分”。`催化 / 相对强弱 / 筹码结构 / 季节日历` 已补成更均衡的双向因子：支持和拖累都能进评分、正文和强因子拆解；当前策略是“证据够硬才扣分”，避免把轻微信号硬写成大逆风。
+- 2026-03-17
+  `fundamental / macro` 也已开始双向化：高估值、弱增长、低 ROE、低毛利、现金流转负、高杠杆、敏感度完全逆风、景气/信用收缩都会形成轻中度拖累；但像科技在通缩链条里未必天然吃亏，这类因子继续按板块映射理性判定，不做机械扣分。
+- 2026-03-17
+  `fundamental / macro` 的核心因子现在也补齐了 `factor_id / factor_meta`：`关键强因子拆解`、factor contract summary 和后续下游不再只看技术/筹码，估值、质量、信用/景气逆风也能按同一合同被识别出来。
+- 2026-03-17
+  K线形态不再只覆盖少数基础组合。`technical.py` 现已补入 `三内升/三内降`、`看涨/看跌母子线`、`平顶/平底镊子线`、`上吊线` 等形态，并已接入技术评分、动作建议和正文叙事；A 股/ETF 的日线抓取也新增了 Tushare 主链重试，`analyze_opportunity` 首轮失败时会先再直连一次中国市场主链，尽量避免误退到快照占位历史。
+- 2026-03-15
+  基金画像链已把 Tushare `fund_manager / fund_company / fund_div / fund_portfolio` 接进 `fund_profile`，当前是 Tushare 优先、AKShare 补充 richer 字段。
 
 ## Strategy Status
 
@@ -137,6 +184,9 @@
 - 通用收敛循环：`docs/prompts/external_review_convergence_loop.md`
 - `strategy` 计划专项：`docs/prompts/external_strategy_plan_reviewer.md`
 - 强因子计划专项：`docs/prompts/external_factor_plan_reviewer.md`
+- 可迁移 kit：`docs/review_kit/README.md`
+- ledger/index：`python -m src.commands.review_ledger`
+- governance audit：`python -m src.commands.review_audit`
 
 ## What To Run
 
@@ -156,6 +206,14 @@ python -m src.commands.strategy experiment 600519 --start 2024-01-01 --end 2024-
 
 1. 先跑相关 narrow tests
 2. 再跑 `pytest -q`
+
+默认开发节奏：
+
+1. patch-level：真实复现 + narrow tests + 真实 spot check
+2. family-level：today final + `release_check` + `report_guard` + 外审
+3. stage-level：lesson / audit / backlog / 文档固化
+
+详细快路径见 [docs/process/feature_fast_loop.md](./docs/process/feature_fast_loop.md)。
 
 如果只是改 `strategy`，先跑：
 

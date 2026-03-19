@@ -1,4 +1,4 @@
-"""Open-end fund profile collector — Tushare-first for basic/NAV, AKShare for details."""
+"""Open-end fund profile collector — Tushare-first for core fund facts, AKShare fallback for richer detail."""
 
 from __future__ import annotations
 
@@ -32,6 +32,8 @@ FUND_THEME_RULES = [
     (("沪深300", "中证a500", "中证500", "上证50"), ("宽基", ["宽基", "大盘蓝筹", "内需"])),
 ]
 
+_PROCESS_SHARED_FRAME_CACHE: Dict[str, pd.DataFrame] = {}
+
 
 def _theme_detection_text(text: str) -> str:
     cleaned = str(text or "")
@@ -48,7 +50,22 @@ def _theme_detection_text(text: str) -> str:
 
 
 class FundProfileCollector(BaseCollector):
-    """场外基金画像数据采集。Tushare fund_basic/fund_nav 优先。"""
+    """场外基金画像数据采集。
+
+    Primary Tushare feeds:
+    - fund_basic
+    - fund_nav
+    - fund_portfolio
+    - fund_manager
+    - fund_company
+    - fund_div
+
+    AKShare remains the richer fallback for:
+    - fund overview text fields
+    - holdings names / industry allocation
+    - manager AUM / peer-fund enrichment
+    - rating tables
+    """
 
     def _ak_function(self, name: str):
         if ak is None:
@@ -58,6 +75,17 @@ class FundProfileCollector(BaseCollector):
             raise RuntimeError(f"AKShare function not available: {name}")
         return func
 
+    def _shared_frame_cache(self, key: str) -> pd.DataFrame | None:
+        frame = _PROCESS_SHARED_FRAME_CACHE.get(str(key))
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            return frame
+        return None
+
+    def _remember_shared_frame(self, key: str, frame: pd.DataFrame) -> pd.DataFrame:
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            _PROCESS_SHARED_FRAME_CACHE[str(key)] = frame
+        return frame
+
     # ── Tushare: 基金基础信息 ─────────────────────────────────
 
     def get_fund_basic(self, market: str = "O") -> pd.DataFrame:
@@ -65,14 +93,17 @@ class FundProfileCollector(BaseCollector):
 
         market: E=场内, O=场外/开放式, L=LOF
         """
+        process_cached = self._shared_frame_cache(f"ts_fund_basic:{market}")
+        if process_cached is not None:
+            return process_cached
         cache_key = f"fund_profile:ts_fund_basic:{market}"
         cached = self._load_cache(cache_key, ttl_hours=24)
         if cached is not None:
-            return cached
+            return self._remember_shared_frame(f"ts_fund_basic:{market}", cached)
         raw = self._ts_call("fund_basic", market=market)
         if raw is not None and not raw.empty:
             self._save_cache(cache_key, raw)
-            return raw
+            return self._remember_shared_frame(f"ts_fund_basic:{market}", raw)
         return pd.DataFrame()
 
     def get_fund_nav_ts(self, symbol: str) -> pd.DataFrame:
@@ -83,6 +114,60 @@ class FundProfileCollector(BaseCollector):
         if cached is not None:
             return cached
         raw = self._ts_call("fund_nav", ts_code=ts_code)
+        if raw is not None and not raw.empty:
+            self._save_cache(cache_key, raw)
+            return raw
+        return pd.DataFrame()
+
+    def get_fund_portfolio_ts(self, symbol: str) -> pd.DataFrame:
+        """Tushare fund_portfolio — 基金季度持仓。"""
+        ts_code = self._resolve_tushare_fund_code(symbol, preferred_markets=("O", "L", "E"))
+        cache_key = f"fund_profile:ts_fund_portfolio:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+        raw = self._ts_call("fund_portfolio", ts_code=ts_code)
+        if raw is not None and not raw.empty:
+            self._save_cache(cache_key, raw)
+            return raw
+        return pd.DataFrame()
+
+    def get_fund_manager_ts(self, symbol: str) -> pd.DataFrame:
+        """Tushare fund_manager — 基金经理任职与简历。"""
+        ts_code = self._resolve_tushare_fund_code(symbol, preferred_markets=("O", "L", "E"))
+        cache_key = f"fund_profile:ts_fund_manager:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+        raw = self._ts_call("fund_manager", ts_code=ts_code)
+        if raw is not None and not raw.empty:
+            self._save_cache(cache_key, raw)
+            return raw
+        return pd.DataFrame()
+
+    def get_fund_company_ts(self) -> pd.DataFrame:
+        """Tushare fund_company — 基金公司目录。"""
+        process_cached = self._shared_frame_cache("ts_fund_company")
+        if process_cached is not None:
+            return process_cached
+        cache_key = "fund_profile:ts_fund_company"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return self._remember_shared_frame("ts_fund_company", cached)
+        raw = self._ts_call("fund_company")
+        if raw is not None and not raw.empty:
+            self._save_cache(cache_key, raw)
+            return self._remember_shared_frame("ts_fund_company", raw)
+        return pd.DataFrame()
+
+    def get_fund_div_ts(self, symbol: str) -> pd.DataFrame:
+        """Tushare fund_div — 基金分红记录。"""
+        ts_code = self._resolve_tushare_fund_code(symbol, preferred_markets=("O", "L", "E"))
+        cache_key = f"fund_profile:ts_fund_div:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+        raw = self._ts_call("fund_div", ts_code=ts_code)
         if raw is not None and not raw.empty:
             self._save_cache(cache_key, raw)
             return raw
@@ -175,24 +260,37 @@ class FundProfileCollector(BaseCollector):
         return pd.DataFrame()
 
     def get_manager_directory(self) -> pd.DataFrame:
+        process_cached = self._shared_frame_cache("manager_directory")
+        if process_cached is not None:
+            return process_cached
+
         def fetcher() -> pd.DataFrame:
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 return self._ak_function("fund_manager_em")()
 
-        return self.cached_call(
+        return self._remember_shared_frame(
+            "manager_directory",
+            self.cached_call(
             "fund_profile:manager_directory",
             fetcher,
             ttl_hours=24,
             prefer_stale=bool(getattr(self, "_profile_prefer_stale", False)),
+            ),
         )
 
     def get_rating_table(self) -> pd.DataFrame:
+        process_cached = self._shared_frame_cache("rating_all")
+        if process_cached is not None:
+            return process_cached
         fetcher = self._ak_function("fund_rating_all")
-        return self.cached_call(
-            "fund_profile:rating_all",
-            fetcher,
-            ttl_hours=24,
-            prefer_stale=bool(getattr(self, "_profile_prefer_stale", False)),
+        return self._remember_shared_frame(
+            "rating_all",
+            self.cached_call(
+                "fund_profile:rating_all",
+                fetcher,
+                ttl_hours=24,
+                prefer_stale=bool(getattr(self, "_profile_prefer_stale", False)),
+            ),
         )
 
     def collect_profile(self, symbol: str, asset_type: str = "cn_fund") -> Dict[str, Any]:
@@ -200,10 +298,14 @@ class FundProfileCollector(BaseCollector):
         previous_prefer_stale = bool(getattr(self, "_profile_prefer_stale", False))
         self._profile_prefer_stale = asset_type == "cn_etf"
         try:
+            ts_manager_df = self._safe_frame(self.get_fund_manager_ts, symbol)
+            ts_company_df = self._safe_frame(self.get_fund_company_ts)
+            ts_div_df = self._safe_frame(self.get_fund_div_ts, symbol)
+            ts_holdings_df = self._safe_frame(self.get_fund_portfolio_ts, symbol)
             overview_df = self._safe_frame(self.get_overview, symbol)
             achievement_df = self._safe_frame(self.get_achievement, symbol)
             asset_mix_df = self._safe_frame(self.get_asset_allocation, symbol)
-            holdings_df = self._safe_frame(self.get_portfolio_hold, symbol)
+            ak_holdings_df = self._safe_frame(self.get_portfolio_hold, symbol)
             industry_df = self._safe_frame(self.get_industry_allocation, symbol)
             manager_df = self._safe_frame(self.get_manager_directory)
             rating_df = self._safe_frame(self.get_rating_table)
@@ -215,17 +317,24 @@ class FundProfileCollector(BaseCollector):
         if not overview:
             notes.append("基金概况缺失")
         achievement = self._achievement_snapshot(achievement_df)
-        top_holdings = self._top_holdings(holdings_df)
+        merged_holdings = self._merge_holdings(ts_holdings_df, ak_holdings_df)
+        top_holdings = self._top_holdings(merged_holdings)
         top_industries = self._top_industries(industry_df)
         asset_mix = self._asset_mix(asset_mix_df)
         rating = self._rating_snapshot(rating_df, symbol)
-        manager = self._manager_snapshot(manager_df, overview)
+        manager = self._manager_snapshot(ts_manager_df, manager_df, overview)
+        company = self._company_snapshot(ts_company_df, overview)
+        dividends = self._dividend_snapshot(ts_div_df)
+        if manager and not str(overview.get("基金经理人", "")).strip():
+            overview["基金经理人"] = str(manager.get("name", "")).strip()
         style = self._derive_style(overview, top_holdings, top_industries, asset_mix, manager, asset_type=asset_type)
 
         if not top_holdings:
             notes.append("基金持仓明细缺失")
         if not manager:
             notes.append("基金经理画像缺失")
+        if not company:
+            notes.append("基金公司画像缺失")
         if not rating:
             notes.append("基金评级缺失")
 
@@ -236,6 +345,8 @@ class FundProfileCollector(BaseCollector):
             "industry_allocation": top_industries,
             "asset_allocation": asset_mix,
             "manager": manager,
+            "company": company,
+            "dividends": dividends,
             "rating": rating,
             "style": style,
             "latest_quarter": str(top_holdings[0].get("季度", "")) if top_holdings else "",
@@ -412,6 +523,89 @@ class FundProfileCollector(BaseCollector):
             )
         return result
 
+    def _merge_holdings(self, ts_frame: pd.DataFrame, ak_frame: pd.DataFrame) -> pd.DataFrame:
+        ts_norm = self._normalize_tushare_holdings(ts_frame)
+        ak_norm = self._normalize_ak_holdings(ak_frame)
+        if ts_norm.empty:
+            return ak_norm
+        if ak_norm.empty:
+            return ts_norm
+
+        merged = ts_norm.merge(
+            ak_norm,
+            on="股票代码",
+            how="left",
+            suffixes=("", "_ak"),
+        )
+        for column in ("股票名称", "持股数", "季度"):
+            ak_column = f"{column}_ak"
+            if ak_column in merged.columns:
+                merged[column] = merged[column].replace("", pd.NA).fillna(merged[ak_column])
+                merged = merged.drop(columns=[ak_column])
+        if "持仓市值_ak" in merged.columns:
+            merged["持仓市值"] = pd.to_numeric(merged["持仓市值"], errors="coerce").fillna(
+                pd.to_numeric(merged["持仓市值_ak"], errors="coerce")
+            )
+            merged = merged.drop(columns=["持仓市值_ak"])
+        if "占净值比例_ak" in merged.columns:
+            merged["占净值比例"] = pd.to_numeric(merged["占净值比例"], errors="coerce").fillna(
+                pd.to_numeric(merged["占净值比例_ak"], errors="coerce")
+            )
+            merged = merged.drop(columns=["占净值比例_ak"])
+        return merged
+
+    def _normalize_tushare_holdings(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return pd.DataFrame()
+        symbol_col = "symbol" if "symbol" in frame.columns else "stk_code" if "stk_code" in frame.columns else None
+        ratio_col = "stk_mkv_ratio" if "stk_mkv_ratio" in frame.columns else "mkv_ratio" if "mkv_ratio" in frame.columns else None
+        value_col = "mkv" if "mkv" in frame.columns else "stk_mkv" if "stk_mkv" in frame.columns else None
+        amount_col = "amount" if "amount" in frame.columns else "stk_amount" if "stk_amount" in frame.columns else None
+        end_col = "end_date" if "end_date" in frame.columns else "report_date" if "report_date" in frame.columns else None
+        ann_col = "ann_date" if "ann_date" in frame.columns else None
+        if not symbol_col:
+            return pd.DataFrame()
+
+        working = frame.copy()
+        if end_col:
+            working["_end_date"] = pd.to_datetime(working[end_col], format="%Y%m%d", errors="coerce")
+            latest = working["_end_date"].max()
+            if pd.notna(latest):
+                working = working[working["_end_date"] == latest]
+        elif ann_col:
+            working["_ann_date"] = pd.to_datetime(working[ann_col], format="%Y%m%d", errors="coerce")
+            latest = working["_ann_date"].max()
+            if pd.notna(latest):
+                working = working[working["_ann_date"] == latest]
+
+        normalized = pd.DataFrame()
+        normalized["股票代码"] = working[symbol_col].fillna("").astype(str).str.split(".").str[0]
+        normalized["股票名称"] = ""
+        normalized["占净值比例"] = pd.to_numeric(working[ratio_col], errors="coerce") if ratio_col else pd.NA
+        normalized["持股数"] = pd.to_numeric(working[amount_col], errors="coerce") if amount_col else pd.NA
+        normalized["持仓市值"] = pd.to_numeric(working[value_col], errors="coerce") if value_col else pd.NA
+        if end_col:
+            normalized["季度"] = working[end_col].map(self._normalize_compact_date)
+        elif ann_col:
+            normalized["季度"] = working[ann_col].map(self._normalize_compact_date)
+        else:
+            normalized["季度"] = ""
+        normalized = normalized[normalized["股票代码"] != ""]
+        return normalized.sort_values("占净值比例", ascending=False, na_position="last").reset_index(drop=True)
+
+    def _normalize_ak_holdings(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return pd.DataFrame()
+        normalized = pd.DataFrame()
+        normalized["股票代码"] = frame.get("股票代码", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+        normalized["股票名称"] = frame.get("股票名称", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+        normalized["占净值比例"] = pd.to_numeric(frame.get("占净值比例", pd.Series(dtype=float)), errors="coerce")
+        normalized["持股数"] = pd.to_numeric(frame.get("持股数", pd.Series(dtype=float)), errors="coerce")
+        normalized["持仓市值"] = pd.to_numeric(frame.get("持仓市值", pd.Series(dtype=float)), errors="coerce")
+        normalized["季度"] = frame.get("季度", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+        normalized = normalized[normalized["股票代码"] != ""]
+        return normalized.sort_values("占净值比例", ascending=False, na_position="last").reset_index(drop=True)
+
     def _top_industries(self, frame: pd.DataFrame) -> List[Dict[str, Any]]:
         if frame.empty:
             return []
@@ -453,23 +647,145 @@ class FundProfileCollector(BaseCollector):
             )
         return result
 
-    def _manager_snapshot(self, frame: pd.DataFrame, overview: Dict[str, Any]) -> Dict[str, Any]:
+    def _manager_snapshot(self, ts_frame: pd.DataFrame, ak_frame: pd.DataFrame, overview: Dict[str, Any]) -> Dict[str, Any]:
         manager_name = str(overview.get("基金经理人", "")).strip()
-        if not manager_name or frame.empty or "姓名" not in frame.columns:
-            return {}
+        if not manager_name:
+            manager_name = self._derive_tushare_manager_names(ts_frame)
         manager_names = [name.strip() for name in re.split(r"[,，、/]+", manager_name) if name.strip()]
+        if not manager_names:
+            return {}
+
+        active_ts = self._active_tushare_manager_rows(ts_frame, manager_names)
+        matched_ak = self._matched_ak_manager_rows(ak_frame, manager_names)
+
+        primary_ts = active_ts.iloc[0].to_dict() if not active_ts.empty else {}
+        primary_ak = matched_ak.iloc[0].to_dict() if not matched_ak.empty else {}
+        begin_date = self._normalize_compact_date(primary_ts.get("begin_date"))
+        end_date = self._normalize_compact_date(primary_ts.get("end_date"))
+        ann_date = self._normalize_compact_date(primary_ts.get("ann_date"))
+
+        snapshot: Dict[str, Any] = {
+            "name": "、".join(manager_names),
+            "company": str(primary_ak.get("所属公司", "") or overview.get("基金管理人", "")).strip(),
+            "tenure_days": self._to_float(primary_ak.get("累计从业时间")),
+            "aum_billion": self._to_float(primary_ak.get("现任基金资产总规模")),
+            "best_return_pct": self._to_float(primary_ak.get("现任基金最佳回报")),
+            "current_fund_count": int(matched_ak["现任基金代码"].astype(str).nunique()) if not matched_ak.empty and "现任基金代码" in matched_ak.columns else len(manager_names),
+            "peer_funds": list(dict.fromkeys(matched_ak.get("现任基金", pd.Series(dtype=str)).astype(str).tolist())) if not matched_ak.empty else [],
+            "begin_date": begin_date,
+            "end_date": end_date,
+            "ann_date": ann_date,
+            "education": str(primary_ts.get("edu", "")).strip(),
+            "nationality": str(primary_ts.get("nationality", "")).strip(),
+            "gender": str(primary_ts.get("gender", "")).strip(),
+            "birth_year": str(primary_ts.get("birth_year", "")).strip(),
+            "resume": str(primary_ts.get("resume", "")).strip(),
+        }
+        return {key: value for key, value in snapshot.items() if value not in (None, "", [])}
+
+    def _derive_tushare_manager_names(self, frame: pd.DataFrame) -> str:
+        if frame.empty or "name" not in frame.columns:
+            return ""
+        active = self._active_tushare_manager_rows(frame, [])
+        if active.empty:
+            active = frame.copy()
+        names = list(dict.fromkeys(active.get("name", pd.Series(dtype=str)).astype(str).str.strip().tolist()))
+        names = [name for name in names if name and name.lower() != "nan"]
+        return "、".join(names[:3])
+
+    def _active_tushare_manager_rows(self, frame: pd.DataFrame, manager_names: Sequence[str]) -> pd.DataFrame:
+        if frame.empty or "name" not in frame.columns:
+            return pd.DataFrame()
+        working = frame.copy()
+        if manager_names:
+            working = working[working["name"].astype(str).isin(manager_names)]
+        if "ann_date" in working.columns:
+            working["_ann_date"] = pd.to_datetime(working["ann_date"], format="%Y%m%d", errors="coerce")
+        if "begin_date" in working.columns:
+            working["_begin_date"] = pd.to_datetime(working["begin_date"], format="%Y%m%d", errors="coerce")
+        if "end_date" in working.columns:
+            end_text = working["end_date"].fillna("").astype(str).str.strip()
+            active_mask = end_text.eq("") | end_text.str.lower().eq("nan")
+            active_rows = working[active_mask]
+            if not active_rows.empty:
+                working = active_rows
+        order_columns = [column for column in ("_ann_date", "_begin_date") if column in working.columns]
+        if order_columns:
+            working = working.sort_values(order_columns, ascending=False, na_position="last")
+        return working.reset_index(drop=True)
+
+    def _matched_ak_manager_rows(self, frame: pd.DataFrame, manager_names: Sequence[str]) -> pd.DataFrame:
+        if frame.empty or "姓名" not in frame.columns or not manager_names:
+            return pd.DataFrame()
         matched = frame[frame["姓名"].astype(str).isin(manager_names)].copy()
         if matched.empty:
+            return matched
+        if "现任基金资产总规模" in matched.columns:
+            matched["现任基金资产总规模"] = pd.to_numeric(matched["现任基金资产总规模"], errors="coerce")
+            matched = matched.sort_values("现任基金资产总规模", ascending=False, na_position="last")
+        return matched.reset_index(drop=True)
+
+    def _company_snapshot(self, frame: pd.DataFrame, overview: Dict[str, Any]) -> Dict[str, Any]:
+        company_name = str(overview.get("基金管理人", "")).strip()
+        if not company_name or frame.empty:
             return {}
-        primary = matched.iloc[0]
+        name_col = "name" if "name" in frame.columns else "company" if "company" in frame.columns else None
+        if not name_col:
+            return {}
+        matched = frame[frame[name_col].astype(str).eq(company_name)].copy()
+        if matched.empty:
+            return {}
+        row = matched.iloc[0]
+        snapshot = {
+            "name": company_name,
+            "short_name": str(row.get("short_name", "") or row.get("shortname", "")).strip(),
+            "province": str(row.get("province", "")).strip(),
+            "city": str(row.get("city", "")).strip(),
+            "website": str(row.get("website", "")).strip(),
+            "phone": str(row.get("phone", "")).strip(),
+            "office": str(row.get("office", "")).strip(),
+            "chairman": str(row.get("chairman", "")).strip(),
+            "general_manager": str(row.get("manager", "")).strip(),
+            "employees": self._to_float(row.get("employees")),
+            "registered_capital": self._to_float(row.get("reg_capital")),
+        }
+        return {key: value for key, value in snapshot.items() if value not in (None, "", [])}
+
+    def _dividend_snapshot(self, frame: pd.DataFrame) -> Dict[str, Any]:
+        if frame.empty:
+            return {}
+        working = frame.copy()
+        sort_col = None
+        for candidate in ("pay_date", "ex_date", "ann_date", "record_date"):
+            if candidate in working.columns:
+                working[f"_{candidate}"] = pd.to_datetime(working[candidate], format="%Y%m%d", errors="coerce")
+                sort_col = f"_{candidate}"
+                break
+        if sort_col:
+            working = working.sort_values(sort_col, ascending=False, na_position="last")
+
+        rows: List[Dict[str, Any]] = []
+        for _, row in working.head(3).iterrows():
+            rows.append(
+                {
+                    "ann_date": self._normalize_compact_date(row.get("ann_date")),
+                    "record_date": self._normalize_compact_date(row.get("record_date")),
+                    "ex_date": self._normalize_compact_date(row.get("ex_date")),
+                    "pay_date": self._normalize_compact_date(row.get("pay_date")),
+                    "div_cash": self._to_float(row.get("div_cash")),
+                    "base_unit": str(row.get("base_unit", "")).strip(),
+                    "ear_distr": self._to_float(row.get("ear_distr")),
+                    "progress": str(row.get("progress", "")).strip(),
+                }
+            )
+        latest = rows[0] if rows else {}
         return {
-            "name": manager_name,
-            "company": str(primary.get("所属公司", "")).strip(),
-            "tenure_days": self._to_float(primary.get("累计从业时间")),
-            "aum_billion": self._to_float(primary.get("现任基金资产总规模")),
-            "best_return_pct": self._to_float(primary.get("现任基金最佳回报")),
-            "current_fund_count": int(matched["现任基金代码"].astype(str).nunique()) if "现任基金代码" in matched.columns else len(matched),
-            "peer_funds": list(dict.fromkeys(matched.get("现任基金", pd.Series(dtype=str)).astype(str).tolist())),
+            "count": len(frame),
+            "latest_ann_date": latest.get("ann_date", ""),
+            "latest_ex_date": latest.get("ex_date", ""),
+            "latest_pay_date": latest.get("pay_date", ""),
+            "latest_div_cash": latest.get("div_cash"),
+            "rows": rows,
         }
 
     def _rating_snapshot(self, frame: pd.DataFrame, symbol: str) -> Dict[str, Any]:

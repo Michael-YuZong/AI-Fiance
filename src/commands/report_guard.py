@@ -84,6 +84,15 @@ def _validate_review_text(review_text: str) -> ReviewSummary | None:
 
     status = status_match.group(1).upper()
     approved = approved_match.group(1) == "是" and no_p1_match.group(1) == "是" and status == "PASS"
+
+    review_prelude = review_text.split("## 收敛结论", 1)[0]
+    unresolved_p0_p1 = re.search(r"^###\s*P[01][^\n]*(未关闭|未修正|仍未|仍然系统性存在)", review_prelude, re.M)
+    newly_found_p0_p1 = re.search(r"(新增|新发现)[^。\n]{0,20}P[01]", review_prelude)
+    delivery_conflict = "对外客户稿需先修正" in review_prelude or "仍有结论层模板化" in review_prelude
+    if no_p1_match.group(1) == "是" and (unresolved_p0_p1 or newly_found_p0_p1):
+        raise ReportGuardError("外部评审正文与收敛结论冲突：正文仍记录未关闭或新增的 P0/P1，但收敛结论写成 `无新的 P0/P1：是`。")
+    if approved_match.group(1) == "是" and status == "PASS" and delivery_conflict:
+        raise ReportGuardError("外部评审正文与交付结论冲突：正文仍写着需要先修正，但收敛结论已允许成稿交付。")
     return ReviewSummary(review_path=Path(), status=status, approved=approved)
 
 
@@ -174,3 +183,17 @@ def export_reviewed_markdown_bundle(
     bundle["review"] = review_summary.review_path
     bundle["manifest"] = manifest_path
     return bundle
+
+
+def exported_bundle_lines(bundle: Mapping[str, Any]) -> list[str]:
+    lines: list[str] = []
+    markdown_path = bundle.get("markdown")
+    html_path = bundle.get("html")
+    pdf_path = bundle.get("pdf")
+    if markdown_path:
+        lines.append(f"[client markdown] {markdown_path}")
+    if html_path:
+        lines.append(f"[client html] {html_path}")
+    if pdf_path:
+        lines.append(f"[client pdf] {pdf_path}")
+    return lines

@@ -33,8 +33,9 @@ from src.output.client_report import ClientReportRenderer
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
 from src.commands.release_check import check_generic_client_report
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
+from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.horizon import get_horizon_contract
-from src.processors.opportunity_engine import _client_safe_issue, analyze_opportunity, build_market_context, build_stock_pool
+from src.processors.opportunity_engine import discover_stock_opportunities
 from src.processors.regime import RegimeDetector
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.processors.trade_handoff import portfolio_whatif_handoff
@@ -357,71 +358,15 @@ def _briefing_a_share_watch_rows(config: Dict[str, Any]) -> tuple[List[List[str]
     top_n = max(int(config.get("briefing_a_share_top_n", 5) or 5), 0)
     if top_n <= 0:
         return [], ["当前已关闭 A 股全市场观察池。"], {"enabled": False, "mode": "disabled"}
-    pool_size = max(int(config.get("briefing_a_share_pool_size", 60) or 60), top_n)
-    shortlist_size = max(int(config.get("briefing_a_share_shortlist", max(top_n * 2, 8)) or max(top_n * 2, 8)), top_n)
     try:
-        pool, pool_warnings = build_stock_pool(config, market="cn", max_candidates=pool_size)
+        shortlist_n = max(int(config.get("briefing_a_share_shortlist", max(top_n * 2, 8)) or max(top_n * 2, 8)), top_n)
+        payload = discover_stock_opportunities(config, top_n=shortlist_n, market="cn")
     except Exception as exc:  # noqa: BLE001
         return [], [f"A 股全市场观察池暂不可用：{exc}"], {"enabled": True, "mode": "unavailable"}
-    if not pool:
+    analyses = list(payload.get("coverage_analyses") or [])
+    top_items = list(payload.get("top") or [])[:top_n]
+    if not analyses:
         return [], ["A 股全市场观察池暂不可用：当前未拿到可用的全市场初筛池。"], {"enabled": True, "mode": "empty_pool"}
-
-    def _seed_rank(item: Any) -> tuple[float, float, float, float]:
-        metadata = dict(item.metadata or {})
-        return (
-            float(metadata.get("bak_strength", 0.0) or 0.0),
-            float(metadata.get("bak_activity", 0.0) or 0.0),
-            float(metadata.get("bak_attack", 0.0) or 0.0),
-            float(item.turnover or 0.0),
-        )
-
-    shortlisted = sorted(pool, key=_seed_rank, reverse=True)[:shortlist_size]
-    relevant_types = list(dict.fromkeys(["cn_stock", "cn_etf", "hk", "us", "futures"]))
-    blind_spots: List[str] = list(pool_warnings)
-    try:
-        context = build_market_context(config, relevant_asset_types=relevant_types)
-    except Exception as exc:  # noqa: BLE001
-        return [], [f"A 股全市场观察池暂不可用：{_client_safe_issue('市场上下文构建失败', exc)}"], {
-            "enabled": True,
-            "mode": "context_error",
-        }
-    analyses: List[Dict[str, Any]] = []
-    for item in shortlisted:
-        try:
-            override: Dict[str, Any] = {
-                "name": item.name,
-                "sector": item.sector,
-                "chain_nodes": item.chain_nodes,
-                "region": item.region,
-                "in_watchlist": item.in_watchlist,
-            }
-            if item.metadata:
-                override.update(item.metadata)
-            analysis = analyze_opportunity(
-                item.symbol,
-                item.asset_type,
-                config,
-                context=context,
-                metadata_override=override,
-            )
-        except Exception as exc:  # noqa: BLE001
-            blind_spots.append(_client_safe_issue(f"{item.symbol} ({item.name}) 扫描失败", exc))
-            continue
-        if analysis.get("excluded"):
-            continue
-        analyses.append(analysis)
-
-    analyses.sort(
-        key=lambda a: (
-            int(dict(a.get("rating") or {}).get("rank", 0) or 0),
-            sum((dict(dimension).get("score") or 0) for dimension in dict(a.get("dimensions") or {}).values()),
-            dict(dict(a.get("dimensions") or {}).get("risk") or {}).get("score", 0) or 0,
-            dict(dict(a.get("dimensions") or {}).get("relative_strength") or {}).get("score", 0) or 0,
-        ),
-        reverse=True,
-    )
-
-    top_items = analyses[:top_n]
     rows: List[List[str]] = []
     for index, item in enumerate(top_items, start=1):
         metadata = dict(item.get("metadata") or {})
@@ -442,12 +387,16 @@ def _briefing_a_share_watch_rows(config: Dict[str, Any]) -> tuple[List[List[str]
 
     lines = [
         "A 股观察池来自 `Tushare 优先` 的全市场快照；"
-        f"初筛池 `{len(pool)}` 只，完整分析 `{len(analyses)}` 只，深分析 shortlist `{len(shortlisted)}` 只。",
+        f"初筛池 `{int(payload.get('scan_pool') or 0)}` 只，完整分析 `{int(payload.get('passed_pool') or len(analyses))}` 只，深分析 shortlist `{len(top_items)}` 只。",
         "这不是对全 A 股逐只深扫，而是全市场初筛后，只对前置筛出的少数样本做完整分析。",
     ]
-    summary = f"全市场初筛 `{len(pool)}` -> shortlist `{len(shortlisted)}` -> 过硬排除 `{len(analyses)}`。"
+    summary = (
+        f"全市场初筛 `{int(payload.get('scan_pool') or 0)}`"
+        f" -> shortlist `{len(top_items)}`"
+        f" -> 过硬排除 `{int(payload.get('passed_pool') or len(analyses))}`。"
+    )
     lines.append("覆盖说明: " + summary)
-    blind_spots = [str(item).strip() for item in blind_spots if str(item).strip()]
+    blind_spots = [str(item).strip() for item in (payload.get("blind_spots") or []) if str(item).strip()]
     if blind_spots:
         lines.append("当前盲点: " + blind_spots[0])
     if not rows:
@@ -455,10 +404,11 @@ def _briefing_a_share_watch_rows(config: Dict[str, Any]) -> tuple[List[List[str]
     meta: Dict[str, Any] = {
         "enabled": True,
         "mode": "tushare_priority_full_market_prescreen",
-        "pool_size": len(pool),
-        "shortlist_size": len(shortlisted),
-        "complete_analysis_size": len(analyses),
+        "pool_size": int(payload.get("scan_pool") or 0),
+        "shortlist_size": len(top_items),
+        "complete_analysis_size": int(payload.get("passed_pool") or len(analyses)),
         "report_top_n": len(rows),
+        "factor_contract": summarize_factor_contracts_from_analyses(analyses, sample_limit=16),
     }
     if blind_spots:
         meta["blind_spot"] = blind_spots[0]
@@ -3747,13 +3697,16 @@ def main() -> None:
                     "mode": args.mode,
                     "detail_source": str(detail_path),
                     "a_share_watch": payload.get("a_share_watch_meta", {}),
+                    "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
                 },
             )
         except ReportGuardError as exc:
             raise SystemExit(str(exc))
         print(client_markdown)
-        print(f"\n[client markdown] {bundle['markdown']}")
-        print(f"[client pdf] {bundle['pdf']}")
+        from src.commands.report_guard import exported_bundle_lines
+
+        for index, line in enumerate(exported_bundle_lines(bundle)):
+            print(f"\n{line}" if index == 0 else line)
         return
 
     findings = check_generic_client_report(rendered, "briefing")
@@ -3768,13 +3721,16 @@ def main() -> None:
                 "mode": args.mode,
                 "detail_source": str(detail_path),
                 "a_share_watch": payload.get("a_share_watch_meta", {}),
+                "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
             },
         )
     except ReportGuardError as exc:
         raise SystemExit(str(exc))
     print(rendered)
-    print(f"\n[client markdown] {bundle['markdown']}")
-    print(f"[client pdf] {bundle['pdf']}")
+    from src.commands.report_guard import exported_bundle_lines
+
+    for index, line in enumerate(exported_bundle_lines(bundle)):
+        print(f"\n{line}" if index == 0 else line)
 
 
 if __name__ == "__main__":

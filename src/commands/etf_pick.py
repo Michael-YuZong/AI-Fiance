@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
 
 from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery, summarize_pick_coverage
-from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
+from src.commands.pick_visuals import attach_visuals_to_analyses
+from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle, exported_bundle_lines
 from src.commands.release_check import check_generic_client_report
 from src.output import ClientReportRenderer, OpportunityReportRenderer
 from src.output.client_report import _fund_profile_sections
+from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.opportunity_engine import _client_safe_issue, analyze_opportunity, build_market_context, discover_opportunities
 from src.utils.fund_taxonomy import taxonomy_from_analysis, taxonomy_rows
 from src.utils.config import load_config, resolve_project_path
@@ -242,30 +245,65 @@ def _watchlist_fallback_payload(
     analyses: List[Dict[str, Any]] = []
     blind_spots = ["全市场 ETF 快照没有形成可交付候选，已回退到 ETF watchlist。"]
     passed = 0
-    for item in pool:
-        try:
-            analysis = analyze_opportunity(
-                str(item["symbol"]),
-                str(item.get("asset_type", "cn_etf")),
-                config,
-                context=context,
-                metadata_override={
-                    "name": str(item.get("name", item["symbol"])),
-                    "sector": str(item.get("sector", "综合")),
-                    "chain_nodes": list(item.get("chain_nodes") or []),
-                    "region": str(item.get("region", "CN")),
-                    "in_watchlist": True,
-                },
-            )
-        except Exception as exc:
-            blind_spots.append(_client_safe_issue(f"{item['symbol']} ({item.get('name', item['symbol'])}) 扫描失败", exc))
-            continue
-        if analysis["excluded"]:
-            continue
-        passed += 1
-        coverage_analyses.append(analysis)
-        if analysis["rating"]["rank"] > 0:
-            analyses.append(analysis)
+    analysis_workers = max(1, min(int(dict(dict(config).get("opportunity") or {}).get("analysis_workers", 4) or 4), len(pool) or 1, 6))
+    base_context = dict(context)
+    if analysis_workers > 1 and len(pool) > 1:
+        with ThreadPoolExecutor(max_workers=analysis_workers) as executor:
+            future_map = {
+                executor.submit(
+                    analyze_opportunity,
+                    str(item["symbol"]),
+                    str(item.get("asset_type", "cn_etf")),
+                    config,
+                    context={**base_context, "runtime_caches": {}},
+                    metadata_override={
+                        "name": str(item.get("name", item["symbol"])),
+                        "sector": str(item.get("sector", "综合")),
+                        "chain_nodes": list(item.get("chain_nodes") or []),
+                        "region": str(item.get("region", "CN")),
+                        "in_watchlist": True,
+                    },
+                ): item
+                for item in pool
+            }
+            for future in as_completed(future_map):
+                item = future_map[future]
+                try:
+                    analysis = future.result()
+                except Exception as exc:
+                    blind_spots.append(_client_safe_issue(f"{item['symbol']} ({item.get('name', item['symbol'])}) 扫描失败", exc))
+                    continue
+                if analysis["excluded"]:
+                    continue
+                passed += 1
+                coverage_analyses.append(analysis)
+                if analysis["rating"]["rank"] > 0:
+                    analyses.append(analysis)
+    else:
+        for item in pool:
+            try:
+                analysis = analyze_opportunity(
+                    str(item["symbol"]),
+                    str(item.get("asset_type", "cn_etf")),
+                    config,
+                    context=context,
+                    metadata_override={
+                        "name": str(item.get("name", item["symbol"])),
+                        "sector": str(item.get("sector", "综合")),
+                        "chain_nodes": list(item.get("chain_nodes") or []),
+                        "region": str(item.get("region", "CN")),
+                        "in_watchlist": True,
+                    },
+                )
+            except Exception as exc:
+                blind_spots.append(_client_safe_issue(f"{item['symbol']} ({item.get('name', item['symbol'])}) 扫描失败", exc))
+                continue
+            if analysis["excluded"]:
+                continue
+            passed += 1
+            coverage_analyses.append(analysis)
+            if analysis["rating"]["rank"] > 0:
+                analyses.append(analysis)
     analyses.sort(key=_rank_key, reverse=True)
     return {
         "generated_at": str(analyses[0].get("generated_at", "")) if analyses else "",
@@ -389,6 +427,7 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context
             "name": winner.get("name"),
             "symbol": winner.get("symbol"),
             "asset_type": winner.get("asset_type"),
+            "visuals": dict(winner.get("visuals") or {}),
             "reference_price": float(dict(winner.get("metrics") or {}).get("last_close") or 0.0),
             "trade_state": dict(winner.get("narrative") or {}).get("judgment", {}).get("state", "持有优于追高"),
             "positives": _winner_reason_lines(winner),
@@ -438,6 +477,7 @@ def main() -> None:
     analyses = list(payload.get("top") or [])
     if not analyses:
         raise SystemExit("当前 ETF 推荐池没有可用候选，请稍后重试或放宽主题过滤。")
+    attach_visuals_to_analyses(analyses[:3])
     delivery_tier = grade_pick_delivery(
         report_type="etf_pick",
         discovery_mode=str(payload.get("discovery_mode", "")),
@@ -474,6 +514,7 @@ def main() -> None:
         str(dict(client_payload.get("winner") or {}).get("symbol", "")),
         selection_context=selection_context,
     )
+    factor_contract = summarize_factor_contracts_from_analyses(list(payload.get("coverage_analyses") or analyses), sample_limit=16)
     detail_path = _detail_output_path(str(client_payload.get("generated_at", "")), theme)
     detail_path.parent.mkdir(parents=True, exist_ok=True)
     detail_path.write_text(detail_markdown, encoding="utf-8")
@@ -493,13 +534,14 @@ def main() -> None:
                 "discovery_mode": str(payload.get("discovery_mode", "")),
                 "delivery_tier": dict(delivery_tier),
                 "data_coverage": dict(payload.get("pick_coverage") or {}),
+                "factor_contract": factor_contract,
             },
         )
     except ReportGuardError as exc:
         raise SystemExit(str(exc))
     print(markdown)
-    print(f"\n[client markdown] {bundle['markdown']}")
-    print(f"[client pdf] {bundle['pdf']}")
+    for index, line in enumerate(exported_bundle_lines(bundle)):
+        print(f"\n{line}" if index == 0 else line)
 
 
 if __name__ == "__main__":

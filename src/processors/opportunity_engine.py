@@ -6,6 +6,7 @@ import io
 import math
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stderr
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,6 +29,7 @@ from src.collectors import (
     ValuationCollector,
 )
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot
+from src.processors.factor_meta import FACTOR_REGISTRY, factor_meta_payload
 from src.processors.horizon import build_analysis_horizon_profile
 from src.processors.provenance import build_analysis_provenance
 from src.processors.regime import RegimeDetector
@@ -135,6 +137,33 @@ NEGATIVE_REGULATORY_KEYS = (
     "gaming stakes",
     "gaming investment",
     "gaming investments",
+)
+
+NEGATIVE_THEME_HEADWIND_KEYS = (
+    "下修",
+    "下调",
+    "砍单",
+    "订单下滑",
+    "需求疲软",
+    "需求走弱",
+    "库存高企",
+    "库存积压",
+    "价格战",
+    "降价",
+    "亏损扩大",
+    "不及预期",
+    "失速",
+    "恶化",
+    "裁员",
+    "产能过剩",
+    "oversupply",
+    "weak demand",
+    "inventory build",
+    "price war",
+    "guidance cut",
+    "cuts forecast",
+    "misses estimates",
+    "recall",
 )
 
 NEGATIVE_EVENT_LOOKBACK_DAYS = 30
@@ -323,6 +352,18 @@ VALUATION_KEYWORD_MAP = {
     "有色": ["有色", "铜", "铝"],
 }
 
+THEME_INDEX_KEYWORD_MAP = {
+    "光模块": ["光模块", "光通信", "CPO", "通信设备", "通信"],
+    "通信设备": ["通信设备", "通信", "光通信", "光模块"],
+    "AI算力": ["AI算力", "算力", "人工智能", "服务器", "数据中心"],
+    "数据中心": ["数据中心", "服务器", "算力", "IDC"],
+    "PCB": ["PCB", "印制电路", "电子元件"],
+    "消费电子": ["消费电子"],
+    "创新药": ["创新药", "医药", "生物医药"],
+    "商业航天": ["商业航天", "卫星", "航天"],
+    "电网设备": ["电网设备", "智能电网", "特高压"],
+}
+
 BOARD_MATCH_ALIASES = {
     "宽基": ["沪深300", "中证A500", "中证500", "上证50", "宽基"],
     "电网": ["电网", "电力", "电网设备", "智能电网", "特高压", "公用事业"],
@@ -438,6 +479,13 @@ def _normalize_sector(name: str, fallback: str = "综合") -> tuple[str, List[st
     return fallback, list(DEFAULT_CHAIN_NODES)
 
 
+def _chain_nodes_are_generic(chain_nodes: Sequence[str]) -> bool:
+    cleaned = [str(item).strip() for item in chain_nodes if str(item).strip()]
+    if not cleaned:
+        return True
+    return all(item in DEFAULT_CHAIN_NODES for item in cleaned)
+
+
 def _merge_metadata(
     symbol: str,
     asset_type: str,
@@ -462,9 +510,16 @@ def _merge_metadata(
         except Exception:
             pass
     merged.setdefault("name", context.name or symbol)
-    sector, chain_nodes = _normalize_sector(str(merged.get("name", symbol)), str(merged.get("sector", "综合")))
-    merged.setdefault("sector", sector)
-    merged.setdefault("chain_nodes", chain_nodes)
+    normalized_sector, normalized_chain_nodes = _normalize_sector(
+        f"{merged.get('name', symbol)} {merged.get('sector', '')}",
+        str(merged.get("sector", "综合")),
+    )
+    merged.setdefault("sector", normalized_sector)
+    existing_chain_nodes = [str(item).strip() for item in merged.get("chain_nodes", []) if str(item).strip()]
+    if _chain_nodes_are_generic(existing_chain_nodes):
+        merged["chain_nodes"] = normalized_chain_nodes
+    else:
+        merged.setdefault("chain_nodes", normalized_chain_nodes)
     merged.setdefault("region", {"cn_etf": "CN", "cn_stock": "CN", "hk": "HK", "hk_index": "HK", "us": "US", "futures": "CN"}.get(asset_type, "CN"))
     return merged
 
@@ -785,6 +840,33 @@ def _top_positive_signals(factors: Sequence[Dict[str, str]], limit: int = 3) -> 
     return " · ".join(positives[:limit]) if positives else "当前没有明确亮点"
 
 
+def _top_material_signals(
+    factors: Sequence[Dict[str, Any]],
+    *,
+    positive_limit: int = 2,
+    negative_limit: int = 1,
+) -> str:
+    positives: List[tuple[float, str]] = []
+    negatives: List[tuple[float, str]] = []
+    for item in factors:
+        signal = str(item.get("signal", "")).strip()
+        if not signal or signal == "缺失":
+            continue
+        try:
+            awarded = float(item.get("awarded", 0) or 0)
+        except (TypeError, ValueError):
+            awarded = 0.0
+        if awarded > 0:
+            positives.append((awarded, signal))
+        elif awarded < 0:
+            negatives.append((abs(awarded), signal))
+    positives.sort(key=lambda row: row[0], reverse=True)
+    negatives.sort(key=lambda row: row[0], reverse=True)
+    parts = [signal for _, signal in negatives[: max(int(negative_limit), 0)]]
+    parts.extend(signal for _, signal in positives[: max(int(positive_limit), 0)])
+    return " · ".join(parts) if parts else _top_positive_signals(factors)
+
+
 def _normalized_title_key(title: str) -> str:
     return re.sub(r"[\s·，,。:：;；!！?？'\"“”‘’（）()\\-]+", "", str(title or "").strip().lower())
 
@@ -814,7 +896,8 @@ def _catalyst_core_signal(
         (
             str(item.get("signal", "")).strip()
             for item in factors
-            if item.get("name") == "负面事件" and str(item.get("display_score", "")).strip().startswith("-")
+            if str(item.get("display_score", "")).strip().startswith("-")
+            and item.get("name") in {"负面事件", "主题逆风"}
         ),
         "",
     )
@@ -846,7 +929,10 @@ def _factor_row(
     maximum: int,
     detail: str,
     display_score: Optional[str] = None,
+    factor_id: Optional[str] = None,
+    factor_meta_overrides: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
+    meta = factor_meta_payload(str(factor_id).strip(), overrides=factor_meta_overrides) if factor_id else {}
     return {
         "name": name,
         "signal": signal,
@@ -854,6 +940,8 @@ def _factor_row(
         "max": maximum,
         "detail": detail,
         "display_score": display_score or ("缺失" if awarded is None else f"{awarded}/{maximum}"),
+        "factor_id": factor_id,
+        "factor_meta": meta,
     }
 
 
@@ -909,6 +997,7 @@ def build_market_context(
     preferred_sources: Optional[Sequence[str]] = None,
     relevant_asset_types: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
+    market_context_cfg = dict(dict(config or {}).get("market_context") or {})
     china_macro: Dict[str, Any] = {}
     global_proxy: Dict[str, Any] = {}
     monitor_rows: List[Dict[str, Any]] = []
@@ -919,19 +1008,118 @@ def build_market_context(
     pulse: Dict[str, Any] = {}
     notes: List[str] = []
     watchlist = load_watchlist()
-    try:
-        china_macro = load_china_macro_snapshot(dict(config))
-    except Exception as exc:
-        notes.append(_client_safe_issue("中国宏观数据缺失", exc))
-    try:
-        with redirect_stderr(io.StringIO()):
-            global_proxy = load_global_proxy_snapshot()
-    except Exception as exc:
-        notes.append(_client_safe_issue("全球代理数据缺失", exc))
-    try:
-        monitor_rows = MarketMonitorCollector(config).collect()
-    except Exception as exc:
-        notes.append(_client_safe_issue("宏观监控数据缺失", exc))
+    selected_asset_types = {str(item) for item in (relevant_asset_types or []) if str(item)}
+
+    def _load_china_macro() -> tuple[Dict[str, Any], Optional[str]]:
+        try:
+            return load_china_macro_snapshot(dict(config)), None
+        except Exception as exc:
+            return {}, _client_safe_issue("中国宏观数据缺失", exc)
+
+    def _load_global_proxy() -> tuple[Dict[str, Any], Optional[str]]:
+        if market_context_cfg.get("skip_global_proxy"):
+            return {}, "全球代理数据已按运行配置关闭，本次先按国内宏观与本地行情上下文生成。"
+        try:
+            with redirect_stderr(io.StringIO()):
+                return load_global_proxy_snapshot(), None
+        except Exception as exc:
+            return {}, _client_safe_issue("全球代理数据缺失", exc)
+
+    def _load_monitor_rows() -> tuple[List[Dict[str, Any]], Optional[str]]:
+        if market_context_cfg.get("skip_market_monitor"):
+            return [], "宏观资产监控已按运行配置关闭，本次不强行刷新跨市场监控快照。"
+        try:
+            return MarketMonitorCollector(config).collect(), None
+        except Exception as exc:
+            return [], _client_safe_issue("宏观监控数据缺失", exc)
+
+    def _load_events() -> tuple[List[Dict[str, Any]], Optional[str]]:
+        try:
+            return EventsCollector(config).collect(mode="daily"), None
+        except Exception as exc:
+            return [], f"事件日历缺失: {exc}"
+
+    def _load_drivers() -> tuple[Dict[str, Any], Optional[str]]:
+        try:
+            return MarketDriversCollector(config).collect(), None
+        except Exception as exc:
+            return {}, f"板块驱动数据缺失: {exc}"
+
+    def _load_pulse() -> tuple[Dict[str, Any], Optional[str]]:
+        try:
+            return MarketPulseCollector(config).collect(), None
+        except Exception as exc:
+            return {}, f"盘面情绪数据缺失: {exc}"
+
+    def _load_watchlist_returns() -> Dict[str, pd.Series]:
+        filtered = [
+            item
+            for item in watchlist
+            if not selected_asset_types or str(item.get("asset_type", "cn_etf")) in selected_asset_types
+        ]
+        if not filtered:
+            return {}
+
+        def _fetch_watch_item(item: Mapping[str, Any]) -> tuple[str, pd.Series] | None:
+            try:
+                returns = _history_returns(fetch_asset_history(item["symbol"], item["asset_type"], dict(config)))
+            except Exception:
+                return None
+            return str(item["symbol"]), returns
+
+        results: Dict[str, pd.Series] = {}
+        with ThreadPoolExecutor(max_workers=min(4, len(filtered))) as pool:
+            for payload in pool.map(_fetch_watch_item, filtered):
+                if payload is None:
+                    continue
+                symbol, returns = payload
+                results[symbol] = returns
+        return results
+
+    def _load_benchmark_returns() -> Dict[str, pd.Series]:
+        filtered = [
+            (asset_type, symbol, bench_asset_type)
+            for asset_type, (symbol, bench_asset_type, _name) in BENCHMARKS.items()
+            if not selected_asset_types or asset_type in selected_asset_types
+        ]
+        if not filtered:
+            return {}
+
+        def _fetch_benchmark(item: tuple[str, str, str]) -> tuple[str, pd.Series] | None:
+            asset_type, symbol, bench_asset_type = item
+            history = _safe_history(symbol, bench_asset_type, config)
+            if history is None:
+                return None
+            return asset_type, history["close"].pct_change().dropna()
+
+        results: Dict[str, pd.Series] = {}
+        with ThreadPoolExecutor(max_workers=min(4, len(filtered))) as pool:
+            for payload in pool.map(_fetch_benchmark, filtered):
+                if payload is None:
+                    continue
+                asset_type, returns = payload
+                results[asset_type] = returns
+        return results
+
+    with ThreadPoolExecutor(max_workers=7) as pool:
+        china_macro_future = pool.submit(_load_china_macro)
+        global_proxy_future = pool.submit(_load_global_proxy)
+        monitor_rows_future = pool.submit(_load_monitor_rows)
+        events_future = pool.submit(_load_events)
+        drivers_future = pool.submit(_load_drivers)
+        pulse_future = pool.submit(_load_pulse)
+        watchlist_returns_future = pool.submit(_load_watchlist_returns)
+        benchmark_returns_future = pool.submit(_load_benchmark_returns)
+
+        china_macro, china_macro_note = china_macro_future.result()
+        global_proxy, global_proxy_note = global_proxy_future.result()
+        monitor_rows, monitor_rows_note = monitor_rows_future.result()
+        if china_macro_note:
+            notes.append(china_macro_note)
+        if global_proxy_note:
+            notes.append(global_proxy_note)
+        if monitor_rows_note:
+            notes.append(monitor_rows_note)
     try:
         regime_inputs = derive_regime_inputs(china_macro, global_proxy, monitor_rows)
         regime = RegimeDetector(regime_inputs).detect_regime()
@@ -947,37 +1135,19 @@ def build_market_context(
         )
     except Exception as exc:
         notes.append(_client_safe_issue("新闻源缺失", exc))
-    try:
-        events = EventsCollector(config).collect(mode="daily")
-    except Exception as exc:
-        notes.append(f"事件日历缺失: {exc}")
-    try:
-        drivers = MarketDriversCollector(config).collect()
-    except Exception as exc:
-        notes.append(f"板块驱动数据缺失: {exc}")
-    try:
-        pulse = MarketPulseCollector(config).collect()
-    except Exception as exc:
-        notes.append(f"盘面情绪数据缺失: {exc}")
+    events, events_note = events_future.result()
+    drivers, drivers_note = drivers_future.result()
+    pulse, pulse_note = pulse_future.result()
+    if events_note:
+        notes.append(events_note)
+    if drivers_note:
+        notes.append(drivers_note)
+    if pulse_note:
+        notes.append(pulse_note)
+    watchlist_returns = watchlist_returns_future.result()
+    benchmark_returns = benchmark_returns_future.result()
 
     day_theme = _today_theme(news_report, monitor_rows)
-    selected_asset_types = {str(item) for item in (relevant_asset_types or []) if str(item)}
-    watchlist_returns: Dict[str, pd.Series] = {}
-    for item in watchlist:
-        item_asset_type = str(item.get("asset_type", "cn_etf"))
-        if selected_asset_types and item_asset_type not in selected_asset_types:
-            continue
-        try:
-            watchlist_returns[item["symbol"]] = _history_returns(fetch_asset_history(item["symbol"], item["asset_type"], dict(config)))
-        except Exception:
-            continue
-    benchmark_returns: Dict[str, pd.Series] = {}
-    for asset_type, (symbol, bench_asset_type, _name) in BENCHMARKS.items():
-        if selected_asset_types and asset_type not in selected_asset_types:
-            continue
-        history = _safe_history(symbol, bench_asset_type, config)
-        if history is not None:
-            benchmark_returns[asset_type] = history["close"].pct_change().dropna()
 
     return {
         "as_of": datetime.now(),
@@ -995,6 +1165,7 @@ def build_market_context(
         "watchlist": watchlist,
         "watchlist_returns": watchlist_returns,
         "benchmark_returns": benchmark_returns,
+        "runtime_caches": {},
     }
 
 
@@ -1019,6 +1190,139 @@ def _metadata_news_keys(metadata: Mapping[str, Any]) -> List[str]:
     return expanded
 
 
+def _runtime_cache_bucket(context: Mapping[str, Any], bucket: str) -> Dict[Any, Any]:
+    if not isinstance(context, dict):
+        return {}
+    caches = context.get("runtime_caches")
+    if not isinstance(caches, dict):
+        caches = {}
+        context["runtime_caches"] = caches
+    bucket_cache = caches.get(bucket)
+    if not isinstance(bucket_cache, dict):
+        bucket_cache = {}
+        caches[bucket] = bucket_cache
+    return bucket_cache
+
+
+def _context_drivers(context: Mapping[str, Any], config: Mapping[str, Any]) -> Dict[str, Any]:
+    if "drivers" in context:
+        return dict(context.get("drivers") or {})
+    cache = _runtime_cache_bucket(context, "drivers")
+    if "value" not in cache:
+        try:
+            cache["value"] = MarketDriversCollector(config).collect()
+        except Exception:
+            cache["value"] = {}
+    return dict(cache.get("value") or {})
+
+
+def _context_stock_news(symbol: str, context: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+    cleaned = str(symbol).strip()
+    if not cleaned:
+        return []
+    cache = _runtime_cache_bucket(context, "stock_news")
+    if cleaned not in cache:
+        try:
+            cache[cleaned] = NewsCollector(dict(context.get("config", {}))).get_stock_news(cleaned)
+        except Exception:
+            cache[cleaned] = []
+    return list(cache.get(cleaned) or [])
+
+
+def _context_cn_index_snapshot(
+    keywords: Sequence[str],
+    context: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    cleaned_keywords = tuple(dict.fromkeys(str(item).strip() for item in keywords if str(item).strip()))
+    if not cleaned_keywords:
+        return {}
+    cache = _runtime_cache_bucket(context, "cn_index_snapshot")
+    if cleaned_keywords not in cache:
+        try:
+            cache[cleaned_keywords] = ValuationCollector(config).get_cn_index_snapshot(list(cleaned_keywords)) or {}
+        except Exception:
+            cache[cleaned_keywords] = {}
+    return dict(cache.get(cleaned_keywords) or {})
+
+
+def _context_cn_index_financial_proxies(
+    index_code: str,
+    *,
+    top_n: int,
+    context: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    cleaned = str(index_code).strip()
+    if not cleaned:
+        return {}
+    cache = _runtime_cache_bucket(context, "cn_index_financial_proxies")
+    key = (cleaned, int(top_n))
+    if key not in cache:
+        try:
+            cache[key] = ValuationCollector(config).get_cn_index_financial_proxies(cleaned, top_n=top_n) or {}
+        except Exception:
+            cache[key] = {}
+    return dict(cache.get(key) or {})
+
+
+def _context_cn_index_proxy_candidates(
+    keywords: Sequence[str],
+    *,
+    context: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    seen_codes: set[str] = set()
+
+    def _append(snapshot: Optional[Mapping[str, Any]]) -> None:
+        if not snapshot:
+            return
+        code = str(snapshot.get("index_code", "")).strip()
+        if not code or code in seen_codes:
+            return
+        seen_codes.add(code)
+        candidates.append(dict(snapshot))
+
+    cleaned_keywords = [str(item).strip() for item in keywords if str(item).strip()]
+    _append(_context_cn_index_snapshot(cleaned_keywords, context, config))
+    for keyword in cleaned_keywords:
+        _append(_context_cn_index_snapshot([keyword], context, config))
+    return candidates
+
+
+def _context_cn_index_concentration_proxy(
+    keywords: Sequence[str],
+    *,
+    symbol: str = "",
+    context: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    cleaned_symbol = str(symbol).strip()
+    for snapshot in _context_cn_index_proxy_candidates(keywords, context=context, config=config):
+        proxies = _context_cn_index_financial_proxies(
+            str(snapshot.get("index_code", "")),
+            top_n=5,
+            context=context,
+            config=config,
+        )
+        if not proxies:
+            continue
+        if cleaned_symbol:
+            constituents = list(proxies.get("constituents") or [])
+            if any(str(item.get("symbol", "")).strip() == cleaned_symbol for item in constituents):
+                merged = dict(proxies)
+                merged["index_snapshot"] = dict(snapshot)
+                merged["matched_current_symbol"] = True
+                return merged
+        if proxies.get("top_concentration") is not None:
+            merged = dict(proxies)
+            merged["index_snapshot"] = dict(snapshot)
+            merged["matched_current_symbol"] = False
+            return merged
+    return {}
+
+
 def _valuation_keywords(
     metadata: Mapping[str, Any],
     asset_type: str = "",
@@ -1028,6 +1332,13 @@ def _valuation_keywords(
     sector = str(metadata.get("sector", "")).strip()
     chain_nodes = [str(item).strip() for item in metadata.get("chain_nodes", []) if str(item).strip()]
     keywords: List[str] = []
+    theme_keywords: List[str] = []
+    if sector:
+        theme_keywords.extend(THEME_INDEX_KEYWORD_MAP.get(sector, []))
+    for item in chain_nodes:
+        theme_keywords.append(item)
+        theme_keywords.extend(THEME_INDEX_KEYWORD_MAP.get(item, []))
+
     if asset_type in {"cn_fund", "cn_etf"} and fund_profile:
         fund_keys = _fund_theme_keywords(metadata, fund_profile)
         benchmark_keys = _fund_benchmark_keywords(fund_profile)
@@ -1044,6 +1355,7 @@ def _valuation_keywords(
             keywords.extend(["半导体", "芯片"])
         elif sector == "科技":
             keywords.extend(["科技", "战略新兴", "信息技术", "通信"])
+        keywords.extend(theme_keywords)
         keywords.extend(fund_keys[:3])
     elif "半导体" in name or "芯片" in name or "半导体" in chain_nodes:
         keywords.extend(["半导体", "芯片"])
@@ -1055,6 +1367,7 @@ def _valuation_keywords(
         keywords.append("有色")
     elif sector in VALUATION_KEYWORD_MAP:
         keywords.extend(VALUATION_KEYWORD_MAP[sector])
+    keywords.extend(theme_keywords)
     if name and name not in keywords:
         keywords.append(name)
     deduped: List[str] = []
@@ -1100,6 +1413,7 @@ def _board_keywords(metadata: Mapping[str, Any]) -> List[str]:
     name = str(metadata.get("name", "")).strip()
     chain_nodes = [str(item).strip() for item in metadata.get("chain_nodes", []) if str(item).strip()]
     keywords = [
+        *_valuation_keywords(metadata),
         *BOARD_MATCH_ALIASES.get(sector, []),
         sector,
         name,
@@ -1127,12 +1441,16 @@ def _first_column(frame: pd.DataFrame, candidates: Sequence[str]) -> Optional[st
     return None
 
 
-def _match_driver_row(frame: pd.DataFrame, metadata: Mapping[str, Any], name_candidates: Sequence[str]) -> Optional[pd.Series]:
+def _match_driver_row_with_score(
+    frame: pd.DataFrame,
+    metadata: Mapping[str, Any],
+    name_candidates: Sequence[str],
+) -> tuple[Optional[pd.Series], int]:
     if frame is None or frame.empty:
-        return None
+        return None, 0
     name_col = _first_column(frame, name_candidates)
     if not name_col:
-        return None
+        return None, 0
     keywords = [keyword.lower() for keyword in _board_keywords(metadata)]
     best_row: Optional[pd.Series] = None
     best_score = 0
@@ -1145,7 +1463,12 @@ def _match_driver_row(frame: pd.DataFrame, metadata: Mapping[str, Any], name_can
         if score > best_score:
             best_row = row
             best_score = score
-    return best_row if best_score > 0 else None
+    return (best_row if best_score > 0 else None), best_score
+
+
+def _match_driver_row(frame: pd.DataFrame, metadata: Mapping[str, Any], name_candidates: Sequence[str]) -> Optional[pd.Series]:
+    matched, _score = _match_driver_row_with_score(frame, metadata, name_candidates)
+    return matched
 
 
 def _row_number(row: Optional[pd.Series], candidates: Sequence[str]) -> Optional[float]:
@@ -1175,6 +1498,180 @@ def _fmt_yi_number(value: Optional[float]) -> str:
     if abs(value) >= 1e4:
         return f"{value / 1e4:.2f}万"
     return f"{value:.2f}"
+
+
+def _matched_sector_spot_row(
+    metadata: Mapping[str, Any],
+    drivers: Mapping[str, Any],
+) -> tuple[Optional[pd.Series], pd.DataFrame, str]:
+    matches: list[tuple[int, pd.Series, pd.DataFrame, str]] = []
+    for level, frame in (
+        ("industry", drivers.get("industry_spot", pd.DataFrame())),
+        ("concept", drivers.get("concept_spot", pd.DataFrame())),
+    ):
+        matched, score = _match_driver_row_with_score(frame, metadata, ("板块名称", "名称", "概念名称"))
+        if matched is not None and score > 0:
+            matches.append((score, matched, frame, level))
+    if not matches:
+        return None, pd.DataFrame(), ""
+    _score, row, frame, level = sorted(matches, key=lambda item: item[0], reverse=True)[0]
+    return row, frame, level
+
+
+def _matched_sector_breadth_row(
+    metadata: Mapping[str, Any],
+    drivers: Mapping[str, Any],
+) -> tuple[Optional[pd.Series], pd.DataFrame, str]:
+    matches: list[tuple[int, int, pd.Series, pd.DataFrame, str]] = []
+    for level, frame in (
+        ("industry", drivers.get("industry_spot", pd.DataFrame())),
+        ("concept", drivers.get("concept_spot", pd.DataFrame())),
+    ):
+        matched, score = _match_driver_row_with_score(frame, metadata, ("板块名称", "名称", "概念名称"))
+        if matched is None or score <= 0:
+            continue
+        advance_col = next((c for c in frame.columns if "上涨" in c and "家数" in c), None)
+        decline_col = next((c for c in frame.columns if "下跌" in c and "家数" in c), None)
+        has_counts = int(bool(advance_col and decline_col))
+        matches.append((has_counts, score, matched, frame, level))
+    if not matches:
+        return None, pd.DataFrame(), ""
+    _has_counts, _score, row, frame, level = sorted(matches, key=lambda item: (item[0], item[1]), reverse=True)[0]
+    return row, frame, level
+
+
+def _format_fundamental_floor_metric(label: str, value: Any, suffix: str = "%") -> str:
+    try:
+        return f"{label} {float(value):.1f}{suffix}"
+    except (TypeError, ValueError):
+        return label
+
+
+def _fundamental_floor_snapshot(
+    asset_type: str,
+    metadata: Mapping[str, Any],
+    fundamental_dimension: Mapping[str, Any],
+    fund_profile: Optional[Mapping[str, Any]] = None,
+) -> tuple[str, str, Optional[str], Optional[str]]:
+    if asset_type in {"cn_etf", "cn_index", "cn_fund"}:
+        if _is_commodity_like_fund(asset_type, metadata, fund_profile):
+            return (
+                "ℹ️",
+                "当前按商品/期货 ETF 的产品结构、跟踪标的和容量做基础质量判断，不使用股票财报底线。",
+                None,
+                None,
+            )
+        return ("ℹ️", "当前以 ETF / 行业代理为主，利润同比底线暂未接入原始财报数据", None, None)
+
+    valuation_snapshot = dict(fundamental_dimension.get("valuation_snapshot") or {})
+    financial_proxy = dict(fundamental_dimension.get("financial_proxy") or {})
+    report_date = str(financial_proxy.get("report_date", "")).strip()
+    growth_val = financial_proxy.get("profit_yoy")
+    if growth_val is None:
+        growth_val = financial_proxy.get("revenue_yoy")
+    roe_val = financial_proxy.get("roe")
+    margin_val = financial_proxy.get("gross_margin")
+    cfps_val = financial_proxy.get("cfps")
+    debt_val = financial_proxy.get("debt_to_assets")
+    data_ready = any(value is not None for value in (growth_val, roe_val, margin_val, cfps_val, debt_val))
+    if not data_ready:
+        if valuation_snapshot:
+            return ("ℹ️", "当前已接入真实估值，但增长/ROE/现金流/杠杆这些底线财务项覆盖还不完整。", None, None)
+        return ("ℹ️", "当前财务快照覆盖不足，暂时无法把基本面底线做成硬排除。", None, None)
+
+    severe_issues: List[str] = []
+    soft_issues: List[str] = []
+    preview_bits: List[str] = []
+    growth_float = None
+    cfps_float = None
+    debt_float = None
+
+    try:
+        if growth_val is not None:
+            growth_float = float(growth_val)
+            preview_bits.append(_format_fundamental_floor_metric("增速", growth_float))
+            if growth_float < 0:
+                severe_issues.append(f"增长转负（{growth_float:.1f}%）")
+            elif growth_float < 3:
+                soft_issues.append(f"增长偏弱（{growth_float:.1f}%）")
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        if roe_val is not None:
+            roe_float = float(roe_val)
+            preview_bits.append(_format_fundamental_floor_metric("ROE", roe_float))
+            if roe_float < 0:
+                severe_issues.append(f"ROE 为负（{roe_float:.1f}%）")
+            elif roe_float < 5:
+                severe_issues.append(f"ROE 过低（{roe_float:.1f}%）")
+            elif roe_float < 8:
+                soft_issues.append(f"ROE 偏低（{roe_float:.1f}%）")
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        if margin_val is not None:
+            margin_float = float(margin_val)
+            preview_bits.append(_format_fundamental_floor_metric("毛利率", margin_float))
+            if margin_float < 10:
+                severe_issues.append(f"毛利率过低（{margin_float:.1f}%）")
+            elif margin_float < 15:
+                soft_issues.append(f"毛利率偏低（{margin_float:.1f}%）")
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        if cfps_val is not None:
+            cfps_float = float(cfps_val)
+            preview_bits.append(_format_fundamental_floor_metric("每股经营现金流", cfps_float, ""))
+            if cfps_float < -0.5:
+                severe_issues.append(f"经营现金流明显为负（{cfps_float:.2f}）")
+            elif cfps_float < 0:
+                soft_issues.append(f"经营现金流小幅为负（{cfps_float:.2f}）")
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        if debt_val is not None:
+            debt_float = float(debt_val)
+            preview_bits.append(_format_fundamental_floor_metric("资产负债率", debt_float))
+            if debt_float >= 85:
+                severe_issues.append(f"杠杆偏高（资产负债率 {debt_float:.1f}%）")
+            elif debt_float >= 70:
+                soft_issues.append(f"杠杆偏高（资产负债率 {debt_float:.1f}%）")
+    except (TypeError, ValueError):
+        pass
+
+    prefix = f"报告期 {report_date}；" if report_date else ""
+    preview = f"（{' / '.join(preview_bits[:3])}）" if preview_bits else ""
+    critical_combo = (
+        debt_float is not None
+        and debt_float >= 90
+        or (
+            cfps_float is not None
+            and cfps_float < -0.5
+            and growth_float is not None
+            and growth_float < 0
+        )
+    )
+    if critical_combo or len(severe_issues) >= 2:
+        issue_text = "；".join((severe_issues + soft_issues)[:3])
+        return (
+            "❌",
+            f"{prefix}最新财务快照已触发明显底线压力：{issue_text}。",
+            "基本面底线失守",
+            "⚠️ 最新财务快照已经触发基本面底线，哪怕技术或催化不差，也更适合降级处理。",
+        )
+    if severe_issues or len(soft_issues) >= 2:
+        issue_text = "；".join((severe_issues + soft_issues)[:3])
+        return (
+            "⚠️",
+            f"{prefix}最新财务快照出现一定底线压力：{issue_text}。",
+            None,
+            "⚠️ 基本面底线已经出现压力，当前更适合把它当成需要额外验证而不是无条件放行的标的。",
+        )
+    return ("✅", f"{prefix}最新财务快照未见明显底线失守项{preview}。", None, None)
 
 
 def _sector_flow_snapshot(metadata: Mapping[str, Any], drivers: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2548,14 +3045,17 @@ def _hard_checks(
         if is_st:
             exclusion_reasons.append("ST / *ST 股票，退市风险较高")
 
-    if asset_type in {"cn_etf", "cn_index", "cn_fund"}:
-        if _is_commodity_like_fund(asset_type, metadata, fund_profile):
-            fundamental_floor_detail = "当前按商品/期货 ETF 的产品结构、跟踪标的和容量做基础质量判断，不使用股票财报底线。"
-        else:
-            fundamental_floor_detail = "当前以 ETF / 行业代理为主，利润同比底线暂未接入原始财报数据"
-    else:
-        fundamental_floor_detail = "当前已接入个股真实估值/财务快照；利润同比底线暂未单独作为硬排除项"
-    checks.append({"name": "基本面底线", "status": "ℹ️", "detail": fundamental_floor_detail})
+    floor_status, fundamental_floor_detail, floor_exclusion, floor_warning = _fundamental_floor_snapshot(
+        asset_type,
+        metadata,
+        fundamental_dimension,
+        fund_profile,
+    )
+    checks.append({"name": "基本面底线", "status": floor_status, "detail": fundamental_floor_detail})
+    if floor_exclusion:
+        exclusion_reasons.append(floor_exclusion)
+    if floor_warning:
+        warnings.append(floor_warning)
     valuation_snapshot = dict(fundamental_dimension.get("valuation_snapshot") or {})
     valuation_extreme = bool(fundamental_dimension.get("valuation_extreme"))
     pe_ttm = valuation_snapshot.get("pe_ttm")
@@ -2675,6 +3175,54 @@ def _support_signals(history: pd.DataFrame, technical: Mapping[str, Any]) -> tup
     return score, detail
 
 
+def _pressure_signals(history: pd.DataFrame, technical: Mapping[str, Any]) -> tuple[int, str, float]:
+    close = history["close"].astype(float)
+    high = history["high"].astype(float)
+    price = float(close.iloc[-1])
+    ma20 = float(technical.get("ma_system", {}).get("mas", {}).get("MA20", 0.0))
+    fib = technical.get("fibonacci", {})
+    fib_levels = fib.get("levels", {})
+    swing_high = float(fib.get("swing_high", 0.0))
+    recent_high_20 = float(high.tail(20).max())
+    recent_high_60 = float(high.tail(60).max())
+
+    candidates: List[tuple[float, str, float]] = []
+
+    def _add(label: str, level: float, threshold: float) -> None:
+        if level <= 0 or level <= price:
+            return
+        gap = float(level / price - 1.0)
+        if gap <= threshold:
+            candidates.append((gap, label, float(level)))
+
+    _add("MA20", ma20, 0.03)
+    _add("斐波那契 0.786", float(fib_levels.get("0.786", 0.0)), 0.04)
+    _add("近20日高点", recent_high_20, 0.05)
+    _add("近60日高点", recent_high_60, 0.08)
+    _add("摆动前高", swing_high, 0.08)
+
+    deduped: List[tuple[float, str, float]] = []
+    seen_labels: set[str] = set()
+    for gap, label, level in sorted(candidates, key=lambda item: (item[0], item[2])):
+        if label in seen_labels:
+            continue
+        deduped.append((gap, label, level))
+        seen_labels.add(label)
+
+    if deduped:
+        nearest_pressure = float(deduped[0][2])
+        detail = " / ".join(f"{label} {level:.3f}（上方 {gap:.1%}）" for gap, label, level in deduped[:3])
+        if len(deduped) >= 2 and deduped[0][0] <= 0.03:
+            score = -10
+        elif deduped[0][0] <= 0.03:
+            score = -8
+        else:
+            score = -5
+        return score, f"上方存在近端压力：{detail}", nearest_pressure
+
+    return 4, "上方最近明确压力不近，短线仍有继续试探空间", 0.0
+
+
 def _technical_dimension(history: pd.DataFrame, technical: Mapping[str, Any]) -> Dict[str, Any]:
     factors: List[Dict[str, Any]] = []
     raw = 0
@@ -2751,7 +3299,7 @@ def _technical_dimension(history: pd.DataFrame, technical: Mapping[str, Any]) ->
         divergence_award = 0
     raw += divergence_award
     available += 10
-    factors.append(_factor_row("量价/动量背离", divergence_label, divergence_award, 10, f"背离按最近两组确认摆点识别，主要看价格与 RSI / MACD / OBV 是否同向。{divergence_detail}"))
+    factors.append(_factor_row("量价/动量背离", divergence_label, divergence_award, 10, f"背离按最近两组确认摆点识别，主要看价格与 RSI / MACD / OBV 是否同向。{divergence_detail}", factor_id="j1_divergence"))
 
     rsi = float(technical.get("rsi", {}).get("RSI", 50.0))
     if 30 <= rsi <= 50:
@@ -2771,18 +3319,30 @@ def _technical_dimension(history: pd.DataFrame, technical: Mapping[str, Any]) ->
     available += 20
     factors.append(_factor_row("支撑位", support_detail, support_award, 20, "优先看前低 / MA60 / 斐波那契 0.382-0.618"))
 
+    pressure_award, pressure_detail, _ = _pressure_signals(history, technical)
+    raw += pressure_award
+    available += 10
+    factors.append(_factor_row("压力位", pressure_detail, pressure_award, 10, "优先看 MA20、斐波那契 0.786、近20/60日高点和摆动前高；上方压制越近，反弹越容易先进入承压消化。", factor_id="j1_resistance_zone"))
+
     pattern_labels = {
         "morning_star": "早晨之星",
         "evening_star": "黄昏之星",
         "three_white_soldiers": "红三兵",
         "three_black_crows": "三只乌鸦",
+        "three_inside_up": "三内升",
+        "three_inside_down": "三内降",
         "bullish_engulfing": "看涨吞没",
         "bearish_engulfing": "看跌吞没",
+        "bullish_harami": "看涨母子线",
+        "bearish_harami": "看跌母子线",
         "piercing_line": "曙光初现",
         "dark_cloud_cover": "乌云盖顶",
+        "tweezer_bottom": "平底镊子线",
+        "tweezer_top": "平顶镊子线",
         "hammer": "锤头线",
         "inverted_hammer": "倒锤头",
         "shooting_star": "流星线",
+        "hanging_man": "上吊线",
         "bullish_marubozu": "光头光脚长阳",
         "bearish_marubozu": "光头光脚长阴",
         "marubozu": "长实体 K 线",
@@ -2791,16 +3351,23 @@ def _technical_dimension(history: pd.DataFrame, technical: Mapping[str, Any]) ->
     pattern_scores = {
         "morning_star": 10,
         "three_white_soldiers": 10,
+        "three_inside_up": 8,
         "bullish_engulfing": 8,
+        "bullish_harami": 5,
         "piercing_line": 7,
+        "tweezer_bottom": 5,
         "hammer": 6,
         "inverted_hammer": 5,
         "bullish_marubozu": 6,
         "evening_star": -10,
         "three_black_crows": -10,
+        "three_inside_down": -8,
         "bearish_engulfing": -8,
+        "bearish_harami": -5,
         "dark_cloud_cover": -7,
+        "tweezer_top": -5,
         "shooting_star": -6,
+        "hanging_man": -6,
         "bearish_marubozu": -6,
         "doji": 0,
         "marubozu": 0,
@@ -2829,6 +3396,7 @@ def _technical_dimension(history: pd.DataFrame, technical: Mapping[str, Any]) ->
             candle_award,
             10,
             "当前按最近 1-3 根 K 线识别单根、双根、三根组合形态；吞没/星形/三兵三鸦等反转形态会结合前序 5 日趋势过滤。",
+            factor_id="j1_candlestick",
         )
     )
 
@@ -2852,7 +3420,7 @@ def _technical_dimension(history: pd.DataFrame, technical: Mapping[str, Any]) ->
     raw += volume_award
     available += 15
     amount_text = f" / 成交额比20日 {amount_ratio_20:.2f}" if amount_ratio_20 is not None else ""
-    factors.append(_factor_row("量价结构", f"{structure} · 量能比5日 {vol_ratio:.2f} / 20日 {vol_ratio_20:.2f}", volume_award, 15, f"这里先看日度量价结构：放量突破更像趋势确认，缩量回调更像抛压衰减，放量滞涨/放量下跌更像分歧扩大；当日涨跌幅 {latest_return:.1%}{amount_text}"))
+    factors.append(_factor_row("量价结构", f"{structure} · 量能比5日 {vol_ratio:.2f} / 20日 {vol_ratio_20:.2f}", volume_award, 15, f"这里先看日度量价结构：放量突破更像趋势确认，缩量回调更像抛压衰减，放量滞涨/放量下跌更像分歧扩大；当日涨跌幅 {latest_return:.1%}{amount_text}", factor_id="j1_volume_structure"))
 
     ma = technical.get("ma_system", {})
     ma_values = ma.get("mas", {})
@@ -2883,7 +3451,52 @@ def _technical_dimension(history: pd.DataFrame, technical: Mapping[str, Any]) ->
         vol_award = 0
     raw += vol_award
     available += 10
-    factors.append(_factor_row("波动压缩", f"ATR/收盘 {natr:.2%} · 带宽分位 {width_pct:.0%}", vol_award, 10, "波动压缩更像筹码收敛后的启动前状态；如果 ATR 和布林带宽度同步扩张，通常意味着已经进入情绪释放阶段而不是舒服的低吸区"))
+    factors.append(_factor_row("波动压缩", f"ATR/收盘 {natr:.2%} · 带宽分位 {width_pct:.0%}", vol_award, 10, "波动压缩更像筹码收敛后的启动前状态；如果 ATR 和布林带宽度同步扩张，通常意味着已经进入情绪释放阶段而不是舒服的低吸区", factor_id="j1_volatility_compression"))
+
+    setup = technical.get("setup", {})
+    false_break = dict(setup.get("false_break") or {})
+    support_setup_block = dict(setup.get("support_setup") or {})
+    compression_setup_block = dict(setup.get("compression_setup") or {})
+    false_break_kind = str(false_break.get("kind", "none"))
+    false_break_label = str(false_break.get("label", "未识别到明确假突破形态"))
+    support_kind = str(support_setup_block.get("kind", "support_intact"))
+    support_label = str(support_setup_block.get("label", "支撑位完整"))
+    compression_kind = str(compression_setup_block.get("kind", "neutral"))
+    compression_label = str(compression_setup_block.get("label", "量价压缩状态中性"))
+
+    if false_break_kind == "bearish_false_break":
+        false_break_award = 8
+    elif false_break_kind == "bullish_false_break":
+        false_break_award = -8
+    else:
+        false_break_award = 0
+    raw += false_break_award
+    available += 8
+    factors.append(_factor_row("假突破识别", false_break_label, false_break_award, 8, "假突破是多空双方试探失败的信号：看涨假突破说明多头未能守住突破位，看跌假突破说明空头未能守住跌破位，两者都是方向反转的早期线索", factor_id="j1_false_break"))
+
+    if support_kind == "support_intact":
+        support_award = 5
+    elif support_kind in {"failed_recovery", "breakdown_continuation"}:
+        support_award = -8
+    elif support_kind == "breakdown_watching":
+        support_award = -3
+    else:
+        support_award = 0
+    raw += support_award
+    available += 8
+    factors.append(_factor_row("支撑结构", support_label, support_award, 8, "支撑失效后的分流很重要：反弹未收复支撑位是失效确认，继续下行是趋势延续，两者都偏空；支撑完整则是多头的基础条件", factor_id="j1_support_setup"))
+
+    if compression_kind == "compression_breakout":
+        compression_award = 10
+    elif compression_kind == "momentum_chase":
+        compression_award = -5
+    elif compression_kind == "still_compressing":
+        compression_award = 3
+    else:
+        compression_award = 0
+    raw += compression_award
+    available += 10
+    factors.append(_factor_row("压缩启动", compression_label, compression_award, 10, "压缩后放量启动是最干净的介入 setup：波动收敛说明筹码趋于稳定，放量突破说明有新资金介入；情绪追价区则相反，波动已扩张时追涨更像接最后一棒", factor_id="j1_compression_breakout"))
 
     score = _normalize_dimension(raw, available, 100)
     return {
@@ -2932,6 +3545,338 @@ def _apply_history_fallback_adjustments(dimensions: Mapping[str, Dict[str, Any]]
     return capped
 
 
+def _j5_etf_fund_factors(
+    asset_type: str,
+    metadata: Mapping[str, Any],
+    fund_profile: Optional[Mapping[str, Any]],
+) -> tuple[List[Dict[str, Any]], int, int]:
+    """J-5: ETF / 基金专属因子评分模块.
+
+    Covers: ETF折溢价、ETF份额申赎、跟踪误差、成分集中度、主题纯度、
+            业绩基准披露（场外基金）、风格漂移评估、经理稳定性、费率结构.
+
+    Returns (factors, raw_added, available_added).
+    All factors carry explicit proxy_level disclosure per J-5 hard constraints.
+    Factor IDs are wired to FACTOR_REGISTRY entries for downstream consumers
+    (e.g. decision_review, strategy) to filter by state/visibility_class.
+    """
+    factors: List[Dict[str, Any]] = []
+    raw = 0
+    available = 0
+    if asset_type not in {"cn_etf", "cn_fund"}:
+        return factors, raw, available
+
+    style = dict((fund_profile or {}).get("style") or {})
+    overview = dict((fund_profile or {}).get("overview") or {})
+    manager_info = dict((fund_profile or {}).get("manager") or {})
+    rating = dict((fund_profile or {}).get("rating") or {})
+
+    tags = list(style.get("tags") or [])
+    is_passive = "被动跟踪" in tags or bool(metadata.get("is_passive_fund"))
+    is_etf = asset_type == "cn_etf"
+    is_active_fund = asset_type == "cn_fund" and not is_passive
+    sector = str(style.get("sector") or metadata.get("sector") or "").strip()
+    benchmark_note = str(style.get("benchmark_note") or overview.get("业绩比较基准", "")).strip()
+
+    # J5.1: ETF 折溢价 (ETF 专属, daily_close, direct)
+    # Hard constraint: only applies to exchange-listed ETFs with intraday pricing.
+    if is_etf:
+        premium_rate = None
+        for key in ("premium_rate", "discount_rate"):
+            raw_val = metadata.get(key)
+            if raw_val is not None:
+                try:
+                    premium_rate = float(raw_val)
+                    break
+                except (ValueError, TypeError):
+                    pass
+        if premium_rate is not None:
+            abs_p = abs(premium_rate)
+            if abs_p > 3:
+                p_award = 0
+                p_signal = f"折溢价偏极端 {premium_rate:+.2f}%，需关注流动性风险"
+            elif premium_rate < -1:
+                p_award = 10
+                p_signal = f"折价 {premium_rate:.2f}%，场内价格低于 NAV，存在修复空间"
+            elif premium_rate > 1:
+                p_award = 0
+                p_signal = f"溢价 {premium_rate:.2f}%，场内价格高于 NAV，回落风险存在"
+            else:
+                p_award = 5
+                p_signal = f"折溢价 {premium_rate:+.2f}%（接近 NAV 中性区间）"
+            raw += p_award
+            available += 10
+            factors.append(_factor_row(
+                "ETF 折溢价", p_signal, p_award, 10,
+                "ETF 场内价格相对 NAV 的偏离；折价意味着场内买入比按 NAV 申购更划算，溢价时反之。数据源：实时行情（direct，无 lag）。",
+                factor_id="j5_etf_premium",
+            ))
+        else:
+            factors.append(_factor_row(
+                "ETF 折溢价", "实时折溢价数据缺失", None, 10,
+                "ETF 折溢价需实时行情对比 NAV；当前未接入。",
+                display_score="信息项",
+                factor_id="j5_etf_premium",
+            ))
+
+    # J5.1b: ETF 份额申赎 (ETF 专属, T+1, direct — j5_etf_share_change)
+    # 份额净创设 = 机构正在场外申购（偏多），净赎回 = 机构在赎回（偏空）。
+    if is_etf:
+        share_change = None
+        for key in ("etf_share_change", "share_change"):
+            raw_val = metadata.get(key)
+            if raw_val is not None:
+                try:
+                    share_change = float(raw_val)
+                    break
+                except (ValueError, TypeError):
+                    pass
+        if share_change is not None:
+            if share_change > 5:
+                sc_award = 10
+                sc_signal = f"ETF 份额净创设 +{share_change:.1f}（亿份），机构积极申购，资金净流入"
+            elif share_change > 0:
+                sc_award = 7
+                sc_signal = f"ETF 份额小幅净创设 +{share_change:.1f}（亿份），资金温和流入"
+            elif share_change >= -2:
+                sc_award = 4
+                sc_signal = f"ETF 份额基本持平 {share_change:+.1f}（亿份），申赎中性"
+            else:
+                sc_award = 0
+                sc_signal = f"ETF 份额净赎回 {share_change:.1f}（亿份），存在赎回压力"
+            raw += sc_award
+            available += 10
+            factors.append(_factor_row(
+                "ETF 份额申赎", sc_signal, sc_award, 10,
+                "ETF 份额变化反映场外申购/赎回行为；净创设代表机构资金流入（T+1 可见，direct）。数据源：基金份额日报（T+1 lag）。",
+                factor_id="j5_etf_share_change",
+            ))
+        else:
+            factors.append(_factor_row(
+                "ETF 份额申赎", "份额申赎数据缺失", None, 10,
+                "ETF 份额变化（净创设/净赎回）数据未接入，无法评估资金流向；数据源：基金份额日报（T+1 lag）。",
+                display_score="信息项",
+                factor_id="j5_etf_share_change",
+            ))
+
+    # J5.2: 跟踪误差 (ETF + 被动基金, daily_close, direct — j5_tracking_error)
+    # 优先使用实际年化跟踪误差数值；数据缺失时降级为基准清晰度代理（proxy 分扣减）。
+    # Hard constraint: only for exchange-listed ETFs and passive funds.
+    if is_etf or is_passive:
+        tracking_error = None
+        for key in ("tracking_error", "annualized_tracking_error"):
+            raw_val = metadata.get(key)
+            if raw_val is not None:
+                try:
+                    tracking_error = float(raw_val)
+                    break
+                except (ValueError, TypeError):
+                    pass
+        if tracking_error is not None:
+            if tracking_error < 0.3:
+                track_award = 10
+                track_signal = f"年化跟踪误差 {tracking_error:.2f}%（优秀，偏离极小）"
+            elif tracking_error < 0.5:
+                track_award = 8
+                track_signal = f"年化跟踪误差 {tracking_error:.2f}%（良好）"
+            elif tracking_error < 1.0:
+                track_award = 5
+                track_signal = f"年化跟踪误差 {tracking_error:.2f}%（偏高，需关注）"
+            else:
+                track_award = 2
+                track_signal = f"年化跟踪误差 {tracking_error:.2f}%（较高，跟踪质量存疑）"
+            track_detail = f"年化跟踪误差 {tracking_error:.2f}%（直接数据，daily_close，无 lag）；越低越好。"
+        else:
+            # 数据缺失，降级为基准清晰度代理
+            if benchmark_note and benchmark_note != "未披露业绩比较基准":
+                consistency_text = str(style.get("consistency") or "").lower()
+                if "跟踪" in consistency_text and ("误差" in consistency_text or "偏离" in consistency_text):
+                    track_award = 4
+                    track_signal = f"跟踪基准已披露（{benchmark_note[:35]}），但存在跟踪提示（代理）"
+                else:
+                    track_award = 6
+                    track_signal = f"跟踪基准清晰（{benchmark_note[:35]}）；实际跟踪误差数据未接入"
+                track_detail = "实际跟踪误差数据未接入，以基准清晰度代理评分（已下调，非直接数据）。数据源：基金合同（季度更新）。"
+            else:
+                track_award = 0
+                track_signal = "业绩基准未披露，无法评估跟踪误差"
+                track_detail = "业绩基准不清晰是跟踪风险的前提条件；无法评估跟踪误差。数据源：基金合同。"
+        raw += track_award
+        available += 10
+        factors.append(_factor_row(
+            "跟踪误差", track_signal, track_award, 10, track_detail,
+            factor_id="j5_tracking_error",
+        ))
+
+    # J5.3: 成分股集中度 (ETF + 基金, quarterly, direct — 季报 lag 30~45 天)
+    top5 = float(style.get("top5_concentration") or 0.0)
+    if top5 > 0:
+        if top5 >= 70:
+            conc_award = 5
+            conc_signal = f"前五大重仓合计 {top5:.1f}%（高度集中，集中度风险明显）"
+        elif top5 >= 30:
+            conc_award = 10
+            conc_signal = f"前五大重仓合计 {top5:.1f}%（集中度适中）"
+        else:
+            conc_award = 8
+            conc_signal = f"前五大重仓合计 {top5:.1f}%（高度分散）"
+        raw += conc_award
+        available += 10
+        factors.append(_factor_row(
+            "成分集中度", conc_signal, conc_award, 10,
+            "前五大重仓占净值比例代理集中度；集中度高则暴露更纯粹，但个股风险更高。数据源：最近一期季报（T+30~45 天 lag）。",
+            factor_id="j5_component_concentration",
+        ))
+    else:
+        factors.append(_factor_row(
+            "成分集中度", "持仓明细缺失", None, 10,
+            "当前未拿到前五大持仓，无法评估成分集中度；数据源：季报（T+30~45 天 lag）。",
+            factor_id="j5_component_concentration",
+        ))
+
+    # J5.4: 主题纯度 (ETF + 基金, quarterly, direct)
+    if sector and sector != "综合":
+        if is_passive:
+            bench_lower = benchmark_note.lower()
+            sector_match = sector.lower() in bench_lower
+            purity_award = 10 if sector_match else 7
+            purity_signal = f"主题 `{sector}`，基准{'与主题匹配' if sector_match else '匹配度有限'}"
+        else:
+            purity_award = 8
+            purity_signal = f"主题 `{sector}` 已从持仓识别（主动基金代理，持仓季报 T+45 天）"
+    else:
+        purity_award = 0
+        purity_signal = "主题/行业方向不清晰（综合型或无法从持仓识别）"
+    raw += purity_award
+    available += 10
+    factors.append(_factor_row(
+        "主题纯度", purity_signal, purity_award, 10,
+        "主题越纯，行业 beta 越清晰，轮动逻辑越充分。数据源：基金名称/基准/持仓（季报 lag）。",
+        factor_id="j5_theme_purity",
+    ))
+
+    # J5.5: 业绩基准披露（场外基金专属, quarterly, direct）
+    if asset_type == "cn_fund":
+        bm_raw = str(overview.get("业绩比较基准", "")).strip()
+        if bm_raw and bm_raw != "未披露业绩比较基准" and len(bm_raw) > 5:
+            bm_award = 10
+            bm_signal = f"业绩基准已披露：{bm_raw[:40]}"
+        elif bm_raw:
+            bm_award = 5
+            bm_signal = f"业绩基准简短披露：{bm_raw}"
+        else:
+            bm_award = 0
+            bm_signal = "业绩比较基准未披露"
+        raw += bm_award
+        available += 10
+        factors.append(_factor_row(
+            "业绩基准披露", bm_signal, bm_award, 10,
+            "场外基金业绩基准是判断超额来源和风格漂移的基础；基准不清晰则收益归因无从开始。数据源：基金合同/定期报告（direct）。",
+            factor_id="j5_fund_benchmark_fit",
+        ))
+
+    # J5.6: 风格漂移评估（主动基金专属, quarterly proxy）
+    if is_active_fund:
+        has_stable_tag = "风格稳定" in tags
+        consistency_raw = str(style.get("consistency") or "")
+        if has_stable_tag:
+            drift_award = 10
+            drift_signal = "风格一致性强（在管产品暴露方向一致）"
+        elif len(consistency_raw) > 20:
+            drift_award = 6
+            drift_signal = "风格一致性有一定支撑，但样本有限"
+        else:
+            drift_award = 0
+            drift_signal = "风格一致性数据不足，无法评估漂移风险"
+        raw += drift_award
+        available += 10
+        factors.append(_factor_row(
+            "风格漂移评估", drift_signal, drift_award, 10,
+            "主动基金风格漂移是核心风险：持仓和基准偏离越大，暴露越难预测。当前以经理在管产品命名/持仓方向代理，数据源：季报持仓（T+45 天 lag）。",
+            factor_id="j5_style_drift",
+        ))
+
+    # J5.7: 基金经理稳定性（all funds, event_driven, direct）
+    tenure_days_val = manager_info.get("tenure_days")
+    if tenure_days_val is not None:
+        try:
+            tenure_years = float(tenure_days_val) / 365.25
+            if tenure_years >= 5:
+                mgr_award = 10
+                mgr_signal = f"在职 {tenure_years:.1f} 年（历经至少一个完整牛熊周期）"
+            elif tenure_years >= 3:
+                mgr_award = 7
+                mgr_signal = f"在职 {tenure_years:.1f} 年（中等经验）"
+            elif tenure_years >= 1:
+                mgr_award = 4
+                mgr_signal = f"在职 {tenure_years:.1f} 年（新晋经理，历史较短）"
+            else:
+                mgr_award = 1
+                mgr_signal = f"在职 {tenure_years:.1f} 年（非常新，风格尚未验证）"
+            raw += mgr_award
+            available += 10
+            factors.append(_factor_row(
+                "经理稳定性", mgr_signal, mgr_award, 10,
+                "基金经理任职年限是衡量经验深度和团队稳定性的基础；新经理历史短，风格尚未经过牛熊验证。数据源：基金管理人档案（事件驱动更新）。",
+                factor_id="j5_manager_stability",
+            ))
+        except (ValueError, TypeError):
+            factors.append(_factor_row("经理稳定性", "任职时长数据异常", None, 10, "基金经理稳定性评估数据解析失败。",
+                                       factor_id="j5_manager_stability"))
+    else:
+        factors.append(_factor_row(
+            "经理稳定性", "经理任职数据缺失", None, 10,
+            "基金经理稳定性评估需任职年限；当前数据未接入。",
+            factor_id="j5_manager_stability",
+        ))
+
+    # J5.8: 申赎友好度 / 费率结构 (all, quarterly proxy)
+    fee_str = str(overview.get("管理费率") or "").strip()
+    fee_value: Optional[float] = None
+    if fee_str:
+        fm = re.search(r"(\d+(?:\.\d+)?)", fee_str)
+        if fm:
+            try:
+                fee_value = float(fm.group(1))
+            except ValueError:
+                pass
+    if fee_value is None:
+        rating_fee = rating.get("fee")
+        if rating_fee is not None:
+            try:
+                fee_value = float(rating_fee)
+            except (ValueError, TypeError):
+                pass
+    if fee_value is not None:
+        if fee_value <= 0.5:
+            fee_award = 10
+            fee_signal = f"管理费率 {fee_value:.2f}% / 年（被动/低费）"
+        elif fee_value <= 1.0:
+            fee_award = 7
+            fee_signal = f"管理费率 {fee_value:.2f}% / 年（费率适中）"
+        elif fee_value <= 1.5:
+            fee_award = 4
+            fee_signal = f"管理费率 {fee_value:.2f}% / 年（费率偏高）"
+        else:
+            fee_award = 0
+            fee_signal = f"管理费率 {fee_value:.2f}% / 年（高费率，长期持有磨损大）"
+        raw += fee_award
+        available += 10
+        factors.append(_factor_row(
+            "费率结构", fee_signal, fee_award, 10,
+            "管理费率越低，长期持有成本越小；ETF/指数型通常费率极低（0.1-0.5%），主动基金通常 1.0-1.5%。数据源：基金合同（quarterly 更新）。",
+            factor_id="j5_redemption_pressure",
+        ))
+    else:
+        factors.append(_factor_row(
+            "费率结构", "费率数据缺失", None, 10,
+            "管理费率数据缺失，申赎友好度无法量化评估。",
+            factor_id="j5_redemption_pressure",
+        ))
+
+    return factors, raw, available
+
+
 def _fundamental_dimension(
     symbol: str,
     asset_type: str,
@@ -2939,6 +3884,7 @@ def _fundamental_dimension(
     metrics: Mapping[str, float],
     config: Mapping[str, Any],
     fund_profile: Optional[Mapping[str, Any]] = None,
+    context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     factors: List[Dict[str, Any]] = []
     raw = 0
@@ -3073,7 +4019,7 @@ def _fundamental_dimension(
         except Exception:
             financial_proxy = {}
         try:
-            sector_flow = _sector_flow_snapshot(metadata, MarketDriversCollector(config).collect())
+            sector_flow = _sector_flow_snapshot(metadata, _context_drivers(context or {}, config))
         except Exception:
             sector_flow = {}
 
@@ -3104,7 +4050,7 @@ def _fundamental_dimension(
                 except (ValueError, TypeError):
                     pass
         try:
-            sector_flow = _sector_flow_snapshot(metadata, MarketDriversCollector(config).collect())
+            sector_flow = _sector_flow_snapshot(metadata, _context_drivers(context or {}, config))
         except Exception:
             sector_flow = {}
 
@@ -3151,7 +4097,7 @@ def _fundamental_dimension(
         if asset_type == "cn_stock" and pe_percentile is None:
             # For individual stocks without PE history, score directly by PE level
             if pe_value <= 0:
-                pe_award = 0  # negative PE = loss-making
+                pe_award = -12  # negative PE = loss-making
             elif pe_value < 15:
                 pe_award = 25  # value zone
             elif pe_value < 25:
@@ -3159,12 +4105,27 @@ def _fundamental_dimension(
             elif pe_value < 40:
                 pe_award = 10  # growth premium
             elif pe_value < 60:
-                pe_award = 5   # expensive
+                pe_award = 0
+            elif pe_value < 90:
+                pe_award = -8
             else:
-                pe_award = 0   # extremely expensive
+                pe_award = -15
             detail = f"个股滚动 PE {pe_value:.1f}x，直接按绝对水平评分。"
         else:
-            pe_award = 25 if pe_percentile is not None and pe_percentile < 0.30 else 10 if pe_percentile is not None and pe_percentile < 0.50 else 10 if pe_value < 20 else 0
+            if pe_percentile is not None and pe_percentile < 0.30:
+                pe_award = 25
+            elif pe_percentile is not None and pe_percentile < 0.50:
+                pe_award = 10
+            elif pe_percentile is not None and pe_percentile >= 0.90:
+                pe_award = -15
+            elif pe_percentile is not None and pe_percentile >= 0.75:
+                pe_award = -8
+            elif pe_value < 20:
+                pe_award = 10
+            elif pe_value >= 60:
+                pe_award = -10
+            else:
+                pe_award = 0
             detail = "当前接入的是目标基准或最接近主题指数的滚动 PE；价格位置另算，不与估值分位混用。"
         raw += pe_award
         available += 25
@@ -3180,10 +4141,11 @@ def _fundamental_dimension(
                 pe_award,
                 25,
                 detail,
+                factor_id="j4_pe_ttm",
             )
         )
     else:
-        percentile_award = 25 if price_percentile < 0.30 else 10 if price_percentile < 0.50 else 0
+        percentile_award = 25 if price_percentile < 0.30 else 10 if price_percentile < 0.50 else -10 if price_percentile >= 0.90 else -5 if price_percentile >= 0.75 else 0
         raw += percentile_award
         available += 25
         factors.append(
@@ -3193,6 +4155,7 @@ def _fundamental_dimension(
                 percentile_award,
                 25,
                 "当前未接入可用指数估值，只能用价格位置代理；价格分位不等于真实估值分位。",
+                factor_id="j4_valuation_proxy",
             )
         )
     factors.append(
@@ -3212,7 +4175,8 @@ def _fundamental_dimension(
     revenue_label = proxy_labels["growth"]
     proxy_scope_detail = proxy_labels["growth_scope"]
     if revenue_yoy is not None:
-        revenue_award = 20 if float(revenue_yoy) >= 20 else 15 if float(revenue_yoy) >= 10 else 8 if float(revenue_yoy) >= 5 else 0
+        revenue_val = float(revenue_yoy)
+        revenue_award = 20 if revenue_val >= 20 else 15 if revenue_val >= 10 else 8 if revenue_val >= 5 else -8 if revenue_val < 0 else -4 if revenue_val < 3 else 0
         raw += revenue_award
         available += 20
         factors.append(
@@ -3222,14 +4186,16 @@ def _fundamental_dimension(
                 revenue_award,
                 20,
                 f"{proxy_scope_detail}，缺失时回退到利润同比；覆盖权重约 {financial_proxy.get('coverage_weight', 0.0):.1f}%。",
+                factor_id="j4_revenue_growth",
             )
         )
     else:
-        factors.append(_factor_row("盈利增速", "缺失", None, 20, "当前未接入对应指数/行业或重仓股的营收同比代理"))
+        factors.append(_factor_row("盈利增速", "缺失", None, 20, "当前未接入对应指数/行业或重仓股的营收同比代理", factor_id="j4_revenue_growth"))
 
     roe_value = financial_proxy.get("roe")
     if roe_value is not None:
-        roe_award = 20 if float(roe_value) >= 15 else 10 if float(roe_value) >= 10 else 0
+        roe_float = float(roe_value)
+        roe_award = 20 if roe_float >= 15 else 10 if roe_float >= 10 else -8 if roe_float < 5 else -4 if roe_float < 8 else 0
         raw += roe_award
         available += 20
         factors.append(
@@ -3239,14 +4205,16 @@ def _fundamental_dimension(
                 roe_award,
                 20,
                 f"财务代理最新报告期 {financial_proxy.get('report_date') or '未知'}。",
+                factor_id="j4_roe",
             )
         )
     else:
-        factors.append(_factor_row("ROE", "缺失", None, 20, "当前未接入对应指数/行业或重仓股的 ROE 代理"))
+        factors.append(_factor_row("ROE", "缺失", None, 20, "当前未接入对应指数/行业或重仓股的 ROE 代理", factor_id="j4_roe"))
 
     gross_margin = financial_proxy.get("gross_margin")
     if gross_margin is not None:
-        margin_award = 15 if float(gross_margin) >= 30 else 10 if float(gross_margin) >= 20 else 0
+        margin_float = float(gross_margin)
+        margin_award = 15 if margin_float >= 30 else 10 if margin_float >= 20 else -6 if margin_float < 10 else -3 if margin_float < 15 else 0
         raw += margin_award
         available += 15
         factors.append(
@@ -3256,10 +4224,11 @@ def _fundamental_dimension(
                 margin_award,
                 15,
                 "用重仓股/成分股加权毛利率代理行业定价权和成本结构。",
+                factor_id="j4_gross_margin",
             )
         )
     else:
-        factors.append(_factor_row("毛利率", "缺失", None, 15, "当前未接入对应行业或重仓股毛利率代理"))
+        factors.append(_factor_row("毛利率", "缺失", None, 15, "当前未接入对应行业或重仓股毛利率代理", factor_id="j4_gross_margin"))
 
     profit_yoy = financial_proxy.get("profit_yoy")
     growth_base = None
@@ -3269,7 +4238,7 @@ def _fundamental_dimension(
         growth_base = float(revenue_yoy)
     peg_value = float(pe_ttm) / growth_base if pe_ttm is not None and growth_base and growth_base > 0 else None
     if peg_value is not None:
-        peg_award = 10 if peg_value < 1 else 5 if peg_value < 1.5 else 0
+        peg_award = 10 if peg_value < 1 else 5 if peg_value < 1.5 else -6 if peg_value >= 3 else -3 if peg_value >= 2 else 0
         raw += peg_award
         available += 10
         factors.append(
@@ -3279,10 +4248,111 @@ def _fundamental_dimension(
                 peg_award,
                 10,
                 f"用真实指数 PE 除以{proxy_labels['peg_base']}增速代理，回答'增长是否已经被定价'。",
+                factor_id="j4_peg",
             )
         )
     else:
-        factors.append(_factor_row("PEG 代理", "缺失", None, 10, "缺少稳定的盈利增速代理，未计算 PEG"))
+        factors.append(_factor_row("PEG 代理", "缺失", None, 10, "缺少稳定的盈利增速代理，未计算 PEG", factor_id="j4_peg"))
+
+    # J-4: 补充财务质量因子（scoring_supportive / observation_only）
+    # Hard constraints:
+    #   - debt_to_assets / current_ratio 来自季报，存在 45 天 lag
+    #   - cfps 代理现金流质量，季报 lag 相同
+    #   - 盈利动量 (j4_earnings_momentum) 始终为 observation_only — 无可靠 point-in-time EPS 修正源
+    if asset_type in {"cn_stock", "hk", "us"}:
+        # J4.a: 经营现金流质量（j4_cashflow_quality, quarterly, lag 45d）
+        cfps_val = financial_proxy.get("cfps")
+        if cfps_val is not None:
+            try:
+                cfps = float(cfps_val)
+                if cfps > 0:
+                    cf_award = 10
+                    cf_signal = f"每股经营现金流 {cfps:.2f}（现金流为正，盈利质量有支撑）"
+                elif cfps >= -0.5:
+                    cf_award = -2
+                    cf_signal = f"每股经营现金流 {cfps:.2f}（轻微为负，需关注）"
+                else:
+                    cf_award = -6
+                    cf_signal = f"每股经营现金流 {cfps:.2f}（明显为负，盈利质量存疑）"
+                raw += cf_award
+                available += 10
+                factors.append(_factor_row(
+                    "现金流质量", cf_signal, cf_award, 10,
+                    f"每股经营现金流代理盈利现金含量；数据源：季报（T+45 天 lag），报告期 {financial_proxy.get('report_date') or '未知'}。",
+                    factor_id="j4_cashflow_quality",
+                ))
+            except (ValueError, TypeError):
+                factors.append(_factor_row("现金流质量", "数据解析异常", None, 10, "每股现金流数据解析失败。", factor_id="j4_cashflow_quality"))
+        else:
+            factors.append(_factor_row(
+                "现金流质量", "缺失", None, 10,
+                "经营现金流数据缺失；当前财务代理未覆盖 cfps，季报 T+45 天 lag。",
+                factor_id="j4_cashflow_quality",
+            ))
+
+        # J4.b: 资产负债率 / 杠杆与偿债压力（j4_leverage, quarterly, lag 45d）
+        debt_ratio = financial_proxy.get("debt_to_assets")
+        current_ratio_val = financial_proxy.get("current_ratio")
+        if debt_ratio is not None:
+            try:
+                dr = float(debt_ratio)
+                if dr < 40:
+                    lev_award = 10
+                    lev_signal = f"资产负债率 {dr:.1f}%（低杠杆，财务稳健）"
+                elif dr < 60:
+                    lev_award = 6
+                    lev_signal = f"资产负债率 {dr:.1f}%（中等杠杆）"
+                elif dr < 80:
+                    lev_award = -4
+                    lev_signal = f"资产负债率 {dr:.1f}%（较高杠杆，需关注偿债压力）"
+                else:
+                    lev_award = -8
+                    lev_signal = f"资产负债率 {dr:.1f}%（高杠杆警戒，偿债风险高）"
+                extra = f"；流动比率 {float(current_ratio_val):.2f}" if current_ratio_val is not None else ""
+                raw += lev_award
+                available += 10
+                factors.append(_factor_row(
+                    "杠杆压力", f"{lev_signal}{extra}", lev_award, 10,
+                    f"资产负债率代理财务杠杆水平；数据源：季报（T+45 天 lag），报告期 {financial_proxy.get('report_date') or '未知'}。",
+                    factor_id="j4_leverage",
+                ))
+            except (ValueError, TypeError):
+                factors.append(_factor_row("杠杆压力", "数据解析异常", None, 10, "资产负债率数据解析失败。", factor_id="j4_leverage"))
+        else:
+            factors.append(_factor_row(
+                "杠杆压力", "缺失", None, 10,
+                "资产负债率数据缺失；当前财务代理未覆盖 debt_to_assets，季报 T+45 天 lag。",
+                factor_id="j4_leverage",
+            ))
+
+        # J4.c: 盈利动量 / EPS 修正代理（j4_earnings_momentum, observation_only）
+        # Hard constraint: 无可靠 point-in-time EPS 修正源，始终为 observation_only。
+        # 当前以扣非净利同比加速/减速作为动量方向的弱代理。
+        profit_dedt = financial_proxy.get("profit_dedt_yoy")
+        profit_base = financial_proxy.get("profit_yoy")
+        if profit_dedt is not None and profit_base is not None:
+            try:
+                momentum_signal = "加速" if float(profit_dedt) > float(profit_base) else "减速"
+                ep_signal = f"扣非净利同比 {float(profit_dedt):.1f}% vs 净利同比 {float(profit_base):.1f}%（{momentum_signal}代理）"
+            except (ValueError, TypeError):
+                ep_signal = "盈利动量数据解析异常"
+        elif profit_base is not None:
+            try:
+                ep_signal = f"净利同比 {float(profit_base):.1f}%（扣非缺失，单一数据点不构成动量信号）"
+            except (ValueError, TypeError):
+                ep_signal = "盈利动量代理数据解析异常"
+        else:
+            ep_signal = "盈利动量代理数据缺失"
+        factors.append(_factor_row(
+            "盈利动量", ep_signal, 0, 0,
+            "j4_earnings_momentum 在无可靠 point-in-time EPS 修正源时始终为 observation_only，不进入评分。当前以扣非/净利同比差异作为方向弱代理，仅供参考。",
+            display_score="观察提示",
+            factor_id="j4_earnings_momentum",
+            factor_meta_overrides={
+                "degraded": True,
+                "degraded_reason": "缺少可靠 point-in-time EPS 修正源和 lag fixture，当前只允许作为观察提示。",
+            },
+        ))
 
     flow_award: Optional[int] = None
     flow_detail = "ETF 份额 / 行业资金流代理暂缺"
@@ -3294,16 +4364,18 @@ def _fundamental_dimension(
             if flow_series.empty and "净申购份额" in fund_flow.columns:
                 flow_series = pd.to_numeric(fund_flow["净申购份额"], errors="coerce").dropna()
             if not flow_series.empty:
-                positive_days = int((flow_series.tail(5) > 0).sum())
-                flow_award = 10 if positive_days >= 3 else 0
-                flow_detail = f"近 5 个可用样本中 {positive_days} 个为净流入/净申购"
-                flow_signal = "ETF 份额近 5 个样本有承接" if flow_award else "ETF 流入承接不稳"
+                tail_series = flow_series.tail(5)
+                positive_days = int((tail_series > 0).sum())
+                negative_days = int((tail_series < 0).sum())
+                flow_award = 10 if positive_days >= 3 else -5 if negative_days >= 3 else 0
+                flow_detail = f"近 5 个可用样本中 {positive_days} 个为净流入/净申购，{negative_days} 个为净流出/净赎回"
+                flow_signal = "ETF 份额近 5 个样本有承接" if flow_award > 0 else "ETF 近 5 个样本持续净流出" if flow_award < 0 else "ETF 流入承接不稳"
         except Exception as exc:
             flow_detail = f"ETF 份额数据缺失: {exc}"
     if flow_award is None and sector_flow:
         main_flow = sector_flow.get("main_flow")
         main_ratio = sector_flow.get("main_ratio")
-        flow_award = 10 if main_flow is not None and float(main_flow) > 0 else 0
+        flow_award = 10 if main_flow is not None and float(main_flow) > 0 else -5 if main_flow is not None and float(main_flow) < 0 else 0
         flow_signal = f"{sector_flow.get('name') or metadata.get('sector', '行业')} 主力净{'流入' if (main_flow or 0) > 0 else '流出'} {_fmt_yi_number(main_flow)}"
         flow_detail = (
             f"ETF 份额缺失，改用行业资金流代理；主力净占比 "
@@ -3313,6 +4385,12 @@ def _fundamental_dimension(
     if flow_award is not None:
         raw += flow_award
         available += 10
+
+    # J-5: ETF / 基金专属因子（成分集中度、主题纯度、跟踪基准、经理稳定性、费率等）
+    j5_factors, j5_raw, j5_available = _j5_etf_fund_factors(asset_type, metadata, fund_profile)
+    factors.extend(j5_factors)
+    raw += j5_raw
+    available += j5_available
 
     score = _normalize_dimension(raw, available, 100)
     # When data coverage is very low (proxy-only, e.g. HK/US stocks with no PE/ROE data),
@@ -3354,7 +4432,7 @@ def _fundamental_dimension(
         "max_score": 100,
         "summary": summary,
         "factors": factors,
-        "core_signal": _top_positive_signals(factors),
+        "core_signal": _top_material_signals(factors),
         "missing": score is None,
         "available_max": available,
         "valuation_snapshot": valuation_snapshot,
@@ -3386,10 +4464,7 @@ def _catalyst_dimension(
     news_items = news_report.get("all_items") or news_report.get("items", [])
     stock_news_items: List[Mapping[str, Any]] = []
     if asset_type_str == "cn_stock" and news_mode == "live":
-        try:
-            stock_news_items = NewsCollector(config).get_stock_news(str(metadata.get("symbol", "")))
-        except Exception:
-            stock_news_items = []
+        stock_news_items = _context_stock_news(str(metadata.get("symbol", "")), context)
     sector = str(metadata.get("sector", ""))
     keyword_keys = _metadata_news_keys(metadata)
     catalyst_keys = list(dict.fromkeys([*_catalyst_keywords(metadata), *[str(item) for item in profile.get("keywords", [])]]))
@@ -3601,14 +4676,18 @@ def _catalyst_dimension(
         news_items=company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool if stock_specific_pool else news_pool),
         stock_news_items=stock_news_items,
     )
-    structured_direct_pool = [
+    structured_non_negative_pool = [
         item
         for item in structured_event_pool
+        if not _is_non_positive_company_statement(item)
+    ]
+    structured_direct_pool = [
+        item
+        for item in structured_non_negative_pool
         if str(item.get("category", "")).lower() not in {"earnings_calendar", "stock_disclosure_calendar"}
-        and not _is_non_positive_company_statement(item)
     ]
     structured_pick = _pick_best_structured_item(
-        structured_direct_pool or structured_event_pool,
+        structured_direct_pool or structured_non_negative_pool,
         [*earnings_keys, *event_keys, *STRUCTURED_COMPANY_EVENT_KEYS],
         stock_name_tokens or keyword_keys,
         reference_now,
@@ -3727,7 +4806,7 @@ def _catalyst_dimension(
                 _factor_row(
                     "负面事件",
                     str(negative_pick.get("title", "")).strip(),
-                    0,
+                    -penalty,
                     15,
                     f"{date_detail} 命中 `{label}` 关键词，容易直接压制催化兑现和风险偏好。",
                     display_score=f"-{penalty}",
@@ -3745,6 +4824,47 @@ def _catalyst_dimension(
                     display_score="信息项",
                 )
             )
+
+    themed_negative_items = [
+        item
+        for item in news_pool
+        if _contains_any(_title_source_text(item), NEGATIVE_THEME_HEADWIND_KEYS)
+        and (
+            _contains_any(_title_source_text(item), [*keyword_keys, *strict_event_keys])
+            or _contains_any(_title_source_text(item), [sector, *profile.get("themes", [])])
+        )
+    ]
+    theme_negative_pick = _pick_best_news_item(
+        themed_negative_items,
+        [*NEGATIVE_THEME_HEADWIND_KEYS, *keyword_keys, *strict_event_keys],
+        [sector, *profile.get("themes", [])],
+    )
+    theme_negative_penalty = 10 if theme_negative_pick else 0
+    raw -= theme_negative_penalty
+    available += 10
+    if theme_negative_pick:
+        factors.append(
+            _factor_row(
+                "主题逆风",
+                str(theme_negative_pick.get("title", "")).strip(),
+                -theme_negative_penalty,
+                10,
+                "这里识别的是主题/产业链层面的逆风，不等于单一公司基本面失效；但会拖慢催化从故事走向价格确认。",
+                display_score=f"-{theme_negative_penalty}",
+            )
+        )
+        evidence_rows.append(_evidence_row(layer="主题逆风", item=theme_negative_pick))
+    else:
+        factors.append(
+            _factor_row(
+                "主题逆风",
+                "近 30 日未命中明确主题/产业链逆风头条",
+                0,
+                10,
+                "当前未识别到会明显压制这条主题风险偏好的产业链级逆风新闻。",
+                display_score="信息项",
+            )
+        )
 
     overseas_keyword_map = {
         "科技": ["tsmc", "台积电", "nvidia", "英伟达", "micron", "美光", "hynix", "海力士", "asml", "broadcom", "amd", "gpu", "semiconductor", "foundry", "fab", "capex"],
@@ -3879,17 +4999,82 @@ def _correlation_to_watchlist(symbol: str, asset_returns: pd.Series, context: Ma
 
 
 def _sector_board_match(metadata: Mapping[str, Any], drivers: Mapping[str, Any]) -> Optional[float]:
+    row, frame, _level = _matched_sector_spot_row(metadata, drivers)
+    if row is None or frame is None or frame.empty:
+        return None
+    move_value = _row_number(row, ("涨跌幅", "今日涨跌幅"))
+    if move_value is None:
+        return None
+    return float(move_value) / 100
+
+
+def _sector_breadth_detail(metadata: Mapping[str, Any], drivers: Mapping[str, Any]) -> Dict[str, Any]:
+    """J-3: Extract sector breadth details from industry_spot data.
+
+    Returns:
+        dict with keys:
+        - advance_ratio: float, fraction of stocks advancing in sector (0-1), or None
+        - sector_move: float, sector-level price change, or None
+        - leader_up: bool, whether sector leader stocks are advancing
+        - proxy_level: str, "sector_proxy" always (not individual stock level)
+        - note: str, disclosure note
+    """
     sector = str(metadata.get("sector", ""))
-    frame = drivers.get("industry_spot", pd.DataFrame()) if drivers else pd.DataFrame()
-    if frame is None or frame.empty:
-        return None
-    name_col = "板块名称" if "板块名称" in frame.columns else "名称" if "名称" in frame.columns else None
-    if name_col is None or "涨跌幅" not in frame.columns:
-        return None
-    matched = frame[frame[name_col].astype(str).str.contains(sector, na=False)]
-    if matched.empty:
-        return None
-    return float(pd.to_numeric(matched.iloc[0]["涨跌幅"], errors="coerce")) / 100
+    row, frame, proxy_level = _matched_sector_breadth_row(metadata, drivers)
+    if row is None or frame is None or frame.empty:
+        row, frame, proxy_level = _matched_sector_spot_row(metadata, drivers)
+    result: Dict[str, Any] = {
+        "advance_ratio": None,
+        "sector_move": None,
+        "leader_up": None,
+        "proxy_level": proxy_level or "sector_proxy",
+        "note": "行业宽度数据缺失",
+    }
+    if row is None or frame is None or frame.empty:
+        return result
+
+    name_col = _first_column(frame, ("板块名称", "名称", "概念名称"))
+    if name_col is None:
+        return result
+    matched_name = str(row.get(name_col, sector)).strip() or sector
+
+    # Try to get advance/decline ratio from industry_spot
+    # Some data sources provide 上涨家数/下跌家数 columns
+    advance_col = next((c for c in frame.columns if "上涨" in c and "家数" in c), None)
+    decline_col = next((c for c in frame.columns if "下跌" in c and "家数" in c), None)
+    move_value = _row_number(row, ("涨跌幅", "今日涨跌幅"))
+    if move_value is not None:
+        result["sector_move"] = float(move_value) / 100
+
+    if advance_col and decline_col:
+        adv = pd.to_numeric(pd.Series([row.get(advance_col)]), errors="coerce").dropna()
+        dec = pd.to_numeric(pd.Series([row.get(decline_col)]), errors="coerce").dropna()
+        if not adv.empty and not dec.empty:
+            total = float(adv.iloc[0]) + float(dec.iloc[0])
+            if total > 0:
+                result["advance_ratio"] = float(adv.iloc[0]) / total
+                result["note"] = f"{matched_name} 上涨家数 {int(adv.iloc[0])}/{int(total)}，扩散比例 {result['advance_ratio']:.0%}"
+    elif result["sector_move"] is not None:
+        # Fallback: use sector move as proxy for breadth direction
+        result["note"] = f"{matched_name} 涨跌幅 {result['sector_move']:.1%}（上涨家数缺失，用板块涨跌幅代理宽度方向）"
+
+    # Leader confirmation: check if sector leaders are in the advancing group.
+    # Hard constraint: leader_up can ONLY be set when advance_ratio is available
+    # (i.e. actual advance/decline counts exist). Inferring leader_up from sector_move
+    # would create a circular dependency — the same 涨跌幅 column would then score
+    # 板块扩散 + 行业宽度 + 龙头确认 from a single data point.
+    sector_chain = _derived_catalyst_profile(metadata)
+    leaders = list(sector_chain.get("domestic_leaders", []))[:3]
+    current_name = str(metadata.get("name", "")).strip()
+    if leaders and result["advance_ratio"] is not None:
+        # Only infer leader direction when we have actual breadth data to anchor it.
+        result["leader_up"] = result["advance_ratio"] >= 0.5
+        result["note"] += f"；龙头代理（{'/'.join(leaders[:2])}）方向与板块一致" if result["leader_up"] else "；龙头代理方向与板块不一致，需关注分化"
+    elif leaders and current_name and any(current_name in str(item) for item in leaders) and result["sector_move"] is not None:
+        result["leader_up"] = float(result["sector_move"]) > 0
+        result["note"] += f"；当前标的命中主题龙头列表（{'/'.join(leaders[:2])}），在上涨家数缺失时用板块方向做轻度代理"
+
+    return result
 
 
 def _relative_strength_dimension(
@@ -3919,24 +5104,95 @@ def _relative_strength_dimension(
             turn_award = 25  # strong persistent outperformance
         elif rel_20d > 0:
             turn_award = 20
+        elif rel_20d < -0.05 and rel_5d < -0.02:
+            turn_award = -20
+        elif rel_20d < 0 and rel_5d < 0:
+            turn_award = -10
         else:
             turn_award = 0
         raw += turn_award
         available += 30
-        factors.append(_factor_row("超额拐点", f"相对基准 5日 {format_pct(rel_5d)} / 20日 {format_pct(rel_20d)}", turn_award, 30, "相对基准从负转正更接近轮动切换窗口"))
+        factors.append(_factor_row("超额拐点", f"相对基准 5日 {format_pct(rel_5d)} / 20日 {format_pct(rel_20d)}", turn_award, 30, "相对基准从负转正更接近轮动切换窗口", factor_id="j3_benchmark_relative"))
     else:
-        factors.append(_factor_row("超额拐点", "缺失", None, 30, "基准收益序列缺失，未计算超额拐点"))
+        factors.append(_factor_row("超额拐点", "缺失", None, 30, "基准收益序列缺失，未计算超额拐点", factor_id="j3_benchmark_relative"))
 
     board_move = _sector_board_match(metadata, context.get("drivers", {}))
     if board_move is not None:
         # Lowered threshold: 0.3% sector gain already qualifies as meaningful breadth.
         # Previous threshold of 1% was too strict for normal A-share sector rotations.
-        breadth_award = 25 if board_move > 0.003 else 10 if board_move > 0 else 0
+        breadth_award = 25 if board_move > 0.003 else 10 if board_move > 0 else -10 if board_move < -0.01 else -4 if board_move < 0 else 0
         raw += breadth_award
         available += 25
-        factors.append(_factor_row("板块扩散", f"板块涨跌幅 {format_pct(board_move)}", breadth_award, 25, "板块内部越普涨，越像轮动扩散"))
+        factors.append(_factor_row("板块扩散", f"板块涨跌幅 {format_pct(board_move)}", breadth_award, 25, "板块内部越普涨，越像轮动扩散；这是行业级代理，不等于个股自身优势。"))
     else:
         factors.append(_factor_row("板块扩散", "缺失", None, 25, "板块扩散数据缺失"))
+
+    # J-3: 行业宽度细节（上涨家数/扩散比例）+ 龙头确认
+    # 硬约束：行业级代理，不能写成个股自身优势
+    breadth_detail = _sector_breadth_detail(metadata, context.get("drivers", {}))
+    advance_ratio = breadth_detail.get("advance_ratio")
+    leader_up = breadth_detail.get("leader_up")
+    breadth_note = str(breadth_detail.get("note", "行业宽度数据缺失"))
+    if advance_ratio is not None:
+        # 上涨家数比例 > 60% 才算真正扩散
+        industry_breadth_award = 15 if advance_ratio >= 0.60 else 8 if advance_ratio >= 0.45 else -8 if advance_ratio < 0.30 else -4 if advance_ratio < 0.40 else 0
+        raw += industry_breadth_award
+        available += 15
+        factors.append(
+            _factor_row(
+                "行业宽度",
+                f"行业上涨家数比例 {advance_ratio:.0%}",
+                industry_breadth_award,
+                15,
+                f"行业宽度越高，说明轮动越扩散而不是只有龙头在涨；这是行业级信号，不等于个股自身优势。{breadth_note}",
+                factor_id="j3_sector_breadth",
+            )
+        )
+    else:
+        # advance_ratio is None — no actual breadth data.
+        # board_move (板块涨跌幅) is ALREADY captured in the 板块扩散 factor above.
+        # Scoring 行业宽度 again from the same 涨跌幅 column would double-count the signal.
+        # → Always observation_only when advance_ratio is absent.
+        if board_move is not None:
+            factors.append(
+                _factor_row(
+                    "行业宽度",
+                    f"上涨家数缺失（板块涨跌幅 {format_pct(board_move)}，不二次计分）",
+                    0,
+                    0,
+                    f"上涨家数/下跌家数数据缺失，板块涨跌幅已在板块扩散中计分，此处不重复评分以避免同源重复加分；代理层级：行业级。{breadth_note}",
+                    display_score="观察提示",
+                    factor_id="j3_sector_breadth",
+                )
+            )
+        else:
+            factors.append(_factor_row("行业宽度", "缺失", None, 15, "行业宽度（行业级代理）数据缺失，无法评估扩散程度。", factor_id="j3_sector_breadth"))
+
+    # J-3: 龙头确认（行业级代理）
+    # 龙头先涨、二线跟随是最健康的扩散结构；龙头不涨只有二线涨更像情绪炒作
+    if leader_up is not None:
+        leader_award = 10 if leader_up and board_move is not None and board_move > 0 else -5 if (leader_up is False and board_move is not None and board_move > 0) else 0
+        raw += leader_award
+        available += 10
+        leader_signal = "龙头方向与板块一致，扩散结构健康" if leader_up else "龙头方向与板块不一致，需关注分化风险"
+        leader_detail = "龙头确认是行业扩散的重要信号：龙头先涨、二线跟随是最健康的结构；龙头不涨只有二线涨更像情绪炒作。当前用行业龙头代理，不是个股自身信号。"
+        factors.append(_factor_row("龙头确认", leader_signal, leader_award, 10, leader_detail, factor_id="j3_leader_confirmation"))
+    else:
+        matched_sector_move = breadth_detail.get("sector_move")
+        if matched_sector_move is not None:
+            factors.append(
+                _factor_row(
+                    "龙头确认",
+                    "上涨家数缺失，暂不判断龙头确认",
+                    0,
+                    0,
+                    "当前已经匹配到行业/概念板块，但缺少上涨家数/下跌家数，不能独立判断龙头是否与板块同步；这里保留为观察提示，避免同源重复推断。",
+                    display_score="观察提示",
+                    factor_id="j3_leader_confirmation",
+                )
+            )
+        else:
+            factors.append(_factor_row("龙头确认", "缺失", None, 10, "龙头确认数据缺失，无法评估行业扩散结构。", factor_id="j3_leader_confirmation"))
 
     chain_award = 20 if _theme_alignment(metadata, context.get("day_theme", {})) and float(metrics.get("return_5d", 0.0)) < 0.08 else 0
     raw += chain_award
@@ -3994,7 +5250,7 @@ def _relative_strength_dimension(
         "max_score": 100,
         "summary": _dimension_summary(score, "轮动已经轮到它，具备主线扩散条件。", "相对强弱有改善，但还不是最典型的扩散点。", "轮动还没轮到它，更多是背景观察。", "ℹ️ 相对强弱数据缺失，本次评级未纳入该维度"),
         "factors": factors,
-        "core_signal": _top_positive_signals(factors),
+        "core_signal": _top_material_signals(factors),
         "missing": score is None,
     }
 
@@ -4010,16 +5266,22 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
     hot_rank = _hot_rank_snapshot(metadata, drivers)
     concentration_proxy: Dict[str, Any] = {}
     if asset_type in {"cn_etf", "cn_index", "cn_fund"} and not commodity_like_fund:
-        try:
-            snapshot = ValuationCollector(config).get_cn_index_snapshot(_valuation_keywords(metadata))
-            if snapshot:
-                concentration_proxy = ValuationCollector(config).get_cn_index_financial_proxies(str(snapshot.get("index_code", "")), top_n=5)
-        except Exception:
-            concentration_proxy = {}
+        concentration_proxy = _context_cn_index_concentration_proxy(
+            _valuation_keywords(metadata),
+            context=context,
+            config=config,
+        )
+    elif asset_type == "cn_stock":
+        concentration_proxy = _context_cn_index_concentration_proxy(
+            _board_keywords(metadata),
+            symbol=symbol,
+            context=context,
+            config=config,
+        )
 
     heat_rank = hot_rank.get("rank") if not commodity_like_fund else None
     if heat_rank is not None:
-        crowding_award = 30 if float(heat_rank) > 50 else 15 if float(heat_rank) > 20 else 0
+        crowding_award = 30 if float(heat_rank) > 50 else 15 if float(heat_rank) > 20 else -10 if float(heat_rank) <= 10 else -5
         # Check whether the hot_rank row matched the individual stock or just the sector.
         # If the matched row name doesn't contain the stock name, it's a sector-level proxy.
         hot_rank_name = str(hot_rank.get("name", ""))
@@ -4031,7 +5293,8 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
         available += 30
         factors.append(_factor_row("公募/热度代理", signal, crowding_award, 30, detail))
     elif sector_flow and not commodity_like_fund:
-        crowding_award = 30 if float(sector_flow.get("main_flow") or 0.0) > 0 else 10
+        main_flow = float(sector_flow.get("main_flow") or 0.0)
+        crowding_award = 30 if main_flow > 0 else -6 if main_flow < 0 else 0
         raw += crowding_award
         available += 30
         factors.append(
@@ -4065,14 +5328,17 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
                     )
                 )
             else:
+                insider_penalty = 6 if net_ratio >= 0.1 else 3
+                raw -= insider_penalty
+                available += 10
                 factors.append(
                     _factor_row(
                         "高管增持",
                         str(holdertrade.get("item", {}).get("title", "近 90 日存在净减持")),
-                        0,
+                        -insider_penalty,
                         10,
-                        "近 90 日净减持更偏负面，不在筹码维度做正向加分。",
-                        display_score="信息项",
+                        "近 90 日净减持说明管理层/重要股东态度偏谨慎，当前按轻度拖累处理，不单独等于趋势反转。",
+                        display_score=f"-{insider_penalty}",
                     )
                 )
         else:
@@ -4110,7 +5376,8 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
     elif asset_type in {"cn_etf", "cn_stock"}:
         if northbound:
             north_value = northbound.get("net_value")
-            north_award = 20 if north_value is not None and float(north_value) > 0 else 0
+            north_float = float(north_value or 0.0)
+            north_award = 20 if north_value is not None and north_float > 0 else -8 if north_value is not None and north_float < 0 else 0
             raw += north_award
             available += 20
             factors.append(
@@ -4143,7 +5410,7 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
                         value = float(
                             pd.to_numeric(pd.Series([latest.get("北向资金净流入")]), errors="coerce").fillna(0.0).iloc[0]
                         )
-                    north_award = 20 if value > 0 else 0
+                    north_award = 20 if value > 0 else -8 if value < 0 else 0
                     raw += north_award
                     available += 20
                     factors.append(
@@ -4168,13 +5435,16 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
             flow = ChinaMarketCollector(config).get_etf_fund_flow(symbol)
             series = pd.to_numeric(flow.get("净流入", pd.Series(dtype=float)), errors="coerce").dropna()
             if not series.empty:
-                chips_award = 10 if float(series.tail(5).sum()) > 0 else 0
+                tail_flow = float(series.tail(5).sum())
+                chips_award = 10 if tail_flow > 0 else -5 if tail_flow < 0 else 0
                 raw += chips_award
                 available += 10
-                factors.append(_factor_row("机构资金承接", "ETF 近 5 个样本净流入为正" if chips_award else "ETF 流入没有持续为正", chips_award, 10, "用 ETF 资金流做筹码代理"))
+                flow_signal = "ETF 近 5 个样本净流入为正" if tail_flow > 0 else "ETF 近 5 个样本净流出" if tail_flow < 0 else "ETF 流入没有持续为正"
+                factors.append(_factor_row("机构资金承接", flow_signal, chips_award, 10, "用 ETF 资金流做筹码代理"))
         except Exception as exc:
             if sector_flow and not commodity_like_fund:
-                chips_award = 10 if float(sector_flow.get("main_flow") or 0.0) > 0 else 0
+                main_flow = float(sector_flow.get("main_flow") or 0.0)
+                chips_award = 10 if main_flow > 0 else -5 if main_flow < 0 else 0
                 raw += chips_award
                 available += 10
                 factors.append(
@@ -4190,7 +5460,8 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
                 factors.append(_factor_row("机构资金承接", "缺失", None, 10, f"ETF 资金流数据缺失: {exc}"))
     elif asset_type == "cn_stock":
         if sector_flow:
-            chips_award_stock = 10 if float(sector_flow.get("main_flow") or 0.0) > 0 else 0
+            main_flow = float(sector_flow.get("main_flow") or 0.0)
+            chips_award_stock = 10 if main_flow > 0 else -5 if main_flow < 0 else 0
             raw += chips_award_stock
             available += 10
             factors.append(
@@ -4227,6 +5498,24 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
         else:
             factors.append(_factor_row("机构集中度代理", "缺失", None, 15, "成分股权重集中度暂未接入"))
 
+    # J-3: 拥挤度/反身性风险（observation_only，不进入主评分加分，只作为风险提示）
+    # 硬约束：拥挤度是市场级/行业级信号，不等于个股自身风险
+    # 当热度排名极高（前 10%）时，反身性风险上升，作为风险提示
+    if heat_rank is not None and not commodity_like_fund:
+        heat_rank_val = float(heat_rank)
+        if heat_rank_val > 90:
+            crowding_risk_signal = f"热度排名 {int(heat_rank_val)}，处于极高拥挤区，反身性风险上升"
+            crowding_risk_detail = "热度排名极高时，市场共识已经非常一致，反身性风险（一致预期反转）上升；这是市场级/行业级信号，不等于个股一定会下跌，但需要更高的安全边际。"
+        elif heat_rank_val > 70:
+            crowding_risk_signal = f"热度排名 {int(heat_rank_val)}，处于较高拥挤区，需关注反身性"
+            crowding_risk_detail = "热度排名较高时，市场共识偏一致，需关注反身性风险；当前只作为观察提示，不进入主评分。"
+        else:
+            crowding_risk_signal = f"热度排名 {int(heat_rank_val)}，拥挤度适中"
+            crowding_risk_detail = "当前热度排名适中，拥挤度风险不突出。"
+        factors.append(_factor_row("拥挤度风险", crowding_risk_signal, None, 0, crowding_risk_detail, display_score="观察提示", factor_id="j3_crowding"))
+    elif not commodity_like_fund:
+        factors.append(_factor_row("拥挤度风险", "热度数据缺失，无法评估拥挤度", None, 0, "拥挤度/反身性风险需要热度排名数据，当前缺失。", display_score="观察提示", factor_id="j3_crowding"))
+
     score = _normalize_dimension(raw, available, 100)
     proxy_only_individual = asset_type in {"cn_stock", "hk", "us"} and available < 40
     if score is not None and proxy_only_individual:
@@ -4240,7 +5529,7 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
         "max_score": 100,
         "summary": summary,
         "factors": factors,
-        "core_signal": _top_positive_signals(factors),
+        "core_signal": _top_material_signals(factors),
         "missing": score is None,
     }
 
@@ -4381,16 +5670,13 @@ def _risk_dimension(
             disclosure_pool.extend([item for item in news_items if _is_disclosure_like_item(item, stock_name_tokens)])
         stock_news_items: List[Mapping[str, Any]] = []
         if asset_type == "cn_stock":
-            try:
-                stock_news_items = NewsCollector(dict(context.get("config", {}))).get_stock_news(symbol)
-                stock_disclosure_items = [
-                    item
-                    for item in stock_news_items
-                    if _is_disclosure_like_item(item, stock_name_tokens)
-                ]
-                disclosure_pool = _dedupe_news_items([*disclosure_pool, *stock_disclosure_items])
-            except Exception:
-                pass
+            stock_news_items = _context_stock_news(symbol, context)
+            stock_disclosure_items = [
+                item
+                for item in stock_news_items
+                if _is_disclosure_like_item(item, stock_name_tokens)
+            ]
+            disclosure_pool = _dedupe_news_items([*disclosure_pool, *stock_disclosure_items])
         disclosure_pool = _dedupe_news_items(
             [
                 *disclosure_pool,
@@ -4436,69 +5722,237 @@ def _risk_dimension(
 
 
 def _seasonality_dimension(metadata: Mapping[str, Any], history: pd.DataFrame, context: Mapping[str, Any]) -> Dict[str, Any]:
+    """J-2: Seasonal / calendar / event window factors.
+
+    Upgrade from rule-based hints to scoreable factors with explicit sample boundaries.
+    Hard constraints:
+    - Must disclose sample size for any win-rate based factor
+    - Degrade to observation-only when sample < MIN_SEASONAL_SAMPLES
+    - Calendar rules are proxies; cannot be written as "will work this time"
+    - Policy event windows are observation_only until lag/visibility fixture is complete
+    """
+    MIN_SEASONAL_SAMPLES = 3  # minimum years of same-month data to score
+
     dated_history = history.copy()
     dated_history["date"] = pd.to_datetime(dated_history["date"], errors="coerce")
     dated_history = dated_history.dropna(subset=["date"]).set_index("date").sort_index()
     close = dated_history["close"].astype(float)
     monthly = close.resample("ME").last().pct_change().dropna()
     month = datetime.now().month
+    sector = str(metadata.get("sector", "综合"))
+    asset_type = str(metadata.get("asset_type", ""))
     factors: List[Dict[str, Any]] = []
     raw = 0
     available = 0
 
+    # --- 月度胜率（J-2: 标的自身历史月度胜率）---
+    # 样本边界必须显式披露；样本不足时降级为观察提示
     if not monthly.empty:
         month_series = monthly[monthly.index.month == month]
-        if not month_series.empty:
+        n_samples = len(month_series)
+        if n_samples >= MIN_SEASONAL_SAMPLES:
             win_rate = float((month_series > 0).mean())
-            month_award = 30 if win_rate > 0.65 else 10 if win_rate > 0.50 else 0
+            month_award = 25 if win_rate > 0.65 else 8 if win_rate > 0.50 else -15 if win_rate < 0.35 else -8 if win_rate < 0.45 else 0
             raw += month_award
-            available += 30
-            factors.append(_factor_row("月度胜率", f"同月胜率 {win_rate:.0%}", month_award, 30, "当前用标的自身历史月度胜率做代理"))
+            available += 25
+            sample_note = f"样本 {n_samples} 年（{int(month_series.index.year.min())}–{int(month_series.index.year.max())}），历史胜率不等于本次必然有效。"
+            factors.append(_factor_row("月度胜率", f"同月胜率 {win_rate:.0%}（{n_samples} 年样本）", month_award, 25, sample_note, factor_id="j2_monthly_win_rate"))
         else:
-            factors.append(_factor_row("月度胜率", "缺失", None, 30, "样本不足"))
+            # 样本不足，降级为观察提示，不进入评分
+            sample_note = f"同月历史样本仅 {n_samples} 年，不足 {MIN_SEASONAL_SAMPLES} 年，降级为观察提示，不进入主评分。"
+            factors.append(_factor_row("月度胜率", f"样本不足（{n_samples} 年）", None, 25, sample_note, factor_id="j2_monthly_win_rate"))
     else:
-        factors.append(_factor_row("月度胜率", "缺失", None, 30, "缺少月度历史"))
+        factors.append(_factor_row("月度胜率", "缺失", None, 25, "缺少月度历史，无法计算同月胜率。", factor_id="j2_monthly_win_rate"))
 
-    sector = str(metadata.get("sector", "综合"))
+    # --- 行业旺季前置窗口（J-2: 规则化日历代理）---
     in_window = month in MONTHLY_SEASONAL_WINDOWS.get(sector, set())
-    window_award = 25 if in_window else 0
+    window_award = 20 if in_window else 0
     raw += window_award
-    available += 25
-    factors.append(_factor_row("旺季前置", "位于常见旺季窗口" if in_window else "当前不在典型旺季前置窗口", window_award, 25, "基于行业常见季节性映射"))
-
-    earnings_window = month in {1, 4, 7, 10}
-    earnings_award = 20 if earnings_window and sector == "科技" else 0
-    raw += earnings_award
     available += 20
-    factors.append(_factor_row("财报窗口", "当前处在典型财报月附近" if earnings_award else "当前不是典型财报博弈窗口", earnings_award, 20, "以季度财报窗口做代理"))
+    window_detail = (
+        f"当前 {month} 月处于 `{sector}` 行业常见旺季前置窗口；这是规则化日历代理，不等于本次一定有效，需结合实际景气数据确认。"
+        if in_window
+        else f"当前 {month} 月不在 `{sector}` 行业常见旺季前置窗口；如果行业景气数据有超预期，可以覆盖这个规则。"
+    )
+    factors.append(_factor_row("旺季前置", "位于常见旺季窗口" if in_window else "当前不在典型旺季前置窗口", window_award, 20, window_detail, factor_id="j2_sector_season"))
 
-    rebalance_months = {5, 6, 11, 12}
-    rebalance_award = 15 if month in rebalance_months else 5 if month in {4, 10} else 0
+    # --- 财报前后窗口（J-2: 按季度日历，覆盖所有行业）---
+    # 财报窗口：1月（Q3报）、4月（年报/Q1报）、7月（半年报预告）、10月（Q3报）
+    # 前置观察期：前一个月（12/3/6/9月）
+    earnings_core_months = {1, 4, 7, 10}
+    earnings_pre_months = {12, 3, 6, 9}
+    if month in earnings_core_months:
+        # 财报密集期：博弈窗口，正负双向
+        # 对成长/科技类加分（业绩超预期概率更高），对高股息/防御类中性
+        earnings_award = 15 if sector in {"科技", "医药", "消费", "军工"} else 8
+        earnings_signal = f"当前处于 Q{(month // 3) % 4 + 1} 财报密集期，{sector} 行业业绩博弈窗口"
+        earnings_detail = "财报密集期是双向博弈窗口：业绩超预期可以加速上涨，不及预期则容易杀估值；当前只做正向加分，不做负向惩罚（负向由催化维度处理）。"
+    elif month in earnings_pre_months:
+        earnings_award = 5
+        earnings_signal = "处于财报前置观察期，业绩预期博弈开始升温"
+        earnings_detail = "财报前一个月通常是预期博弈升温期，机构开始调整仓位；当前只做轻度加分，不等于业绩一定超预期。"
+    else:
+        earnings_award = 0
+        earnings_signal = "当前不在典型财报博弈窗口"
+        earnings_detail = "当前月份不在财报密集期或前置观察期，财报窗口因子中性。"
+    raw += earnings_award
+    available += 15
+    factors.append(_factor_row("财报窗口", earnings_signal, earnings_award, 15, earnings_detail, factor_id="j2_earnings_window"))
+
+    # --- 指数调样/半年末/年末窗口（J-2）---
+    # 主流 A 股指数（沪深300、中证500、中证1000）通常在 6 月和 12 月调样
+    # 调样前 1-2 个月（4-5月、10-11月）是预期博弈期
+    if month in {6, 12}:
+        rebalance_award = 15
+        rebalance_signal = f"{month} 月：主流指数调样窗口，潜在纳入/剔除标的博弈"
+        rebalance_detail = "沪深300/中证500/中证1000 通常在 6 月和 12 月调样；被纳入预期的标的可能提前被动买入，被剔除预期的标的可能提前被动卖出。当前只做规则化代理，不等于个股一定被纳入。"
+    elif month in {5, 11}:
+        rebalance_award = 10
+        rebalance_signal = f"{month} 月：指数调样前置观察期"
+        rebalance_detail = "调样前一个月是预期博弈升温期，机构开始布局潜在纳入标的；当前只做轻度加分。"
+    elif month in {4, 10}:
+        rebalance_award = 5
+        rebalance_signal = f"{month} 月：指数调样早期观察期"
+        rebalance_detail = "调样前两个月开始有早期布局，但博弈强度较低；当前只做轻度加分。"
+    else:
+        rebalance_award = 0
+        rebalance_signal = "当前不在典型调样窗口"
+        rebalance_detail = "当前月份不在指数调样窗口或前置观察期，该因子中性。"
     raw += rebalance_award
     available += 15
+    factors.append(_factor_row("指数调整", rebalance_signal, rebalance_award, 15, rebalance_detail, factor_id="j2_index_rebalance"))
+
+    # --- 节假日消费/出行窗口（J-2: 按行业）---
+    # 春节前后（1-2月）：消费/出行/旅游
+    # 五一/十一（4-5月、9-10月）：消费/出行
+    # 暑期（7-8月）：旅游/娱乐/教育
+    HOLIDAY_WINDOWS: Dict[str, set] = {
+        "消费": {1, 2, 4, 5, 9, 10},
+        "旅游": {1, 2, 4, 5, 7, 8, 9, 10},
+        "餐饮": {1, 2, 4, 5, 9, 10},
+        "零售": {1, 2, 4, 5, 9, 10, 11, 12},
+        "航空": {1, 2, 4, 5, 7, 8, 9, 10},
+        "酒店": {1, 2, 4, 5, 7, 8, 9, 10},
+    }
+    holiday_sectors = [s for s, months in HOLIDAY_WINDOWS.items() if sector.startswith(s) or s in sector]
+    in_holiday_window = any(month in HOLIDAY_WINDOWS.get(s, set()) for s in holiday_sectors)
+    # 消费/旅游类行业在节假日窗口加分
+    if in_holiday_window:
+        holiday_award = 10
+        holiday_signal = f"{month} 月：{sector} 行业节假日消费/出行窗口"
+        holiday_detail = "节假日前后是消费/出行类行业的季节性顺风期；当前只做规则化代理，需结合实际出行/消费数据确认。"
+    elif sector in {"消费", "旅游", "餐饮", "零售", "航空", "酒店"}:
+        holiday_award = 0
+        holiday_signal = "当前不在节假日消费/出行窗口"
+        holiday_detail = "当前月份不在该行业的典型节假日窗口，季节性因子中性。"
+    else:
+        holiday_award = 0
+        holiday_signal = "节假日窗口：该行业不适用"
+        holiday_detail = "节假日消费/出行窗口主要适用于消费/旅游/餐饮/零售/航空/酒店等行业。"
+    raw += holiday_award
+    available += 10
+    factors.append(_factor_row("节假日窗口", holiday_signal, holiday_award, 10, holiday_detail, factor_id="j2_holiday_window"))
+
+    # --- 商品/能源季节性窗口（J-2）---
+    # 能源：冬季取暖需求（10-12月）、夏季用电高峰（6-8月）
+    # 有色金属：春季开工（3-4月）、年末备货（11-12月）
+    # 农产品：播种/收获季节
+    COMMODITY_WINDOWS: Dict[str, set] = {
+        "能源": {6, 7, 8, 10, 11, 12},
+        "煤炭": {10, 11, 12, 1},
+        "天然气": {10, 11, 12, 1, 2},
+        "有色": {3, 4, 11, 12},
+        "钢铁": {3, 4, 5, 9, 10},
+        "化工": {3, 4, 9, 10},
+        "农业": {3, 4, 9, 10},
+    }
+    commodity_sectors = [s for s, months in COMMODITY_WINDOWS.items() if sector.startswith(s) or s in sector]
+    in_commodity_window = any(month in COMMODITY_WINDOWS.get(s, set()) for s in commodity_sectors)
+    if in_commodity_window:
+        commodity_award = 10
+        commodity_signal = f"{month} 月：{sector} 商品/能源季节性需求窗口"
+        commodity_detail = "商品/能源类行业存在明显季节性需求规律；当前只做规则化代理，需结合实际库存/价格数据确认。"
+    elif commodity_sectors:
+        commodity_award = 0
+        commodity_signal = "当前不在商品/能源季节性需求窗口"
+        commodity_detail = "当前月份不在该商品/能源行业的典型季节性需求窗口，该因子中性。"
+    else:
+        commodity_award = 0
+        commodity_signal = "商品季节性：该行业不适用"
+        commodity_detail = "商品/能源季节性窗口主要适用于能源/有色/钢铁/化工/农业等行业。"
+    raw += commodity_award
+    available += 10
+    factors.append(_factor_row("商品季节性", commodity_signal, commodity_award, 10, commodity_detail, factor_id="j2_commodity_season"))
+
+    # --- 政策事件窗（J-2: observation_only，不进入主评分）---
+    # 政策会议（两会3月、中央经济工作会议12月）、医保谈判（11-12月）、产业展会
+    # 硬约束：没有完成 lag/visibility fixture 前，只作为观察提示，不进入主评分
+    POLICY_EVENT_WINDOWS: Dict[str, Any] = {
+        "两会": {"months": {3}, "sectors": {"综合", "科技", "医药", "消费", "军工", "电网"}},
+        "中央经济工作会议": {"months": {12}, "sectors": {"综合", "科技", "消费", "高股息"}},
+        "医保谈判": {"months": {11, 12}, "sectors": {"医药"}},
+        "产业展会": {"months": {3, 4, 9, 10}, "sectors": {"科技", "消费", "汽车"}},
+    }
+    policy_hints: List[str] = []
+    for event_name, event_info in POLICY_EVENT_WINDOWS.items():
+        if month in event_info["months"] and (not event_info["sectors"] or sector in event_info["sectors"] or "综合" in event_info["sectors"]):
+            policy_hints.append(event_name)
+    if policy_hints:
+        policy_signal = f"观察提示：{' / '.join(policy_hints)} 窗口期"
+        policy_detail = f"当前处于 {' / '.join(policy_hints)} 窗口期，可能对 {sector} 行业有政策催化；但政策事件窗因子尚未完成 lag/visibility fixture，当前只作为观察提示，不进入主评分。"
+    else:
+        policy_signal = "当前无明确政策事件窗口"
+        policy_detail = "当前月份未识别到与该行业相关的典型政策事件窗口。政策事件窗因子尚未完成 lag/visibility fixture，不进入主评分。"
+    # 政策事件窗：observation_only，不加分，只作为信息项
     factors.append(
         _factor_row(
-            "指数调整",
-            "接近半年/年末常见调样窗口" if rebalance_award >= 15 else "当前不在典型调样窗口" if rebalance_award == 0 else "处在调样前置观察期",
-            rebalance_award,
-            15,
-            "A 股主流指数常见在 6 月和 12 月附近调样；当前先用规则化日历代理。",
+            "政策事件窗",
+            policy_signal,
+            None,
+            0,
+            policy_detail,
+            display_score="观察提示",
+            factor_id="j2_policy_event",
+            factor_meta_overrides={
+                "degraded": True,
+                "degraded_reason": "政策事件窗尚未完成 lag / visibility fixture，当前只保留观察提示，不进入主评分。",
+            },
         )
     )
 
-    dividend_award = 10 if sector == "高股息" and month in {4, 5, 6} else 0
+    # --- 分红窗口（J-2: 高股息行业专属）---
+    dividend_sectors = {"高股息", "银行", "电力", "公用事业", "煤炭"}
+    in_dividend_sector = sector in dividend_sectors or any(s in sector for s in dividend_sectors)
+    if in_dividend_sector and month in {4, 5, 6}:
+        dividend_award = 10
+        dividend_signal = f"{month} 月：高股息/分红行业抢权窗口"
+        dividend_detail = "高股息/分红类行业在 4-6 月通常有抢权行情；当前只做规则化代理，需结合实际分红公告确认。"
+    elif in_dividend_sector:
+        dividend_award = 0
+        dividend_signal = "当前不在典型分红博弈窗口"
+        dividend_detail = "当前月份不在高股息行业的典型抢权窗口，该因子中性。"
+    else:
+        dividend_award = 0
+        dividend_signal = "分红窗口：该行业不适用"
+        dividend_detail = "分红窗口主要适用于高股息/银行/电力/公用事业等行业。"
     raw += dividend_award
     available += 10
-    factors.append(_factor_row("分红窗口", "接近高股息常见抢权窗口" if dividend_award else "当前不是典型分红博弈窗口", dividend_award, 10, "高股息方向更相关"))
+    factors.append(_factor_row("分红窗口", dividend_signal, dividend_award, 10, dividend_detail, factor_id="j2_dividend_window"))
 
     score = _normalize_dimension(raw, available, 100)
     return {
         "name": "季节/日历",
         "score": score,
         "max_score": 100,
-        "summary": _dimension_summary(score, "当前时间窗口相对有利。", "时间窗口中性，没有明显顺风。", "时间窗口不占优，更多靠主线和技术本身。", "ℹ️ 季节/日历数据缺失，本次评级未纳入该维度"),
+        "summary": _dimension_summary(
+            score,
+            "当前时间窗口相对有利，多个季节性因子共振。",
+            "时间窗口中性，没有明显顺风或逆风。",
+            "时间窗口不占优，更多靠主线和技术本身。",
+            "ℹ️ 季节/日历数据缺失，本次评级未纳入该维度",
+        ),
         "factors": factors,
-        "core_signal": _top_positive_signals(factors),
+        "core_signal": _top_material_signals(factors),
         "missing": score is None,
     }
 
@@ -4532,6 +5986,8 @@ def _macro_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) ->
         sensitivity_award = 30
     elif match_count == 1:
         sensitivity_award = 10
+    elif active >= 3:
+        sensitivity_award = -10
     else:
         sensitivity_award = 0
     raw += sensitivity_award
@@ -4543,6 +5999,7 @@ def _macro_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) ->
             sensitivity_award,
             40,
             "利率 / 美元 / 油价 / 人民币 四因子匹配。",
+            factor_id="m1_sensitivity_vector",
         )
     )
 
@@ -4555,14 +6012,14 @@ def _macro_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) ->
         demand_award = 20 if recovery_preference >= 1 else 10 if recovery_preference == 0 else 0
         demand_signal = f"PMI {pmi:.1f} / 新订单 {new_orders:.1f} / 生产 {production:.1f}，景气领先指标改善"
     elif demand_state == "weakening":
-        demand_award = 20 if recovery_preference <= -1 else 0 if recovery_preference >= 1 else 8
+        demand_award = 20 if recovery_preference <= -1 else -8 if recovery_preference >= 1 else 4
         demand_signal = f"PMI {pmi:.1f} / 新订单 {new_orders:.1f}，景气领先指标偏弱"
     else:
         demand_award = 12 if recovery_preference == 0 else 8
         demand_signal = f"PMI {pmi:.1f} / 新订单 {new_orders:.1f}，景气方向暂时中性"
     raw += demand_award
     available += 20
-    factors.append(_factor_row("景气方向", demand_signal, demand_award, 20, "优先看 PMI、新订单和生产分项，而不是只看一个 PMI 总量。"))
+    factors.append(_factor_row("景气方向", demand_signal, demand_award, 20, "优先看 PMI、新订单和生产分项，而不是只看一个 PMI 总量。", factor_id="m1_demand_cycle"))
 
     ppi = float(china_macro.get("ppi_yoy", 0.0))
     price_state = str(china_macro.get("price_state", "stable"))
@@ -4571,14 +6028,14 @@ def _macro_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) ->
         price_award = 15 if reflation_preference >= 1 else 8 if reflation_preference == 0 else 0
         price_signal = f"PPI {ppi:.1f}% 且趋势回升，价格链条偏修复"
     elif price_state == "disinflation":
-        price_award = 15 if reflation_preference <= -1 else 0 if reflation_preference >= 1 else 8
+        price_award = 15 if reflation_preference <= -1 else -6 if reflation_preference >= 1 else 6
         price_signal = f"PPI {ppi:.1f}% 且趋势走弱，价格链条偏通缩"
     else:
         price_award = 8 if reflation_preference == 0 else 5
         price_signal = f"PPI {ppi:.1f}% ，价格链条暂时中性"
     raw += price_award
     available += 15
-    factors.append(_factor_row("价格链条", price_signal, price_award, 15, "PPI 更适合判断未来 3-6 个月的上游价格与利润链条，不直接替代个股基本面。"))
+    factors.append(_factor_row("价格链条", price_signal, price_award, 15, "PPI 更适合判断未来 3-6 个月的上游价格与利润链条，不直接替代个股基本面。", factor_id="m1_price_chain"))
 
     credit_impulse = str(china_macro.get("credit_impulse", "stable"))
     spread = float(china_macro.get("m1_m2_spread", 0.0))
@@ -4588,14 +6045,14 @@ def _macro_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) ->
         credit_award = 15 if credit_preference >= 1 else 8 if credit_preference == 0 else 0
         credit_signal = f"M1-M2 剪刀差 {spread:+.1f}pct，社融近3月均值 {sf_avg_text}，信用脉冲扩张"
     elif credit_impulse == "contracting":
-        credit_award = 15 if credit_preference <= -1 else 0 if credit_preference >= 1 else 8
+        credit_award = 15 if credit_preference <= -1 else -6 if credit_preference >= 1 else 4
         credit_signal = f"M1-M2 剪刀差 {spread:+.1f}pct，信用脉冲收缩"
     else:
         credit_award = 8 if credit_preference == 0 else 5
         credit_signal = f"M1-M2 剪刀差 {spread:+.1f}pct，信用脉冲暂时中性"
     raw += credit_award
     available += 15
-    factors.append(_factor_row("信用脉冲", credit_signal, credit_award, 15, "更偏中期环境因子，主要影响资金扩张、订单兑现和风险偏好。"))
+    factors.append(_factor_row("信用脉冲", credit_signal, credit_award, 15, "更偏中期环境因子，主要影响资金扩张、订单兑现和风险偏好。", factor_id="m1_credit_impulse"))
 
     regime_name = str(regime.get("current_regime", "unknown"))
     defensive_preference = int(leading_profile.get("defensive", 0))
@@ -4603,17 +6060,17 @@ def _macro_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) ->
         regime_award = 10 if defensive_preference >= 1 else 4 if defensive_preference == 0 else 0
         regime_signal = f"当前背景 `{regime_name}`，偏防守/避险"
     elif regime_name == "recovery":
-        regime_award = 10 if recovery_preference >= 1 else 4 if recovery_preference == 0 else 0
+        regime_award = 10 if recovery_preference >= 1 else -4 if recovery_preference <= -1 else 4
         regime_signal = "当前背景 `recovery`，偏景气修复"
     elif regime_name == "overheating":
-        regime_award = 10 if reflation_preference >= 1 else 4 if reflation_preference == 0 else 0
+        regime_award = 10 if reflation_preference >= 1 else -4 if reflation_preference <= -1 else 4
         regime_signal = "当前背景 `overheating`，更利于资源/通胀受益方向"
     else:
         regime_award = 4
         regime_signal = f"当前背景 `{regime_name}`，暂按中性处理"
     raw += regime_award
     available += 10
-    factors.append(_factor_row("当前 regime", regime_signal, regime_award, 10, "把中期宏观环境映射到当前板块/标的，不单独决定方向。"))
+    factors.append(_factor_row("当前 regime", regime_signal, regime_award, 10, "把中期宏观环境映射到当前板块/标的，不单独决定方向。", factor_id="m1_regime_context"))
 
     score = _normalize_dimension(raw, available, 40)
     return {
@@ -4628,7 +6085,7 @@ def _macro_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) ->
             "ℹ️ 宏观领先指标缺失，本次评级未纳入该维度",
         ),
         "factors": factors,
-        "core_signal": _top_positive_signals(factors),
+        "core_signal": _top_material_signals(factors),
         "missing": False,
         "macro_reverse": (score or 0) <= 5,
     }
@@ -4825,6 +6282,7 @@ def _build_narrative(
     analysis_seed: Mapping[str, Any],
     metadata: Mapping[str, Any],
     asset_type: str,
+    history: pd.DataFrame,
     metrics: Mapping[str, float],
     dimensions: Mapping[str, Mapping[str, Any]],
     technical: Mapping[str, Any],
@@ -4864,6 +6322,9 @@ def _build_narrative(
     price_percentile = float(metrics.get("price_percentile_1y", 0.5))
     commodity_like_fund = _is_commodity_like_fund(asset_type, metadata, fund_profile)
     support_signal = _find_factor(dimensions["technical"], "支撑位").get("signal", "关键支撑未明确")
+    pressure_factor = _find_factor(dimensions["technical"], "压力位")
+    pressure_signal = str(pressure_factor.get("signal", "")).strip()
+    pressure_award = int(pressure_factor.get("awarded", 0) or 0)
     macd_signal = _find_factor(dimensions["technical"], "MACD 金叉").get("signal", "MACD 方向一般")
     candle_factor = _find_factor(dimensions["technical"], "K线形态")
     candle_signal = str(candle_factor.get("signal", "")).strip()
@@ -4871,10 +6332,17 @@ def _build_narrative(
     divergence_factor = _find_factor(dimensions["technical"], "量价/动量背离")
     divergence_signal = str(divergence_factor.get("signal", "")).strip()
     divergence_award = int(divergence_factor.get("awarded", 0) or 0)
+    false_break_factor = _find_factor(dimensions["technical"], "假突破识别")
+    false_break_signal = str(false_break_factor.get("signal", "")).strip()
+    false_break_award = int(false_break_factor.get("awarded", 0) or 0)
+    compression_factor = _find_factor(dimensions["technical"], "压缩启动")
+    compression_signal = str(compression_factor.get("signal", "")).strip()
+    compression_award = int(compression_factor.get("awarded", 0) or 0)
     rsi = float(technical.get("rsi", {}).get("RSI", 50.0))
     ma20 = float(technical.get("ma_system", {}).get("mas", {}).get("MA20", 0.0))
     ma60 = float(technical.get("ma_system", {}).get("mas", {}).get("MA60", ma20))
     support_level = max(float(technical.get("fibonacci", {}).get("levels", {}).get("0.618", 0.0)), ma60)
+    _, _, nearest_pressure_level = _pressure_signals(history, technical)
 
     macro_driver = (
         f"当前更偏 `{theme}` / `{regime}` 背景。对 `{sector}` 方向来说，宏观与主线整体是 {'顺风' if macro_score >= 30 else '中性或略逆风'}，"
@@ -4923,6 +6391,21 @@ def _build_narrative(
             technical_driver += f" 最近 1-3 根 K 线还出现 `{candle_signal}`，说明短线承接开始改善。"
         elif candle_award <= -7:
             technical_driver += f" 但最近 1-3 根 K 线出现 `{candle_signal}`，说明反弹结构还没有真正站稳。"
+    if false_break_signal and "未识别到明确假突破" not in false_break_signal:
+        if false_break_award > 0:
+            technical_driver += f" 同时出现 `{false_break_signal}`，空头试探失败是多头的辅助确认。"
+        elif false_break_award < 0:
+            technical_driver += f" 同时出现 `{false_break_signal}`，多头试探失败说明突破位上方承压仍重。"
+    if compression_signal and "中性" not in compression_signal:
+        if compression_award >= 8:
+            technical_driver += f" 当前处于 `{compression_signal}`，是相对干净的介入 setup。"
+        elif compression_award < 0:
+            technical_driver += f" 但当前处于 `{compression_signal}`，追涨赔率偏低。"
+    if pressure_signal:
+        if pressure_award < 0:
+            technical_driver += f" 同时上方还要先消化 `{pressure_signal}`，所以反弹更像先处理承压，而不是直接进入顺畅加速。"
+        elif pressure_award > 0 and "上方最近明确压力不近" in pressure_signal:
+            technical_driver += " 上方最近没有很近的压制位，说明一旦动能修复，价格还有继续试探的空间。"
     if asset_type == "cn_fund" and fund_profile:
         selection = str(dict(fund_profile.get("style") or {}).get("selection", "")).strip()
         if selection:
@@ -4948,6 +6431,8 @@ def _build_narrative(
         positives.append("回撤、相关性或防守属性还算可控，适合放进组合框架里评估。")
     if support_signal and support_signal != "当前价格未明显贴近 MA60、前低或关键斐波那契支撑":
         positives.append(f"价格靠近 `{support_signal}`，说明下方不是完全没有承接。")
+    if pressure_award > 0 and pressure_signal and "上方最近明确压力不近" in pressure_signal:
+        positives.append("上方最近明确压力不近，说明反弹不是一抬头就先撞线。")
     if not positives:
         positives.append("当前仍保留一定观察价值，主要因为趋势并未被彻底破坏。")
 
@@ -4962,6 +6447,8 @@ def _build_narrative(
         cautions.append("短线动能不足，趋势确认仍欠缺。")
     if rsi > 70:
         cautions.append("短线已经偏拥挤，即使逻辑不坏，追高的盈亏比也不优。")
+    if pressure_award < 0 and pressure_signal:
+        cautions.append(f"上方还要先消化 `{pressure_signal}`，反弹不等于已经进入顺畅加速。")
     if not cautions:
         cautions.append("当前最大问题不是方向，而是节奏，仍要防止追在情绪高点。")
 
@@ -4996,6 +6483,7 @@ def _build_narrative(
     watch_points = [
         f"短线动能是否重新修复：重点看 `{macd_signal}` 能否扭转，或价格重新站上关键均线。",
         f"关键支撑是否有效：重点看 `{support_signal}` 附近是否出现企稳，而不是继续失守。",
+        f"近端压力是否消化：重点看 `{pressure_signal or '上方近端压力'}` 能否被放量突破，而不是一反弹就遇阻回落。",
         "资金是否重新形成共振：ETF 份额、主力资金或相关配置资金是否重新转正。",
         f"主线变量是否延续：继续观察 `{theme}` 是否强化，以及它对应的宏观变量是否继续配合。",
     ]
@@ -5012,6 +6500,16 @@ def _build_narrative(
             "judge": f"收盘不低于关键支撑 `{support_level:.3f}` 下方 2%",
             "bull": "说明回调更像消化而不是破位，左侧观察价值仍在。",
             "bear": "说明支撑失效，先处理风险，再谈逻辑。",
+        },
+        {
+            "watch": "近端压力是否突破",
+            "judge": (
+                f"收盘站上近端压力 `{nearest_pressure_level:.3f}`，且次日不回落失守"
+                if nearest_pressure_level > 0
+                else "价格继续抬高并站稳近端高点，上方没有新的明显承压"
+            ),
+            "bull": "说明上方抛压开始被消化，反弹更有机会升级成趋势确认。",
+            "bear": "说明还是先遇阻回落，当前更像区间内反弹或修复波段。",
         },
         {
             "watch": "资金是否回流",
@@ -5119,6 +6617,7 @@ def _action_plan(
     rating = analysis["rating"]["rank"]
     asset_type = str(analysis.get("asset_type", ""))
     tech = analysis["dimensions"]["technical"]["score"]
+    fundamental_score = analysis["dimensions"]["fundamental"]["score"] or 0
     risk_score = analysis["dimensions"]["risk"]["score"] or 0
     relative_score = analysis["dimensions"]["relative_strength"]["score"] or 0
     catalyst_score = analysis["dimensions"]["catalyst"]["score"] or 0
@@ -5129,11 +6628,11 @@ def _action_plan(
     candlestick_patterns = set(technical.get("candlestick", []) or [])
     bearish_candle = any(
         pattern in candlestick_patterns
-        for pattern in {"evening_star", "three_black_crows", "bearish_engulfing", "dark_cloud_cover", "shooting_star", "bearish_marubozu"}
+        for pattern in {"evening_star", "three_black_crows", "three_inside_down", "bearish_engulfing", "bearish_harami", "dark_cloud_cover", "tweezer_top", "shooting_star", "hanging_man", "bearish_marubozu"}
     )
     bullish_candle = any(
         pattern in candlestick_patterns
-        for pattern in {"morning_star", "three_white_soldiers", "bullish_engulfing", "piercing_line", "hammer", "inverted_hammer", "bullish_marubozu"}
+        for pattern in {"morning_star", "three_white_soldiers", "three_inside_up", "bullish_engulfing", "bullish_harami", "piercing_line", "tweezer_bottom", "hammer", "inverted_hammer", "bullish_marubozu"}
     )
     fib_levels = technical.get("fibonacci", {}).get("levels", {})
     ma20 = float(technical.get("ma_system", {}).get("mas", {}).get("MA20", history["close"].iloc[-1]))
@@ -5143,6 +6642,13 @@ def _action_plan(
     vol_percentile = float((metrics or {}).get("volatility_percentile_1y", 0.5))
     return_5d = float((metrics or {}).get("return_5d", 0.0))
     trade_state = _trade_state_label(analysis["dimensions"], metrics or {}, technical)
+
+    # Read setup signals from technical scorecard
+    setup_block = dict(technical.get("setup") or {})
+    false_break_kind = str(dict(setup_block.get("false_break") or {}).get("kind", "none"))
+    false_break_award = -8 if false_break_kind == "bullish_false_break" else 8 if false_break_kind == "bearish_false_break" else 0
+    compression_kind = str(dict(setup_block.get("compression_setup") or {}).get("kind", "neutral"))
+    compression_award = 10 if compression_kind == "compression_breakout" else -5 if compression_kind == "momentum_chase" else 0
 
     if rating >= 3 and not macro_reverse:
         direction = "观望偏多" if trade_state in {"持有优于追高", "等右侧确认", "风险释放前不宜激进"} else "做多"
@@ -5154,10 +6660,12 @@ def _action_plan(
         direction = "回避"
 
     # --- Entry conditions: incorporate risk and relative strength ---
-    if divergence_signal == "bearish" or bearish_candle:
-        entry = "先等顶背离消化、MACD/OBV 重新同步，再考虑分批介入"
-    elif rsi > 70:
-        entry = "等 RSI 回落到 60 附近且 MACD 不死叉，再考虑分批介入"
+    if divergence_signal == "bearish" or bearish_candle or false_break_award < 0:
+        entry = "先等顶背离/假突破消化、MACD/OBV 重新同步，再考虑分批介入"
+    elif rsi > 70 or compression_award < 0:
+        entry = "等 RSI 回落到 60 附近且 MACD 不死叉，当前情绪追价区赔率偏低，不追高"
+    elif compression_award >= 8:
+        entry = "当前处于压缩后放量启动 setup，可在量能持续确认后小仓试探，止损设在压缩区低点"
     elif (divergence_signal == "bullish" or bullish_candle) and tech is not None and tech >= 40:
         entry = "已有底背离雏形，更适合等价格重新站回 MA20 或 MACD 继续走强后小仓试探"
     elif tech is not None and tech >= 55 and ma20_gap >= 0.05 and return_5d >= 0.05:
@@ -5267,7 +6775,13 @@ def _action_plan(
     elif rating == 2:
         scaling = "一次性小仓位，不加仓"
     else:
-        scaling = "仅观察仓，不加仓"
+        scaling = _watch_scaling_plan_from_scores(
+            technical_score=int(tech or 0),
+            fundamental_score=int(fundamental_score or 0),
+            catalyst_score=int(catalyst_score or 0),
+            relative_score=int(relative_score or 0),
+            risk_score=int(risk_score or 0),
+        )
 
     corr_warning = ""
     if correlation_pair and len(correlation_pair) >= 2:
@@ -5279,7 +6793,7 @@ def _action_plan(
         rating=rating,
         asset_type=asset_type,
         technical_score=int(tech or 0),
-        fundamental_score=int(analysis["dimensions"]["fundamental"]["score"] or 0),
+        fundamental_score=int(fundamental_score or 0),
         catalyst_score=int(catalyst_score or 0),
         relative_score=int(relative_score or 0),
         risk_score=int(risk_score or 0),
@@ -5307,6 +6821,25 @@ def _action_plan(
     }
 
 
+def _retry_china_history_after_failure(
+    symbol: str,
+    asset_type: str,
+    config: Mapping[str, Any],
+) -> pd.DataFrame:
+    if asset_type not in {"cn_stock", "cn_etf", "cn_index", "cn_fund"}:
+        raise ValueError(f"Unsupported China asset type retry: {asset_type}")
+    collector = ChinaMarketCollector(dict(config))
+    context = get_asset_context(symbol, asset_type, dict(config))
+    source_symbol = context.source_symbol
+    if asset_type == "cn_stock":
+        return collector.get_stock_daily(source_symbol)
+    if asset_type == "cn_etf":
+        return collector.get_etf_daily(source_symbol)
+    if asset_type == "cn_index":
+        return collector.get_index_daily(symbol, proxy_symbol=source_symbol)
+    return collector.get_open_fund_daily(symbol, proxy_symbol=source_symbol)
+
+
 def analyze_opportunity(
     symbol: str,
     asset_type: str,
@@ -5325,17 +6858,48 @@ def analyze_opportunity(
     notes: List[str] = []
     history_fallback_mode = False
     try:
-        history = normalize_ohlcv_frame(fetch_asset_history(symbol, asset_type, dict(config)))
+        raw_history = fetch_asset_history(symbol, asset_type, dict(config))
+        history = normalize_ohlcv_frame(raw_history)
+        history_source = str(getattr(raw_history, "attrs", {}).get("history_source", "") or getattr(history, "attrs", {}).get("history_source", "")).strip()
+        history_source_label = str(getattr(raw_history, "attrs", {}).get("history_source_label", "") or getattr(history, "attrs", {}).get("history_source_label", "")).strip()
+        if history_source:
+            metadata = dict(metadata)
+            metadata["history_source"] = history_source
+        if history_source_label:
+            metadata = dict(metadata)
+            metadata["history_source_label"] = history_source_label
     except Exception as exc:
-        fallback_history = build_snapshot_fallback_history(symbol, asset_type, config, periods=60)
-        if fallback_history is None or fallback_history.empty:
-            raise
-        history = normalize_ohlcv_frame(fallback_history)
-        metadata = dict(metadata)
-        metadata["history_fallback"] = True
-        metadata["history_fallback_reason"] = str(exc)
-        history_fallback_mode = True
-        notes.append("完整日线历史当前不可用，本次先用本地实时快照降级生成分析；技术、风险、相对强弱等历史依赖维度只作参考。")
+        retry_exc = exc
+        retry_history = None
+        if asset_type in {"cn_stock", "cn_etf", "cn_index", "cn_fund"}:
+            try:
+                retry_history = _retry_china_history_after_failure(symbol, asset_type, config)
+            except Exception as second_exc:  # pragma: no cover - only hit on repeated vendor failure
+                retry_exc = second_exc
+        if retry_history is not None and not retry_history.empty:
+            raw_history = retry_history
+            history = normalize_ohlcv_frame(raw_history)
+            history_source = str(getattr(raw_history, "attrs", {}).get("history_source", "") or getattr(history, "attrs", {}).get("history_source", "")).strip()
+            history_source_label = str(getattr(raw_history, "attrs", {}).get("history_source_label", "") or getattr(history, "attrs", {}).get("history_source_label", "")).strip()
+            if history_source:
+                metadata = dict(metadata)
+                metadata["history_source"] = history_source
+            if history_source_label:
+                metadata = dict(metadata)
+                metadata["history_source_label"] = history_source_label
+            notes.append("历史日线首轮抓取失败后已重试中国市场主链，并成功恢复完整日线。")
+        else:
+            fallback_history = build_snapshot_fallback_history(symbol, asset_type, config, periods=60)
+            if fallback_history is None or fallback_history.empty:
+                raise retry_exc
+            history = normalize_ohlcv_frame(fallback_history)
+            metadata = dict(metadata)
+            metadata["history_fallback"] = True
+            metadata["history_fallback_reason"] = str(retry_exc)
+            metadata["history_source"] = "snapshot_fallback"
+            metadata["history_source_label"] = "本地实时快照占位"
+            history_fallback_mode = True
+            notes.append("完整日线历史当前不可用，本次先用本地实时快照降级生成分析；技术、风险、相对强弱等历史依赖维度只作参考。")
     intraday = _intraday_snapshot(symbol, asset_type, config, history) if today_mode else {"enabled": False}
     technical = TechnicalAnalyzer(history).generate_scorecard(dict(config).get("technical", {}))
     metrics = compute_history_metrics(history)
@@ -5357,7 +6921,7 @@ def analyze_opportunity(
 
     dimensions = {
         "technical": _technical_dimension(history, technical),
-        "fundamental": _fundamental_dimension(symbol, asset_type, metadata, metrics, config, fund_profile),
+        "fundamental": _fundamental_dimension(symbol, asset_type, metadata, metrics, config, fund_profile, runtime_context),
         "catalyst": _catalyst_dimension(metadata, runtime_context, fund_profile),
         "relative_strength": _relative_strength_dimension(symbol, asset_type, metadata, metrics, asset_returns, runtime_context),
         "chips": _chips_dimension(symbol, asset_type, metadata, runtime_context, config),
@@ -5413,6 +6977,7 @@ def analyze_opportunity(
         },
         metadata,
         asset_type,
+        history,
         metrics,
         dimensions,
         technical,
@@ -5454,6 +7019,226 @@ def analyze_opportunity(
     return result
 
 
+def _signal_confidence_warning_line(confidence: Mapping[str, Any]) -> str:
+    payload = dict(confidence or {})
+    if not payload or not payload.get("available"):
+        return ""
+    stop_rate = payload.get("stop_hit_rate")
+    target_rate = payload.get("target_hit_rate")
+    try:
+        stop_value = float(stop_rate)
+    except (TypeError, ValueError):
+        return ""
+    try:
+        target_value = float(target_rate) if target_rate is not None else None
+    except (TypeError, ValueError):
+        target_value = None
+    if target_value is not None and stop_value > 0.5 and target_value < 0.2:
+        return f"历史相似样本止损触发率 {stop_value:.0%}、目标触达率 {target_value:.0%}，当前执行容错率偏低。"
+    if stop_value > 0.6:
+        return f"历史相似样本止损触发率 {stop_value:.0%}，说明同类信号的止损频率偏高。"
+    return ""
+
+
+def _append_sentence(base: str, extra: str) -> str:
+    head = str(base).strip()
+    tail = str(extra).strip()
+    if not tail:
+        return head
+    if not head:
+        return tail
+    if head.endswith(("。", "！", "？")):
+        return f"{head}{tail}"
+    return f"{head} {tail}"
+
+
+def _prepend_context(base: str, context: str) -> str:
+    text = str(base).strip()
+    prefix = str(context).strip()
+    if not text or not prefix:
+        return text
+    if text.startswith(prefix):
+        return text
+    return f"{prefix}{text}"
+
+
+def _dimension_constraint_phrase(dimension: Mapping[str, Any]) -> str:
+    for factor in list(dimension.get("factors") or []):
+        signal = str(factor.get("signal", "")).strip()
+        display = str(factor.get("display_score", "")).strip()
+        if not signal or signal in {"—", "缺失", "不适用"}:
+            continue
+        if display.startswith("-") or display.startswith("0/"):
+            return signal
+    for key in ("core_signal", "summary"):
+        text = str(dimension.get(key, "")).strip()
+        if text and text not in {"当前没有明确亮点", "当前没有额外说明。"}:
+            return text
+    return ""
+
+
+def _action_guidance_hint(analysis: Mapping[str, Any]) -> Dict[str, str]:
+    dimensions = dict(analysis.get("dimensions") or {})
+    ordered = [
+        ("relative_strength", "相对强弱"),
+        ("technical", "技术面"),
+        ("catalyst", "催化面"),
+        ("risk", "风险特征"),
+        ("seasonality", "季节/日历"),
+    ]
+    candidates: List[tuple[int, str, str]] = []
+    for key, label in ordered:
+        dimension = dict(dimensions.get(key) or {})
+        score = dimension.get("score")
+        if score is None:
+            continue
+        phrase = _dimension_constraint_phrase(dimension)
+        if not phrase:
+            continue
+        candidates.append((int(score), label, phrase.replace("；", "，")))
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda item: item[0])
+    _, label, phrase = candidates[0]
+    if len(phrase) > 36:
+        phrase = phrase[:36].rstrip("，；。 ") + "..."
+    focus = f"{label}还停在“{phrase}”"
+    return {
+        "fit": f"眼下更卡在{focus}。",
+        "misfit": f"在{focus}改善前，不要把观察仓误解成趋势已经重启。",
+        "scaling": f"先等{focus}改善，再讨论第二笔。",
+    }
+
+
+def _personalize_action_guidance(analysis: Dict[str, Any]) -> None:
+    action = dict(analysis.get("action") or {})
+    if not action:
+        return
+    horizon = dict(action.get("horizon") or {})
+    if str(horizon.get("code", "")).strip() != "watch":
+        return
+    hint = _action_guidance_hint(analysis)
+    if not hint:
+        return
+    name = str(analysis.get("name", "")).strip()
+    context_prefix = f"对{name}来说，" if name else ""
+    if horizon:
+        horizon["style"] = _prepend_context(str(horizon.get("style", "")), context_prefix)
+        horizon["fit_reason"] = _prepend_context(str(horizon.get("fit_reason", "")), context_prefix)
+        horizon["fit_reason"] = _append_sentence(str(horizon.get("fit_reason", "")), hint["fit"])
+        horizon["misfit_reason"] = _prepend_context(str(horizon.get("misfit_reason", "")), context_prefix)
+        horizon["misfit_reason"] = _append_sentence(str(horizon.get("misfit_reason", "")), hint["misfit"])
+        action["horizon"] = horizon
+    if action.get("scaling_plan"):
+        action["scaling_plan"] = _prepend_context(str(action.get("scaling_plan", "")), context_prefix)
+        action["scaling_plan"] = _append_sentence(str(action.get("scaling_plan", "")), hint["scaling"])
+    analysis["action"] = action
+
+
+def _watch_scaling_plan_from_scores(
+    *,
+    technical_score: int,
+    fundamental_score: int,
+    catalyst_score: int,
+    relative_score: int,
+    risk_score: int,
+    stop_hit_rate: float | None = None,
+    win_rate_20d: float | None = None,
+    confidence_score: int | None = None,
+) -> str:
+    if stop_hit_rate is not None and stop_hit_rate >= 0.6:
+        return "观察名单阶段，不预设加仓"
+    if risk_score >= 70 and technical_score >= 35 and catalyst_score < 20:
+        return "先按防守观察仓理解，等催化补齐后再讨论第二笔"
+    if fundamental_score >= 70 and relative_score < 40:
+        return "等轮动修复后，再重开加仓计划"
+    if relative_score >= 60 and fundamental_score < 30:
+        return "先盯基本面约束能否缓解，再决定是否给第二笔"
+    if win_rate_20d is not None and win_rate_20d >= 0.65 and technical_score < 45:
+        return "先等右侧确认，再决定是否开启第二笔"
+    if catalyst_score >= 50 and technical_score < 40:
+        return "先看催化能否转成趋势，再谈第二笔"
+    if catalyst_score < 20 and technical_score >= 35:
+        return "先等量能或催化补齐，再决定是否从观察转成试仓"
+    if technical_score < 35:
+        return "不抢反弹，不预设加仓"
+    if fundamental_score < 25:
+        return "先把基本面风险看清，再决定是否值得给第二笔"
+    if confidence_score is not None and confidence_score < 40:
+        return "样本置信度偏低，暂不预设加仓"
+    return "先列观察名单，不预设加仓"
+
+
+def _refresh_action_from_signal_confidence(analysis: Dict[str, Any]) -> None:
+    confidence = dict(analysis.get("signal_confidence") or {})
+    action = dict(analysis.get("action") or {})
+    if not action:
+        return
+
+    dimensions = dict(analysis.get("dimensions") or {})
+    technical_score = int(dict(dimensions.get("technical") or {}).get("score") or 0)
+    fundamental_score = int(dict(dimensions.get("fundamental") or {}).get("score") or 0)
+    catalyst_score = int(dict(dimensions.get("catalyst") or {}).get("score") or 0)
+    relative_score = int(dict(dimensions.get("relative_strength") or {}).get("score") or 0)
+    risk_score = int(dict(dimensions.get("risk") or {}).get("score") or 0)
+    action["horizon"] = build_analysis_horizon_profile(
+        rating=int(dict(analysis.get("rating") or {}).get("rank", 0) or 0),
+        asset_type=str(analysis.get("asset_type", "")),
+        technical_score=technical_score,
+        fundamental_score=fundamental_score,
+        catalyst_score=catalyst_score,
+        relative_score=relative_score,
+        risk_score=risk_score,
+        macro_reverse=bool(dict(dimensions.get("macro") or {}).get("macro_reverse", False)),
+        trade_state=str(dict(dict(analysis.get("narrative") or {}).get("judgment") or {}).get("state", "")),
+        direction=str(action.get("direction", "")),
+        position=str(action.get("position", "")),
+        stop_hit_rate=confidence.get("stop_hit_rate"),
+        win_rate_20d=confidence.get("win_rate_20d"),
+        confidence_score=int(confidence.get("confidence_score", 0) or 0) if confidence.get("confidence_score") is not None else None,
+    )
+
+    if action["horizon"].get("code") == "watch":
+        try:
+            stop_value = float(confidence.get("stop_hit_rate")) if confidence.get("stop_hit_rate") is not None else None
+        except (TypeError, ValueError):
+            stop_value = None
+        try:
+            win_value = float(confidence.get("win_rate_20d")) if confidence.get("win_rate_20d") is not None else None
+        except (TypeError, ValueError):
+            win_value = None
+        try:
+            confidence_value = int(confidence.get("confidence_score")) if confidence.get("confidence_score") is not None else None
+        except (TypeError, ValueError):
+            confidence_value = None
+        action["scaling_plan"] = _watch_scaling_plan_from_scores(
+            technical_score=technical_score,
+            fundamental_score=fundamental_score,
+            catalyst_score=catalyst_score,
+            relative_score=relative_score,
+            risk_score=risk_score,
+            stop_hit_rate=stop_value,
+            win_rate_20d=win_value,
+            confidence_score=confidence_value,
+        )
+
+    warning_line = _signal_confidence_warning_line(confidence)
+    if warning_line:
+        rating_payload = dict(analysis.get("rating") or {})
+        warnings = [str(item).strip() for item in (rating_payload.get("warnings") or []) if str(item).strip()]
+        if warning_line not in warnings:
+            warnings.append(warning_line)
+        rating_payload["warnings"] = warnings
+        analysis["rating"] = rating_payload
+
+        conclusion = str(analysis.get("conclusion", "")).strip()
+        if warning_line not in conclusion:
+            analysis["conclusion"] = f"{conclusion} {warning_line}".strip()
+
+    analysis["action"] = action
+    _personalize_action_guidance(analysis)
+
+
 def _attach_signal_confidence(
     analyses: Sequence[Dict[str, Any]],
     config: Mapping[str, Any],
@@ -5476,6 +7261,7 @@ def _attach_signal_confidence(
             target_pct=action.get("target_pct", 0.12),
             history_fallback=bool(analysis.get("history_fallback_mode")),
         )
+        _refresh_action_from_signal_confidence(analysis)
 
 
 def _fund_pool_composite_text(row: Mapping[str, Any]) -> str:
@@ -6412,30 +8198,65 @@ def discover_opportunities(config: Mapping[str, Any], top_n: int = 5, theme_filt
     coverage_analyses: List[Dict[str, Any]] = []
     analyses: List[Dict[str, Any]] = []
     blind_spots: List[str] = list(pool_warnings)
-    for item in pool:
-        try:
-            analysis = analyze_opportunity(
-                item.symbol,
-                item.asset_type,
-                config,
-                context=context,
-                metadata_override={
-                    "name": item.name,
-                    "sector": item.sector,
-                    "chain_nodes": item.chain_nodes,
-                    "region": item.region,
-                    "in_watchlist": item.in_watchlist,
-                },
-            )
-        except Exception as exc:
-            blind_spots.append(_client_safe_issue(f"{item.symbol} 扫描失败", exc))
-            continue
-        if analysis["excluded"]:
-            continue
-        passed += 1
-        coverage_analyses.append(analysis)
-        if analysis["rating"]["rank"] > 0:
-            analyses.append(analysis)
+    analysis_workers = max(1, min(int(dict(dict(config).get("opportunity") or {}).get("analysis_workers", 4) or 4), len(pool) or 1, 6))
+    base_context = dict(context)
+    if analysis_workers > 1 and len(pool) > 1:
+        with ThreadPoolExecutor(max_workers=analysis_workers) as executor:
+            future_map = {
+                executor.submit(
+                    analyze_opportunity,
+                    item.symbol,
+                    item.asset_type,
+                    config,
+                    context={**base_context, "runtime_caches": {}},
+                    metadata_override={
+                        "name": item.name,
+                        "sector": item.sector,
+                        "chain_nodes": item.chain_nodes,
+                        "region": item.region,
+                        "in_watchlist": item.in_watchlist,
+                    },
+                ): item
+                for item in pool
+            }
+            for future in as_completed(future_map):
+                item = future_map[future]
+                try:
+                    analysis = future.result()
+                except Exception as exc:
+                    blind_spots.append(_client_safe_issue(f"{item.symbol} 扫描失败", exc))
+                    continue
+                if analysis["excluded"]:
+                    continue
+                passed += 1
+                coverage_analyses.append(analysis)
+                if analysis["rating"]["rank"] > 0:
+                    analyses.append(analysis)
+    else:
+        for item in pool:
+            try:
+                analysis = analyze_opportunity(
+                    item.symbol,
+                    item.asset_type,
+                    config,
+                    context=context,
+                    metadata_override={
+                        "name": item.name,
+                        "sector": item.sector,
+                        "chain_nodes": item.chain_nodes,
+                        "region": item.region,
+                        "in_watchlist": item.in_watchlist,
+                    },
+                )
+            except Exception as exc:
+                blind_spots.append(_client_safe_issue(f"{item.symbol} 扫描失败", exc))
+                continue
+            if analysis["excluded"]:
+                continue
+            passed += 1
+            coverage_analyses.append(analysis)
+            if analysis["rating"]["rank"] > 0:
+                analyses.append(analysis)
     analyses.sort(
         key=lambda item: (
             item["rating"]["rank"],
@@ -6527,31 +8348,67 @@ def discover_fund_opportunities(
     passed = 0
     analyses: List[Dict[str, Any]] = []
     blind_spots: List[str] = list(pool_warnings)
-    for item in pool:
-        try:
-            override: Dict[str, Any] = {
-                "name": item.name,
-                "sector": item.sector,
-                "chain_nodes": item.chain_nodes,
-                "region": item.region,
-                "in_watchlist": item.in_watchlist,
-            }
-            if item.metadata:
-                override.update(item.metadata)
-            analysis = analyze_opportunity(
-                item.symbol,
-                item.asset_type,
-                config,
-                context=context,
-                metadata_override=override,
-            )
-        except Exception as exc:
-            blind_spots.append(_client_safe_issue(f"{item.symbol} ({item.name}) 扫描失败", exc))
-            continue
-        if analysis["excluded"]:
-            continue
-        passed += 1
-        analyses.append(analysis)
+    analysis_workers = max(1, min(int(dict(dict(config).get("opportunity") or {}).get("analysis_workers", 4) or 4), len(pool) or 1, 6))
+    base_context = dict(context)
+    if analysis_workers > 1 and len(pool) > 1:
+        with ThreadPoolExecutor(max_workers=analysis_workers) as executor:
+            future_map = {}
+            for item in pool:
+                override: Dict[str, Any] = {
+                    "name": item.name,
+                    "sector": item.sector,
+                    "chain_nodes": item.chain_nodes,
+                    "region": item.region,
+                    "in_watchlist": item.in_watchlist,
+                }
+                if item.metadata:
+                    override.update(item.metadata)
+                future = executor.submit(
+                    analyze_opportunity,
+                    item.symbol,
+                    item.asset_type,
+                    config,
+                    context={**base_context, "runtime_caches": {}},
+                    metadata_override=override,
+                )
+                future_map[future] = item
+            for future in as_completed(future_map):
+                item = future_map[future]
+                try:
+                    analysis = future.result()
+                except Exception as exc:
+                    blind_spots.append(_client_safe_issue(f"{item.symbol} ({item.name}) 扫描失败", exc))
+                    continue
+                if analysis["excluded"]:
+                    continue
+                passed += 1
+                analyses.append(analysis)
+    else:
+        for item in pool:
+            try:
+                override: Dict[str, Any] = {
+                    "name": item.name,
+                    "sector": item.sector,
+                    "chain_nodes": item.chain_nodes,
+                    "region": item.region,
+                    "in_watchlist": item.in_watchlist,
+                }
+                if item.metadata:
+                    override.update(item.metadata)
+                analysis = analyze_opportunity(
+                    item.symbol,
+                    item.asset_type,
+                    config,
+                    context=context,
+                    metadata_override=override,
+                )
+            except Exception as exc:
+                blind_spots.append(_client_safe_issue(f"{item.symbol} ({item.name}) 扫描失败", exc))
+                continue
+            if analysis["excluded"]:
+                continue
+            passed += 1
+            analyses.append(analysis)
     analyses.sort(
         key=lambda item: (
             item["rating"]["rank"],
@@ -6825,6 +8682,7 @@ def discover_stock_opportunities(
     top_n: int = 20,
     market: str = "all",
     sector_filter: str = "",
+    context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Scan a stock universe and surface top picks."""
     def _coverage_state(analyses: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -6853,8 +8711,14 @@ def discover_stock_opportunities(
             "summary": f"结构化事件覆盖 {structured_count}/{total}，高置信公司新闻覆盖 {direct_count}/{total}。",
         }
 
-    relevant_types = list(dict.fromkeys(["cn_stock", "cn_etf", "hk", "us", "futures"]))
-    context = build_market_context(config, relevant_asset_types=relevant_types)
+    relevant_by_market = {
+        "cn": ["cn_stock", "cn_etf", "futures"],
+        "hk": ["hk", "cn_etf", "futures"],
+        "us": ["us", "cn_etf", "futures"],
+        "all": ["cn_stock", "cn_etf", "hk", "us", "futures"],
+    }
+    relevant_types = list(dict.fromkeys(relevant_by_market.get(str(market), relevant_by_market["all"])))
+    runtime_context = context if context is not None else build_market_context(config, relevant_asset_types=relevant_types)
     pool, pool_warnings = build_stock_pool(config, market=market, sector_filter=sector_filter)
     passed = 0
     analyses: List[Dict[str, Any]] = []
@@ -6874,7 +8738,7 @@ def discover_stock_opportunities(
                 item.symbol,
                 item.asset_type,
                 config,
-                context=context,
+                context=runtime_context,
                 metadata_override=override,
             )
         except Exception as exc:
@@ -6924,8 +8788,8 @@ def discover_stock_opportunities(
         "passed_pool": passed,
         "market": market,
         "market_label": market_labels.get(market, market),
-        "regime": context.get("regime", {}),
-        "day_theme": context.get("day_theme", {}),
+        "regime": runtime_context.get("regime", {}),
+        "day_theme": runtime_context.get("day_theme", {}),
         "data_coverage": _coverage_state(analyses),
         "coverage_analyses": analyses,
         "top": analyses[:top_n],
