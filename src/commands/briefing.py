@@ -35,7 +35,7 @@ from src.commands.release_check import check_generic_client_report
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.horizon import get_horizon_contract
-from src.processors.opportunity_engine import discover_stock_opportunities
+from src.processors.opportunity_engine import discover_stock_opportunities, _today_theme as _opportunity_day_theme
 from src.processors.regime import RegimeDetector
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.processors.trade_handoff import portfolio_whatif_handoff
@@ -361,13 +361,49 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
     return snapshots, alerts, rows
 
 
-def _briefing_a_share_watch_rows(config: Dict[str, Any]) -> tuple[List[List[str]], List[str], Dict[str, Any]]:
+def _briefing_shared_market_context(
+    config: Dict[str, Any],
+    *,
+    china_macro: Dict[str, Any],
+    global_proxy: Dict[str, Any],
+    monitor_rows: List[Dict[str, Any]],
+    regime_result: Dict[str, Any],
+    news_report: Dict[str, Any],
+    drivers: Dict[str, Any],
+    pulse: Dict[str, Any],
+    events: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    return {
+        "config": dict(config),
+        "as_of": datetime.now(),
+        "china_macro": dict(china_macro or {}),
+        "global_proxy": dict(global_proxy or {}),
+        "monitor_rows": list(monitor_rows or []),
+        "regime": dict(regime_result or {}),
+        "day_theme": _opportunity_day_theme(news_report or {}, monitor_rows or []),
+        "news_report": dict(news_report or {}),
+        "events": list(events or []),
+        "drivers": dict(drivers or {}),
+        "pulse": dict(pulse or {}),
+        "notes": [],
+        "preferred_sources": [],
+        "watchlist_returns": {},
+        "benchmark_returns": {},
+        "runtime_caches": {},
+    }
+
+
+def _briefing_a_share_watch_rows(
+    config: Dict[str, Any],
+    *,
+    shared_context: Optional[Dict[str, Any]] = None,
+) -> tuple[List[List[str]], List[str], Dict[str, Any]]:
     top_n = max(int(config.get("briefing_a_share_top_n", 5) or 5), 0)
     if top_n <= 0:
         return [], ["当前已关闭 A 股全市场观察池。"], {"enabled": False, "mode": "disabled"}
     try:
         shortlist_n = max(int(config.get("briefing_a_share_shortlist", max(top_n * 2, 8)) or max(top_n * 2, 8)), top_n)
-        payload = discover_stock_opportunities(config, top_n=shortlist_n, market="cn")
+        payload = discover_stock_opportunities(config, top_n=shortlist_n, market="cn", context=shared_context)
     except Exception as exc:  # noqa: BLE001
         return [], [f"A 股全市场观察池暂不可用：{exc}"], {"enabled": True, "mode": "unavailable"}
     analyses = list(payload.get("coverage_analyses") or [])
@@ -3925,14 +3961,28 @@ def main() -> None:
     pulse = MarketPulseCollector(config).collect()
     drivers = MarketDriversCollector(config).collect()
     news_report = _news_report(snapshots, china_macro, global_proxy, config, args.news_source)
+    events = EventsCollector(config).collect(mode=args.mode)
     a_share_watch_rows: List[List[str]] = []
     a_share_watch_lines: List[str] = []
     a_share_watch_meta: Dict[str, Any] = {}
     if args.mode in {"daily", "weekly", "market"}:
-        a_share_watch_rows, a_share_watch_lines, a_share_watch_meta = _briefing_a_share_watch_rows(config)
+        a_share_watch_context = _briefing_shared_market_context(
+            config,
+            china_macro=china_macro,
+            global_proxy=global_proxy,
+            monitor_rows=monitor_rows,
+            regime_result=regime_result,
+            news_report=news_report,
+            drivers=drivers,
+            pulse=pulse,
+            events=events,
+        )
+        a_share_watch_rows, a_share_watch_lines, a_share_watch_meta = _briefing_a_share_watch_rows(
+            config,
+            shared_context=a_share_watch_context,
+        )
     narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime_result, a_share_watch_meta)
     anomaly_report = _anomaly_report(snapshots, monitor_rows)
-    events = EventsCollector(config).collect(mode=args.mode)
     liquidity_lines = _liquidity_lines(config)
     data_coverage, missing_sources = _coverage_metadata(news_report, liquidity_lines, events, global_proxy_note, monitor_rows)
     macro_items = macro_lines(china_macro, global_proxy)

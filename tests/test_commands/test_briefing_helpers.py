@@ -11,6 +11,7 @@ from src.commands.briefing import (
     _appendix_derivative_lines,
     _action_lines,
     _briefing_a_share_watch_rows,
+    _briefing_shared_market_context,
     _briefing_internal_dir,
     _compact_headline_lines,
     _coverage_metadata,
@@ -112,10 +113,12 @@ def test_appendix_derivative_lines_do_not_render_fake_zero_vix() -> None:
 
 
 def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
     monkeypatch.setattr(
         briefing_module,
         "discover_stock_opportunities",
-        lambda config, top_n=8, market="cn": {  # noqa: ARG005
+        lambda config, top_n=8, market="cn", context=None: captured.update({"context": context}) or {  # noqa: ARG005
             "scan_pool": 1,
             "passed_pool": 1,
             "blind_spots": ["部分样本缺少完整事件覆盖。"],
@@ -150,6 +153,41 @@ def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> 
     assert meta["report_top_n"] == 1
     assert meta["blind_spot"] == "部分样本缺少完整事件覆盖。"
     assert "factor_contract" in meta
+    assert captured["context"] is None
+
+
+def test_briefing_a_share_watch_rows_reuses_shared_context(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        briefing_module,
+        "discover_stock_opportunities",
+        lambda config, top_n=8, market="cn", context=None: captured.update({"context": context}) or {  # noqa: ARG005
+            "scan_pool": 0,
+            "passed_pool": 0,
+            "blind_spots": [],
+            "top": [],
+            "coverage_analyses": [],
+        },
+    )
+
+    shared_context = _briefing_shared_market_context(
+        {},
+        china_macro={"pmi": 50.1},
+        global_proxy={"dxy_20d_change": -0.01},
+        monitor_rows=[{"name": "VIX波动率", "latest": 18.0}],
+        regime_result={"current_regime": "recovery", "preferred_assets": ["成长股"]},
+        news_report={"items": [{"category": "fed"}]},
+        drivers={"industry_spot": pd.DataFrame()},
+        pulse={"zt_pool": pd.DataFrame()},
+        events=[{"title": "财报窗口"}],
+    )
+
+    _briefing_a_share_watch_rows({}, shared_context=shared_context)
+
+    assert captured["context"] == shared_context
+    assert captured["context"]["regime"]["current_regime"] == "recovery"
+    assert captured["context"]["day_theme"]["code"] == "rate_growth"
 
 
 def test_briefing_action_helpers_include_portfolio_whatif_handoff() -> None:
