@@ -211,11 +211,18 @@ def _signal_confidence_lines(analysis: Mapping[str, Any]) -> List[str]:
     ]
     lines.extend(_table(["指标", "结果"], rows))
     sample_dates = list(confidence.get("sample_dates") or [])
+    scope = str(confidence.get("scope", "同标的日线相似场景")).strip() or "同标的日线相似场景"
+    non_overlapping = confidence.get("non_overlapping_count", confidence.get("sample_count", "—"))
+    coverage_months = confidence.get("coverage_months", "—")
+    quality_label = str(confidence.get("sample_quality_label", "—")).strip() or "—"
+    quality_score = confidence.get("sample_quality_score", "—")
+    confidence_label = str(confidence.get("confidence_label", "—")).strip() or "—"
+    confidence_score = confidence.get("confidence_score", "—")
     lines.extend(
         [
             "",
-            "- 这层只反映历史相似量价/技术场景的样本置信度，不等于本次总推荐置信度。",
-            "- 严格口径会剔除未来窗口重叠样本，避免把一段连续走势重复算成多次命中。",
+            f"- 这层更像 `{scope}` 的历史统计：当前保留 `{non_overlapping}` 个非重叠样本，覆盖约 `{coverage_months}` 个月，不直接替代本次总推荐判断。",
+            f"- 当前样本质量 `{quality_label}`（{quality_score}/100）、样本置信度 `{confidence_label}`（{confidence_score}/100）；严格口径会先去掉未来窗口重叠样本，避免把同一段走势重复算成多次命中。",
         ]
     )
     quality_notes = [str(item).strip() for item in (confidence.get("quality_notes") or []) if str(item).strip()]
