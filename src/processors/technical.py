@@ -25,6 +25,7 @@ def normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Price dataframe is empty")
 
     frame = df.copy()
+    attrs = dict(getattr(df, "attrs", {}) or {})
     if isinstance(frame.index, pd.DatetimeIndex) and "date" not in frame.columns:
         index_name = frame.index.name or "date"
         frame = frame.reset_index().rename(columns={index_name: "date"})
@@ -64,7 +65,9 @@ def normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
 
     frame = frame.dropna(subset=["date", "open", "high", "low", "close"])
     frame = frame.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True)
-    return frame[["date", "open", "high", "low", "close", "volume", "amount"]]
+    normalized = frame[["date", "open", "high", "low", "close", "volume", "amount"]]
+    normalized.attrs.update(attrs)
+    return normalized
 
 
 def _last_valid(
@@ -766,6 +769,13 @@ class TechnicalAnalyzer:
             first = _candle_snapshot(self.df.iloc[-3])
             second = _candle_snapshot(self.df.iloc[-2])
             third = latest
+            first_body_high = max(float(first["open"]), float(first["close"]))
+            first_body_low = min(float(first["open"]), float(first["close"]))
+            second_body_high = max(float(second["open"]), float(second["close"]))
+            second_body_low = min(float(second["open"]), float(second["close"]))
+            third_body_high = max(float(third["open"]), float(third["close"]))
+            third_body_low = min(float(third["open"]), float(third["close"]))
+            equal_body_tolerance = max(float(first["range"]), float(second["range"]), float(third["range"])) * 0.08
             if (
                 three_bar_trend <= -0.02
                 and first["bearish"]
@@ -806,10 +816,55 @@ class TechnicalAnalyzer:
                 and float(second["close"]) <= float(third["open"]) <= float(second["open"])
             ):
                 _append("three_black_crows")
+            if (
+                three_bar_trend <= -0.02
+                and first["bearish"]
+                and float(first["body_ratio"]) >= 0.45
+                and second_body_low >= first_body_low
+                and second_body_high <= first_body_high
+                and float(second["body"]) <= float(first["body"]) * 0.65
+                and third["bullish"]
+                and float(third["close"]) > first_body_high
+            ):
+                _append("three_inside_up")
+            if (
+                three_bar_trend >= 0.02
+                and first["bullish"]
+                and float(first["body_ratio"]) >= 0.45
+                and second_body_low >= first_body_low
+                and second_body_high <= first_body_high
+                and float(second["body"]) <= float(first["body"]) * 0.65
+                and third["bearish"]
+                and float(third["close"]) < first_body_low
+            ):
+                _append("three_inside_down")
+            if (
+                three_bar_trend <= -0.015
+                and first["bearish"]
+                and second["bearish"]
+                and abs(float(first["low"]) - float(second["low"])) <= equal_body_tolerance
+                and third["bullish"]
+                and float(third["close"]) > max(float(second["open"]), float(second["close"]))
+            ):
+                _append("tweezer_bottom")
+            if (
+                three_bar_trend >= 0.015
+                and first["bullish"]
+                and second["bullish"]
+                and abs(float(first["high"]) - float(second["high"])) <= equal_body_tolerance
+                and third["bearish"]
+                and float(third["close"]) < min(float(second["open"]), float(second["close"]))
+            ):
+                _append("tweezer_top")
 
         if len(self.df) >= 2:
             previous = _candle_snapshot(self.df.iloc[-2])
             current = latest
+            prev_body_high = max(float(previous["open"]), float(previous["close"]))
+            prev_body_low = min(float(previous["open"]), float(previous["close"]))
+            curr_body_high = max(float(current["open"]), float(current["close"]))
+            curr_body_low = min(float(current["open"]), float(current["close"]))
+            equal_wick_tolerance = max(float(previous["range"]), float(current["range"])) * 0.08
             if (
                 two_bar_trend <= -0.01
                 and previous["bearish"]
@@ -848,6 +903,42 @@ class TechnicalAnalyzer:
                 and float(current["close"]) > float(previous["open"])
             ):
                 _append("dark_cloud_cover")
+            if (
+                two_bar_trend <= -0.01
+                and previous["bearish"]
+                and float(previous["body_ratio"]) >= 0.45
+                and current["bullish"]
+                and curr_body_low >= prev_body_low
+                and curr_body_high <= prev_body_high
+                and float(current["body"]) <= float(previous["body"]) * 0.65
+            ):
+                _append("bullish_harami")
+            if (
+                two_bar_trend >= 0.01
+                and previous["bullish"]
+                and float(previous["body_ratio"]) >= 0.45
+                and current["bearish"]
+                and curr_body_low >= prev_body_low
+                and curr_body_high <= prev_body_high
+                and float(current["body"]) <= float(previous["body"]) * 0.65
+            ):
+                _append("bearish_harami")
+            if (
+                two_bar_trend <= -0.015
+                and previous["bearish"]
+                and current["bullish"]
+                and abs(float(previous["low"]) - float(current["low"])) <= equal_wick_tolerance
+                and float(current["close"]) > float(previous["close"])
+            ):
+                _append("tweezer_bottom")
+            if (
+                two_bar_trend >= 0.015
+                and previous["bullish"]
+                and current["bearish"]
+                and abs(float(previous["high"]) - float(current["high"])) <= equal_wick_tolerance
+                and float(current["close"]) < float(previous["close"])
+            ):
+                _append("tweezer_top")
 
         if float(latest["range"]) > 0:
             if (
@@ -868,6 +959,12 @@ class TechnicalAnalyzer:
                 and float(latest["lower_shadow"]) <= max(float(latest["body"]) * 0.6, float(latest["range"]) * 0.15)
             ):
                 _append("shooting_star")
+            if (
+                single_trend >= 0.01
+                and float(latest["lower_shadow"]) >= max(float(latest["body"]) * 2.2, float(latest["range"]) * 0.45)
+                and float(latest["upper_shadow"]) <= max(float(latest["body"]) * 0.6, float(latest["range"]) * 0.15)
+            ):
+                _append("hanging_man")
             if float(latest["body"]) <= float(latest["range"]) * 0.1:
                 _append("doji")
             if (
@@ -897,6 +994,159 @@ class TechnicalAnalyzer:
         alignment = {"bullish": "bullish", "bearish": "bearish"}.get(signal, "mixed")
         return {"mas": mas, "alignment": alignment, "signal": signal}
 
+    def setup_analysis(self, lookback: int = 60) -> Dict[str, Any]:
+        """识别当前价量 setup 类型：假突破/失败突破、支撑失效分流、压缩启动 vs 情绪追价。"""
+        close = self.df["close"].astype(float)
+        high = self.df["high"].astype(float)
+        low = self.df["low"].astype(float)
+        volume = self.df["volume"].fillna(0).astype(float)
+
+        window = min(lookback, len(self.df) - 1)
+        recent_high = float(high.iloc[-(window + 1) : -1].max()) if window > 0 else float(high.iloc[-1])
+        recent_low = float(low.iloc[-(window + 1) : -1].min()) if window > 0 else float(low.iloc[-1])
+
+        latest_close = float(close.iloc[-1])
+        latest_high = float(high.iloc[-1])
+        latest_low = float(low.iloc[-1])
+        prev_close = float(close.iloc[-2]) if len(close) >= 2 else latest_close
+
+        vol_ma20 = volume.rolling(20).mean()
+        latest_vol = float(volume.iloc[-1])
+        latest_vol_ma20 = float(vol_ma20.iloc[-1]) if pd.notna(vol_ma20.iloc[-1]) and float(vol_ma20.iloc[-1]) > 0 else 1.0
+        vol_ratio_20 = latest_vol / latest_vol_ma20
+
+        # --- 假突破 / 失败突破 ---
+        # 日内突破近期高点但收盘回落到突破位下方（看涨假突破）
+        # 或日内跌破近期低点但收盘回升到跌破位上方（看跌假突破）
+        breakout_threshold = max(recent_high * 0.002, 0.01)
+        breakdown_threshold = max(recent_low * 0.002, 0.01)
+
+        bullish_false_break = (
+            latest_high >= recent_high - breakout_threshold  # 日内触及或突破近期高点
+            and latest_close < recent_high - breakout_threshold  # 但收盘回落到突破位下方
+            and latest_close < prev_close * 1.005  # 收盘没有明显上涨
+        )
+        bearish_false_break = (
+            latest_low <= recent_low + breakdown_threshold  # 日内触及或跌破近期低点
+            and latest_close > recent_low + breakdown_threshold  # 但收盘回升到跌破位上方
+            and latest_close > prev_close * 0.995  # 收盘没有明显下跌
+        )
+
+        if bullish_false_break:
+            false_break_kind = "bullish_false_break"
+            false_break_label = "看涨假突破：日内触及近期高点但收盘回落，多头未能守住突破位"
+        elif bearish_false_break:
+            false_break_kind = "bearish_false_break"
+            false_break_label = "看跌假突破：日内触及近期低点但收盘回升，空头未能守住跌破位"
+        else:
+            false_break_kind = "none"
+            false_break_label = "未识别到明确假突破形态"
+
+        # --- 支撑失效后的 setup 分流 ---
+        # 判断当前是否处于支撑失效后的两种状态：
+        # 1. 跌破支撑后反弹但未能收复 → 失效确认，偏空
+        # 2. 跌破支撑后继续下行 → 趋势延续，偏空
+        # 支撑位用近期低点代理
+        #
+        # IMPORTANT: support_level must be computed from bars BEFORE bar -2 (the potential
+        # breakdown bar). normalize_ohlcv_frame recomputes low = min(OHLC), so a breakdown
+        # bar's normalized low will always be ≤ its close (= prev_close). Including bar -2
+        # in the support window would make support_level ≤ prev_close always, making the
+        # condition structurally impossible. Use low.iloc[-(window+1):-2] instead.
+        _support_history = low.iloc[-(window + 1) : -2]
+        support_level = float(_support_history.min()) if not _support_history.empty else float(low.iloc[-2])
+        support_broken = prev_close < support_level  # strictly below historical floor
+
+        if support_broken:
+            rebound_from_break = (latest_close - prev_close) / max(abs(prev_close), 1e-9)
+            if rebound_from_break >= 0.01 and latest_close < support_level:
+                # 反弹但未能收复支撑位 → 失效确认
+                support_setup = "failed_recovery"
+                support_label = "支撑失效后反弹未收复：跌破支撑后出现反弹但未能重新站上，偏空分流"
+            elif rebound_from_break < 0:
+                # 继续下行
+                support_setup = "breakdown_continuation"
+                support_label = "支撑失效后继续下行：跌破支撑后未见反弹，趋势延续偏空"
+            else:
+                support_setup = "breakdown_watching"
+                support_label = "支撑失效观察中：跌破支撑后量价尚未给出明确分流信号"
+        else:
+            support_setup = "support_intact"
+            support_label = "支撑位完整：当前价格未跌破近期低点支撑区"
+
+        # --- 压缩后放量启动 vs 情绪追价 ---
+        # 需要结合波动率压缩状态和当前量价行为
+        boll = self._bollinger_series(period=20, std=2)
+        width = ((boll["UPPER"] - boll["LOWER"]) / boll["MID"].replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+        width_window = width.tail(max(lookback, 20)).dropna()
+        latest_width = _last_valid(width, default=0.0, lower=0.0)
+        width_percentile = float((width_window <= latest_width).mean()) if not width_window.empty else 0.5
+
+        atr = self._atr_series(period=14)
+        natr = atr / close.replace(0, np.nan)
+        natr_ma20 = natr.rolling(20).mean()
+        latest_natr = _last_valid(natr, default=0.0, lower=0.0)
+        latest_natr_ma20 = _last_valid(natr_ma20, default=latest_natr if latest_natr > 0 else 1.0, lower=1e-9)
+        atr_ratio = latest_natr / latest_natr_ma20 if latest_natr_ma20 > 0 else 1.0
+
+        was_compressed = atr_ratio <= 1.05 and width_percentile <= 0.40
+        price_change_1d = (latest_close - prev_close) / max(abs(prev_close), 1e-9) if len(close) >= 2 else 0.0
+
+        if was_compressed and vol_ratio_20 >= 1.5 and price_change_1d >= 0.015:
+            # 压缩后放量上涨 → 真启动信号
+            compression_setup = "compression_breakout"
+            compression_label = "压缩后放量启动：波动收敛后出现放量上涨，更像筹码收敛后的真启动"
+        elif not was_compressed and vol_ratio_20 >= 1.5 and price_change_1d >= 0.02:
+            # 波动已扩张阶段的放量上涨 → 情绪追价风险
+            compression_setup = "momentum_chase"
+            compression_label = "情绪追价区：波动已扩张阶段出现放量上涨，更像情绪释放而非低吸区"
+        elif was_compressed and vol_ratio_20 < 0.8:
+            # 压缩中缩量 → 仍在蓄势
+            compression_setup = "still_compressing"
+            compression_label = "仍在压缩蓄势：波动收敛且成交量萎缩，尚未出现启动信号"
+        else:
+            compression_setup = "neutral"
+            compression_label = "量价压缩状态中性：当前未识别出明确的压缩启动或情绪追价特征"
+
+        # 综合 setup 信号
+        bullish_setups = sum([
+            false_break_kind == "bearish_false_break",  # 空头假突破 → 多头机会
+            support_setup == "support_intact",
+            compression_setup == "compression_breakout",
+        ])
+        bearish_setups = sum([
+            false_break_kind == "bullish_false_break",  # 多头假突破 → 空头机会
+            support_setup in {"failed_recovery", "breakdown_continuation"},
+            compression_setup == "momentum_chase",
+        ])
+
+        if bullish_setups > bearish_setups:
+            overall_signal = "bullish"
+        elif bearish_setups > bullish_setups:
+            overall_signal = "bearish"
+        else:
+            overall_signal = "neutral"
+
+        return {
+            "signal": overall_signal,
+            "false_break": {
+                "kind": false_break_kind,
+                "label": false_break_label,
+            },
+            "support_setup": {
+                "kind": support_setup,
+                "label": support_label,
+                "support_level": float(support_level),
+            },
+            "compression_setup": {
+                "kind": compression_setup,
+                "label": compression_label,
+                "was_compressed": was_compressed,
+                "vol_ratio_20": float(vol_ratio_20),
+                "width_percentile": float(width_percentile),
+            },
+        }
+
     def generate_scorecard(self, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         technical_config = config or {}
         return {
@@ -912,4 +1162,5 @@ class TechnicalAnalyzer:
             "candlestick": self.candlestick_patterns(),
             "ma_system": self.ma_system(technical_config.get("ma_periods")),
             "divergence": self.divergence_analysis(**technical_config.get("divergence", {})),
+            "setup": self.setup_analysis(**technical_config.get("setup", {})),
         }

@@ -26,13 +26,42 @@
 - 技术叙事
 - 介入条件
 
+**2026-03-15 首次 family-level 收口（J-1 ~ J-5）：**
+
+| 因子家族 | 状态 | 核心落地 |
+|---|---|---|
+| J-1 价量结构与 setup | ✅ production | `setup_analysis()` 三种 setup + 评分/叙事/介入 |
+| J-2 季节/日历/事件窗 | ✅ scoring_supportive | 显式样本边界 + 降级 + 7 子因子 |
+| J-3 breadth/chips | ✅ scoring_supportive | 行业宽度/龙头确认/拥挤度风险 |
+| J-4 质量/盈利修正 | ✅ scoring_supportive | 现金流质量/杠杆压力 + observation_only 盈利动量 |
+| J-5 ETF/基金专属 | ✅ scoring_supportive | 9 个子因子全部落地；ETF 份额申赎 + 真实跟踪误差已补入 |
+| factor_meta.py | ✅ 共享合同（已消费） | FactorMeta + FACTOR_REGISTRY J-1~J-5；factor_id 已接入 J-5 _factor_row 输出 |
+
+相关因子家族回归、产品链回归与治理回归已通过；具体数字以 [docs/status_snapshot.md](../status_snapshot.md) 的最新记录为准。
+
+**2026-03-16 阶段 J 结案边界（v1）**
+
+- 强因子工程按 `v1 已收口` 切出主开发主线，不再把“继续补新因子”当当前第一优先级。
+- 当前结案判断不是“以后不再改”，而是：
+  - J-1 ~ J-5 已进入产品链
+  - 共享因子 metadata 合同已落地
+  - family-level 产物和 review 记录已存在
+  - `review_audit` 当前对 `structured-round` 协议审计为 `0 active findings`
+- 后续同类问题进入常规 today final / 外审 / 校准节奏，不再单独算作阶段 J 未完成。
+
 当前还明显偏弱的因子家族：
 
-1. 价量结构剩余 setup
-2. 季节 / 日历 / 事件窗
-3. breadth / chips
-4. 质量 / 盈利修正 / 估值协同
-5. ETF / 基金专属因子
+1. ~~价量结构剩余 setup~~ ✅
+2. ~~季节 / 日历 / 事件窗~~ ✅
+3. ~~breadth / chips~~ ✅
+4. ~~质量 / 盈利修正 / 估值协同~~ ✅（基础层，EPS修正仍 observation_only）
+5. ~~ETF / 基金专属因子~~ ✅
+
+已迁出的长尾工作：
+
+- J-4 EPS 修正：等待可靠 point-in-time 源接入后再升格，转入 `阶段 E / I`
+- J-2 政策事件窗：lag/visibility fixture 完成后可升格，转入 `阶段 E / I`
+- setup / breadth / 质量阈值再校准，转入 `阶段 F`
 
 ## 3. 为什么单独成专题
 

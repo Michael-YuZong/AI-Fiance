@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import pandas as pd
 
@@ -39,19 +39,36 @@ class MarketDriversCollector(BaseCollector):
             "pledge_stat": self._ts_pledge_stat(),
         }
 
-        # AKShare 数据（板块涨幅/概念/热门排名 — Tushare 不覆盖）
-        if ak is not None:
+        result["industry_fund_flow"] = self._ts_sector_fund_flow("industry")
+        if result["industry_fund_flow"].empty:
             result["industry_fund_flow"] = self._sector_fund_flow("行业资金流")
+
+        result["concept_fund_flow"] = self._ts_sector_fund_flow("concept")
+        if result["concept_fund_flow"].empty:
             result["concept_fund_flow"] = self._sector_fund_flow("概念资金流")
+
+        result["northbound_industry"] = self._ts_northbound_industry(as_of)
+        if result["northbound_industry"]["frame"].empty:
             result["northbound_industry"] = self._northbound_rank("北向资金增持行业板块排行", as_of)
-            result["northbound_concept"] = self._northbound_rank("北向资金增持概念板块排行", as_of)
+
+        # Tushare 目前更适合稳定补行业级北向持仓变化，概念级无可靠一对一映射时回退为空/AK。
+        result["northbound_concept"] = self._empty_rank_report()
+        if ak is not None:
+            fallback_concept = self._northbound_rank("北向资金增持概念板块排行", as_of)
+            if not fallback_concept["frame"].empty:
+                result["northbound_concept"] = fallback_concept
+
+        result["industry_spot"] = self._ts_board_spot("industry")
+        if result["industry_spot"].empty:
             result["industry_spot"] = self._board_spot("stock_board_industry_name_em")
+
+        result["concept_spot"] = self._ts_board_spot("concept")
+        if result["concept_spot"].empty:
             result["concept_spot"] = self._board_spot("stock_board_concept_name_em")
+
+        result["hot_rank"] = self._ts_hot_rank()
+        if result["hot_rank"].empty:
             result["hot_rank"] = self._hot_rank()
-        else:
-            for key in ("industry_fund_flow", "concept_fund_flow", "northbound_industry",
-                        "northbound_concept", "industry_spot", "concept_spot", "hot_rank"):
-                result.setdefault(key, pd.DataFrame() if key.endswith("spot") or key == "hot_rank" else {})
 
         return result
 
@@ -244,6 +261,321 @@ class MarketDriversCollector(BaseCollector):
             "is_fresh": self._is_fresh(latest_date, reference_date),
             "symbol": symbol,
         }
+
+    def _empty_rank_report(self) -> Dict[str, Any]:
+        return {"frame": pd.DataFrame(), "is_fresh": False, "latest_date": "", "symbol": ""}
+
+    def _ts_board_spot(self, board_type: str) -> pd.DataFrame:
+        cache_key = f"market_drivers:ts_board_spot:{board_type}:v1"
+        cached = self._load_cache(cache_key, ttl_hours=2)
+        if cached is not None:
+            return cached
+
+        board_rows = self._ts_board_index_rows(board_type)
+        if board_rows.empty:
+            return pd.DataFrame()
+
+        trade_date = self._latest_open_trade_date(lookback_days=14)
+        if not trade_date:
+            return pd.DataFrame()
+
+        try:
+            daily = self._ts_call("ths_daily", trade_date=trade_date)
+        except Exception:
+            daily = None
+        if daily is None or daily.empty:
+            return pd.DataFrame()
+
+        working = daily.copy()
+        ts_code_col = self._first_existing_column(working, ("ts_code", "code", "指数代码"))
+        if ts_code_col is None:
+            return pd.DataFrame()
+        working["ts_code"] = working[ts_code_col].astype(str)
+        working = working.merge(board_rows[["ts_code", "名称", "板块类型"]], on="ts_code", how="inner")
+        if working.empty:
+            return pd.DataFrame()
+
+        normalized = pd.DataFrame(
+            {
+                "代码": working["ts_code"].astype(str),
+                "名称": working["名称"].astype(str),
+                "板块类型": working["板块类型"].astype(str),
+                "涨跌幅": pd.to_numeric(
+                    working.get("pct_change", working.get("change_pct", working.get("涨跌幅"))),
+                    errors="coerce",
+                ),
+                "成交额": pd.to_numeric(
+                    working.get("amount", working.get("成交额")),
+                    errors="coerce",
+                ) * 1000.0,
+                "日期": working.get("trade_date", pd.Series(trade_date, index=working.index)).map(self._normalize_date_text),
+            }
+        )
+        normalized = normalized.dropna(subset=["涨跌幅"]).sort_values("涨跌幅", ascending=False).reset_index(drop=True)
+        self._save_cache(cache_key, normalized)
+        return normalized
+
+    def _ts_board_index_rows(self, board_type: str) -> pd.DataFrame:
+        cache_key = f"market_drivers:ts_board_index_rows:{board_type}:v1"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+
+        type_map = {"industry": "I", "concept": "N"}
+        type_code = type_map.get(board_type, "")
+        raw = None
+        for kwargs in (
+            {"exchange": "A", "type": type_code},
+            {"type": type_code},
+            {"exchange": "A"},
+            {},
+        ):
+            filtered_kwargs = {key: value for key, value in kwargs.items() if value}
+            try:
+                raw = self._ts_call("ths_index", **filtered_kwargs)
+            except Exception:
+                raw = None
+            if raw is not None and not raw.empty:
+                break
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+
+        frame = raw.copy()
+        ts_code_col = self._first_existing_column(frame, ("ts_code", "code"))
+        name_col = self._first_existing_column(frame, ("name", "名称"))
+        if ts_code_col is None or name_col is None:
+            return pd.DataFrame()
+        frame["ts_code"] = frame[ts_code_col].astype(str)
+        frame["名称"] = frame[name_col].astype(str)
+        raw_type_col = self._first_existing_column(frame, ("type", "板块类型"))
+        if raw_type_col is not None:
+            frame["raw_type"] = frame[raw_type_col].astype(str)
+            if type_code:
+                frame = frame[frame["raw_type"].eq(type_code)]
+        frame["板块类型"] = board_type
+        result = frame[["ts_code", "名称", "板块类型"]].drop_duplicates("ts_code").reset_index(drop=True)
+        self._save_cache(cache_key, result)
+        return result
+
+    def _ts_sector_fund_flow(self, board_type: str) -> pd.DataFrame:
+        api_name = "moneyflow_ind_ths" if board_type == "industry" else "moneyflow_cnt_ths"
+        cache_key = f"market_drivers:ts_sector_fund_flow:{board_type}:v1"
+        cached = self._load_cache(cache_key, ttl_hours=2)
+        if cached is not None:
+            return cached
+
+        for trade_date in reversed(self._recent_open_trade_dates(lookback_days=14)):
+            try:
+                raw = self._ts_call(api_name, trade_date=trade_date)
+            except Exception:
+                raw = None
+            normalized = self._normalize_ths_moneyflow(raw, trade_date=trade_date)
+            if not normalized.empty:
+                self._save_cache(cache_key, normalized)
+                return normalized
+        return pd.DataFrame()
+
+    def _normalize_ths_moneyflow(self, frame: pd.DataFrame | None, trade_date: str = "") -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        working = frame.copy()
+        name_col = self._first_existing_column(working, ("name", "名称", "板块名称", "概念名称", "行业"))
+        if name_col is None:
+            return pd.DataFrame()
+        normalized = pd.DataFrame(
+            {
+                "名称": working[name_col].astype(str),
+                "行业": working[name_col].astype(str),
+                "涨跌幅": pd.to_numeric(
+                    working.get("pct_change", working.get("change_pct", working.get("涨跌幅"))),
+                    errors="coerce",
+                ),
+                "今日主力净流入-净额": pd.to_numeric(
+                    working.get("net_amount", working.get("主力净流入-净额", working.get("今日主力净流入-净额"))),
+                    errors="coerce",
+                ) * 10_000.0,
+                "今日主力净流入-净占比": pd.to_numeric(
+                    working.get("net_amount_rate", working.get("主力净流入-净占比", working.get("今日主力净流入-净占比"))),
+                    errors="coerce",
+                ),
+                "今日超大单净流入-净额": pd.to_numeric(
+                    working.get("buy_elg_amount", working.get("超大单净流入-净额", working.get("今日超大单净流入-净额"))),
+                    errors="coerce",
+                ) * 10_000.0,
+                "今日大单净流入-净额": pd.to_numeric(
+                    working.get("buy_lg_amount", working.get("大单净流入-净额", working.get("今日大单净流入-净额"))),
+                    errors="coerce",
+                ) * 10_000.0,
+                "日期": working.get("trade_date", pd.Series(trade_date, index=working.index)).map(self._normalize_date_text),
+            }
+        )
+        if normalized["今日超大单净流入-净额"].isna().all():
+            normalized["今日超大单净流入-净额"] = pd.to_numeric(
+                working.get("elg_net_amount", working.get("super_net_amount")),
+                errors="coerce",
+            ) * 10_000.0
+        if normalized["今日大单净流入-净额"].isna().all():
+            normalized["今日大单净流入-净额"] = pd.to_numeric(
+                working.get("lg_net_amount", working.get("big_net_amount")),
+                errors="coerce",
+            ) * 10_000.0
+        return normalized.dropna(subset=["名称"]).reset_index(drop=True)
+
+    def _ts_northbound_industry(self, reference_date: datetime) -> Dict[str, Any]:
+        cache_key = "market_drivers:ts_northbound_industry:v1"
+        cached = self._load_cache(cache_key, ttl_hours=8)
+        if cached is not None and not cached.empty:
+            latest_date = self._extract_latest_date(cached, "报告时间")
+            return {
+                "frame": cached.reset_index(drop=True),
+                "latest_date": latest_date,
+                "is_fresh": self._is_fresh(latest_date, reference_date),
+                "symbol": "北向资金增持行业板块排行",
+            }
+
+        trade_dates = self._recent_open_trade_dates(lookback_days=14)
+        if len(trade_dates) < 2:
+            return self._empty_rank_report()
+
+        latest = trade_dates[-1]
+        previous = trade_dates[-2]
+        try:
+            current = self._ts_call("hk_hold", trade_date=latest)
+        except Exception:
+            current = None
+        try:
+            previous_frame = self._ts_call("hk_hold", trade_date=previous)
+        except Exception:
+            previous_frame = None
+        if current is None or current.empty or previous_frame is None or previous_frame.empty:
+            return self._empty_rank_report()
+
+        current_working = self._normalize_hk_hold_frame(current)
+        previous_working = self._normalize_hk_hold_frame(previous_frame)
+        if current_working.empty or previous_working.empty:
+            return self._empty_rank_report()
+
+        merged = current_working.merge(
+            previous_working[["ts_code", "持股量"]].rename(columns={"持股量": "前日持股量"}),
+            on="ts_code",
+            how="left",
+        )
+        merged["持股变动"] = merged["持股量"] - merged["前日持股量"].fillna(0.0)
+
+        try:
+            daily = self._ts_call("daily", trade_date=latest)
+        except Exception:
+            daily = None
+        try:
+            stock_basic = self._ts_call("stock_basic", exchange="", list_status="L", fields="ts_code,industry")
+        except Exception:
+            stock_basic = None
+        if daily is None or daily.empty or stock_basic is None or stock_basic.empty:
+            return self._empty_rank_report()
+
+        daily_view = daily[["ts_code", "close"]].copy()
+        daily_view["close"] = pd.to_numeric(daily_view["close"], errors="coerce")
+        industry_view = stock_basic[["ts_code", "industry"]].copy()
+        industry_view["industry"] = industry_view["industry"].astype(str)
+        merged = merged.merge(daily_view, on="ts_code", how="left").merge(industry_view, on="ts_code", how="left")
+        merged["北向资金今日增持估计-市值"] = pd.to_numeric(merged["持股变动"], errors="coerce") * pd.to_numeric(
+            merged["close"], errors="coerce"
+        )
+        ranked = (
+            merged.dropna(subset=["industry", "北向资金今日增持估计-市值"])
+            .groupby("industry", dropna=False)["北向资金今日增持估计-市值"]
+            .sum()
+            .reset_index()
+            .rename(columns={"industry": "名称"})
+            .sort_values("北向资金今日增持估计-市值", ascending=False)
+            .reset_index(drop=True)
+        )
+        if ranked.empty:
+            return self._empty_rank_report()
+        ranked["报告时间"] = self._normalize_date_text(latest)
+        self._save_cache(cache_key, ranked)
+        latest_date = self._extract_latest_date(ranked, "报告时间")
+        return {
+            "frame": ranked,
+            "latest_date": latest_date,
+            "is_fresh": self._is_fresh(latest_date, reference_date),
+            "symbol": "北向资金增持行业板块排行",
+        }
+
+    def _normalize_hk_hold_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        working = frame.copy()
+        ts_code_col = self._first_existing_column(working, ("ts_code", "code"))
+        vol_col = self._first_existing_column(working, ("vol", "持股数量", "持股量"))
+        if ts_code_col is None or vol_col is None:
+            return pd.DataFrame()
+        normalized = pd.DataFrame(
+            {
+                "ts_code": working[ts_code_col].astype(str),
+                "持股量": pd.to_numeric(working[vol_col], errors="coerce"),
+            }
+        )
+        return normalized.dropna(subset=["ts_code", "持股量"]).reset_index(drop=True)
+
+    def _ts_hot_rank(self) -> pd.DataFrame:
+        cache_key = "market_drivers:ts_hot_rank:v1"
+        cached = self._load_cache(cache_key, ttl_hours=1)
+        if cached is not None:
+            return cached
+
+        trade_date = self._latest_open_trade_date(lookback_days=14)
+        if not trade_date:
+            return pd.DataFrame()
+
+        raw = None
+        for kwargs in (
+            {"trade_date": trade_date, "market": "A"},
+            {"trade_date": trade_date},
+            {},
+        ):
+            try:
+                raw = self._ts_call("ths_hot", **kwargs)
+            except Exception:
+                raw = None
+            if raw is not None and not raw.empty:
+                break
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+
+        working = raw.copy()
+        ts_code_col = self._first_existing_column(working, ("ts_code", "code"))
+        rank_col = self._first_existing_column(working, ("rank", "排名", "当前排名"))
+        hot_col = self._first_existing_column(working, ("hot", "热度"))
+        if ts_code_col is None or rank_col is None:
+            return pd.DataFrame()
+
+        try:
+            stock_basic = self._ts_call("stock_basic", exchange="", list_status="L", fields="ts_code,name")
+        except Exception:
+            stock_basic = None
+        try:
+            daily = self._ts_call("daily", trade_date=trade_date)
+        except Exception:
+            daily = None
+        if stock_basic is None or stock_basic.empty or daily is None or daily.empty:
+            return pd.DataFrame()
+        basics = stock_basic[["ts_code", "name"]].rename(columns={"name": "股票名称"})
+        daily_view = daily[["ts_code", "pct_chg"]].rename(columns={"pct_chg": "涨跌幅"})
+
+        selected_columns = [ts_code_col, rank_col] + ([hot_col] if hot_col else [])
+        normalized = working[selected_columns].copy()
+        rename_map = {ts_code_col: "ts_code", rank_col: "排名"}
+        if hot_col:
+            rename_map[hot_col] = "热度"
+        normalized = normalized.rename(columns=rename_map)
+        normalized["排名"] = pd.to_numeric(normalized["排名"], errors="coerce")
+        normalized = normalized.merge(basics, on="ts_code", how="left").merge(daily_view, on="ts_code", how="left")
+        normalized["名称"] = normalized["股票名称"]
+        normalized["代码"] = normalized["ts_code"].astype(str).map(self._from_ts_code)
+        normalized = normalized.dropna(subset=["排名"]).sort_values("排名").reset_index(drop=True)
+        self._save_cache(cache_key, normalized)
+        return normalized
 
     def _board_spot(self, func_name: str) -> pd.DataFrame:
         fetcher = getattr(ak, func_name, None)

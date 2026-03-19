@@ -29,6 +29,27 @@ except ImportError:  # pragma: no cover
 class ChinaMarketCollector(BaseCollector):
     """A 股 ETF 行情与技术数据采集。Tushare 优先，AKShare/yfinance 兜底。"""
 
+    def _retry_tushare_history(self, fetcher: Callable[[], pd.DataFrame | None], attempts: int = 2) -> pd.DataFrame | None:
+        last_exc: Exception | None = None
+        for _ in range(max(int(attempts), 1)):
+            try:
+                frame = fetcher()
+                if frame is not None and not frame.empty:
+                    return frame
+            except Exception as exc:  # pragma: no cover - retry branch
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+        return None
+
+    def _tag_history_frame(self, frame: pd.DataFrame | None, source: str, label: str) -> pd.DataFrame | None:
+        if frame is None:
+            return None
+        tagged = frame.copy()
+        tagged.attrs["history_source"] = source
+        tagged.attrs["history_source_label"] = label
+        return tagged
+
     def _yahoo_symbol(self, symbol: str) -> str:
         if len(symbol) == 6 and symbol.isdigit():
             suffix = ".SS" if symbol[0] in {"5", "6", "9"} else ".SZ"
@@ -62,16 +83,16 @@ class ChinaMarketCollector(BaseCollector):
 
         # ── Tushare (primary) ──
         try:
-            frame = self._ts_stock_daily(symbol, start, end, adjust)
+            frame = self._retry_tushare_history(lambda: self._ts_stock_daily(symbol, start, end, adjust))
             if frame is not None and not frame.empty:
-                return frame
+                return self._tag_history_frame(frame, "tushare", "Tushare 日线")
         except Exception:
             pass
 
         # ── AKShare (fallback 1) ──
         try:
             fetcher = self._ak_function("stock_zh_a_hist")
-            return self.cached_call(
+            frame = self.cached_call(
                 f"cn_market:stock_daily:{symbol}:{period}:{adjust}:{start}:{end}",
                 fetcher,
                 symbol=symbol,
@@ -80,18 +101,22 @@ class ChinaMarketCollector(BaseCollector):
                 end_date=end,
                 adjust=adjust,
             )
+            return self._tag_history_frame(frame, "akshare", "AKShare 日线回退")
         except Exception as primary_exc:
-            if yf is None:
+            market_cfg = dict(self.config or {}).get("market", {})
+            allow_yahoo_fallback = bool(market_cfg.get("enable_yahoo_fallback_for_cn_stock", False))
+            if yf is None or not allow_yahoo_fallback:
                 raise primary_exc
             ticker = self._yahoo_symbol(symbol)
             try:
-                return self.cached_call(
+                frame = self.cached_call(
                     f"cn_market:yahoo_stock_daily:{ticker}:{period}",
                     yf.Ticker(ticker).history,
                     period="3y" if period == "daily" else period,
                     interval="1d",
                     auto_adjust=False,
                 )
+                return self._tag_history_frame(frame, "yahoo", "Yahoo Finance 日线回退")
             except Exception:
                 raise primary_exc
 
@@ -218,16 +243,16 @@ class ChinaMarketCollector(BaseCollector):
 
         # ── Tushare (primary) ──
         try:
-            frame = self._ts_etf_daily(symbol, start, end, adjust)
+            frame = self._retry_tushare_history(lambda: self._ts_etf_daily(symbol, start, end, adjust))
             if frame is not None and not frame.empty:
-                return frame
+                return self._tag_history_frame(frame, "tushare", "Tushare 日线")
         except Exception:
             pass
 
         # ── AKShare (fallback 1) ──
         try:
             fetcher = self._ak_function("fund_etf_hist_em")
-            return self.cached_call(
+            frame = self.cached_call(
                 f"cn_market:etf_daily:{symbol}:{period}:{adjust}:{start}:{end}",
                 fetcher,
                 symbol=symbol,
@@ -236,6 +261,7 @@ class ChinaMarketCollector(BaseCollector):
                 end_date=end,
                 adjust=adjust,
             )
+            return self._tag_history_frame(frame, "akshare", "AKShare 日线回退")
         except Exception as primary_exc:
             market_cfg = dict(self.config or {}).get("market", {})
             allow_yahoo_fallback = bool(market_cfg.get("enable_yahoo_fallback_for_cn_etf", False))
@@ -243,13 +269,14 @@ class ChinaMarketCollector(BaseCollector):
                 raise primary_exc
             ticker = self._yahoo_symbol(symbol)
             try:
-                return self.cached_call(
+                frame = self.cached_call(
                     f"cn_market:yahoo_etf_daily:{ticker}:{period}",
                     yf.Ticker(ticker).history,
                     period="3y" if period == "daily" else period,
                     interval="1d",
                     auto_adjust=False,
                 )
+                return self._tag_history_frame(frame, "yahoo", "Yahoo Finance 日线回退")
             except Exception:
                 raise primary_exc
 
@@ -375,14 +402,14 @@ class ChinaMarketCollector(BaseCollector):
         try:
             frame = self._ts_index_daily(symbol, start, end)
             if frame is not None and not frame.empty:
-                return frame
+                return self._tag_history_frame(frame, "tushare", "Tushare 指数日线")
         except Exception:
             pass
 
         # ── AKShare (fallback) ──
         try:
             fetcher = self._ak_function("index_zh_a_hist")
-            return self.cached_call(
+            frame = self.cached_call(
                 f"cn_market:index_daily:{symbol}:{period}:{start}:{end}",
                 fetcher,
                 symbol=symbol,
@@ -390,10 +417,12 @@ class ChinaMarketCollector(BaseCollector):
                 start_date=start,
                 end_date=end,
             )
+            return self._tag_history_frame(frame, "akshare", "AKShare 指数日线回退")
         except Exception as primary_exc:
             if proxy_symbol and proxy_symbol != symbol:
                 try:
-                    return self.get_etf_daily(proxy_symbol, period="daily", adjust="qfq", start_date=start, end_date=end)
+                    frame = self.get_etf_daily(proxy_symbol, period="daily", adjust="qfq", start_date=start, end_date=end)
+                    return self._tag_history_frame(frame, "proxy_etf", f"代理 ETF 日线回退（{proxy_symbol}）")
                 except Exception:
                     pass
             raise primary_exc
@@ -434,7 +463,7 @@ class ChinaMarketCollector(BaseCollector):
         try:
             frame = self._ts_fund_nav(symbol)
             if frame is not None and not frame.empty:
-                return frame
+                return self._tag_history_frame(frame, "tushare", "Tushare 基金净值")
         except Exception:
             pass
 
@@ -448,11 +477,12 @@ class ChinaMarketCollector(BaseCollector):
                 indicator=indicator,
                 period=period,
             )
-            return self._normalize_open_fund_nav(frame)
+            return self._tag_history_frame(self._normalize_open_fund_nav(frame), "akshare", "AKShare 基金净值回退")
         except Exception as primary_exc:
             if proxy_symbol and proxy_symbol != symbol:
                 try:
-                    return self.get_etf_daily(proxy_symbol)
+                    frame = self.get_etf_daily(proxy_symbol)
+                    return self._tag_history_frame(frame, "proxy_etf", f"代理 ETF 日线回退（{proxy_symbol}）")
                 except Exception:
                     pass
             raise primary_exc

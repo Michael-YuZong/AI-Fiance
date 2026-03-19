@@ -9,11 +9,6 @@ from src.collectors.base import BaseCollector
 from src.utils.config import resolve_project_path
 from src.utils.data import load_watchlist, load_yaml
 
-try:
-    import akshare as ak
-except ImportError:  # pragma: no cover
-    ak = None
-
 
 THEME_QUERY_EXPANSIONS = {
     "商业航天": ["商业航天", "卫星", "卫星产业", "航天", "商用卫星"],
@@ -34,7 +29,7 @@ class AssetLookupCollector(BaseCollector):
         self.alias_path = resolve_project_path(alias_file)
 
     def search(self, keyword: str, limit: int = 8) -> List[Dict[str, Any]]:
-        """Search aliases first, then try Tushare, then AKShare live lookup."""
+        """Search aliases first, then Tushare stock/fund snapshots."""
         cleaned = self._normalize_query(keyword)
         if not cleaned:
             return []
@@ -42,23 +37,7 @@ class AssetLookupCollector(BaseCollector):
         alias_matches = self._search_aliases(cleaned)
         live_matches: List[Dict[str, Any]] = []
         if not alias_matches:
-            # Tushare stock_basic / fund_basic (primary)
             live_matches = self._search_tushare(cleaned)
-
-            # AKShare fallback
-            if not live_matches:
-                for term in self._candidate_terms(cleaned):
-                    for item in self._search_live_fund_names(term):
-                        if item not in live_matches:
-                            live_matches.append(item)
-                    if len(live_matches) >= limit:
-                        break
-                    if self._looks_like_symbol(term):
-                        for item in self._search_live_etf(term):
-                            if item not in live_matches:
-                                live_matches.append(item)
-                        if len(live_matches) >= limit:
-                            break
 
         combined: List[Dict[str, Any]] = []
         seen = set()
@@ -193,103 +172,46 @@ class AssetLookupCollector(BaseCollector):
         except Exception:
             pass
 
-        # 基金搜索
-        try:
-            fund_df = self._ts_call("fund_basic", market="E")  # 场内ETF
-            if fund_df is not None and not fund_df.empty:
-                mask = (
-                    fund_df["name"].astype(str).str.contains(keyword, case=False, na=False)
-                    | fund_df["ts_code"].astype(str).str.contains(keyword, case=False, na=False)
-                )
-                for _, row in fund_df[mask].head(4).iterrows():
-                    results.append({
+        for market in ("E", "L", "O"):
+            try:
+                fund_df = self._ts_fund_basic_snapshot(market)
+            except Exception:
+                fund_df = None
+            if fund_df is None or fund_df.empty:
+                continue
+            name_col = "name" if "name" in fund_df.columns else None
+            code_col = "ts_code" if "ts_code" in fund_df.columns else None
+            if not name_col or not code_col:
+                continue
+            mask = (
+                fund_df[name_col].astype(str).str.contains(keyword, case=False, na=False)
+                | fund_df[code_col].astype(str).str.contains(keyword, case=False, na=False)
+            )
+            matched = fund_df[mask].copy()
+            if matched.empty:
+                continue
+            for _, row in matched.head(6).iterrows():
+                results.append(
+                    {
                         "symbol": self._from_ts_code(str(row["ts_code"])),
                         "name": str(row.get("name", "")),
-                        "asset_type": "cn_etf",
-                        "source": "tushare_fund_basic",
+                        "asset_type": self._infer_tushare_fund_asset_type(row, market),
+                        "source": f"tushare_fund_basic_{market}",
                         "match_type": "live_search",
-                    })
-        except Exception:
-            pass
+                    }
+                )
 
         return results[:8]
 
-    def _search_live_etf(self, keyword: str) -> List[Dict[str, Any]]:
-        if ak is None:
-            return []
-        try:
-            frame = self.cached_call("asset_lookup:cn_etf_spot", ak.fund_etf_spot_em, ttl_hours=12)
-        except Exception:
-            return []
-
-        name_col = "名称" if "名称" in frame.columns else None
-        code_col = "代码" if "代码" in frame.columns else None
-        if not name_col or not code_col:
-            return []
-
-        mask = frame[name_col].astype(str).str.contains(keyword, case=False, na=False) | frame[code_col].astype(str).str.contains(keyword, case=False, na=False)
-        result = []
-        for _, row in frame[mask].head(8).iterrows():
-            result.append(
-                {
-                    "symbol": str(row[code_col]),
-                    "name": str(row[name_col]),
-                    "asset_type": "cn_etf",
-                    "source": "live_etf_search",
-                    "match_type": "live_search",
-                }
-            )
-        return result
-
-    def _search_live_fund_names(self, keyword: str) -> List[Dict[str, Any]]:
-        if ak is None:
-            return []
-        try:
-            frame = self.cached_call("asset_lookup:fund_name_em", ak.fund_name_em, ttl_hours=12)
-        except Exception:
-            return []
-
-        name_col = "基金简称" if "基金简称" in frame.columns else None
-        code_col = "基金代码" if "基金代码" in frame.columns else None
-        if not name_col or not code_col:
-            return []
-
-        mask = frame[name_col].astype(str).str.contains(keyword, case=False, na=False) | frame[code_col].astype(str).str.contains(keyword, case=False, na=False)
-        subset = frame[mask].copy()
-        if subset.empty:
-            return []
-
-        def _rank(row: Any) -> tuple[int, int]:
-            name = str(row[name_col])
-            score = 0
-            if keyword.lower() == name.lower():
-                score += 4
-            if "ETF" in name.upper():
-                score += 3
-            if "LOF" in name.upper() or "联接" in name:
-                score -= 1
-            if len(str(row[code_col])) == 6:
-                score += 1
-            return (-score, len(name))
-
-        subset = subset.sort_values(by=name_col, key=lambda series: series.astype(str).str.len())
-        ranked_rows = sorted(subset.to_dict("records"), key=_rank)[:8]
-        return [
-            {
-                "symbol": str(row[code_col]),
-                "name": str(row[name_col]),
-                "asset_type": self._infer_fund_asset_type(row, name_col),
-                "source": "fund_name_em",
-                "match_type": "live_name_search",
-            }
-            for row in ranked_rows
-        ]
-
-    def _infer_fund_asset_type(self, row: Mapping[str, Any], name_col: str) -> str:
-        name = str(row.get(name_col, "")).strip()
-        fund_type = str(row.get("基金类型", "")).strip()
-        symbol = str(row.get("基金代码", "")).strip()
+    def _infer_tushare_fund_asset_type(self, row: Mapping[str, Any], market: str) -> str:
+        name = str(row.get("name", "")).strip()
+        fund_type = str(row.get("fund_type", "")).strip()
+        symbol = self._from_ts_code(str(row.get("ts_code", "")).strip())
         upper_name = name.upper()
+        if market == "E":
+            return "cn_etf"
+        if market == "L":
+            return "cn_fund"
         if "ETF" in upper_name and "联接" not in name and "LOF" not in upper_name:
             return "cn_etf"
         if "LOF" in upper_name:
