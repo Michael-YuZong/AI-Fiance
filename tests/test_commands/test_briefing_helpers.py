@@ -154,7 +154,7 @@ def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> 
     assert meta["blind_spot"] == "部分样本缺少完整事件覆盖。"
     assert "factor_contract" in meta
     assert captured["context"] is None
-    assert captured["max_candidates"] == 18
+    assert captured["max_candidates"] == 16
     assert captured["attach_signal_confidence"] is False
 
 
@@ -191,7 +191,7 @@ def test_briefing_a_share_watch_rows_reuses_shared_context(monkeypatch) -> None:
     assert captured["context"] == shared_context
     assert captured["context"]["regime"]["current_regime"] == "recovery"
     assert captured["context"]["day_theme"]["code"] == "rate_growth"
-    assert captured["max_candidates"] == 18
+    assert captured["max_candidates"] == 16
     assert captured["attach_signal_confidence"] is False
 
 
@@ -221,8 +221,8 @@ def test_briefing_a_share_watch_rows_discloses_candidate_limit(monkeypatch) -> N
     rows, lines, meta = _briefing_a_share_watch_rows({})
 
     assert rows[0][1] == "宁德时代 (300750)"
-    assert any("候选上限 `18`" in item for item in lines)
-    assert meta["candidate_limit"] == 18
+    assert any("候选上限 `16`" in item for item in lines)
+    assert meta["candidate_limit"] == 16
 
 
 def test_briefing_action_helpers_include_portfolio_whatif_handoff() -> None:

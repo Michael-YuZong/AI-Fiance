@@ -403,7 +403,7 @@ def _briefing_a_share_watch_rows(
         return [], ["当前已关闭 A 股全市场观察池。"], {"enabled": False, "mode": "disabled"}
     try:
         shortlist_n = max(int(config.get("briefing_a_share_shortlist", max(top_n * 2, 8)) or max(top_n * 2, 8)), top_n)
-        candidate_cap = max(int(config.get("briefing_a_share_max_candidates", max(top_n * 3, 18)) or max(top_n * 3, 18)), shortlist_n)
+        candidate_cap = max(int(config.get("briefing_a_share_max_candidates", max(top_n * 2 + 6, 16)) or max(top_n * 2 + 6, 16)), shortlist_n)
         payload = discover_stock_opportunities(
             config,
             top_n=shortlist_n,
