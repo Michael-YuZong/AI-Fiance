@@ -60,6 +60,11 @@
 
 - `reports/reviews/..._roundN.md`
 
+推荐直接复用：
+
+- `docs/review_kit/review_record_template.md`
+- `docs/review_kit/review_ledger_schema.md`
+
 每轮记录至少包含：
 
 - `review_target`

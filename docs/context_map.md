@@ -66,12 +66,18 @@
 - `src/storage/strategy.py`
 - `tests/test_*strategy*`
 
-### 改强因子工程
+### 改强因子工程 / 维护强因子
 
 先读：
 
 - [docs/plans/strong_factors.md](./plans/strong_factors.md)
 - [docs/status_snapshot.md](./status_snapshot.md)
+
+当前默认口径：
+
+- 阶段 J 已按 `v1 已收口` 进入维护模式
+- 新任务优先落在 `校准 / point-in-time / strategy fixtures`
+- 不要默认把“继续补新因子”当成当前第一优先级
 
 再读：
 
@@ -85,11 +91,16 @@
 先读：
 
 - `docs/prompts/`
+- `docs/review_kit/README.md`
 - [docs/status_snapshot.md](./status_snapshot.md)
 
 必要时再读：
 
 - [plan.md](../plan.md)
+- `src/reporting/review_ledger.py`
+- `src/commands/review_ledger.py`
+- `src/reporting/review_audit.py`
+- `src/commands/review_audit.py`
 
 ## 默认不要读什么
 

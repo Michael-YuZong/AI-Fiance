@@ -11,6 +11,10 @@
 - 默认入口：先看 [docs/context_map.md](./docs/context_map.md)
 - YAML 入口：先看 [config/README.md](./config/README.md)
 - 路线图入口：先看 [plan.md](./plan.md)
+- 外审 kit：看 [docs/review_kit/README.md](./docs/review_kit/README.md)
+- 外审命令：`python -m src.commands.review_ledger` / `python -m src.commands.review_audit`
+  - `review_ledger` 收录全部外审记录
+  - `review_audit` 只审当前 `structured-round` 协议
 
 ## 渐进式披露读法
 
@@ -131,6 +135,7 @@ python -m src.commands.strategy validate --symbol 600519 --limit 20 --preview
 - 当前状态快照：[docs/status_snapshot.md](./docs/status_snapshot.md)
 - 路线图总览：[plan.md](./plan.md)
 - `strategy` 专题：[docs/plans/strategy.md](./docs/plans/strategy.md)
+- 外审 kit：[docs/review_kit/README.md](./docs/review_kit/README.md)
 
 ## 历史文档说明
 
