@@ -4,13 +4,43 @@ from __future__ import annotations
 
 import pandas as pd
 
+from src.collectors import fund_profile as fund_profile_module
 from src.collectors.fund_profile import FundProfileCollector
 from src.utils.fund_taxonomy import build_standard_fund_taxonomy
+
+
+def test_fund_profile_shared_tables_reuse_process_cache(monkeypatch):
+    fund_profile_module._PROCESS_SHARED_FRAME_CACHE.clear()
+    calls = {"manager": 0, "rating": 0}
+
+    def fake_cached_call(self, cache_key, fetcher, *args, **kwargs):  # noqa: ANN001, ARG002
+        if cache_key == "fund_profile:manager_directory":
+            calls["manager"] += 1
+            return pd.DataFrame([{"姓名": "张三"}])
+        if cache_key == "fund_profile:rating_all":
+            calls["rating"] += 1
+            return pd.DataFrame([{"代码": "513120"}])
+        raise AssertionError(cache_key)
+
+    monkeypatch.setattr(FundProfileCollector, "cached_call", fake_cached_call)
+
+    first = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    second = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+
+    assert not first.get_manager_directory().empty
+    assert not second.get_manager_directory().empty
+    assert not first.get_rating_table().empty
+    assert not second.get_rating_table().empty
+    assert calls == {"manager": 1, "rating": 1}
 
 
 def test_fund_profile_collects_holdings_and_manager_style(monkeypatch):
     collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
     monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
 
     monkeypatch.setattr(
         collector,
@@ -108,6 +138,10 @@ def test_fund_profile_collects_holdings_and_manager_style(monkeypatch):
 def test_fund_profile_prefers_fund_benchmark_theme_over_manager_peer_funds(monkeypatch):
     collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
     monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
 
     monkeypatch.setattr(
         collector,
@@ -165,6 +199,10 @@ def test_fund_profile_prefers_fund_benchmark_theme_over_manager_peer_funds(monke
 def test_fund_profile_does_not_misclassify_a500_due_to_bank_deposit_tail(monkeypatch):
     collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
     monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
 
     monkeypatch.setattr(
         collector,
@@ -203,6 +241,83 @@ def test_fund_profile_does_not_misclassify_a500_due_to_bank_deposit_tail(monkeyp
     assert "宽基" in profile["style"]["summary"]
 
 
+def test_fund_profile_recognizes_sse_composite_etf_as_broad_index(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+
+    monkeypatch.setattr(
+        collector,
+        "get_overview",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "基金简称": "上证指数ETF",
+                    "基金类型": "股票型 / 被动指数型",
+                    "基金管理人": "富国基金",
+                    "基金经理人": "王保合、方旻",
+                    "业绩比较基准": "上证综合指数",
+                    "跟踪标的": "上证综合指数",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_asset_allocation",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"资产类型": "股票", "仓位占比": 99.86},
+                {"资产类型": "现金", "仓位占比": 0.24},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_portfolio_hold",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"股票代码": "601288", "股票名称": "农业银行", "占净值比例": 3.83, "持股数": 1, "持仓市值": 1, "季度": "2025年4季度股票投资明细"},
+                {"股票代码": "601857", "股票名称": "中国石油", "占净值比例": 3.25, "持股数": 1, "持仓市值": 1, "季度": "2025年4季度股票投资明细"},
+                {"股票代码": "600519", "股票名称": "贵州茅台", "占净值比例": 2.26, "持股数": 1, "持仓市值": 1, "季度": "2025年4季度股票投资明细"},
+                {"股票代码": "601138", "股票名称": "工业富联", "占净值比例": 2.19, "持股数": 1, "持仓市值": 1, "季度": "2025年4季度股票投资明细"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_industry_allocation",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"行业类别": "制造业", "占净值比例": 43.9, "市值": 1, "截止时间": "2025-12-31"},
+                {"行业类别": "金融业", "占净值比例": 23.63, "市值": 1, "截止时间": "2025-12-31"},
+                {"行业类别": "信息传输、软件和信息技术服务业", "占净值比例": 6.1, "市值": 1, "截止时间": "2025-12-31"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_manager_directory",
+        lambda: pd.DataFrame(
+            [
+                {"姓名": "王保合", "所属公司": "富国基金", "现任基金代码": "510210", "现任基金": "上证指数ETF", "累计从业时间": 4000, "现任基金资产总规模": 100.0, "现任基金最佳回报": 200.0},
+                {"姓名": "王保合", "所属公司": "富国基金", "现任基金代码": "588000", "现任基金": "富国上证科创板综合价格指数增强A", "累计从业时间": 4000, "现任基金资产总规模": 100.0, "现任基金最佳回报": 200.0},
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+
+    profile = collector.collect_profile("510210", asset_type="cn_etf")
+    assert profile["style"]["sector"] == "宽基"
+    assert profile["style"]["chain_nodes"] == ["宽基", "大盘蓝筹", "内需"]
+    assert "宽基主题" in profile["style"]["tags"]
+    assert profile["style"]["taxonomy"]["exposure_scope"] == "宽基"
+
+
 def test_fund_profile_industry_allocation_swallows_known_shape_errors(monkeypatch):
     collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
     monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005
@@ -221,6 +336,10 @@ def test_fund_profile_industry_allocation_swallows_known_shape_errors(monkeypatc
 def test_fund_profile_prefers_benchmark_theme_over_secondary_industries(monkeypatch):
     collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
     monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
 
     monkeypatch.setattr(
         collector,
@@ -283,6 +402,10 @@ def test_fund_profile_backfills_overview_from_tushare_when_overview_empty(monkey
     collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
 
     monkeypatch.setattr(collector, "get_overview", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(collector, "get_asset_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(collector, "get_portfolio_hold", lambda symbol: pd.DataFrame())  # noqa: ARG005
@@ -349,6 +472,10 @@ def test_fund_profile_prefers_tushare_basic_fields_and_uses_overview_for_missing
     monkeypatch.setattr(collector, "get_asset_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(collector, "get_portfolio_hold", lambda symbol: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(collector, "get_industry_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(collector, "get_manager_directory", lambda: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(
@@ -388,6 +515,10 @@ def test_fund_profile_does_not_render_nan_issue_amount(monkeypatch):
     collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
 
     monkeypatch.setattr(collector, "get_overview", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(collector, "get_asset_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(collector, "get_portfolio_hold", lambda symbol: pd.DataFrame())  # noqa: ARG005
@@ -437,6 +568,10 @@ def test_fund_profile_commodity_etf_treats_cash_as_margin_structure(monkeypatch)
         ),
     )
     monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
     monkeypatch.setattr(
         collector,
         "get_asset_allocation",
@@ -473,3 +608,93 @@ def test_standard_taxonomy_does_not_treat_etf_suffix_as_f_share_class() -> None:
 
     assert taxonomy["product_form"] == "ETF"
     assert taxonomy["share_class"] == "未分级"
+
+
+def test_fund_profile_uses_tushare_manager_company_dividend_and_holdings(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_overview",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "基金简称": "永赢科技智选混合发起C",
+                    "基金类型": "混合型-偏股",
+                    "基金管理人": "永赢基金",
+                    "基金经理人": "",
+                    "业绩比较基准": "中国战略新兴产业成份指数收益率",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_asset_allocation", lambda symbol: pd.DataFrame([{"资产类型": "股票", "仓位占比": 85.0}]))  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_fund_portfolio_ts",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"symbol": "300308.SZ", "stk_mkv_ratio": 8.4, "mkv": 2110.0, "amount": 20.1, "end_date": "20251231"},
+                {"symbol": "300738.SZ", "stk_mkv_ratio": 9.3, "mkv": 2338.66, "amount": 96.4, "end_date": "20251231"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_portfolio_hold",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"股票代码": "300308", "股票名称": "中际旭创", "占净值比例": 8.40, "持股数": 20.1, "持仓市值": 2110.00, "季度": "2025年4季度股票投资明细"},
+                {"股票代码": "300738", "股票名称": "奥飞数据", "占净值比例": 9.30, "持股数": 96.4, "持仓市值": 2338.66, "季度": "2025年4季度股票投资明细"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_industry_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_fund_manager_ts",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"name": "任桀", "ann_date": "20260110", "begin_date": "20241030", "end_date": "", "edu": "硕士", "nationality": "中国", "resume": "长期覆盖科技成长方向。"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_manager_directory",
+        lambda: pd.DataFrame(
+            [
+                {"姓名": "任桀", "所属公司": "永赢基金", "现任基金代码": "022365", "现任基金": "永赢科技智选混合发起C", "累计从业时间": 495, "现任基金资产总规模": 161.72, "现任基金最佳回报": 281.99},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_fund_company_ts",
+        lambda: pd.DataFrame(
+            [
+                {"name": "永赢基金", "short_name": "永赢", "province": "上海", "city": "上海", "website": "https://example.com", "manager": "王某"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_fund_div_ts",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"ann_date": "20251220", "ex_date": "20251225", "pay_date": "20251226", "div_cash": 0.12, "progress": "实施"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+
+    profile = collector.collect_profile("022365")
+
+    assert profile["overview"]["基金经理人"] == "任桀"
+    assert profile["manager"]["education"] == "硕士"
+    assert profile["manager"]["ann_date"] == "2026-01-10"
+    assert profile["company"]["short_name"] == "永赢"
+    assert profile["company"]["general_manager"] == "王某"
+    assert profile["dividends"]["latest_ex_date"] == "2025-12-25"
+    assert profile["top_holdings"][0]["股票名称"] in {"奥飞数据", "中际旭创"}

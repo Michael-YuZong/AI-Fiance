@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from src.commands.etf_pick import _watchlist_fallback_payload
 
 
@@ -51,3 +53,30 @@ def test_watchlist_fallback_payload_uses_only_cn_etf(monkeypatch) -> None:
     assert len(payload["coverage_analyses"]) == 2
     assert [item["symbol"] for item in payload["top"]] == ["513120"]
     assert any("回退到 ETF watchlist" in item for item in payload["blind_spots"])
+
+
+def test_watchlist_fallback_payload_analyzes_candidates_in_parallel(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.commands.etf_pick.load_watchlist",
+        lambda: [
+            {"symbol": "513120", "name": "港股创新药ETF", "asset_type": "cn_etf", "sector": "医药"},
+            {"symbol": "561380", "name": "电网ETF", "asset_type": "cn_etf", "sector": "电网"},
+            {"symbol": "512480", "name": "半导体ETF", "asset_type": "cn_etf", "sector": "科技"},
+        ],
+    )
+    monkeypatch.setattr("src.commands.etf_pick.build_market_context", lambda config, relevant_asset_types=None: {"runtime_caches": {}})  # noqa: ARG005
+
+    def fake_analyze(symbol, asset_type, config, context=None, metadata_override=None):  # noqa: ANN001, ARG001
+        time.sleep(0.08)
+        return _analysis(symbol, metadata_override.get("name", symbol), 1)
+
+    monkeypatch.setattr("src.commands.etf_pick.analyze_opportunity", fake_analyze)
+
+    start = time.perf_counter()
+    payload = _watchlist_fallback_payload({"opportunity": {"analysis_workers": 3}}, top_n=5, theme_filter="")
+    elapsed = time.perf_counter() - start
+
+    assert payload["scan_pool"] == 3
+    assert payload["passed_pool"] == 3
+    assert len(payload["top"]) == 3
+    assert elapsed < 0.20

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Optional
 
 from src.commands.pick_history import enrich_pick_payload_with_score_history, summarize_pick_coverage
-from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
+from src.commands.pick_visuals import attach_visuals_to_analyses
+from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle, exported_bundle_lines
 from src.output import ClientReportRenderer, OpportunityReportRenderer
-from src.processors.opportunity_engine import discover_stock_opportunities
+from src.processors.factor_meta import summarize_factor_contracts_from_analyses
+from src.processors.opportunity_engine import build_market_context, discover_stock_opportunities
 from src.utils.config import PROJECT_ROOT, load_config
 from src.utils.logger import setup_logger
 
@@ -111,6 +113,36 @@ def _watch_positive_candidates(analyses: list[Mapping[str, Any]]) -> list[Mappin
     )[:6]
 
 
+def _factor_contract_summary(analyses: list[Mapping[str, Any]]) -> Dict[str, Any]:
+    return summarize_factor_contracts_from_analyses(list(analyses or []), sample_limit=16)
+
+
+def _attach_featured_visuals(payload: Dict[str, Any]) -> Dict[str, Any]:
+    top = list(payload.get("top") or [])
+    if not top:
+        return payload
+    watch_symbols = {
+        str(item.get("symbol", ""))
+        for item in (payload.get("watch_positive") or [])
+        if str(item.get("symbol", "")).strip()
+    }
+    grouped: Dict[str, list[Mapping[str, Any]]] = {"A股": [], "港股": [], "美股": []}
+    for item in top:
+        label = {"cn_stock": "A股", "hk": "港股", "us": "美股"}.get(str(item.get("asset_type", "")), "")
+        if label:
+            grouped.setdefault(label, []).append(item)
+
+    featured: list[Dict[str, Any]] = []
+    for market_name in ("A股", "港股", "美股"):
+        items = grouped.get(market_name) or []
+        if not items:
+            continue
+        ranked = ClientReportRenderer._rank_market_items(items, watch_symbols)
+        featured.extend([dict(item) if not isinstance(item, dict) else item for item in ranked[:3]])
+    attach_visuals_to_analyses(featured)
+    return payload
+
+
 def enrich_payload_with_score_history(
     payload: Dict[str, Any],
     market: str,
@@ -133,7 +165,7 @@ def enrich_payload_with_score_history(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Scan stock universe and surface top individual stock picks.")
-    parser.add_argument("--market", default="all", choices=["cn", "hk", "us", "all"], help="Market scope: cn (A-share), hk, us, or all")
+    parser.add_argument("--market", default="cn", choices=["cn", "hk", "us", "all"], help="Market scope: cn (A-share), hk, us, or all")
     parser.add_argument("--sector", default="", help="Sector filter, e.g. 科技 / 消费 / 医药")
     parser.add_argument("--top", type=int, default=20, help="Number of top picks to show")
     parser.add_argument("--config", default="", help="Optional path to config YAML")
@@ -205,9 +237,11 @@ def _run_market(
     market: str,
     top_n: int,
     sector_filter: str,
+    context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    payload = discover_stock_opportunities(config, top_n=top_n, market=market, sector_filter=sector_filter)
-    return enrich_payload_with_score_history(payload, market=market, sector_filter=sector_filter)
+    payload = discover_stock_opportunities(config, top_n=top_n, market=market, sector_filter=sector_filter, context=context)
+    payload = enrich_payload_with_score_history(payload, market=market, sector_filter=sector_filter)
+    return _attach_featured_visuals(payload)
 
 
 def main() -> None:
@@ -224,14 +258,25 @@ def main() -> None:
         return
 
     if args.market == "all":
+        shared_context = build_market_context(
+            config,
+            relevant_asset_types=["cn_stock", "cn_etf", "hk", "us", "futures"],
+        )
         market_payloads = {
-            market: _run_market(config, market, args.top, sector_filter)
+            market: _run_market(config, market, args.top, sector_filter, context=shared_context)
             for market in ("cn", "hk", "us")
         }
         for market, payload in market_payloads.items():
             detailed = OpportunityReportRenderer().render_stock_picks(payload)
             _persist_internal_detail_report(_internal_detail_stem(market, str(payload.get("generated_at", ""))), detailed)
         client_payload = _merge_payloads(market_payloads)
+        factor_contract = _factor_contract_summary(
+            [
+                analysis
+                for market_payload in market_payloads.values()
+                for analysis in list(market_payload.get("coverage_analyses") or market_payload.get("top") or [])
+            ]
+        )
         source_path = _persist_internal_detail_report(
             _internal_merged_stem(str(client_payload.get("generated_at", ""))),
             OpportunityReportRenderer().render_stock_picks(client_payload),
@@ -248,14 +293,14 @@ def main() -> None:
                 markdown_text=client_markdown,
                 markdown_path=target_path,
                 release_findings=findings,
-                extra_manifest={"market": "all", "detail_source": str(source_path)},
+                extra_manifest={"market": "all", "detail_source": str(source_path), "factor_contract": factor_contract},
             )
         except (Exception, ReportGuardError) as exc:
             raise SystemExit(str(exc))
 
         print(client_markdown)
-        print(f"\n[client markdown] {bundle['markdown']}")
-        print(f"[client pdf] {bundle['pdf']}")
+        for index, line in enumerate(exported_bundle_lines(bundle)):
+            print(f"\n{line}" if index == 0 else line)
         return
 
     payload = _run_market(config, args.market, args.top, sector_filter)
@@ -263,6 +308,7 @@ def main() -> None:
     detail_path = _persist_internal_detail_report(_internal_detail_stem(args.market, str(payload.get("generated_at", ""))), detailed)
     client_markdown = ClientReportRenderer().render_stock_picks_detailed(payload)
     target_path = FINAL_DIR / f"{_market_final_stem(args.market, str(payload.get('generated_at', '')))}.md"
+    factor_contract = _factor_contract_summary(list(payload.get("coverage_analyses") or payload.get("top") or []))
 
     findings = []
     if args.market == "cn":
@@ -278,14 +324,14 @@ def main() -> None:
             markdown_text=client_markdown,
             markdown_path=target_path,
             release_findings=findings,
-            extra_manifest={"market": args.market, "detail_source": str(detail_path)},
+            extra_manifest={"market": args.market, "detail_source": str(detail_path), "factor_contract": factor_contract},
         )
     except ReportGuardError as exc:
         raise SystemExit(str(exc))
 
     print(client_markdown)
-    print(f"\n[client markdown] {bundle['markdown']}")
-    print(f"[client pdf] {bundle['pdf']}")
+    for index, line in enumerate(exported_bundle_lines(bundle)):
+        print(f"\n{line}" if index == 0 else line)
 
 
 if __name__ == "__main__":

@@ -335,8 +335,118 @@ def test_candlestick_patterns_detect_evening_star():
     assert "evening_star" in patterns
 
 
+def test_candlestick_patterns_detect_bullish_harami():
+    base = list(np.linspace(21.0, 18.8, 38))
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=40, freq="B"),
+            "open": [price + 0.1 for price in base] + [18.7, 18.25],
+            "high": [price + 0.3 for price in base] + [18.9, 18.55],
+            "low": [price - 0.3 for price in base] + [17.85, 18.05],
+            "close": base + [18.0, 18.45],
+            "volume": [1_000_000] * 40,
+        }
+    )
+
+    patterns = TechnicalAnalyzer(frame).candlestick_patterns()
+
+    assert "bullish_harami" in patterns
+
+
+def test_candlestick_patterns_detect_hanging_man():
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=40, freq="B"),
+            "open": list(np.linspace(10.0, 14.0, 39)) + [14.45],
+            "high": list(np.linspace(10.3, 14.3, 39)) + [14.55],
+            "low": list(np.linspace(9.8, 13.8, 39)) + [13.9],
+            "close": list(np.linspace(10.1, 14.4, 39)) + [14.48],
+            "volume": [1_000_000] * 40,
+        }
+    )
+
+    patterns = TechnicalAnalyzer(frame).candlestick_patterns()
+
+    assert "hanging_man" in patterns
+
+
 def test_ma_system_omits_unavailable_long_averages():
     analyzer = TechnicalAnalyzer(_sample_price_frame(35))
     ma = analyzer.ma_system([5, 10, 20, 60])
     assert "MA5" in ma["mas"]
     assert "MA60" not in ma["mas"]
+
+
+def test_setup_analysis_detects_bullish_false_break():
+    # 构造：日内触及近期高点但收盘回落（看涨假突破）
+    rows = 80
+    dates = pd.date_range("2025-01-01", periods=rows, freq="D")
+    close = np.linspace(10.0, 14.0, rows)
+    high = close + 0.4
+    low = close - 0.4
+    open_ = close - 0.1
+    # 近期高点约为 13.6（第 70 根附近）
+    # 最后一根：日内突破近期高点，但收盘回落
+    high[-1] = float(high[-2]) + 0.5   # 日内突破
+    close[-1] = float(close[-2]) - 0.1  # 收盘回落
+    open_[-1] = float(close[-2]) + 0.1
+    low[-1] = float(close[-1]) - 0.2
+    frame = pd.DataFrame({"date": dates, "open": open_, "high": high, "low": low, "close": close, "volume": np.full(rows, 1000.0)})
+    result = TechnicalAnalyzer(frame).setup_analysis()
+    assert result["false_break"]["kind"] == "bullish_false_break"
+    assert result["signal"] in {"bearish", "neutral"}
+
+
+def test_setup_analysis_detects_compression_breakout():
+    # 构造：前期波动压缩，最后一根放量上涨
+    rows = 120
+    dates = pd.date_range("2025-01-01", periods=rows, freq="D")
+    # 前 90 根正常波动，后 30 根压缩（包括最后一根）
+    close = np.concatenate([np.linspace(20.0, 23.0, 90), np.linspace(23.1, 23.4, 30)])
+    wide_range = np.concatenate([np.full(90, 1.5), np.full(30, 0.2)])
+    volume = np.concatenate([np.full(90, 1000.0), np.full(29, 600.0), [3000.0]])
+    # 最后一根：close 上涨但 high/low range 仍小（ATR 不会立刻扩张）
+    close[-1] = 23.75  # 涨幅约 1.5%，满足 >= 0.015
+    frame = pd.DataFrame({
+        "date": dates,
+        "open": close - 0.05,
+        "high": close + wide_range,
+        "low": close - wide_range,
+        "close": close,
+        "volume": volume,
+    })
+    result = TechnicalAnalyzer(frame).setup_analysis()
+    assert result["compression_setup"]["kind"] == "compression_breakout"
+    assert result["compression_setup"]["was_compressed"] is True
+    assert result["compression_setup"]["vol_ratio_20"] >= 1.5
+
+
+def test_setup_analysis_detects_support_breakdown():
+    # 构造：前一日跌破近期低点，最后一根反弹但未收复
+    rows = 80
+    dates = pd.date_range("2025-01-01", periods=rows, freq="D")
+    close = np.linspace(20.0, 15.0, rows)  # 下跌趋势
+    high = close + 0.3
+    low = close - 0.3
+    open_ = close + 0.1
+    # 近期低点约为 15.0，前一日跌破，最后一根小幅反弹但未收复
+    close[-2] = 14.5   # 跌破支撑
+    close[-1] = 14.7   # 反弹但仍在支撑下方
+    high[-1] = 14.9
+    low[-1] = 14.4
+    open_[-1] = 14.5
+    frame = pd.DataFrame({"date": dates, "open": open_, "high": high, "low": low, "close": close, "volume": np.full(rows, 1000.0)})
+    result = TechnicalAnalyzer(frame).setup_analysis()
+    assert result["support_setup"]["kind"] in {"failed_recovery", "breakdown_continuation", "breakdown_watching"}
+
+
+def test_setup_analysis_included_in_scorecard():
+    analyzer = TechnicalAnalyzer(_sample_price_frame(80))
+    scorecard = analyzer.generate_scorecard()
+    assert "setup" in scorecard
+    setup = scorecard["setup"]
+    assert "signal" in setup
+    assert setup["signal"] in {"bullish", "bearish", "neutral"}
+    assert "false_break" in setup
+    assert "support_setup" in setup
+    assert "compression_setup" in setup

@@ -4,21 +4,26 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pandas as pd
+
 import src.commands.briefing as briefing_module
 from src.commands.briefing import (
     _appendix_derivative_lines,
     _action_lines,
     _briefing_a_share_watch_rows,
     _briefing_internal_dir,
+    _compact_headline_lines,
     _coverage_metadata,
     _flow_lines,
     _load_same_day_briefing,
     _noon_action_lines,
     _monitor_alerts,
+    _primary_narrative,
     _persist_briefing,
     _quality_lines,
     _sentiment_lines,
     _tomorrow_action_lines,
+    build_parser,
 )
 
 
@@ -107,33 +112,28 @@ def test_appendix_derivative_lines_do_not_render_fake_zero_vix() -> None:
 
 
 def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> None:
-    pool = [
-        SimpleNamespace(
-            symbol="300750",
-            name="宁德时代",
-            asset_type="cn_stock",
-            region="CN",
-            sector="新能源",
-            chain_nodes=["新能源"],
-            in_watchlist=False,
-            metadata={"bak_strength": 90, "bak_activity": 80, "bak_attack": 70},
-            turnover=1_000_000_000,
-        )
-    ]
-    monkeypatch.setattr(briefing_module, "build_stock_pool", lambda config, market="cn", max_candidates=60: (pool, ["部分样本缺少完整事件覆盖。"]))  # noqa: ARG005
-    monkeypatch.setattr(briefing_module, "build_market_context", lambda config, relevant_asset_types=None: {"regime": {}, "day_theme": {}, "notes": []})  # noqa: ARG005
     monkeypatch.setattr(
         briefing_module,
-        "analyze_opportunity",
-        lambda symbol, asset_type, config, context=None, metadata_override=None: {  # noqa: ARG005
-            "symbol": symbol,
-            "name": "宁德时代",
-            "metadata": {"sector": "新能源"},
-            "rating": {"label": "较强机会", "rank": 3},
-            "action": {"position": "首次建仓 ≤3%"},
-            "narrative": {"judgment": {"state": "持有优于追高"}},
-            "dimensions": {"risk": {"score": 60}, "relative_strength": {"score": 80}, "technical": {"score": 70}},
-            "excluded": False,
+        "discover_stock_opportunities",
+        lambda config, top_n=8, market="cn": {  # noqa: ARG005
+            "scan_pool": 1,
+            "passed_pool": 1,
+            "blind_spots": ["部分样本缺少完整事件覆盖。"],
+            "top": [
+                {
+                    "symbol": "300750",
+                    "name": "宁德时代",
+                    "metadata": {"sector": "新能源"},
+                    "rating": {"label": "较强机会", "rank": 3},
+                    "action": {"position": "首次建仓 ≤3%"},
+                    "narrative": {"judgment": {"state": "持有优于追高"}},
+                }
+            ],
+            "coverage_analyses": [
+                {
+                    "dimensions": {"risk": {"score": 60}, "relative_strength": {"score": 80}, "technical": {"score": 70}},
+                }
+            ],
         },
     )
 
@@ -142,15 +142,14 @@ def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> 
     assert rows == [["1", "宁德时代 (300750)", "新能源", "较强机会", "持有优于追高", "首次建仓 ≤3%"]]
     assert any("Tushare 优先" in item for item in lines)
     assert any("初筛池 `1`" in item for item in lines)
-    assert meta == {
-        "enabled": True,
-        "mode": "tushare_priority_full_market_prescreen",
-        "pool_size": 1,
-        "shortlist_size": 1,
-        "complete_analysis_size": 1,
-        "report_top_n": 1,
-        "blind_spot": "部分样本缺少完整事件覆盖。",
-    }
+    assert meta["enabled"] is True
+    assert meta["mode"] == "tushare_priority_full_market_prescreen"
+    assert meta["pool_size"] == 1
+    assert meta["shortlist_size"] == 1
+    assert meta["complete_analysis_size"] == 1
+    assert meta["report_top_n"] == 1
+    assert meta["blind_spot"] == "部分样本缺少完整事件覆盖。"
+    assert "factor_contract" in meta
 
 
 def test_briefing_action_helpers_include_portfolio_whatif_handoff() -> None:
@@ -175,3 +174,77 @@ def test_briefing_action_helpers_include_portfolio_whatif_handoff() -> None:
     assert any("portfolio whatif buy 561380 2.2340 计划金额" in item for item in daily_lines)
     assert any("portfolio whatif buy 561380 2.2340 计划金额" in item for item in noon_lines)
     assert any("portfolio whatif buy 561380 2.2340 计划金额" in item for item in tomorrow_lines)
+
+
+def test_briefing_parser_accepts_market_mode() -> None:
+    args = build_parser().parse_args(["market"])
+    assert args.mode == "market"
+
+
+def test_primary_narrative_can_identify_broad_market_repair() -> None:
+    snapshots = [
+        SimpleNamespace(symbol="510210", sector="宽基", return_1d=0.012, return_5d=0.031),
+        SimpleNamespace(symbol="QQQM", sector="科技", return_1d=0.001, return_5d=0.01),
+        SimpleNamespace(symbol="HSTECH", sector="科技", return_1d=-0.002, return_5d=0.0),
+    ]
+    monitor_rows = [
+        {"name": "美国10Y收益率", "return_1d": -0.015},
+        {"name": "美元指数", "return_5d": -0.003},
+        {"name": "VIX波动率", "latest": 18.0},
+    ]
+    drivers = {"industry_spot": pd.DataFrame([{"名称": "银行"}]), "concept_spot": pd.DataFrame()}
+    pulse = {"zt_pool": pd.DataFrame(), "strong_pool": pd.DataFrame()}
+    news_report = {"items": [{"category": "fed"}]}
+    regime = {"current_regime": "recovery", "preferred_assets": ["宽基", "成长股"]}
+    a_share_watch_meta = {"sector_counts": {"宽基": 1, "银行": 1, "电网": 1}}
+
+    narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime, a_share_watch_meta)
+
+    assert narrative["theme"] == "broad_market_repair"
+    assert narrative["label"] == "宽基修复"
+    headline_lines = _compact_headline_lines(narrative, {"pmi": 50.1}, monitor_rows, {})
+    assert "背景框架" in headline_lines[1]
+    assert "交易主线候选" in headline_lines[1]
+
+
+def test_primary_narrative_can_identify_power_utilities_separately_from_policy() -> None:
+    snapshots = [
+        SimpleNamespace(symbol="561380", sector="电网", return_1d=0.015, return_5d=0.04),
+        SimpleNamespace(symbol="510210", sector="宽基", return_1d=0.001, return_5d=0.01),
+        SimpleNamespace(symbol="510880", sector="高股息", return_1d=0.004, return_5d=0.012),
+    ]
+    monitor_rows = [
+        {"name": "VIX波动率", "latest": 19.0},
+        {"name": "美元指数", "return_5d": 0.001},
+    ]
+    drivers = {"industry_spot": pd.DataFrame([{"名称": "电力设备"}, {"名称": "公用事业"}]), "concept_spot": pd.DataFrame()}
+    pulse = {"zt_pool": pd.DataFrame(), "strong_pool": pd.DataFrame()}
+    news_report = {"items": [{"category": "china_macro"}]}
+    regime = {"current_regime": "deflation", "preferred_assets": ["电网", "高股息"]}
+
+    narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime)
+
+    assert narrative["theme"] == "power_utilities"
+    assert narrative["label"] == "电网/公用事业"
+
+
+def test_primary_narrative_uses_a_share_watch_sector_counts_to_boost_theme() -> None:
+    snapshots = [
+        SimpleNamespace(symbol="510210", sector="宽基", return_1d=0.0, return_5d=0.01),
+        SimpleNamespace(symbol="QQQM", sector="科技", return_1d=0.005, return_5d=0.02),
+    ]
+    monitor_rows = [
+        {"name": "美国10Y收益率", "return_1d": -0.005},
+        {"name": "美元指数", "return_5d": -0.001},
+        {"name": "VIX波动率", "latest": 20.0},
+    ]
+    drivers = {"industry_spot": pd.DataFrame(), "concept_spot": pd.DataFrame()}
+    pulse = {"zt_pool": pd.DataFrame(), "strong_pool": pd.DataFrame()}
+    news_report = {"items": []}
+    regime = {"current_regime": "recovery", "preferred_assets": ["宽基"]}
+    a_share_watch_meta = {"sector_counts": {"宽基": 2, "银行": 1}}
+
+    narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime, a_share_watch_meta)
+
+    assert narrative["theme"] == "broad_market_repair"
+    assert narrative["scores"]["broad_market_repair"] > narrative["scores"]["rate_growth"]

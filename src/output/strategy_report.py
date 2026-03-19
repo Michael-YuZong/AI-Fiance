@@ -58,6 +58,7 @@ class StrategyReportRenderer:
         lines.append("")
         lines.append("## 因子快照")
         snapshot = dict(payload.get("factor_snapshot") or {})
+        factor_contract = dict(payload.get("factor_contract") or {})
         momentum = dict(snapshot.get("price_momentum") or {})
         relative = dict(snapshot.get("benchmark_relative") or {})
         technical = dict(snapshot.get("technical") or {})
@@ -79,6 +80,26 @@ class StrategyReportRenderer:
         lines.append(
             f"- 风险: 20日波动 `{_pct(risk.get('volatility_20d'))}` | 1年最大回撤 `{_pct(risk.get('max_drawdown_1y'))}`"
         )
+        if factor_contract:
+            families = dict(factor_contract.get("families") or {})
+            states = dict(factor_contract.get("states") or {})
+            blockers = list(factor_contract.get("point_in_time_blockers") or [])
+            lines.append("")
+            lines.append("## 因子合同")
+            if families:
+                lines.append("- family 覆盖: " + " / ".join(f"`{key}` `{value}`" for key, value in families.items()))
+            if states:
+                lines.append("- 状态分布: " + " / ".join(f"`{key}` `{value}`" for key, value in states.items()))
+            candidate_ids = list(factor_contract.get("strategy_candidate_factor_ids") or [])
+            if candidate_ids:
+                lines.append("- strategy 候选: " + " / ".join(f"`{item}`" for item in candidate_ids[:8]))
+            else:
+                lines.append("- strategy 候选: 当前没有满足 point-in-time 合同的强因子进入 challenger。")
+            if blockers:
+                blocker = dict(blockers[0] or {})
+                lines.append(
+                    f"- point-in-time blocker: `{blocker.get('factor_id', '—')}` | {blocker.get('reason', 'lag / visibility fixture incomplete')}"
+                )
         lines.append("")
         lines.append("## 证据时点与来源")
         evidence = dict(payload.get("evidence_sources") or {})

@@ -1,0 +1,10 @@
+# Stock pick fast profile for weak-network / cached-only reruns.
+news_feeds_file: config/news_feeds.empty.yaml
+news_topic_search_enabled: false
+
+market:
+  enable_yahoo_fallback_for_cn_stock: false
+
+market_context:
+  skip_global_proxy: true
+  skip_market_monitor: true

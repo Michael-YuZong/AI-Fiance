@@ -2,20 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from urllib.parse import quote_plus
 
 import feedparser
 import requests
 
+import pandas as pd
+
 from src.collectors.base import BaseCollector
 from src.utils.config import resolve_project_path
 from src.utils.data import load_yaml
-
-try:
-    import akshare as ak
-except ImportError:  # pragma: no cover
-    ak = None
 
 
 def _format_pct(value: float) -> str:
@@ -241,43 +239,99 @@ class NewsCollector(BaseCollector):
         return self._diversify_items(ranked, limit)
 
     def get_stock_news(self, symbol: str, limit: int = 10) -> List[Dict[str, str]]:
-        """Fetch per-stock news from akshare (A-share only)."""
-        if ak is None:
+        """Fetch per-stock news from Tushare news/major_news with symbol-aware filtering."""
+        profile = self._stock_identity(symbol)
+        if not profile:
             return []
-        fetcher = getattr(ak, "stock_news_em", None)
-        if not callable(fetcher):
-            return []
+        keywords = [profile["symbol"], profile["ts_code"], profile["name"]]
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+        items: List[Dict[str, str]] = []
+
+        for api_name in ("news", "major_news"):
+            try:
+                frame = self._ts_call(api_name, start_date=start, end_date=end)
+            except Exception:
+                frame = None
+            items.extend(self._normalize_tushare_stock_news(frame, keywords, limit=limit))
+            if len(items) >= limit:
+                break
+
+        deduped: List[Dict[str, str]] = []
+        seen = set()
+        for item in items:
+            key = (item.get("title", ""), item.get("published_at", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped[:limit]
+
+    def _stock_identity(self, symbol: str) -> Dict[str, str]:
+        ts_code = self._to_ts_code(symbol)
         try:
-            frame = self.cached_call(
-                f"news:stock:{symbol}",
-                fetcher,
-                symbol=symbol,
-                ttl_hours=2,
-                prefer_stale=True,
-            )
+            frame = self._ts_call("stock_basic", ts_code=ts_code, fields="ts_code,symbol,name")
         except Exception:
-            return []
+            frame = None
+        if frame is None or frame.empty:
+            return {}
+        row = frame.iloc[0]
+        return {
+            "symbol": str(row.get("symbol", symbol)).strip() or symbol,
+            "ts_code": str(row.get("ts_code", ts_code)).strip() or ts_code,
+            "name": str(row.get("name", "")).strip(),
+        }
+
+    def _normalize_tushare_stock_news(
+        self,
+        frame: pd.DataFrame | None,
+        keywords: Sequence[str],
+        limit: int = 10,
+    ) -> List[Dict[str, str]]:
         if frame is None or frame.empty:
             return []
-        title_col = next((c for c in frame.columns if "新闻标题" in c or "title" in c.lower()), None)
-        source_col = next((c for c in frame.columns if "新闻来源" in c or "来源" in c or "source" in c.lower()), None)
-        time_col = next((c for c in frame.columns if "发布时间" in c or "时间" in c or "date" in c.lower()), None)
-        if not title_col:
+
+        title_col = self._first_existing_column(frame, ("title", "标题", "subject", "新闻标题"))
+        content_col = self._first_existing_column(frame, ("content", "summary", "内容", "正文"))
+        source_col = self._first_existing_column(frame, ("src", "media", "来源", "新闻来源"))
+        time_col = self._first_existing_column(frame, ("pub_time", "datetime", "发布时间", "时间", "date"))
+        link_col = self._first_existing_column(frame, ("url", "link", "新闻链接"))
+        if title_col is None:
             return []
+
+        pattern_keywords = [str(item).strip() for item in keywords if str(item).strip()]
         items: List[Dict[str, str]] = []
-        for _, row in frame.head(limit).iterrows():
+        working = frame.copy()
+        combined_text = working[title_col].astype(str)
+        if content_col is not None:
+            combined_text = combined_text + " " + working[content_col].astype(str)
+        mask = pd.Series(False, index=working.index)
+        for keyword in pattern_keywords:
+            mask = mask | combined_text.str.contains(keyword, case=False, na=False)
+        filtered = working[mask].copy()
+        if filtered.empty:
+            return []
+
+        if time_col is not None:
+            filtered["_published_at"] = filtered[time_col].map(self._normalize_date_text)
+            filtered = filtered.sort_values("_published_at", ascending=False)
+        for _, row in filtered.head(limit).iterrows():
             title = str(row.get(title_col, "")).strip()
             if not title:
                 continue
-            items.append({
-                "category": "stock_announcement",
-                "title": title,
-                "source": str(row.get(source_col, "东方财富")).strip() if source_col else "东方财富",
-                "configured_source": "东方财富",
-                "must_include": False,
-                "published_at": self._normalize_date_text(row.get(time_col)) if time_col else "",
-                "link": str(row.get("新闻链接", "")).strip() if "新闻链接" in frame.columns else "",
-            })
+            items.append(
+                {
+                    "category": "stock_announcement",
+                    "title": title,
+                    "source": str(row.get(source_col, "Tushare")).strip() if source_col else "Tushare",
+                    "configured_source": "Tushare",
+                    "must_include": False,
+                    "published_at": str(row.get("_published_at", "")) if "_published_at" in row else (
+                        self._normalize_date_text(row.get(time_col)) if time_col else ""
+                    ),
+                    "link": str(row.get(link_col, "")).strip() if link_col else "",
+                }
+            )
         return items
 
     def _fetch_feed(self, url: str) -> feedparser.FeedParserDict:
@@ -401,7 +455,7 @@ class NewsCollector(BaseCollector):
         locales: List[tuple[str, str, str, List[str]]] = []
         if zh_terms or not en_terms:
             locales.append(("zh-CN", "CN", "CN:zh-Hans", zh_terms or base_terms[:2]))
-        if en_terms or any(source in {"Reuters", "Bloomberg", "Financial Times"} for source in preferred_sources):
+        if en_terms:
             locales.append(("en-US", "US", "US:en", en_terms or base_terms[:2]))
 
         queries: List[tuple[str, str]] = []

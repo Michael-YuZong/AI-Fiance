@@ -250,6 +250,89 @@ class BriefingRenderer:
         )
         return "\n".join(lines)
 
+    def render_market(self, payload: Dict[str, Any]) -> str:
+        lines = [
+            f"# {payload['title']}",
+            "",
+            f"> **生成时间**: `{payload['generated_at']}`",
+            f"> **数据覆盖**: {payload.get('data_coverage', '未标注')} | 缺失项: {payload.get('missing_sources', '无')}",
+        ]
+
+        _append_block(lines, "1. 市场结论")
+        _append_subsection(lines, "1.1 今日主线", payload.get("headline_lines", []))
+        _append_subsection(lines, "1.2 仓位与执行", payload.get("action_lines", []))
+
+        _append_block(lines, "2. 宏观与市场全景")
+        _append_subsection(lines, "2.1 宏观框架", payload.get("macro_items", []))
+        _append_table_subsection(
+            lines,
+            "2.2 国内市场概览",
+            ["指数", "收盘", "涨跌幅", "成交额(亿)", "较前日", "简评"],
+            payload.get("domestic_index_rows", []),
+        )
+        for item in payload.get("domestic_market_lines", []) or []:
+            lines.append(f"- {item}")
+        _append_table_subsection(
+            lines,
+            "2.3 风格与行业",
+            ["维度", "今日强势", "今日弱势", "信号"],
+            payload.get("style_rows", []),
+        )
+        if payload.get("industry_rows"):
+            lines.extend(["", "**行业涨跌幅 TOP/BOTTOM 5**", ""])
+            lines.extend(_table(["排名", "行业", "涨跌幅", "主要催化"], payload.get("industry_rows", [])))
+        _append_table_subsection(
+            lines,
+            "2.4 宏观资产",
+            ["资产", "最新价", "1日", "5日", "20日", "状态", "异常"],
+            payload.get("macro_asset_rows", []),
+        )
+        _append_table_subsection(
+            lines,
+            "2.5 隔夜外盘",
+            ["市场", "指数", "收盘", "涨跌幅", "简评"],
+            payload.get("overnight_rows", []),
+        )
+        _append_table_subsection(
+            lines,
+            "2.6 跨市场观察哨",
+            ["标的", "最新价", "1日", "5日", "20日", "趋势", "信号", "简评"],
+            payload.get("watchlist_rows", []),
+        )
+
+        _append_block(lines, "3. 资金与催化")
+        _append_subsection(lines, "3.1 核心事件", payload.get("core_event_lines", []))
+        _append_table_subsection(
+            lines,
+            "3.2 主线跟踪",
+            ["方向", "催化剂", "逻辑", "时间维度", "风险点"],
+            payload.get("theme_tracking_rows", []),
+        )
+        for item in payload.get("theme_tracking_lines", []) or []:
+            lines.append(f"- {item}")
+        _append_subsection(lines, "3.3 盘面与资金", payload.get("capital_flow_lines", []))
+        _append_subsection(lines, "3.4 新闻覆盖与数据质量", payload.get("quality_lines", []))
+
+        _append_block(lines, "4. A股观察池")
+        _append_table_subsection(
+            lines,
+            "4.1 A股全市场观察池（Tushare 初筛）",
+            ["排名", "标的", "行业", "评级", "当前状态", "首次仓位"],
+            payload.get("a_share_watch_rows", []),
+        )
+        for item in payload.get("a_share_watch_lines", []) or []:
+            lines.append(f"- {item}")
+
+        _append_block(lines, "5. 今日验证点")
+        _append_table_subsection(
+            lines,
+            "5.1 验证点表",
+            ["#", "观察什么", "怎么判断（量化标准）", "如果成立→", "如果不成立→"],
+            payload.get("verification_rows", []),
+        )
+        _append_subsection(lines, "5.2 风险提醒", payload.get("alerts", []))
+        return "\n".join(lines)
+
     def render_noon(self, payload: Dict[str, Any]) -> str:
         """Render noon briefing payload to markdown."""
         lines = [

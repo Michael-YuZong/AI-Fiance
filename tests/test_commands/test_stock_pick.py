@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.commands.stock_pick import enrich_payload_with_score_history
+from src.commands.stock_pick import _run_market, build_parser, enrich_payload_with_score_history
 
 
 def _sample_payload(score: int, signal: str, generated_at: str) -> dict:
@@ -217,3 +217,38 @@ def test_enrich_payload_with_score_history_prefers_full_coverage_population(tmp_
     assert coverage["total"] == 2
     assert any("A股 结构化事件覆盖 100%" in item for item in coverage["lines"])
     assert any("港股 结构化事件覆盖 0%" in item for item in coverage["lines"])
+
+
+def test_build_parser_defaults_to_cn_market() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args([])
+
+    assert args.market == "cn"
+
+
+def test_run_market_reuses_shared_context(monkeypatch) -> None:
+    shared_context = {"regime": {"current_regime": "deflation"}}
+    captured: dict = {}
+
+    def fake_discover(config, top_n=20, market="all", sector_filter="", context=None):  # noqa: ANN001
+        captured["context"] = context
+        captured["market"] = market
+        return {
+            "generated_at": "2026-03-17 18:00:00",
+            "market": market,
+            "data_coverage": {"news_mode": "live", "degraded": False},
+            "top": [],
+            "coverage_analyses": [],
+            "watch_positive": [],
+        }
+
+    monkeypatch.setattr("src.commands.stock_pick.discover_stock_opportunities", fake_discover)
+    monkeypatch.setattr("src.commands.stock_pick.enrich_payload_with_score_history", lambda payload, market, sector_filter: payload)  # noqa: ARG005,E501
+    monkeypatch.setattr("src.commands.stock_pick._attach_featured_visuals", lambda payload: payload)
+
+    payload = _run_market({}, "cn", 5, "", context=shared_context)
+
+    assert payload["market"] == "cn"
+    assert captured["market"] == "cn"
+    assert captured["context"] is shared_context

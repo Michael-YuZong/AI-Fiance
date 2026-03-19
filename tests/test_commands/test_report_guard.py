@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from src.commands import report_guard
-from src.commands.report_guard import ReportGuardError, export_reviewed_markdown_bundle, review_path_for
+from src.commands.report_guard import ReportGuardError, export_reviewed_markdown_bundle, exported_bundle_lines, review_path_for
 from src.output import client_export
 from src.output.client_export import export_markdown_bundle
 
@@ -86,6 +86,38 @@ def test_report_guard_blocks_non_pass_review(isolated_reports: Path) -> None:
     )
 
     with pytest.raises(ReportGuardError, match="外部评审尚未通过"):
+        export_reviewed_markdown_bundle(
+            report_type="scan",
+            markdown_text=SCAN_DETAIL_MARKDOWN,
+            markdown_path=target,
+            release_findings=[],
+        )
+
+
+def test_report_guard_blocks_conflicting_pass_review_text(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/scans/etfs/final/scan_159981_2026-03-11_client_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        "\n".join(
+            [
+                "## 一句话总评",
+                "正文仍写着未关闭问题。",
+                "## 主要问题",
+                "- 还有问题",
+                "### P1-1 关闭状态：未关闭",
+                "## 独立答案",
+                "- 结论还没完全收口",
+                "## 收敛结论",
+                "- 状态：PASS",
+                "- 无新的 P0/P1：是",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReportGuardError, match="正文与收敛结论冲突"):
         export_reviewed_markdown_bundle(
             report_type="scan",
             markdown_text=SCAN_DETAIL_MARKDOWN,
@@ -399,3 +431,19 @@ def test_report_guard_accepts_observe_etf_pick_markdown(isolated_reports: Path) 
         release_findings=[],
     )
     assert bundle["markdown"] == target
+
+
+def test_exported_bundle_lines_includes_html_between_markdown_and_pdf() -> None:
+    lines = exported_bundle_lines(
+        {
+            "markdown": Path("/tmp/demo.md"),
+            "html": Path("/tmp/demo.html"),
+            "pdf": Path("/tmp/demo.pdf"),
+        }
+    )
+
+    assert lines == [
+        "[client markdown] /tmp/demo.md",
+        "[client html] /tmp/demo.html",
+        "[client pdf] /tmp/demo.pdf",
+    ]

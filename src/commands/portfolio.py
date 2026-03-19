@@ -10,7 +10,9 @@ from typing import Any, Dict, List
 from src.commands.release_check import check_generic_client_report
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
 from src.output import DecisionRetrospectReportRenderer
+from src.processors.factor_meta import summarize_factor_contracts_from_analysis
 from src.processors.horizon import build_trade_plan_horizon
+from src.processors.opportunity_engine import analyze_opportunity, build_market_context
 from src.processors.portfolio_actions import (
     build_trade_decision_snapshot,
     build_trade_plan,
@@ -166,12 +168,20 @@ def _trade_logging_snapshots(
             "volume_signal": volume.get("signal"),
             "volume_structure": volume.get("structure"),
         }
+        factor_contract: Dict[str, Any] = {}
+        try:
+            context = build_market_context(config, relevant_asset_types=[asset_type])
+            analysis = analyze_opportunity(symbol, asset_type, config, context=context, today_mode=False)
+            factor_contract = summarize_factor_contracts_from_analysis(analysis)
+        except Exception:
+            factor_contract = {}
         decision_snapshot = build_trade_decision_snapshot(
             symbol=symbol,
             asset_type=asset_type,
             config=config,
             history=history,
             thesis=thesis_snapshot,
+            factor_contract=factor_contract,
         )
         execution_snapshot = estimate_execution_profile(
             asset_type=asset_type,

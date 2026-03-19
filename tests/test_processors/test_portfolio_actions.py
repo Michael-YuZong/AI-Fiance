@@ -89,6 +89,29 @@ def test_build_trade_plan_estimates_budget_execution_and_provenance(monkeypatch,
         asset_type="cn_etf",
         repo=repo,
         thesis_repo=thesis_repo,
+        analysis={
+            "symbol": "561380",
+            "name": "电网ETF",
+            "dimensions": {
+                "technical": {
+                    "factors": [
+                        {
+                            "name": "量价结构",
+                            "factor_id": "j1_volume_structure",
+                            "factor_meta": {
+                                "factor_id": "j1_volume_structure",
+                                "family": "J-1",
+                                "state": "strategy_challenger",
+                                "visibility_class": "daily_close",
+                                "proxy_level": "direct",
+                                "supports_strategy_candidate": True,
+                                "point_in_time_ready": True,
+                            },
+                        }
+                    ]
+                }
+            },
+        },
         period="12m",
     )
 
@@ -97,6 +120,7 @@ def test_build_trade_plan_estimates_budget_execution_and_provenance(monkeypatch,
     assert payload["execution"]["estimated_total_cost"] > 0
     assert payload["execution"]["tradability_label"] in {"顺畅", "可成交", "谨慎", "冲击偏高", "数据不足"}
     assert payload["decision_snapshot"]["market_data_as_of"] == "2025-12-31"
+    assert payload["decision_snapshot"]["factor_contract"]["families"]["J-1"] == 1
     assert payload["horizon"]["code"] == "position_trade"
     assert payload["decision_snapshot"]["horizon"]["code"] == "position_trade"
     assert payload["current_risk"]["annual_vol"] >= 0

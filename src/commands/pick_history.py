@@ -214,14 +214,21 @@ def _score_value(value: Any) -> Optional[float]:
 
 
 def _factor_snapshot(dimension: Mapping[str, Any]) -> Dict[str, Dict[str, str]]:
-    factors: Dict[str, Dict[str, str]] = {}
+    factors: Dict[str, Dict[str, Any]] = {}
     for item in dimension.get("factors", []) or []:
         name = str(item.get("name", "")).strip()
         if not name:
             continue
+        factor_meta = dict(item.get("factor_meta") or {})
         factors[name] = {
             "display_score": str(item.get("display_score", "")),
             "signal": str(item.get("signal", "")),
+            "factor_id": str(item.get("factor_id", "")),
+            "family": str(factor_meta.get("family", "")),
+            "state": str(factor_meta.get("state", "")),
+            "visibility_class": str(factor_meta.get("visibility_class", "")),
+            "proxy_level": str(factor_meta.get("proxy_level", "")),
+            "supports_strategy_candidate": bool(factor_meta.get("supports_strategy_candidate")),
         }
     return factors
 

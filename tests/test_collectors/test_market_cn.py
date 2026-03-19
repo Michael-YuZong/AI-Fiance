@@ -39,6 +39,22 @@ def test_market_cn_falls_back_to_yahoo_when_ak_unavailable(monkeypatch):
     monkeypatch.setattr("src.collectors.market_cn.yf", _FakeYFinance())
     frame = collector.get_etf_daily("512400")
     assert not frame.empty
+    assert frame.attrs["history_source"] == "yahoo"
+    assert frame.attrs["history_source_label"] == "Yahoo Finance 日线回退"
+
+
+def test_market_cn_stock_does_not_fall_back_to_yahoo_unless_enabled(monkeypatch):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_ts_stock_daily", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ts failed")))
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(RuntimeError("ak failed")))
+    monkeypatch.setattr("src.collectors.market_cn.yf", _FakeYFinance())
+
+    try:
+        collector.get_stock_daily("300750")
+    except RuntimeError as exc:
+        assert str(exc) == "ak failed"
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected get_stock_daily to stop before Yahoo fallback")
 
 
 def test_market_cn_maps_exchange_suffix():
@@ -66,6 +82,8 @@ def test_market_cn_normalizes_open_fund_nav(monkeypatch):
     frame = collector.get_open_fund_daily("022365")
     assert list(frame.columns) == ["date", "open", "high", "low", "close", "volume", "amount"]
     assert float(frame["close"].iloc[-1]) == 1.02
+    assert frame.attrs["history_source"] == "akshare"
+    assert frame.attrs["history_source_label"] == "AKShare 基金净值回退"
 
 
 def test_market_cn_index_daily_falls_back_to_proxy_etf(monkeypatch):
@@ -121,6 +139,8 @@ def test_market_cn_ts_stock_daily_scales_amount_to_yuan(monkeypatch, tmp_path):
     frame = collector.get_stock_daily("300750")
     assert not frame.empty
     assert float(frame["成交额"].iloc[-1]) == 1_234_500.0
+    assert frame.attrs["history_source"] == "tushare"
+    assert frame.attrs["history_source_label"] == "Tushare 日线"
 
 
 def test_market_cn_ts_etf_daily_scales_amount_to_yuan(monkeypatch, tmp_path):
@@ -148,6 +168,32 @@ def test_market_cn_ts_etf_daily_scales_amount_to_yuan(monkeypatch, tmp_path):
     frame = collector.get_etf_daily("510300")
     assert not frame.empty
     assert float(frame["成交额"].iloc[-1]) == 567_800.0
+    assert frame.attrs["history_source"] == "tushare"
+    assert frame.attrs["history_source_label"] == "Tushare 日线"
+
+
+def test_market_cn_retries_tushare_stock_daily_before_fallback(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    attempts = {"count": 0}
+
+    def fake_ts_stock_daily(symbol: str, start: str, end: str, adjust: str):  # noqa: ARG001
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("temporary ts failure")
+        return pd.DataFrame(
+            [
+                {"日期": "2026-03-10", "开盘": 10.0, "最高": 10.3, "最低": 9.9, "收盘": 10.2, "成交量": 1000, "成交额": 1_000_000.0},
+                {"日期": "2026-03-11", "开盘": 10.2, "最高": 10.5, "最低": 10.1, "收盘": 10.4, "成交量": 1200, "成交额": 1_200_000.0},
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_stock_daily", fake_ts_stock_daily)
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AK fallback should not run")))
+    frame = collector.get_stock_daily("300750")
+
+    assert attempts["count"] == 2
+    assert not frame.empty
+    assert frame.attrs["history_source"] == "tushare"
 
 
 def test_market_cn_etf_universe_snapshot_merges_basic_and_daily(monkeypatch, tmp_path):

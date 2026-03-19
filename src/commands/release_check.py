@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import re
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -59,6 +58,23 @@ GENERIC_OPERATION_PREFIXES = (
     "当前动作：",
     "单票上限",
     "执行原则",
+    "`政策催化`",
+    "`龙头公告",
+    "`海外映射",
+    "`研报/新闻",
+    "`结构化事件",
+    "`负面事件",
+    "`新闻热度",
+    "`前瞻催化",
+)
+
+PICK_OPERATION_PREFIXES = (
+    "周期理由：",
+    "不适合打法：",
+    "为什么按这个周期理解：",
+    "现在不适合的打法：",
+    "现在不适合：",
+    "加仓节奏：",
 )
 
 
@@ -163,12 +179,57 @@ def _explanation_bullets(text: str) -> List[str]:
     return bullets
 
 
+def _normalize_duplicate_text(text: str) -> str:
+    line = str(text).strip()
+    if not line:
+        return ""
+    for prefix in (*GENERIC_OPERATION_PREFIXES, *PICK_OPERATION_PREFIXES):
+        if line.startswith(prefix):
+            line = line[len(prefix) :].strip()
+            break
+    line = re.sub(r"[（(][^）)]{1,20}[）)]", "", line)
+    line = re.sub(r"`([^`]+)`", r"\1", line)
+    line = re.sub(r"\s+", "", line)
+    return line
+
+
+def _operation_bullets(text: str) -> List[str]:
+    bullets: List[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        body = stripped[2:].strip()
+        if any(body.startswith(prefix) for prefix in PICK_OPERATION_PREFIXES):
+            bullets.append(body)
+    return bullets
+
+
 def _duplicate_explanation_findings(text: str, *, max_repeat: int = 2) -> List[str]:
     findings: List[str] = []
-    duplicates = Counter(_explanation_bullets(text))
-    for item, count in duplicates.items():
-        if count > max_repeat:
-            findings.append(format_lesson_finding("L003", f"[P1] 解释文案重复过多（{count} 次），像模板而不像成稿: {item}"))
+    normalized: Dict[str, List[str]] = {}
+    for item in _explanation_bullets(text):
+        key = _normalize_duplicate_text(item)
+        if not key:
+            continue
+        normalized.setdefault(key, []).append(item)
+    for items in normalized.values():
+        if len(items) > max_repeat:
+            findings.append(format_lesson_finding("L003", f"[P1] 解释文案重复过多（{len(items)} 次），像模板而不像成稿: {items[0]}"))
+    return findings
+
+
+def _duplicate_operation_findings(text: str, *, max_repeat: int = 2, scope: str = "报告") -> List[str]:
+    findings: List[str] = []
+    normalized: Dict[str, List[str]] = {}
+    for item in _operation_bullets(text):
+        key = _normalize_duplicate_text(item)
+        if not key:
+            continue
+        normalized.setdefault(key, []).append(item)
+    for items in normalized.values():
+        if len(items) > max_repeat:
+            findings.append(format_lesson_finding("L003", f"[P1] {scope} 的周期/动作文案重复过多（{len(items)} 次），像模板而不像成稿: {items[0]}"))
     return findings
 
 
@@ -564,6 +625,8 @@ def check_stock_pick_client_report(client_text: str, source_text: str) -> List[s
         if "样本质量" not in client_text:
             findings.append(format_lesson_finding("L030", "[P2] 个股成稿引用了历史相似样本，但没有展示样本质量判断"))
     findings.extend(_duplicate_explanation_findings(client_text, max_repeat=2))
+    findings.extend(_duplicate_operation_findings(client_text, max_repeat=2, scope="客户稿"))
+    findings.extend(_duplicate_operation_findings(source_text, max_repeat=2, scope="详细稿"))
     if len(_explanation_bullets(client_text)) < 8:
         findings.append(format_lesson_finding("L002", "[P2] 客户稿解释性不足：实质性解释条目太少"))
     findings.extend(_intraday_claim_findings(client_text))

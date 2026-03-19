@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
 
 from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery, summarize_pick_coverage
-from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
+from src.commands.pick_visuals import attach_visuals_to_analyses
+from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle, exported_bundle_lines
 from src.commands.release_check import check_generic_client_report
 from src.output import ClientReportRenderer, OpportunityReportRenderer
+from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.opportunity_engine import analyze_opportunity, build_market_context, discover_fund_opportunities
 from src.utils.fund_taxonomy import taxonomy_from_analysis, taxonomy_rows
 from src.utils.config import load_config, resolve_project_path
@@ -427,6 +429,7 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context
         "name": winner.get("name"),
         "symbol": winner.get("symbol"),
         "asset_type": winner.get("asset_type"),
+        "visuals": dict(winner.get("visuals") or {}),
         "reference_price": float(dict(winner.get("metrics") or {}).get("last_close") or 0.0),
         "trade_state": narrative.get("judgment", {}).get("state", "持有优于追高"),
         "positives": _winner_reason_lines(winner, defensive_mode),
@@ -548,6 +551,7 @@ def main() -> None:
         rank_key=lambda item: _rank_key(item, defensive_mode),
     )
     analyses = list(payload.get("top") or [])
+    attach_visuals_to_analyses(analyses[:3])
     delivery_tier = grade_pick_delivery(
         report_type="fund_pick",
         discovery_mode=discovery_mode,
@@ -583,6 +587,7 @@ def main() -> None:
         str(dict(report_payload.get("winner") or {}).get("symbol", "")),
         selection_context=selection_context,
     )
+    factor_contract = summarize_factor_contracts_from_analyses(list(payload.get("coverage_analyses") or analyses), sample_limit=16)
     detail_path = _detail_output_path(str(report_payload.get("generated_at", "")))
     detail_path.parent.mkdir(parents=True, exist_ok=True)
     detail_path.write_text(detail_markdown, encoding="utf-8")
@@ -606,13 +611,14 @@ def main() -> None:
                 "discovery_mode": discovery_mode,
                 "delivery_tier": dict(delivery_tier),
                 "data_coverage": dict(payload.get("pick_coverage") or {}),
+                "factor_contract": factor_contract,
             },
         )
     except ReportGuardError as exc:
         raise SystemExit(str(exc))
     print(markdown)
-    print(f"\n[client markdown] {bundle['markdown']}")
-    print(f"[client pdf] {bundle['pdf']}")
+    for index, line in enumerate(exported_bundle_lines(bundle)):
+        print(f"\n{line}" if index == 0 else line)
 
 
 if __name__ == "__main__":

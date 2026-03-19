@@ -46,6 +46,32 @@ def test_valuation_index_snapshot_prefers_specific_theme_proxy_over_generic_keyw
     assert "代理" in snapshot["match_note"]
 
 
+def test_valuation_index_snapshot_reuses_process_index_master_frame(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    ValuationCollector._CN_INDEX_MASTER_FRAME = None
+    frame = pd.DataFrame(
+        [
+            {"指数简称": "中证光模块", "指数代码": "931160", "PE滚动": 42.5},
+        ]
+    )
+    calls = {"count": 0}
+
+    def fake_cached_call(*args, **kwargs):  # noqa: ANN001
+        calls["count"] += 1
+        return frame
+
+    monkeypatch.setattr(collector, "cached_call", fake_cached_call)
+    monkeypatch.setattr(collector, "_require_ak", lambda: type("AKClient", (), {"index_all_cni": object()})())
+
+    first = collector.get_cn_index_snapshot(["光模块"])
+    second = collector.get_cn_index_snapshot(["光模块"])
+
+    assert first is not None
+    assert second is not None
+    assert calls["count"] == 1
+    ValuationCollector._CN_INDEX_MASTER_FRAME = None
+
+
 def test_valuation_etf_nav_resolves_tushare_fund_code(monkeypatch, tmp_path):
     collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
 
