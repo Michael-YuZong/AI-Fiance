@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List
@@ -625,6 +626,11 @@ def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None 
 
 
 def _export_pdf(markdown_text: str, html_path: Path, pdf_path: Path) -> None:
+    try:
+        pdf_path.unlink()
+    except FileNotFoundError:
+        pass
+
     if _EDGE_BINARY.exists():
         try:
             with tempfile.TemporaryDirectory(prefix="edge-export-", dir="/tmp") as user_data_dir:
@@ -648,32 +654,49 @@ def _export_pdf(markdown_text: str, html_path: Path, pdf_path: Path) -> None:
                 ]
                 process = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     env=env,
                 )
-                try:
-                    stdout, stderr = process.communicate(timeout=45)
-                except subprocess.TimeoutExpired:
-                    if pdf_path.exists() and pdf_path.stat().st_size > 0:
-                        process.terminate()
-                        try:
-                            process.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            process.wait(timeout=5)
-                        return
-                    process.kill()
-                    process.wait(timeout=5)
-                    raise
-                finally:
-                    if process.stdout is not None:
-                        process.stdout.close()
-                    if process.stderr is not None:
-                        process.stderr.close()
-                if process.returncode != 0:
-                    raise subprocess.CalledProcessError(process.returncode, cmd, output=stdout, stderr=stderr)
+                deadline = time.monotonic() + 45.0
+                last_pdf_size = -1
+                stable_pdf_ticks = 0
+                while True:
+                    return_code = process.poll()
+                    if return_code is not None:
+                        if return_code != 0:
+                            raise subprocess.CalledProcessError(return_code, cmd)
+                        break
+
+                    if pdf_path.exists():
+                        pdf_size = pdf_path.stat().st_size
+                        if pdf_size > 0 and pdf_size == last_pdf_size:
+                            stable_pdf_ticks += 1
+                        else:
+                            last_pdf_size = pdf_size
+                            stable_pdf_ticks = 0
+                        if pdf_size > 0 and stable_pdf_ticks >= 2:
+                            process.terminate()
+                            try:
+                                process.wait(timeout=3)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                process.wait(timeout=3)
+                            return
+
+                    if time.monotonic() >= deadline:
+                        if pdf_path.exists() and pdf_path.stat().st_size > 0:
+                            process.terminate()
+                            try:
+                                process.wait(timeout=3)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                process.wait(timeout=3)
+                            return
+                        process.kill()
+                        process.wait(timeout=3)
+                        raise subprocess.TimeoutExpired(cmd=cmd, timeout=45)
+                    time.sleep(0.25)
             return
         except Exception:
             pass

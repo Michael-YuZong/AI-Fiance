@@ -806,6 +806,10 @@ def check_generic_client_report(client_text: str, report_type: str, source_text:
 def _intraday_claim_findings(text: str) -> List[str]:
     findings: List[str] = []
     normalized = re.sub(r"^\|\s*盘中快照 as_of\s*\|.*$", "", text, flags=re.M)
+    normalized = normalized.replace("盘中快照成稿", "")
+    normalized = normalized.replace("盘中快照", "")
+    normalized = normalized.replace("盘中实时/缓存快照", "")
+    normalized = normalized.replace("盘中实时快照", "")
     risky_opening_patterns = (
         r"开盘.{0,8}(做|买|追|加仓|执行|跟随|介入)",
         r"明天开盘.{0,8}(做|买|追|加仓|执行|跟随|介入)",

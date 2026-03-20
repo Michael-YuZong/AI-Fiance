@@ -12,8 +12,10 @@ def _sample_analysis(symbol: str, name: str, asset_type: str = "cn_stock", rank:
         "action": {
             "direction": "小仓试仓",
             "entry": "等回踩确认",
+            "buy_range": "9.850 - 10.000",
             "position": "首次建仓 ≤3%",
             "scaling_plan": "分 2-3 批建仓",
+            "trim_range": "11.200 - 11.500",
             "stop": "跌破关键支撑离场",
             "target": "先看前高",
             "max_portfolio_exposure": "单标的 ≤6%",
@@ -101,13 +103,17 @@ def test_render_stock_picks_has_client_table_and_reasoning() -> None:
         "watch_positive": [],
     }
     rendered = ClientReportRenderer().render_stock_picks(payload)
+    assert "**先看结论：** 先看短线/中线和低门槛入口" in rendered
     assert "## A股" in rendered
     assert "| 标的 | 技术 | 基本面 | 催化 | 相对强弱 | 风险 | 结论 |" in rendered
+    assert "### 第一批：核心主线" in rendered
     assert "为什么能进正式推荐" in rendered
     assert "持有周期：中线配置（1-3月）" in rendered
     assert "portfolio whatif buy 300502" in rendered
     assert "为什么按这个周期理解" in rendered
     assert "现在不适合的打法" in rendered
+    assert "建议买入区间：9.850 - 10.000" in rendered
+    assert "建议减仓区间：11.200 - 11.500" in rendered
     assert "## 仓位管理" in rendered
 
 
@@ -194,11 +200,45 @@ def test_render_stock_picks_detailed_backfills_catalyst_and_degraded_history_sec
         "watch_positive": [analysis],
     }
     rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
-    assert "催化证据来源" in rendered
+    assert "证据口径：" in rendered
     assert "高置信直连催化" in rendered
+    assert "下一步怎么盯：" in rendered
+    assert "## 历史相似样本验证" in rendered
     assert "非重叠样本" in rendered
-    assert "95%区间" in rendered
     assert "样本质量" in rendered
+    assert "关键盯盘价位" in rendered
+
+
+def test_render_stock_picks_detailed_compacts_watch_items() -> None:
+    watch_one = _sample_analysis("601857", "中国石油", "cn_stock", rank=1)
+    watch_one["action"]["entry"] = "当前缺少完整日线历史，先按观察仓处理；更适合等补齐日线后再确认趋势。"
+    watch_one["action"]["buy_range"] = ""
+    watch_one["action"]["stop_ref"] = 11.72
+    watch_one["action"]["target_ref"] = 12.95
+    watch_two = _sample_analysis("002195", "岩山科技", "cn_stock", rank=1)
+    watch_two["action"]["entry"] = "当前缺少完整日线历史，先按观察仓处理；更适合等补齐日线后再确认趋势。"
+    watch_two["action"]["buy_range"] = ""
+    watch_two["action"]["stop_ref"] = 10.33
+    watch_two["action"]["target_ref"] = 11.36
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "day_theme": {"label": "能源冲击 + 地缘风险"},
+        "regime": {"current_regime": "stagflation"},
+        "market_label": "A股",
+        "top": [watch_one, watch_two],
+        "watch_positive": [watch_one, watch_two],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
+
+    assert "为什么继续看它：" in rendered
+    assert "为什么现在不升级成正式推荐：" in rendered
+    assert "下一步怎么盯：" in rendered
+    assert "关键盯盘价位" in rendered
+    assert "### 看好但暂不推荐" not in rendered
+    assert "## 观察名单代表样本详细拆解" in rendered
+    assert "**八维雷达：**" in rendered
+    assert "**催化拆解：**" in rendered
 
 
 def test_render_stock_picks_marks_watch_only_market_as_observe() -> None:
@@ -214,13 +254,40 @@ def test_render_stock_picks_marks_watch_only_market_as_observe() -> None:
         "watch_positive": [{"symbol": "01024.HK", "name": "快手-W"}],
     }
     rendered = ClientReportRenderer().render_stock_picks(payload)
-    assert "- 港股今天暂不正式推荐，优先观察：`快手-W`" in rendered
+    assert "- 港股今天短线先看：`快手-W`；中线暂不单列" in rendered
+
+
+def test_render_stock_picks_surfaces_affordable_cn_batch_from_coverage_pool() -> None:
+    leader = _sample_analysis("300502", "新易盛", "cn_stock", rank=3)
+    leader["metrics"] = {"last_close": 122.5}
+    affordable = _sample_analysis("002241", "歌尔股份", "cn_stock", rank=2)
+    affordable["metrics"] = {"last_close": 23.4}
+    affordable["metadata"] = {"sector": "人工智能", "chain_nodes": ["AI算力"]}
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "day_theme": {"label": "AI/半导体催化"},
+        "regime": {"current_regime": "deflation"},
+        "top": [leader],
+        "coverage_analyses": [leader, affordable],
+        "watch_positive": [{"symbol": "002241", "name": "歌尔股份"}],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks(payload)
+
+    assert "- A股低门槛可执行先看：`歌尔股份`" in rendered
+    assert "- A股关联ETF平替先看：`人工智能ETF`" in rendered
+    assert "### 第二批：低门槛 / 关联ETF" in rendered
+    assert "#### 低门槛可执行" in rendered
+    assert "#### 关联ETF平替" in rendered
+    assert "2340 元/100股" in rendered
+    assert "人工智能ETF (515070)" in rendered
 
 
 def test_render_scan_has_reasoning_and_position_management() -> None:
     analysis = _sample_analysis("561380", "电网ETF", "cn_etf", rank=1)
     rendered = ClientReportRenderer().render_scan(analysis)
     assert "## 为什么这么判断" in rendered
+    assert "**先看结论：** 这段先看八维里哪几项在支撑，哪几项在拖后腿。" in rendered
     assert "## 硬检查" in rendered
     assert "## 关键证据" in rendered
     assert "https://example.com/earnings" in rendered
@@ -228,11 +295,27 @@ def test_render_scan_has_reasoning_and_position_management() -> None:
     assert "行情来源" in rendered
     assert "AKShare 日线回退" in rendered
     assert "## 当前更合适的动作" in rendered
+    assert "先看动作和触发条件，再决定要不要给它执行优先级。" in rendered
     assert "| 适用时段 |" in rendered
+    assert "| 建议买入区间 | 9.850 - 10.000 |" in rendered
+    assert "| 建议减仓区间 | 11.200 - 11.500 |" in rendered
     assert "## 仓位管理" in rendered
     assert "## 组合落单前" in rendered
     assert "portfolio whatif buy 561380" in rendered
     assert "## 分维度详解" in rendered
+
+
+def test_render_scan_observe_trigger_uses_trading_language_template() -> None:
+    analysis = _sample_analysis("601857", "中国石油", "cn_stock", rank=1)
+    analysis["action"]["entry"] = "当前缺少完整日线历史，先按观察仓处理；更适合等补齐日线后再确认趋势。"
+    analysis["action"]["buy_range"] = ""
+    analysis["action"]["stop_ref"] = 7.86
+    analysis["action"]["target_ref"] = 8.52
+    analysis["dimensions"]["relative_strength"]["score"] = 10
+    rendered = ClientReportRenderer().render_scan(analysis)
+    assert "| 触发买点条件 | 先等补齐日线并确认 MA20 / MA60 拐头，再看相对强弱转正；触发前先别急着给精确买入价。 |" in rendered
+    assert "| 关键盯盘价位 | 下沿先看 `7.860` 上方能不能稳住；上沿先看 `8.520` 附近能不能放量突破。 |" in rendered
+    assert "| 建议买入区间 |" not in rendered
 
 
 def test_render_scan_surfaces_strong_factor_breakdown() -> None:
@@ -511,12 +594,17 @@ def test_render_fund_pick_has_alternatives() -> None:
                     "style": "更像 1-3 个月的分批配置或波段跟踪，不按隔日涨跌去做快进快出。",
                     "fit_reason": "基本面、风险收益和趋势至少有两项站得住，更适合按一段完整主线去拿，而不是只博短催化。",
                     "misfit_reason": "现在不适合当成纯隔夜交易，也还没强到可以长期不复核地持有一年以上。",
+                    "allocation_view": "如果按配置视角理解，更适合作为中期主题暴露分批持有，不适合一次打满。",
+                    "trading_view": "如果按交易视角理解，更适合等回踩承接后的再确认，不必天天换仓。",
                 },
                 "entry": "等回撤再看",
+                "buy_range": "1.960 - 2.010",
                 "position": "计划仓位的 1/3 - 1/2",
                 "scaling_plan": "确认后再加",
+                "trim_range": "2.180 - 2.240",
                 "stop": "跌破支撑离场",
             },
+            "narrative": {"playbook": {"allocation": "先按中线配置理解。", "trend": "等回踩确认后再动。"}},
             "positioning_lines": ["先小仓。"],
             "dimensions": {
                 "fundamental": {
@@ -575,6 +663,10 @@ def test_render_fund_pick_has_alternatives() -> None:
     assert "![分析看板](/tmp/fund_dashboard.png)" in rendered
     assert "| 持有周期 | 中线配置（1-3月） |" in rendered
     assert "| 为什么按这个周期看 | 基本面、风险收益和趋势至少有两项站得住，更适合按一段完整主线去拿，而不是只博短催化。 |" in rendered
+    assert "| 配置视角 | 如果按配置视角理解，更适合作为中期主题暴露分批持有，不适合一次打满。 |" in rendered
+    assert "| 交易视角 | 如果按交易视角理解，更适合等回踩承接后的再确认，不必天天换仓。 |" in rendered
+    assert "| 建议买入区间 | 1.960 - 2.010 |" in rendered
+    assert "| 建议减仓区间 | 2.180 - 2.240 |" in rendered
     assert "| 预演命令 | `portfolio whatif buy 021740 最新净值 计划金额` |" in rendered
     assert "## 组合落单前" in rendered
     assert "## 标准化分类" in rendered
@@ -591,6 +683,58 @@ def test_render_fund_pick_has_alternatives() -> None:
     assert "为什么不是另外几只" in rendered
     assert "## 关键强因子拆解" in rendered
     assert "风格漂移评估（ETF/基金专属）" in rendered
+
+
+def test_render_fund_pick_summary_only_skips_full_action_template() -> None:
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "selection_context": {
+            "discovery_mode_label": "全市场初筛",
+            "scan_pool": 12,
+            "passed_pool": 2,
+            "theme_filter_label": "黄金",
+            "style_filter_label": "商品/黄金",
+            "manager_filter_label": "未指定",
+            "coverage_note": "本轮新闻/事件覆盖存在降级。",
+            "coverage_lines": ["结构化事件覆盖 0%（0/1）", "高置信直接新闻覆盖 0%（0/1）"],
+            "coverage_total": 1,
+            "delivery_tier_label": "降级观察稿",
+            "delivery_observe_only": True,
+            "delivery_summary_only": True,
+            "delivery_notes": ["当前覆盖率过低，本次只输出摘要观察稿，不展开完整动作模板。"],
+            "blind_spots": ["基金画像覆盖不足，当前只保留摘要判断。"],
+        },
+        "winner": {
+            "name": "前海开源黄金ETF联接C",
+            "symbol": "021740",
+            "asset_type": "cn_fund",
+            "trade_state": "观察为主",
+            "positives": ["方向还在。", "但覆盖率太低。"],
+            "dimension_rows": [["产品质量/基本面代理", "61/100", "当前更多是产品结构和主题代理判断"]],
+            "action": {
+                "direction": "观察为主",
+                "horizon": {
+                    "label": "观察期",
+                    "allocation_view": "先按配置观察，不急着升级动作。",
+                    "trading_view": "等覆盖率和确认信号一起改善。",
+                },
+                "entry": "等覆盖率恢复后再看",
+                "stop_ref": 1.88,
+                "target_ref": 2.06,
+            },
+            "narrative": {"playbook": {"allocation": "先观察。", "trend": "等确认。"}},
+        },
+        "alternatives": [],
+    }
+    rendered = ClientReportRenderer().render_fund_pick(payload)
+    assert "## 当前只看什么" in rendered
+    assert "| 触发买点条件 | 等覆盖率恢复后再看；触发前先别急着给精确买入价。 |" in rendered
+    assert "| 关键盯盘价位 | 下沿先看 `1.880` 上方能不能稳住；上沿先看 `2.060` 附近能不能放量突破。 |" in rendered
+    assert "## 标准化分类" in rendered
+    assert "## 关键证据" in rendered
+    assert "## 为什么不是另外几只" in rendered
+    assert "基金画像覆盖不足" in rendered
+    assert "建议买入区间" not in rendered
 
 
 def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
@@ -634,7 +778,22 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
             "comparison_basis_label": "当日基准版",
             "delivery_tier_label": "降级观察稿",
             "delivery_observe_only": True,
+            "delivery_summary_only": False,
             "delivery_notes": ["当前流程不是把全市场每只标的都做完整八维深扫，而是先初筛 `9` 只，再对其中 `5` 只做完整分析。", "新闻/事件覆盖存在降级，本次更适合作为观察优先对象，不宜当成强执行型推荐。"],
+        },
+        "recommendation_tracks": {
+            "short_term": {
+                "name": "能源化工ETF",
+                "symbol": "159981",
+                "horizon_label": "短线交易（3-10日）",
+                "reason": "当前更强的是催化、相对强弱和执行节奏，优势主要集中在接下来几个交易日到一两周内。",
+            },
+            "medium_term": {
+                "name": "红利ETF",
+                "symbol": "510880",
+                "horizon_label": "中线配置（1-3月）",
+                "reason": "更适合围绕一段完整主线分批拿，不只是看一两天波动。",
+            },
         },
         "winner": {
             "name": "能源化工ETF",
@@ -656,13 +815,18 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
                     "style": "更看催化、趋势和执行节奏，适合盯右侧确认和止损，不适合当成长线底仓。",
                     "fit_reason": "当前更强的是催化、相对强弱和执行节奏，优势主要集中在接下来几个交易日到一两周内。",
                     "misfit_reason": "现在不适合直接当成长线底仓，一旦催化和强势股状态失效要更快处理。",
+                    "allocation_view": "如果按配置视角理解，这条方向已经有一定配置价值，但更适合分批跟踪，不适合一次打满。",
+                    "trading_view": "如果按交易视角理解，更看催化兑现、右侧确认和止损纪律，优先等回踩或放量确认，不追当天情绪。",
                 },
                 "entry": "等回踩再看",
+                "buy_range": "0.820 - 0.845",
                 "position": "首次建仓 ≤3%",
                 "scaling_plan": "分 2-3 批建仓",
+                "trim_range": "0.920 - 0.960",
                 "stop": "跌破支撑离场",
                 "target": "先看前高",
             },
+            "narrative": {"playbook": {"allocation": "先按配置仓看。", "trend": "回踩确认后再跟。"}},
             "positioning_lines": ["先小仓。"],
             "evidence": list(analysis["dimensions"]["catalyst"]["evidence"]),
             "dimensions": analysis["dimensions"],
@@ -683,11 +847,14 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     }
     rendered = ClientReportRenderer().render_etf_pick(payload)
     assert "今日ETF观察" in rendered
-    assert "如果按今天剩余交易时段的计划先排一个观察优先的 ETF 对象" in rendered
+    assert "如果按今天剩余交易时段的计划一定要给执行入口，我会分成两档：短线先看：`能源化工ETF`；中线先看：`红利ETF`" in rendered
     assert "这份建议的适用时段：" in rendered
     assert "## 数据完整度" in rendered
     assert "## 交付等级" in rendered
     assert "降级观察稿" in rendered
+    assert "## 当前分层建议" in rendered
+    assert "**先看结论：** 这段只回答今天先看哪只、按什么周期先跟。" in rendered
+    assert "| 短线优先 | 能源化工ETF (159981) | 短线交易（3-10日） |" in rendered
     assert "## 为什么先看它" in rendered
     assert "## 为什么推荐它" not in rendered
     assert "## 图表速览" in rendered
@@ -695,9 +862,15 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     assert "覆盖率的分母是今天进入完整分析的 `5` 只 ETF" in rendered
     assert "当前更合适的持有周期：**`短线交易（3-10日）`**" in rendered
     assert "| 持有周期 | 短线交易（3-10日） |" in rendered
+    assert "| 触发买点条件 | 先等回踩关键支撑不破；如果触发，再优先看 `0.820 - 0.845` 一带的承接。 |" in rendered
+    assert "| 关键盯盘价位 | 回踩先看 `0.820 - 0.845` 一带的承接；如果反弹延续，再看 `0.920 - 0.960` 一带的承压。 |" in rendered
     assert "现在不适合：现在不适合直接当成长线底仓" in rendered
-    assert "| 预演命令 | `portfolio whatif buy 159981 最新价 计划金额` |" in rendered
-    assert "## 组合落单前" in rendered
+    assert "| 配置视角 | 如果按配置视角理解，这条方向已经有一定配置价值，但更适合分批跟踪，不适合一次打满。 |" in rendered
+    assert "| 交易视角 | 如果按交易视角理解，更看催化兑现、右侧确认和止损纪律，优先等回踩或放量确认，不追当天情绪。 |" in rendered
+    assert "| 建议买入区间 | 0.820 - 0.845 |" not in rendered
+    assert "| 建议减仓区间 | 0.920 - 0.960 |" not in rendered
+    assert "| 预演命令 | `portfolio whatif buy 159981 最新价 计划金额` |" not in rendered
+    assert "## 组合落单前" not in rendered
     assert "## 这只ETF为什么是这个分" in rendered
     assert "## 标准化分类" in rendered
     assert "场内ETF" in rendered
@@ -729,7 +902,16 @@ def test_render_etf_pick_explains_missing_alternatives() -> None:
             "coverage_total": 1,
             "delivery_tier_label": "代理观察稿",
             "delivery_observe_only": True,
+            "delivery_summary_only": True,
             "delivery_notes": ["当前流程不是把全市场每只标的都做完整八维深扫，而是先初筛 `7` 只，再对其中 `2` 只做完整分析。"],
+        },
+        "recommendation_tracks": {
+            "short_term": {
+                "name": "港股创新药ETF",
+                "symbol": "513120",
+                "horizon_label": "观察期",
+                "reason": "当前信号还没共振到足以支撑正式动作，先观察更稳妥。",
+            }
         },
         "winner": {
             "name": "港股创新药ETF",
@@ -756,10 +938,16 @@ def test_render_etf_pick_explains_missing_alternatives() -> None:
         "notes": ["全市场 ETF 快照没有形成可交付候选，已回退到 ETF watchlist。"],
     }
     rendered = ClientReportRenderer().render_etf_pick(payload)
-    assert "如果按下一个交易日的计划先排一个观察优先的 ETF 对象" in rendered
+    assert "如果按下一个交易日的计划只能先给一档，我先看：短线先看：`港股创新药ETF`" in rendered
+    assert "## 当前只看什么" in rendered
+    assert "| 短线优先 | 港股创新药ETF (513120)；当前信号还没共振到足以支撑正式动作，先观察更稳妥。 |" in rendered
+    assert "| 触发买点条件 | 先等 MA20 向上拐头；触发前先别急着给精确买入价。 |" in rendered
+    assert "关键盯盘价位" not in rendered
+    assert "## 标准化分类" in rendered
+    assert "## 关键证据" in rendered
     assert "## 为什么不是另外几只" in rendered
-    assert "今天可进入完整评分且未被硬排除的 ETF 候选只有 1 只" in rendered
-    assert "只能按观察优先或降级稿处理" in rendered
+    assert "建议买入区间" not in rendered
+    assert "摘要版交付" in rendered
 
 
 def test_render_etf_pick_single_standard_candidate_does_not_self_downgrade() -> None:

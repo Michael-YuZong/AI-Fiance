@@ -41,6 +41,7 @@ from src.utils.fund_taxonomy import build_standard_fund_taxonomy
 from src.utils.market import (
     build_snapshot_fallback_history,
     build_intraday_snapshot,
+    close_yfinance_runtime_caches,
     compute_history_metrics,
     fetch_asset_history,
     format_pct,
@@ -1024,6 +1025,8 @@ def build_market_context(
                 return load_global_proxy_snapshot(), None
         except Exception as exc:
             return {}, _client_safe_issue("全球代理数据缺失", exc)
+        finally:
+            close_yfinance_runtime_caches()
 
     def _load_monitor_rows() -> tuple[List[Dict[str, Any]], Optional[str]]:
         if market_context_cfg.get("skip_market_monitor"):
@@ -1032,6 +1035,8 @@ def build_market_context(
             return MarketMonitorCollector(config).collect(), None
         except Exception as exc:
             return [], _client_safe_issue("宏观监控数据缺失", exc)
+        finally:
+            close_yfinance_runtime_caches()
 
     def _load_events() -> tuple[List[Dict[str, Any]], Optional[str]]:
         try:
@@ -1065,6 +1070,8 @@ def build_market_context(
                 returns = _history_returns(fetch_asset_history(item["symbol"], item["asset_type"], dict(config)))
             except Exception:
                 return None
+            finally:
+                close_yfinance_runtime_caches()
             return str(item["symbol"]), returns
 
         results: Dict[str, pd.Series] = {}
@@ -1086,11 +1093,14 @@ def build_market_context(
             return {}
 
         def _fetch_benchmark(item: tuple[str, str, str]) -> tuple[str, pd.Series] | None:
-            asset_type, symbol, bench_asset_type = item
-            history = _safe_history(symbol, bench_asset_type, config)
-            if history is None:
-                return None
-            return asset_type, history["close"].pct_change().dropna()
+            try:
+                asset_type, symbol, bench_asset_type = item
+                history = _safe_history(symbol, bench_asset_type, config)
+                if history is None:
+                    return None
+                return asset_type, history["close"].pct_change().dropna()
+            finally:
+                close_yfinance_runtime_caches()
 
         results: Dict[str, pd.Series] = {}
         with ThreadPoolExecutor(max_workers=min(4, len(filtered))) as pool:
@@ -1146,6 +1156,7 @@ def build_market_context(
         notes.append(pulse_note)
     watchlist_returns = watchlist_returns_future.result()
     benchmark_returns = benchmark_returns_future.result()
+    close_yfinance_runtime_caches()
 
     day_theme = _today_theme(news_report, monitor_rows)
 
@@ -1286,6 +1297,8 @@ def _context_cn_index_proxy_candidates(
 
     cleaned_keywords = [str(item).strip() for item in keywords if str(item).strip()]
     _append(_context_cn_index_snapshot(cleaned_keywords, context, config))
+    if candidates:
+        return candidates
     for keyword in cleaned_keywords:
         _append(_context_cn_index_snapshot([keyword], context, config))
     return candidates
@@ -1299,7 +1312,9 @@ def _context_cn_index_concentration_proxy(
     config: Mapping[str, Any],
 ) -> Dict[str, Any]:
     cleaned_symbol = str(symbol).strip()
-    for snapshot in _context_cn_index_proxy_candidates(keywords, context=context, config=config):
+    cleaned_keywords = [str(item).strip() for item in keywords if str(item).strip()]
+    primary_candidates = _context_cn_index_proxy_candidates(cleaned_keywords, context=context, config=config)
+    for snapshot in primary_candidates:
         proxies = _context_cn_index_financial_proxies(
             str(snapshot.get("index_code", "")),
             top_n=5,
@@ -1308,13 +1323,39 @@ def _context_cn_index_concentration_proxy(
         )
         if not proxies:
             continue
-        if cleaned_symbol:
-            constituents = list(proxies.get("constituents") or [])
-            if any(str(item.get("symbol", "")).strip() == cleaned_symbol for item in constituents):
-                merged = dict(proxies)
-                merged["index_snapshot"] = dict(snapshot)
-                merged["matched_current_symbol"] = True
-                return merged
+        constituents = list(proxies.get("constituents") or [])
+        if cleaned_symbol and any(str(item.get("symbol", "")).strip() == cleaned_symbol for item in constituents):
+            merged = dict(proxies)
+            merged["index_snapshot"] = dict(snapshot)
+            merged["matched_current_symbol"] = True
+            return merged
+        if proxies.get("top_concentration") is not None:
+            merged = dict(proxies)
+            merged["index_snapshot"] = dict(snapshot)
+            merged["matched_current_symbol"] = False
+            return merged
+
+    seen_codes = {str(item.get("index_code", "")).strip() for item in primary_candidates if str(item.get("index_code", "")).strip()}
+    for keyword in cleaned_keywords:
+        snapshot = _context_cn_index_snapshot([keyword], context, config)
+        code = str(snapshot.get("index_code", "")).strip()
+        if not snapshot or not code or code in seen_codes:
+            continue
+        seen_codes.add(code)
+        proxies = _context_cn_index_financial_proxies(
+            code,
+            top_n=5,
+            context=context,
+            config=config,
+        )
+        if not proxies:
+            continue
+        constituents = list(proxies.get("constituents") or [])
+        if cleaned_symbol and any(str(item.get("symbol", "")).strip() == cleaned_symbol for item in constituents):
+            merged = dict(proxies)
+            merged["index_snapshot"] = dict(snapshot)
+            merged["matched_current_symbol"] = True
+            return merged
         if proxies.get("top_concentration") is not None:
             merged = dict(proxies)
             merged["index_snapshot"] = dict(snapshot)
@@ -1832,6 +1873,52 @@ def _fund_specific_catalyst_profile(
         },
     )
     return profile
+
+
+def _fund_directional_catalyst_signal(
+    news_pool: Sequence[Mapping[str, Any]],
+    fund_profile: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    benchmark_keywords = _fund_benchmark_keywords(fund_profile)[:4]
+    industry_keywords = _fund_industry_keywords(fund_profile)[:5]
+    holding_names = _fund_top_holding_names(fund_profile, top_n=5)
+    if not (benchmark_keywords or industry_keywords or holding_names):
+        return {}
+
+    candidates: List[tuple[int, int, Mapping[str, Any], List[str], List[str]]] = []
+    for item in news_pool:
+        if _is_non_positive_company_statement(item):
+            continue
+        text = _headline_text(item)
+        matched_groups: List[str] = []
+        matched_terms: List[str] = []
+        for label, tokens in (
+            ("跟踪基准", benchmark_keywords),
+            ("行业暴露", industry_keywords),
+            ("核心成分", holding_names),
+        ):
+            hits = [token for token in tokens if _contains_any(text, [token])]
+            if hits:
+                matched_groups.append(label)
+                matched_terms.append(hits[0])
+        if matched_groups:
+            candidates.append((len(matched_groups), len(set(matched_terms)), item, matched_groups, matched_terms))
+
+    if not candidates:
+        return {}
+
+    group_count, term_count, item, matched_groups, matched_terms = max(
+        candidates,
+        key=lambda row: (row[0], row[1]),
+    )
+    award = 12 if group_count >= 2 or term_count >= 2 else 6
+    unique_terms = list(dict.fromkeys(matched_terms))
+    return {
+        "item": item,
+        "award": award,
+        "matched_groups": matched_groups,
+        "matched_terms": unique_terms,
+    }
 
 
 def _derived_catalyst_profile(metadata: Mapping[str, Any]) -> Dict[str, Any]:
@@ -3889,6 +3976,7 @@ def _fundamental_dimension(
     factors: List[Dict[str, Any]] = []
     raw = 0
     available = 0
+    display_name = "产品质量/基本面代理" if asset_type in {"cn_etf", "cn_index", "cn_fund"} else "基本面"
     price_percentile = float(metrics.get("price_percentile_1y", 0.5))
     valuation_snapshot: Optional[Dict[str, Any]] = None
     valuation_note = f"近一年价格分位 {price_percentile:.0%}，这只反映位置，不等于真实估值分位。"
@@ -3984,6 +4072,7 @@ def _fundamental_dimension(
             summary += f" {valuation_note}"
         return {
             "name": "基本面",
+            "display_name": display_name,
             "score": score,
             "max_score": 100,
             "summary": summary,
@@ -4399,6 +4488,10 @@ def _fundamental_dimension(
     # fundamental" threshold used in rating logic.
     if score is not None and available < 35:
         score = min(score, 55)
+    if asset_type in {"cn_etf", "cn_index", "cn_fund"} and score is not None:
+        proxy_weight = float(financial_proxy.get("coverage_weight") or 0.0)
+        if valuation_snapshot is None and proxy_weight < 35:
+            score = min(score, 68)
     is_single_stock = asset_type in {"cn_stock", "hk", "us"}
     negative_summary = "当前估值与财务质量都未形成明显优势。"
     if is_single_stock:
@@ -4412,13 +4505,15 @@ def _fundamental_dimension(
             negative_summary = "当前估值与财务质量都未形成明显优势。"
     summary = _dimension_summary(
         score,
-        "个股估值/财务快照偏正面，基本面支撑存在。" if is_single_stock else "估值/资金承接代理偏正面，但当前仍是 ETF/行业代理视角。",
-        "个股基本面暂无明显低估或高估结论。" if is_single_stock else "基本面代理没有明显便宜或显著昂贵结论。",
-        negative_summary if is_single_stock else "估值代理偏高，基本面安全边际不足。",
-        "ℹ️ 个股基本面数据缺失，本次评级未纳入完整基本面维度" if is_single_stock else "ℹ️ 基本面数据缺失，本次评级未纳入完整基本面维度",
+        "个股估值/财务快照偏正面，基本面支撑存在。" if is_single_stock else "产品结构和基本面代理偏正面，但这不等于底层行业景气已经被直接验证。",
+        "个股基本面暂无明显低估或高估结论。" if is_single_stock else "产品结构和基本面代理大体中性，当前还不能把它解释成底层行业明显低估。",
+        negative_summary if is_single_stock else "估值代理或产品承接一般，当前安全边际不够厚。",
+        "ℹ️ 个股基本面数据缺失，本次评级未纳入完整基本面维度" if is_single_stock else "ℹ️ 产品结构/基本面代理数据缺失，本次评级未纳入完整维度",
     )
     if score is not None and available < 35:
         summary += " 当前仅基于代理因子归一化评分。"
+    if asset_type in {"cn_etf", "cn_index", "cn_fund"}:
+        summary += " 当前分数更接近产品质量、跟踪机制和主题代理，不直接等同于底层行业基本面已经确认。"
     if valuation_snapshot and pe_ttm is not None:
         summary += (
             f" 当前已接入 `{valuation_snapshot.get('index_name', '')}` "
@@ -4428,6 +4523,7 @@ def _fundamental_dimension(
         summary += f" {valuation_note}"
     return {
         "name": "基本面",
+        "display_name": display_name,
         "score": score,
         "max_score": 100,
         "summary": summary,
@@ -4906,6 +5002,43 @@ def _catalyst_dimension(
     if overseas_award > 0 and overseas_pick:
         evidence_rows.append(_evidence_row(layer="海外映射", item=overseas_pick))
 
+    if asset_type_str in {"cn_etf", "cn_fund"}:
+        directional_snapshot = _fund_directional_catalyst_signal(news_pool, fund_profile)
+        directional_award = int(directional_snapshot.get("award", 0) or 0)
+        directional_item = directional_snapshot.get("item")
+        matched_groups = list(directional_snapshot.get("matched_groups") or [])
+        matched_terms = list(directional_snapshot.get("matched_terms") or [])
+        raw += directional_award
+        available += 12
+        if directional_award > 0 and directional_item:
+            detail = (
+                f"优先看跟踪基准、行业暴露和核心成分的共振，而不是把泛主题热词直接当成 ETF 催化。"
+                f" 当前命中 `{ ' / '.join(matched_groups) }`，关键词 `{ ' / '.join(matched_terms[:3]) }`。"
+            )
+            factors.append(
+                _factor_row(
+                    "产品/跟踪方向催化",
+                    str(directional_item.get("title", "")).strip(),
+                    directional_award,
+                    12,
+                    detail,
+                    factor_id="j5_directional_catalyst",
+                )
+            )
+            evidence_rows.append(_evidence_row(layer="产品/跟踪方向催化", item=directional_item))
+        else:
+            factors.append(
+                _factor_row(
+                    "产品/跟踪方向催化",
+                    "近 7 日未命中跟踪基准/行业暴露/核心成分共振催化",
+                    0,
+                    12,
+                    "这里优先看跟踪基准、行业暴露和核心成分的直接共振，不把泛主题新闻直接算成 ETF/基金催化。",
+                    display_score="信息项",
+                    factor_id="j5_directional_catalyst",
+                )
+            )
+
     # For individual stocks: density and heat only count articles that directly mention the stock.
     # This prevents sector-level news (e.g. broad AI/tech news) from inflating density scores.
     density_pool = company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool if (is_individual_stock and stock_name_tokens) else news_pool)
@@ -5265,6 +5398,7 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
     factors: List[Dict[str, Any]] = []
     raw = 0
     available = 0
+    display_name = "筹码结构（辅助项）" if asset_type in {"cn_etf", "cn_index", "cn_fund"} else "筹码结构"
     commodity_like_fund = _is_commodity_like_fund(asset_type, metadata, context.get("fund_profile"))
     drivers = dict(context.get("drivers", {}))
     sector_flow = _sector_flow_snapshot(metadata, drivers)
@@ -5529,8 +5663,14 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
     summary = _dimension_summary(score, "聪明钱方向偏正面。", "筹码结构没有形成明确增量共识。", "聪明钱没有明显站在这一边。", "ℹ️ 筹码结构数据缺失，本次评级未纳入该维度")
     if proxy_only_individual and score is not None:
         summary += " 当前更多是行业/市场级筹码代理，不把它当成单一个股已经被资金充分确认。"
+    if asset_type in {"cn_etf", "cn_index", "cn_fund"}:
+        if available <= 0:
+            summary = "当前 ETF/基金 的筹码代理缺口较大，本轮主排序未使用该维度，先只作辅助披露。"
+        else:
+            summary += " 对 ETF/基金 只作辅助判断，当前主排序不会因为这项缺失而机械拉低。"
     return {
         "name": "筹码结构",
+        "display_name": display_name,
         "score": score,
         "max_score": 100,
         "summary": summary,
@@ -6108,13 +6248,21 @@ def _rating_from_dimensions(dimensions: Mapping[str, Mapping[str, Any]], warning
     def ok(value: Optional[int], threshold: int) -> bool:
         return value is not None and value >= threshold
 
+    def macro_resilient_rank_three() -> bool:
+        return (
+            (ok(tech, 45) and ok(relative, 70))
+            or (ok(fundamental, 75) and ok(catalyst, 50) and ok(tech, 35))
+        )
+
     rank = 0
     label = "无信号"
     meaning = "没有形成可执行的多维共振。"
     if ok(tech, 70) and ok(fundamental, 60) and ok(catalyst, 50) and ok(risk, 50):
         rank, label, meaning = 4, "强机会", "四维共振，具备建仓计划条件。"
-    elif ok(fundamental, 60) and (ok(catalyst, 50) or ok(relative, 60)) and ok(tech, 40):
-        rank, label, meaning = 3, "较强机会", "逻辑成立，但还需要一个维度继续确认。"
+    elif ok(fundamental, 60) and (ok(catalyst, 50) or ok(relative, 60)) and ok(tech, 35):
+        rank, label, meaning = 3, "较强机会", "逻辑成立，右侧执行仍需一个维度继续确认。"
+    elif ok(tech, 55) and ok(relative, 65) and ok(risk, 45) and (ok(catalyst, 25) or ok(fundamental, 35)):
+        rank, label, meaning = 3, "较强机会", "趋势和轮动已经形成共振，不必因为赔率还不完美就过度降级。"
     elif (ok(tech, 70) and catalyst is not None and catalyst < 50) or (ok(catalyst, 60) and tech is not None and tech < 40):
         rank, label, meaning = 2, "储备机会", "单维度亮灯但还未形成共振。"
     else:
@@ -6124,8 +6272,14 @@ def _rating_from_dimensions(dimensions: Mapping[str, Mapping[str, Any]], warning
             rank, label, meaning = 1, "有信号但不充分", "只有单一维度足够亮，其余不足以支持动作。"
 
     if dimensions["macro"].get("macro_reverse"):
-        rank = min(rank, 2)
-        warnings = list(warnings) + ["⚠️ 宏观敏感度完全逆风，评级上限已压到 ⭐⭐"]
+        if rank >= 4:
+            rank = 3
+            warnings = list(warnings) + ["⚠️ 宏观敏感度完全逆风，评级上限已压到 ⭐⭐⭐"]
+        elif rank >= 3 and not macro_resilient_rank_three():
+            rank = 2
+            warnings = list(warnings) + ["⚠️ 宏观敏感度完全逆风，评级上限已压到 ⭐⭐"]
+        elif rank >= 3:
+            warnings = list(warnings) + ["⚠️ 宏观敏感度完全逆风，但当前走势/基本面韧性足以保留 ⭐⭐⭐ 观察上限"]
     if tech is None:
         rank = min(rank, 2)
         warnings = list(warnings) + ["ℹ️ 技术面数据缺失，评级上限降至 ⭐⭐"]
@@ -6648,6 +6802,15 @@ def _action_plan(
     vol_percentile = float((metrics or {}).get("volatility_percentile_1y", 0.5))
     return_5d = float((metrics or {}).get("return_5d", 0.0))
     trade_state = _trade_state_label(analysis["dimensions"], metrics or {}, technical)
+    etf_trend_continuation = (
+        asset_type in {"cn_etf", "cn_fund"}
+        and not macro_reverse
+        and tech is not None
+        and tech >= 48
+        and relative_score >= 65
+        and risk_score >= 45
+        and (fundamental_score >= 40 or catalyst_score >= 40)
+    )
 
     # Read setup signals from technical scorecard
     setup_block = dict(technical.get("setup") or {})
@@ -6656,8 +6819,10 @@ def _action_plan(
     compression_kind = str(dict(setup_block.get("compression_setup") or {}).get("kind", "neutral"))
     compression_award = 10 if compression_kind == "compression_breakout" else -5 if compression_kind == "momentum_chase" else 0
 
-    if rating >= 3 and not macro_reverse:
-        direction = "观望偏多" if trade_state in {"持有优于追高", "等右侧确认", "风险释放前不宜激进"} else "做多"
+    if rating >= 3:
+        direction = "观望偏多" if macro_reverse or trade_state in {"持有优于追高", "等右侧确认", "风险释放前不宜激进"} else "做多"
+    elif etf_trend_continuation:
+        direction = "观望偏多"
     elif rating == 2:
         direction = "观望"
     elif risk_score >= 70 and relative_score >= 60:
@@ -6707,6 +6872,8 @@ def _action_plan(
             position = "首次建仓 ≤5%，确认后再加到 10%"
         else:
             position = "首次建仓 ≤3%，等结构进一步确认后再加仓"
+    elif etf_trend_continuation:
+        position = "首次建仓 ≤3%，右侧确认或回踩承接后再加到 8%"
     elif rating == 2:
         position = "先不超过 5% 试错"
     elif risk_score >= 70 and relative_score >= 60:
@@ -6764,9 +6931,56 @@ def _action_plan(
     if target_ref <= close_now:
         target_ref = close_now * 1.05
 
-    timeframe = "中线配置(1-3月)" if rating >= 3 else "短线交易(1-2周)" if rating >= 2 or (risk_score >= 70 and relative_score >= 60) else "等待更好窗口"
+    buy_low_ref: Optional[float] = None
+    buy_high_ref: Optional[float] = None
+    if not (direction == "回避" and "暂不出手" in position):
+        buy_candidates = [
+            candidate
+            for candidate in [
+                ma20,
+                ma60,
+                float(fib_levels.get("0.382", 0.0)),
+                float(fib_levels.get("0.500", 0.0)),
+                float(fib_levels.get("0.618", 0.0)),
+            ]
+            if candidate > 0 and candidate <= close_now * 1.03
+        ]
+        if tech is not None and tech >= 55:
+            buy_anchor = max(
+                [candidate for candidate in buy_candidates if candidate <= close_now * 1.01],
+                default=min(close_now, ma20 or close_now),
+            )
+        elif etf_trend_continuation or rating >= 2 or relative_score >= 60 or risk_score >= 70:
+            buy_anchor = max(
+                [candidate for candidate in buy_candidates if candidate <= close_now],
+                default=close_now * 0.99,
+            )
+        else:
+            buy_anchor = 0.0
+        if buy_anchor > 0:
+            buy_high_ref = min(close_now * 1.005, max(buy_anchor, close_now * 0.985))
+            buy_low_ref = max(stop_ref * 1.02, min(buy_anchor, buy_high_ref) * 0.985)
+            if buy_low_ref >= buy_high_ref:
+                buy_low_ref = buy_high_ref * 0.985
+
+    trim_low_ref = max(close_now * (1.06 if rating >= 3 else 1.04), target_ref * 0.97)
+    trim_high_ref = max(trim_low_ref * 1.02, target_ref * 1.03)
+    if trim_high_ref <= trim_low_ref:
+        trim_high_ref = trim_low_ref * 1.02
+
+    timeframe = (
+        "中线配置(1-3月)"
+        if rating >= 3
+        else "波段跟踪(2-6周)"
+        if etf_trend_continuation
+        else "短线交易(1-2周)"
+        if rating >= 2 or (risk_score >= 70 and relative_score >= 60)
+        else "等待更好窗口"
+    )
     target = f"先看前高/近 60 日高点 {target_ref:.3f} 附近的承压与突破情况"
     stop = f"跌破 {stop_ref:.3f} 或主线/催化失效时重新评估"
+    buy_range = _format_execution_price_range(buy_low_ref, buy_high_ref) if buy_low_ref and buy_high_ref else "暂不设，先等右侧确认"
+    trim_range = _format_execution_price_range(trim_low_ref, trim_high_ref)
 
     # --- Portfolio-level position management ---
     if risk_score >= 70:
@@ -6778,6 +6992,8 @@ def _action_plan(
 
     if rating >= 3:
         scaling = "分 2-3 批建仓，每次确认后加仓"
+    elif etf_trend_continuation:
+        scaling = "分 2 批跟踪，回踩承接或放量确认后再考虑第二笔"
     elif rating == 2:
         scaling = "一次性小仓位，不加仓"
     else:
@@ -6817,6 +7033,12 @@ def _action_plan(
         "target": target,
         "stop_ref": stop_ref,
         "target_ref": target_ref,
+        "buy_low_ref": buy_low_ref,
+        "buy_high_ref": buy_high_ref,
+        "buy_range": buy_range,
+        "trim_low_ref": trim_low_ref,
+        "trim_high_ref": trim_high_ref,
+        "trim_range": trim_range,
         "target_pct": float(target_ref / close_now - 1) if close_now else 0.0,
         "timeframe": timeframe,
         "max_portfolio_exposure": max_exposure,
@@ -7056,6 +7278,18 @@ def _append_sentence(base: str, extra: str) -> str:
     if head.endswith(("。", "！", "？")):
         return f"{head}{tail}"
     return f"{head} {tail}"
+
+
+def _format_execution_price_range(low: Optional[float], high: Optional[float]) -> str:
+    if low is None or high is None:
+        return ""
+    lower = float(min(low, high))
+    upper = float(max(low, high))
+    if not math.isfinite(lower) or not math.isfinite(upper):
+        return ""
+    if upper - lower <= max(0.001, upper * 0.003):
+        return f"{upper:.3f} 附近"
+    return f"{lower:.3f} - {upper:.3f}"
 
 
 def _prepend_context(base: str, context: str) -> str:

@@ -189,3 +189,42 @@ def test_build_intraday_snapshot_for_cn_stock_includes_auction_metrics(monkeypat
     assert snapshot["down_limit"] == pytest.approx(353.45)
     assert snapshot["limit_distance_up"] == pytest.approx(432.0 / 403.0 - 1)
     assert "涨跌停边界" in snapshot["limit_commentary"] or "涨跌停" in snapshot["limit_commentary"]
+
+
+def test_close_yfinance_runtime_caches_closes_known_peewee_managers(monkeypatch):
+    closed: list[str] = []
+
+    class _Manager:
+        def __init__(self, label: str) -> None:
+            self.label = label
+            self._db = object()
+
+        def close_db(self) -> None:
+            closed.append(self.label)
+
+    class _Dummy:
+        pass
+
+    import yfinance.cache as yf_cache
+
+    monkeypatch.setattr(yf_cache, "_TzDBManager", _Manager("tz"))
+    monkeypatch.setattr(yf_cache, "_CookieDBManager", _Manager("cookie"))
+    monkeypatch.setattr(yf_cache, "_ISINDBManager", _Manager("isin"))
+    monkeypatch.setattr(yf_cache, "_TzCacheDummy", _Dummy)
+    monkeypatch.setattr(yf_cache, "_CookieCacheDummy", _Dummy)
+    monkeypatch.setattr(yf_cache, "_ISINCacheDummy", _Dummy)
+    monkeypatch.setattr(yf_cache, "_TzCacheManager", type("_TzCacheManager", (), {"_tz_cache": None}))
+    monkeypatch.setattr(yf_cache, "_CookieCacheManager", type("_CookieCacheManager", (), {"_Cookie_cache": None}))
+    monkeypatch.setattr(yf_cache, "_ISINCacheManager", type("_ISINCacheManager", (), {"_isin_cache": None}))
+
+    market.close_yfinance_runtime_caches()
+
+    assert closed.count("tz") >= 1
+    assert closed.count("cookie") >= 1
+    assert closed.count("isin") >= 1
+    assert yf_cache._TzDBManager._db is None
+    assert yf_cache._CookieDBManager._db is None
+    assert yf_cache._ISINDBManager._db is None
+    assert isinstance(yf_cache._TzCacheManager._tz_cache, _Dummy)
+    assert isinstance(yf_cache._CookieCacheManager._Cookie_cache, _Dummy)
+    assert isinstance(yf_cache._ISINCacheManager._isin_cache, _Dummy)

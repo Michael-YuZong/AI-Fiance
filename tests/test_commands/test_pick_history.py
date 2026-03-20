@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.commands.pick_history import enrich_pick_payload_with_score_history
+from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery
 
 
 def _sample_payload(score: int, signal: str, generated_at: str, *, degraded: bool = False) -> dict:
@@ -158,3 +158,45 @@ def test_enrich_pick_payload_with_score_history_prefers_full_coverage_population
 
     assert enriched["pick_coverage"]["total"] == 2
     assert enriched["pick_coverage"]["structured_rate"] == 0.5
+
+
+def test_grade_pick_delivery_labels_realtime_universe_as_intraday_final() -> None:
+    delivery = grade_pick_delivery(
+        report_type="etf_pick",
+        discovery_mode="realtime_universe",
+        coverage={"degraded": False, "total": 2},
+        scan_pool=8,
+        passed_pool=2,
+    )
+
+    assert delivery["code"] == "realtime_snapshot_note"
+    assert delivery["label"] == "盘中快照成稿"
+    assert delivery["observe_only"] is True
+    assert any("正式 final" in note for note in delivery["notes"])
+
+
+def test_grade_pick_delivery_keeps_watchlist_fallback_as_observe_only() -> None:
+    delivery = grade_pick_delivery(
+        report_type="etf_pick",
+        discovery_mode="watchlist_fallback",
+        coverage={"degraded": False, "total": 2},
+        scan_pool=8,
+        passed_pool=2,
+    )
+
+    assert delivery["label"] == "代理观察稿"
+    assert delivery["observe_only"] is True
+
+
+def test_grade_pick_delivery_marks_low_coverage_etf_as_summary_only() -> None:
+    delivery = grade_pick_delivery(
+        report_type="etf_pick",
+        discovery_mode="full_universe",
+        coverage={"degraded": True, "total": 1, "structured_rate": 0.0, "direct_news_rate": 0.0},
+        scan_pool=9,
+        passed_pool=2,
+    )
+
+    assert delivery["observe_only"] is True
+    assert delivery["summary_only"] is True
+    assert any("摘要观察稿" in note for note in delivery["notes"])

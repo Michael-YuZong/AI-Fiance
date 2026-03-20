@@ -466,6 +466,54 @@ def test_release_check_ignores_disabled_intraday_metadata_row() -> None:
     assert not any("盘中/开盘执行语言" in item for item in findings)
 
 
+def test_release_check_ignores_intraday_delivery_tier_labels() -> None:
+    client = """# 今日ETF观察
+
+## 数据完整度
+
+- 当前覆盖率正常。
+
+## 交付等级
+
+- 当前交付等级：`盘中快照成稿`。
+- 当前全市场初筛基于盘中实时/缓存快照，不是 Tushare 日终正式快照；这份产物已经是正式 final，但数据口径仍应按盘中快照理解。
+- 这是一份 `ETF` 观察优先稿，不按正式推荐稿理解。
+
+## 为什么先看它
+
+- 方向没坏。
+- 短线不追高。
+- 先看确认。
+
+## 这只ETF为什么是这个分
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 52/100 | 方向没坏但不适合追高 |
+
+## 标准化分类
+
+| 维度 | 结果 |
+| --- | --- |
+| 产品形态 | ETF |
+| 载体角色 | 场内ETF |
+| 管理方式 | 被动跟踪 |
+| 暴露类型 | 商品 |
+| 主方向 | 能源 |
+| 份额类别 | 未分级 |
+
+## 关键证据
+
+- [证据1](https://example.com)
+
+## 为什么不是另外几只
+
+- 当前候选不足，先不展开。
+"""
+    findings = check_generic_client_report(client, "etf_pick")
+    assert not any("盘中/开盘执行语言" in item for item in findings)
+
+
 def test_release_check_flags_empty_fund_profile_table() -> None:
     client = """# 今日 ETF 分析
 

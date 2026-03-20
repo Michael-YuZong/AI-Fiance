@@ -47,6 +47,12 @@
 | `L030` | 历史样本验证必须披露非重叠样本、置信区间和样本质量 | `release_check` / `renderer` |
 | `L031` | Pick 覆盖率分母必须对应完整分析样本 | `release_check` |
 | `L032` | 单候选说明不能擅自改写交付等级 | `release_check` |
+| `L033` | 覆盖率过低的 ETF/基金不应继续输出完整终稿模板，应退化为摘要观察稿 | `workflow` / `release_check` / `external_review` |
+| `L034` | `回避 / 观察` 的 ETF/基金稿不能无差别保留完整交易动作表 | `renderer` / `external_review` |
+| `L035` | ETF/基金“基本面”若主要来自产品结构和代理映射，必须显式降格或改名，不能冒充真实行业基本面 | `opportunity_engine` / `renderer` / `external_review` |
+| `L036` | 长期缺失的维度不能只写“未纳入”，必须做补权、归一化或降格为信息项 | `opportunity_engine` / `external_review` |
+| `L037` | 观察类终稿必须按信息增量裁剪篇幅，重复 playbook 句式视为结构性解释不合格 | `renderer` / `release_check` / `external_review` |
+| `L038` | 外审必须包含“rich prompt 审稿 + 零提示发散审”双层结果，不能只跑模板化单层审稿 | `workflow` / `report_guard` / `review_audit` / `external_review` |
 
 ## 处理规则
 

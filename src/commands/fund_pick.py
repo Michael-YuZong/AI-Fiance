@@ -113,7 +113,7 @@ def _fund_dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
         max_score = dimension.get("max_score", 100)
         display = "—" if score is None else f"{score}/{max_score}"
         reason = str(dimension.get("summary", "")).strip() or str(dimension.get("core_signal", "")).strip()
-        rows.append([label, display, reason])
+        rows.append([str(dimension.get("display_name", label)), display, reason])
     return rows
 
 
@@ -316,6 +316,7 @@ def _selection_context(
         "delivery_tier_code": str(delivery.get("code", "")),
         "delivery_tier_label": str(delivery.get("label", "未标注")),
         "delivery_observe_only": bool(delivery.get("observe_only")),
+        "delivery_summary_only": bool(delivery.get("summary_only")),
         "delivery_notes": [str(item).strip() for item in delivery.get("notes", []) if str(item).strip()],
     }
 
@@ -435,6 +436,7 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context
         "positives": _winner_reason_lines(winner, defensive_mode),
         "dimension_rows": _fund_dimension_rows(winner),
         "action": dict(winner.get("action") or {}),
+        "narrative": {"playbook": dict(narrative.get("playbook") or {})},
         "positioning_lines": [
             f"首次仓位按 `{winner.get('action', {}).get('position', '计划仓位的 1/3 - 1/2')}` 执行。",
             f"加仓节奏按 `{winner.get('action', {}).get('scaling_plan', '确认后再考虑第二笔')}` 执行。",

@@ -10,7 +10,7 @@
 - 审稿对象：[target.md](/absolute/path/to/target.md)
 - 适用 prompt：[external_xxx_reviewer.md](/absolute/path/to/prompt.md)
 - previous_round：[..._round1.md](/absolute/path/to/round1.md)
-- 审稿方式：`合同审 + 发散审`
+- 审稿方式：`合同审 + rich prompt 审稿 + 零提示发散审`
 - review_target：`path/or/logical_target`
 - review_prompt：`path/to/prompt.md`
 
@@ -40,6 +40,12 @@
 1. reviewer 自己发散找到的框架外问题
 2. ...
 
+## 零提示发散审
+
+1. 把同一份 Markdown 当成唯一输入、先不沿用 rich checklist 时，最先冒出来的问题
+2. 这一轮相比结构化审稿额外多出来的担心
+3. 如果没有新增问题，也要明确写：`零提示二审未发现新的实质性问题`
+
 ## 建议沉淀
 
 - prompt
@@ -66,6 +72,7 @@
 - closed_items：
   - ...
 - new_divergent_findings：...
+- zero_prompt_findings：...
 - solidification_actions：
   - ...
 - 本轮是否收敛：是 / 否
@@ -82,5 +89,6 @@
 - 如果是计划外审，至少要保留：
   - `是否允许开始实现`
 - `框架外问题` 不能省略
+- `零提示发散审` 不能省略
 - `建议沉淀` 不能省略
 - `收敛结论` 必须可被 parser 抽取

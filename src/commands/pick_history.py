@@ -77,6 +77,14 @@ def grade_pick_delivery(
 ) -> Dict[str, Any]:
     coverage_payload = dict(coverage or {})
     degraded = bool(coverage_payload.get("degraded"))
+    total = int(coverage_payload.get("total") or 0)
+    structured_rate = float(coverage_payload.get("structured_rate") or 0.0)
+    direct_rate = float(coverage_payload.get("direct_news_rate") or 0.0)
+    summary_only = (
+        report_type in {"etf_pick", "fund_pick"}
+        and degraded
+        and (total <= 1 or (structured_rate < 0.34 and direct_rate < 0.34))
+    )
     label = "标准推荐稿"
     code = "standard_recommendation"
     notes = [
@@ -90,8 +98,8 @@ def grade_pick_delivery(
         notes.append("全市场初筛没有形成稳定候选，本次已回退到默认候选池，只适合当作兜底观察名单。")
     elif discovery_mode == "realtime_universe":
         code = "realtime_snapshot_note"
-        label = "实时快照稿"
-        notes.append("当前全市场初筛基于 ETF 实时/缓存快照，不是 Tushare 日终正式快照；更适合按快照观察优先理解。")
+        label = "盘中快照成稿"
+        notes.append("当前全市场初筛基于盘中实时/缓存快照，不是 Tushare 日终正式快照；这份产物已经是正式 final，但数据口径仍应按盘中快照理解。")
     elif discovery_mode == "watchlist_fallback":
         code = "proxy_watch_only"
         label = "代理观察稿"
@@ -108,6 +116,8 @@ def grade_pick_delivery(
         code = "degraded_observation"
         label = "降级观察稿"
         notes.append("新闻/事件覆盖存在降级，本次更适合作为观察优先对象，不宜当成强执行型推荐。")
+    if summary_only:
+        notes.append("当前覆盖率过低，本次只输出摘要观察稿，不展开完整动作模板。")
 
     if coverage_payload.get("total") and coverage_payload.get("total", 0) < max(2, passed_pool):
         notes.append("可统计覆盖样本比进入完整分析的样本更少，说明部分候选仍有数据缺口。")
@@ -119,6 +129,7 @@ def grade_pick_delivery(
         "code": code,
         "label": label,
         "observe_only": observe_only,
+        "summary_only": summary_only,
         "notes": notes,
     }
 

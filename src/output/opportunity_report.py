@@ -39,7 +39,7 @@ def _dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
     for key, label in DIMENSION_ORDER:
         dimension = analysis["dimensions"][key]
         score = "缺失" if dimension.get("score") is None else f"{dimension['score']}/{dimension['max_score']}"
-        rows.append([label, score, dimension.get("core_signal", "—")])
+        rows.append([str(dimension.get("display_name", label)), score, dimension.get("core_signal", "—")])
     return rows
 
 
@@ -48,7 +48,7 @@ def _dimension_summary_rows(analysis: Dict[str, Any]) -> List[List[str]]:
     for key, label in DIMENSION_ORDER:
         dimension = analysis["dimensions"][key]
         score = "—/100" if dimension.get("score") is None else f"{dimension['score']}/{dimension['max_score']}"
-        rows.append([label, score, dimension.get("summary", "—"), dimension.get("core_signal", "—")])
+        rows.append([str(dimension.get("display_name", label)), score, dimension.get("summary", "—"), dimension.get("core_signal", "—")])
     return rows
 
 

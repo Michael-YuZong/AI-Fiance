@@ -14,11 +14,12 @@ from src.utils.config import resolve_project_path
 
 
 REPORT_TYPES = {"stock_pick", "stock_analysis", "briefing", "fund_pick", "etf_pick", "scan", "retrospect"}
-REQUIRED_REVIEW_HEADINGS = (
-    "## 一句话总评",
-    "## 主要问题",
-    "## 独立答案",
-    "## 收敛结论",
+REQUIRED_REVIEW_SECTIONS = (
+    "一句话总评",
+    "主要问题",
+    "独立答案",
+    "零提示发散审",
+    "收敛结论",
 )
 DETAILED_FINAL_MARKERS = {
     "stock_pick": ("八维雷达", "催化拆解", "硬排除检查", "风险拆解", "历史相似样本"),
@@ -40,6 +41,15 @@ class ReviewSummary:
     review_path: Path
     status: str
     approved: bool
+
+
+def _extract_review_section(review_text: str, section_title: str) -> str:
+    pattern = re.compile(
+        rf"^##+\s*{re.escape(section_title)}\s*$\n?(.*?)(?=^##+\s+\S|\Z)",
+        re.M | re.S,
+    )
+    match = pattern.search(review_text)
+    return (match.group(1).strip() if match else "")
 
 
 def ensure_report_task_registered(report_type: str) -> None:
@@ -67,7 +77,7 @@ def manifest_path_for(markdown_path: Path) -> Path:
 
 
 def _validate_review_text(review_text: str) -> ReviewSummary | None:
-    missing = [heading for heading in REQUIRED_REVIEW_HEADINGS if heading not in review_text]
+    missing = [title for title in REQUIRED_REVIEW_SECTIONS if not _extract_review_section(review_text, title)]
     if missing:
         raise ReportGuardError("外部评审意见缺少必要章节: " + "、".join(missing))
 

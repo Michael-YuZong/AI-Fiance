@@ -28,6 +28,7 @@
    - `本轮新增 P0/P1`
    - `上一轮 P0/P1 是否已关闭`
    - `框架外问题`
+   - `零提示发散审`
    - `收敛结论`
 5. 主执行者按外审结果修正：
    - 代码
@@ -47,8 +48,9 @@
 1. 连续两轮没有新的 `P0 / P1`
 2. 上一轮 `P0 / P1` 已关闭、降级或被明确判定为误报
 3. 本轮发散审没有新的实质性框架外问题
-4. 合理的发散审问题已经完成固化分流
-5. 剩余问题主要是展示优化、措辞顺序或低风险补充项
+4. 本轮零提示发散审也没有新的实质性高优先级问题
+5. 合理的发散审问题已经完成固化分流
+6. 剩余问题主要是展示优化、措辞顺序或低风险补充项
 
 如果任一条件不满足，默认继续下一轮。
 
@@ -75,6 +77,7 @@
 - `carried_p0_p1`
 - `closed_items`
 - `new_divergent_findings`
+- `zero_prompt_findings`
 - `solidification_actions`
 - `convergence_status`
 
@@ -90,6 +93,8 @@
 - `hard rule / guard / workflow`
 - `test / fixture`
 - `lesson / backlog`
+
+如果本轮发现的问题本来就应该由 reviewer 主动问到、但 reviewer prompt 并没有显式覆盖，这一轮不能只修当前稿，必须同步补 reviewer prompt 或 guard；否则默认这类问题下轮还会再漏。
 
 没有完成这一步，默认这轮外审闭环未完成。
 

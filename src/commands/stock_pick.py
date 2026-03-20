@@ -14,6 +14,7 @@ from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.opportunity_engine import build_market_context, discover_stock_opportunities
 from src.utils.config import PROJECT_ROOT, load_config
 from src.utils.logger import setup_logger
+from src.utils.market import close_yfinance_runtime_caches
 
 SNAPSHOT_PATH = PROJECT_ROOT / "data" / "stock_pick_score_history.json"
 FINAL_DIR = PROJECT_ROOT / "reports" / "stock_picks" / "final"
@@ -250,88 +251,90 @@ def main() -> None:
     setup_logger("ERROR")
     config = load_config(args.config or None)
     sector_filter = args.sector.strip()
+    try:
+        if not args.client_final:
+            payload = discover_stock_opportunities(config, top_n=args.top, market=args.market, sector_filter=sector_filter)
+            payload = enrich_payload_with_score_history(payload, market=args.market, sector_filter=sector_filter)
+            print(OpportunityReportRenderer().render_stock_picks(payload))
+            return
 
-    if not args.client_final:
-        payload = discover_stock_opportunities(config, top_n=args.top, market=args.market, sector_filter=sector_filter)
-        payload = enrich_payload_with_score_history(payload, market=args.market, sector_filter=sector_filter)
-        print(OpportunityReportRenderer().render_stock_picks(payload))
-        return
+        if args.market == "all":
+            shared_context = build_market_context(
+                config,
+                relevant_asset_types=["cn_stock", "cn_etf", "hk", "us", "futures"],
+            )
+            market_payloads = {
+                market: _run_market(config, market, args.top, sector_filter, context=shared_context)
+                for market in ("cn", "hk", "us")
+            }
+            for market, payload in market_payloads.items():
+                detailed = OpportunityReportRenderer().render_stock_picks(payload)
+                _persist_internal_detail_report(_internal_detail_stem(market, str(payload.get("generated_at", ""))), detailed)
+            client_payload = _merge_payloads(market_payloads)
+            factor_contract = _factor_contract_summary(
+                [
+                    analysis
+                    for market_payload in market_payloads.values()
+                    for analysis in list(market_payload.get("coverage_analyses") or market_payload.get("top") or [])
+                ]
+            )
+            source_path = _persist_internal_detail_report(
+                _internal_merged_stem(str(client_payload.get("generated_at", ""))),
+                OpportunityReportRenderer().render_stock_picks(client_payload),
+            )
+            client_markdown = ClientReportRenderer().render_stock_picks_detailed(client_payload)
+            target_path = FINAL_DIR / f"{_final_stem(str(client_payload.get('generated_at', '')))}.md"
 
-    if args.market == "all":
-        shared_context = build_market_context(
-            config,
-            relevant_asset_types=["cn_stock", "cn_etf", "hk", "us", "futures"],
-        )
-        market_payloads = {
-            market: _run_market(config, market, args.top, sector_filter, context=shared_context)
-            for market in ("cn", "hk", "us")
-        }
-        for market, payload in market_payloads.items():
-            detailed = OpportunityReportRenderer().render_stock_picks(payload)
-            _persist_internal_detail_report(_internal_detail_stem(market, str(payload.get("generated_at", ""))), detailed)
-        client_payload = _merge_payloads(market_payloads)
-        factor_contract = _factor_contract_summary(
-            [
-                analysis
-                for market_payload in market_payloads.values()
-                for analysis in list(market_payload.get("coverage_analyses") or market_payload.get("top") or [])
-            ]
-        )
-        source_path = _persist_internal_detail_report(
-            _internal_merged_stem(str(client_payload.get("generated_at", ""))),
-            OpportunityReportRenderer().render_stock_picks(client_payload),
-        )
-        client_markdown = ClientReportRenderer().render_stock_picks_detailed(client_payload)
-        target_path = FINAL_DIR / f"{_final_stem(str(client_payload.get('generated_at', '')))}.md"
+            try:
+                from src.commands.release_check import check_stock_pick_client_report
 
+                findings = check_stock_pick_client_report(client_markdown, source_path.read_text(encoding="utf-8"))
+                bundle = export_reviewed_markdown_bundle(
+                    report_type="stock_pick",
+                    markdown_text=client_markdown,
+                    markdown_path=target_path,
+                    release_findings=findings,
+                    extra_manifest={"market": "all", "detail_source": str(source_path), "factor_contract": factor_contract},
+                )
+            except (Exception, ReportGuardError) as exc:
+                raise SystemExit(str(exc))
+
+            print(client_markdown)
+            for index, line in enumerate(exported_bundle_lines(bundle)):
+                print(f"\n{line}" if index == 0 else line)
+            return
+
+        payload = _run_market(config, args.market, args.top, sector_filter)
+        detailed = OpportunityReportRenderer().render_stock_picks(payload)
+        detail_path = _persist_internal_detail_report(_internal_detail_stem(args.market, str(payload.get("generated_at", ""))), detailed)
+        client_markdown = ClientReportRenderer().render_stock_picks_detailed(payload)
+        target_path = FINAL_DIR / f"{_market_final_stem(args.market, str(payload.get('generated_at', '')))}.md"
+        factor_contract = _factor_contract_summary(list(payload.get("coverage_analyses") or payload.get("top") or []))
+
+        findings = []
+        if args.market == "cn":
+            try:
+                from src.commands.release_check import check_stock_pick_client_report
+
+                findings = check_stock_pick_client_report(client_markdown, detail_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise SystemExit(f"发布前一致性校验失败: {exc}")
         try:
-            from src.commands.release_check import check_stock_pick_client_report
-
-            findings = check_stock_pick_client_report(client_markdown, source_path.read_text(encoding="utf-8"))
             bundle = export_reviewed_markdown_bundle(
                 report_type="stock_pick",
                 markdown_text=client_markdown,
                 markdown_path=target_path,
                 release_findings=findings,
-                extra_manifest={"market": "all", "detail_source": str(source_path), "factor_contract": factor_contract},
+                extra_manifest={"market": args.market, "detail_source": str(detail_path), "factor_contract": factor_contract},
             )
-        except (Exception, ReportGuardError) as exc:
+        except ReportGuardError as exc:
             raise SystemExit(str(exc))
 
         print(client_markdown)
         for index, line in enumerate(exported_bundle_lines(bundle)):
             print(f"\n{line}" if index == 0 else line)
-        return
-
-    payload = _run_market(config, args.market, args.top, sector_filter)
-    detailed = OpportunityReportRenderer().render_stock_picks(payload)
-    detail_path = _persist_internal_detail_report(_internal_detail_stem(args.market, str(payload.get("generated_at", ""))), detailed)
-    client_markdown = ClientReportRenderer().render_stock_picks_detailed(payload)
-    target_path = FINAL_DIR / f"{_market_final_stem(args.market, str(payload.get('generated_at', '')))}.md"
-    factor_contract = _factor_contract_summary(list(payload.get("coverage_analyses") or payload.get("top") or []))
-
-    findings = []
-    if args.market == "cn":
-        try:
-            from src.commands.release_check import check_stock_pick_client_report
-
-            findings = check_stock_pick_client_report(client_markdown, detail_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise SystemExit(f"发布前一致性校验失败: {exc}")
-    try:
-        bundle = export_reviewed_markdown_bundle(
-            report_type="stock_pick",
-            markdown_text=client_markdown,
-            markdown_path=target_path,
-            release_findings=findings,
-            extra_manifest={"market": args.market, "detail_source": str(detail_path), "factor_contract": factor_contract},
-        )
-    except ReportGuardError as exc:
-        raise SystemExit(str(exc))
-
-    print(client_markdown)
-    for index, line in enumerate(exported_bundle_lines(bundle)):
-        print(f"\n{line}" if index == 0 else line)
+    finally:
+        close_yfinance_runtime_caches()
 
 
 if __name__ == "__main__":

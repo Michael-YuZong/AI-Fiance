@@ -76,6 +76,8 @@ def test_report_guard_blocks_non_pass_review(isolated_reports: Path) -> None:
                 "- 存在实质问题",
                 "## 独立答案",
                 "- 保守处理",
+                "## 零提示发散审",
+                "- 不看模板时，第一反应仍是风险没有收口。",
                 "## 收敛结论",
                 "- 状态：BLOCKED",
                 "- 无新的 P0/P1：否",
@@ -86,6 +88,37 @@ def test_report_guard_blocks_non_pass_review(isolated_reports: Path) -> None:
     )
 
     with pytest.raises(ReportGuardError, match="外部评审尚未通过"):
+        export_reviewed_markdown_bundle(
+            report_type="scan",
+            markdown_text=SCAN_DETAIL_MARKDOWN,
+            markdown_path=target,
+            release_findings=[],
+        )
+
+
+def test_report_guard_blocks_review_missing_zero_prompt_divergence_section(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/scans/etfs/final/scan_159981_2026-03-11_client_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        "\n".join(
+            [
+                "## 一句话总评",
+                "可发",
+                "## 主要问题",
+                "- 无新的实质问题",
+                "## 独立答案",
+                "- 结论一致",
+                "## 收敛结论",
+                "- 状态：PASS",
+                "- 无新的 P0/P1：是",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReportGuardError, match="零提示发散审"):
         export_reviewed_markdown_bundle(
             report_type="scan",
             markdown_text=SCAN_DETAIL_MARKDOWN,
@@ -108,6 +141,8 @@ def test_report_guard_blocks_conflicting_pass_review_text(isolated_reports: Path
                 "### P1-1 关闭状态：未关闭",
                 "## 独立答案",
                 "- 结论还没完全收口",
+                "## 零提示发散审",
+                "- 零提示再看，仍然先担心未关闭的阻塞项。",
                 "## 收敛结论",
                 "- 状态：PASS",
                 "- 无新的 P0/P1：是",
@@ -139,6 +174,8 @@ def test_report_guard_allows_passed_review_and_writes_manifest(isolated_reports:
                 "- 无新的实质问题",
                 "## 独立答案",
                 "- 结论一致",
+                "## 零提示发散审",
+                "- 只看成稿时，没有再发现新的高优先级问题。",
                 "## 收敛结论",
                 "- 状态：PASS",
                 "- 无新的 P0/P1：是",
@@ -179,6 +216,8 @@ def test_report_guard_blocks_summary_like_markdown(isolated_reports: Path) -> No
                 "- 无新的实质问题",
                 "## 独立答案",
                 "- 结论一致",
+                "## 零提示发散审",
+                "- 零提示再审，没有新的阻塞项。",
                 "## 收敛结论",
                 "- 状态：PASS",
                 "- 无新的 P0/P1：是",
@@ -210,6 +249,8 @@ def test_report_guard_accepts_detailed_retrospect_markdown(isolated_reports: Pat
                 "- 无新的实质问题",
                 "## 独立答案",
                 "- 结论一致",
+                "## 零提示发散审",
+                "- 零提示再审，没有新的阻塞项。",
                 "## 收敛结论",
                 "- 状态：PASS",
                 "- 无新的 P0/P1：是",
@@ -257,6 +298,8 @@ def test_report_guard_accepts_stock_analysis_markdown(isolated_reports: Path) ->
                 "- 无新的实质问题",
                 "## 独立答案",
                 "- 结论一致",
+                "## 零提示发散审",
+                "- 零提示复核后，没有新的高优先级问题。",
                 "## 收敛结论",
                 "- 状态：PASS",
                 "- 无新的 P0/P1：是",
@@ -304,6 +347,8 @@ def test_report_guard_accepts_etf_pick_markdown(isolated_reports: Path) -> None:
                 "- 无新的实质问题",
                 "## 独立答案",
                 "- 结论一致",
+                "## 零提示发散审",
+                "- 零提示复核后，没有新的高优先级问题。",
                 "## 收敛结论",
                 "- 状态：PASS",
                 "- 无新的 P0/P1：是",
@@ -375,6 +420,8 @@ def test_report_guard_accepts_observe_etf_pick_markdown(isolated_reports: Path) 
                 "- 无新的实质问题",
                 "## 独立答案",
                 "- 结论一致",
+                "## 零提示发散审",
+                "- 零提示复核后，没有新的高优先级问题。",
                 "## 收敛结论",
                 "- 状态：PASS",
                 "- 无新的 P0/P1：是",

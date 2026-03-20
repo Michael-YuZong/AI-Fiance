@@ -14,7 +14,7 @@ from src.collectors.market_cn import ChinaMarketCollector
 from src.collectors.market_drivers import MarketDriversCollector
 from src.collectors.valuation import ValuationCollector
 from src.collectors.news import NewsCollector
-from src.processors.opportunity_engine import PoolItem, _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _correlation_to_watchlist, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _refresh_action_from_signal_confidence, _relative_strength_dimension, _risk_dimension, _seasonality_dimension, _signal_confidence_warning_line, _stock_name_tokens, _technical_dimension, analyze_opportunity, build_default_pool, build_fund_pool, build_market_context, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities
+from src.processors.opportunity_engine import PoolItem, _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _correlation_to_watchlist, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _rating_from_dimensions, _refresh_action_from_signal_confidence, _relative_strength_dimension, _risk_dimension, _seasonality_dimension, _signal_confidence_warning_line, _stock_name_tokens, _technical_dimension, analyze_opportunity, build_default_pool, build_fund_pool, build_market_context, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities
 from src.processors.opportunity_engine import _asset_note
 from src.processors.horizon import build_analysis_horizon_profile
 from src.utils.market import compute_history_metrics
@@ -834,10 +834,12 @@ def test_fundamental_dimension_for_cn_fund_prefers_holdings_proxy_and_benchmark_
         fund_profile,
     )
     factors = {factor["name"]: factor for factor in dimension["factors"]}
+    assert dimension["display_name"] == "产品质量/基本面代理"
     assert dimension["valuation_snapshot"]["index_name"] == "中国战略新兴产业"
     assert "前五大重仓股加权增速代理" in factors["盈利增速"]["signal"]
     assert "前五大重仓股" in factors["ROE"]["signal"]
     assert factors["PEG 代理"]["display_score"] != "缺失"
+    assert "不直接等同于底层行业基本面已经确认" in dimension["summary"]
 
 
 def test_fundamental_dimension_for_cn_etf_prefers_fund_profile_benchmark_and_holdings_proxy(monkeypatch):
@@ -906,10 +908,12 @@ def test_fundamental_dimension_for_cn_etf_prefers_fund_profile_benchmark_and_hol
         fund_profile,
     )
     factors = {factor["name"]: factor for factor in dimension["factors"]}
+    assert dimension["display_name"] == "产品质量/基本面代理"
     assert dimension["valuation_snapshot"]["index_name"] == "中证人工智能主题指数"
     assert "前五大持仓/成分股加权增速代理" in factors["盈利增速"]["signal"]
     assert "前五大持仓/成分股" in factors["ROE"]["signal"]
     assert factors["PEG 代理"]["display_score"] != "缺失"
+    assert "不直接等同于底层行业基本面已经确认" in dimension["summary"]
 
 
 def test_fundamental_dimension_for_commodity_etf_uses_product_structure_not_stock_pe(monkeypatch):
@@ -948,6 +952,7 @@ def test_fundamental_dimension_for_commodity_etf_uses_product_structure_not_stoc
         fund_profile,
     )
     factors = {factor["name"]: factor for factor in dimension["factors"]}
+    assert dimension["display_name"] == "产品质量/基本面代理"
     assert dimension["valuation_snapshot"] is None
     assert dimension["financial_proxy"] == {}
     assert "产品结构评估" in dimension["summary"] or "产品结构" in dimension["summary"]
@@ -1140,10 +1145,50 @@ def test_chips_dimension_for_commodity_etf_avoids_northbound_and_stock_concentra
         {},
     )
     factors = {factor["name"]: factor for factor in dimension["factors"]}
+    assert dimension["display_name"] == "筹码结构（辅助项）"
     assert factors["北向/南向"]["display_score"] == "不适用"
     assert factors["机构集中度代理"]["display_score"] == "不适用"
     assert factors["机构资金承接"]["display_score"] != "缺失"
     assert "ETF" in factors["机构资金承接"]["detail"]
+    assert "辅助判断" in dimension["summary"] or "主排序未使用" in dimension["summary"]
+
+
+def test_fundamental_dimension_caps_proxy_only_etf_without_true_valuation(monkeypatch):
+    monkeypatch.setattr(ValuationCollector, "get_cn_index_snapshot", lambda self, keywords: None)  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_index_value_history", lambda self, index_code: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_weighted_stock_financial_proxies",
+        lambda self, holdings, **kwargs: {  # noqa: ARG005
+            "revenue_yoy": 25.0,
+            "profit_yoy": 28.0,
+            "roe": 18.0,
+            "gross_margin": 35.0,
+            "coverage_weight": 20.0,
+            "report_date": "2025-12-31",
+        },
+    )
+    monkeypatch.setattr(
+        MarketDriversCollector,
+        "collect",
+        lambda self: {"industry_fund_flow": pd.DataFrame(), "concept_fund_flow": pd.DataFrame()},  # noqa: ARG005
+    )
+    fund_profile = {
+        "overview": {"基金简称": "人工智能ETF", "业绩比较基准": "中证人工智能主题指数收益率"},
+        "top_holdings": [{"股票代码": "300308", "股票名称": "中际旭创", "占净值比例": 10.57}],
+        "industry_allocation": [{"行业类别": "信息技术", "占净值比例": 88.0}],
+    }
+    dimension = _fundamental_dimension(
+        "159819",
+        "cn_etf",
+        {"name": "人工智能ETF", "sector": "科技", "chain_nodes": ["AI算力"]},
+        {"price_percentile_1y": 0.84},
+        {},
+        fund_profile,
+    )
+
+    assert dimension["score"] <= 68
+    assert "产品质量、跟踪机制和主题代理" in dimension["summary"]
 
 
 def test_chips_dimension_penalizes_outflow_and_crowding(monkeypatch):
@@ -1349,6 +1394,41 @@ def test_catalyst_dimension_for_grid_etf_ignores_generic_ai_noise(monkeypatch):
     assert signals["政策催化"] == "近 7 日未命中直接政策催化"
     assert signals["龙头公告/业绩"] == "未命中直接龙头公告"
     assert not any(str(keyword).lower() in {"ai", "算力", "人工智能"} for keyword in captured_keywords)
+
+
+def test_catalyst_dimension_for_cn_etf_scores_directional_catalyst_from_holdings():
+    fund_profile = {
+        "overview": {
+            "基金简称": "人工智能ETF",
+            "业绩比较基准": "中证人工智能主题指数收益率",
+        },
+        "top_holdings": [
+            {"股票代码": "300308", "股票名称": "中际旭创", "占净值比例": 8.85},
+            {"股票代码": "002463", "股票名称": "沪电股份", "占净值比例": 8.84},
+        ],
+        "industry_allocation": [{"行业类别": "科技", "占净值比例": 88.0}],
+    }
+    context = {
+        "config": {},
+        "news_report": {
+            "mode": "live",
+            "all_items": [
+                {"title": "【早报】AI 龙虾概念再起，地方支持政策引关注", "category": "ai", "source": "财联社"},
+                {"title": "中际旭创上修光模块出货指引，AI 光互连景气延续", "category": "china_market_domestic", "source": "证券时报"},
+            ],
+        },
+        "events": [],
+    }
+    dimension = _catalyst_dimension(
+        {"symbol": "159819", "name": "人工智能ETF", "asset_type": "cn_etf", "sector": "科技", "chain_nodes": ["AI算力", "光模块"]},
+        context,
+        fund_profile,
+    )
+    directional_factor = next(f for f in dimension["factors"] if f["name"] == "产品/跟踪方向催化")
+    assert directional_factor["factor_id"] == "j5_directional_catalyst"
+    assert directional_factor["awarded"] > 0
+    assert "中际旭创" in directional_factor["signal"]
+    assert "龙虾" not in directional_factor["signal"]
 
 
 def test_hard_checks_use_fund_scale_for_cn_fund():
@@ -2873,6 +2953,86 @@ def _make_simple_history():
     })
 
 
+def test_rating_from_dimensions_keeps_resilient_rank_three_under_macro_reverse():
+    dimensions = {
+        "technical": {"score": 45},
+        "fundamental": {"score": 74, "available_max": 100},
+        "catalyst": {"score": 59},
+        "relative_strength": {"score": 87},
+        "risk": {"score": 37},
+        "macro": {"score": 3, "macro_reverse": True},
+    }
+
+    rating = _rating_from_dimensions(dimensions, [])
+
+    assert rating["rank"] == 3
+    assert any("保留 ⭐⭐⭐" in item for item in rating["warnings"])
+
+
+def test_rating_from_dimensions_still_caps_non_resilient_rank_three_under_macro_reverse():
+    dimensions = {
+        "technical": {"score": 40},
+        "fundamental": {"score": 68, "available_max": 100},
+        "catalyst": {"score": 52},
+        "relative_strength": {"score": 45},
+        "risk": {"score": 37},
+        "macro": {"score": 3, "macro_reverse": True},
+    }
+
+    rating = _rating_from_dimensions(dimensions, [])
+
+    assert rating["rank"] == 2
+    assert any("评级上限已压到 ⭐⭐" in item for item in rating["warnings"])
+
+
+def test_rating_from_dimensions_promotes_trend_continuation_candidate():
+    dimensions = {
+        "technical": {"score": 63},
+        "fundamental": {"score": 38, "available_max": 100},
+        "catalyst": {"score": 42},
+        "relative_strength": {"score": 76},
+        "risk": {"score": 58},
+        "macro": {"score": 18, "macro_reverse": False},
+    }
+
+    rating = _rating_from_dimensions(dimensions, [])
+
+    assert rating["rank"] == 3
+    assert "趋势和轮动已经形成共振" in rating["meaning"]
+
+
+def test_rating_from_dimensions_promotes_borderline_logic_candidate_after_calibration():
+    dimensions = {
+        "technical": {"score": 35},
+        "fundamental": {"score": 62, "available_max": 100},
+        "catalyst": {"score": 50},
+        "relative_strength": {"score": 58},
+        "risk": {"score": 32},
+        "macro": {"score": 18, "macro_reverse": False},
+    }
+
+    rating = _rating_from_dimensions(dimensions, [])
+
+    assert rating["rank"] == 3
+    assert "右侧执行仍需一个维度继续确认" in rating["meaning"]
+
+
+def test_rating_from_dimensions_promotes_borderline_trend_candidate_after_calibration():
+    dimensions = {
+        "technical": {"score": 55},
+        "fundamental": {"score": 35, "available_max": 100},
+        "catalyst": {"score": 25},
+        "relative_strength": {"score": 65},
+        "risk": {"score": 45},
+        "macro": {"score": 18, "macro_reverse": False},
+    }
+
+    rating = _rating_from_dimensions(dimensions, [])
+
+    assert rating["rank"] == 3
+    assert "不必因为赔率还不完美就过度降级" in rating["meaning"]
+
+
 def test_action_plan_differentiated_when_risk_high_relative_high():
     """rating <= 1 but risk >= 70 and relative >= 60 should NOT be '暂不出手'."""
     analysis = _make_action_plan_analysis(rating_rank=1, tech=35, risk=75, relative=65, catalyst=20)
@@ -2916,6 +3076,35 @@ def test_action_plan_uses_watchful_bullish_direction_when_odds_are_low():
     technical = {"rsi": {"RSI": 75.0}, "fibonacci": {"levels": {}}, "ma_system": {"mas": {"MA20": 10.0, "MA60": 9.8}}}
     result = _action_plan(analysis, history, technical, None, {"volatility_percentile_1y": 0.4, "price_percentile_1y": 0.95})
     assert result["direction"] == "观望偏多"
+
+
+def test_action_plan_relaxes_trend_continuation_etf_when_rank_two():
+    analysis = _make_action_plan_analysis(
+        rating_rank=2,
+        tech=50,
+        risk=48,
+        relative=72,
+        catalyst=42,
+        asset_type="cn_etf",
+        fundamental=38,
+    )
+    history = _make_simple_history()
+    technical = {"rsi": {"RSI": 57.0}, "fibonacci": {"levels": {}}, "ma_system": {"mas": {"MA20": 10.0, "MA60": 9.8}}}
+    result = _action_plan(analysis, history, technical, None, {"volatility_percentile_1y": 0.35, "price_percentile_1y": 0.58})
+    assert result["direction"] == "观望偏多"
+    assert result["timeframe"] == "波段跟踪(2-6周)"
+    assert "≤3%" in result["position"]
+    assert "分 2 批跟踪" in result["scaling_plan"]
+    assert result["horizon"]["code"] == "swing"
+
+
+def test_action_plan_keeps_watchful_bullish_direction_for_macro_reverse_rank_three():
+    analysis = _make_action_plan_analysis(rating_rank=3, tech=48, risk=40, relative=82, catalyst=55, macro_reverse=True)
+    history = _make_simple_history()
+    technical = {"rsi": {"RSI": 54.0}, "fibonacci": {"levels": {}}, "ma_system": {"mas": {"MA20": 10.0, "MA60": 9.8}}}
+    result = _action_plan(analysis, history, technical, None, {"volatility_percentile_1y": 0.4, "price_percentile_1y": 0.62})
+    assert result["direction"] == "观望偏多"
+    assert "首次建仓" in result["position"]
 
 
 def test_action_plan_warns_when_price_runs_far_above_ma20():
@@ -2963,6 +3152,25 @@ def test_action_plan_validates_stop_and_target_against_current_price():
     assert stop_ref < 50.0
     assert target_ref > 50.0
     assert stop_ref <= 49.0
+
+
+def test_action_plan_surfaces_buy_and_trim_ranges():
+    analysis = _make_action_plan_analysis(rating_rank=3, tech=62, risk=55, relative=60, catalyst=52, asset_type="cn_stock")
+    history = _make_simple_history()
+    history.loc[:, "close"] = [20.0] * (len(history) - 1) + [20.0]
+    technical = {
+        "rsi": {"RSI": 54.0},
+        "fibonacci": {"levels": {"0.382": 19.4, "0.500": 19.0, "0.618": 18.6, "1.000": 21.6}},
+        "ma_system": {"mas": {"MA20": 19.6, "MA60": 19.1}},
+    }
+    result = _action_plan(analysis, history, technical, None, {"volatility_percentile_1y": 0.45, "return_5d": 0.02})
+    assert result["buy_low_ref"] is not None
+    assert result["buy_high_ref"] is not None
+    assert result["buy_low_ref"] < result["buy_high_ref"] <= 20.1
+    assert result["trim_low_ref"] > 20.0
+    assert result["trim_high_ref"] > result["trim_low_ref"]
+    assert re.search(r"[0-9.]+ - [0-9.]+", result["buy_range"])
+    assert re.search(r"[0-9.]+ - [0-9.]+", result["trim_range"])
 
 
 def test_action_plan_marks_long_term_when_fundamental_and_risk_are_strong():
@@ -3076,6 +3284,32 @@ def test_build_market_context_prefetches_independent_sections_in_parallel(monkey
     assert context["drivers"] == {}
     assert context["pulse"] == {}
     assert elapsed < 0.30
+
+
+def test_build_market_context_closes_yfinance_runtime_caches(monkeypatch):
+    closed = {"count": 0}
+
+    monkeypatch.setattr("src.processors.opportunity_engine.load_watchlist", lambda: [])
+    monkeypatch.setattr("src.processors.opportunity_engine.load_china_macro_snapshot", lambda cfg: {"pmi": 50.0})  # noqa: ARG005
+    monkeypatch.setattr("src.processors.opportunity_engine.derive_regime_inputs", lambda *args, **kwargs: {})
+    monkeypatch.setattr("src.processors.opportunity_engine.RegimeDetector.detect_regime", lambda self: {"current_regime": "recovery", "preferred_assets": []})
+    monkeypatch.setattr("src.processors.opportunity_engine.NewsCollector.collect", lambda self, **kwargs: {"mode": "proxy", "items": [], "lines": [], "note": ""})  # noqa: ARG005,E501
+    monkeypatch.setattr("src.processors.opportunity_engine.EventsCollector.collect", lambda self, mode="daily": [])
+    monkeypatch.setattr("src.processors.opportunity_engine.MarketDriversCollector.collect", lambda self: {})
+    monkeypatch.setattr("src.processors.opportunity_engine.MarketPulseCollector.collect", lambda self: {})
+    monkeypatch.setattr("src.processors.opportunity_engine.close_yfinance_runtime_caches", lambda: closed.__setitem__("count", closed["count"] + 1))
+
+    build_market_context(
+        {
+            "market_context": {
+                "skip_global_proxy": True,
+                "skip_market_monitor": True,
+            }
+        },
+        relevant_asset_types=["cn_etf", "futures"],
+    )
+
+    assert closed["count"] >= 1
 
 
 def test_discover_opportunities_analyzes_candidates_in_parallel(monkeypatch):

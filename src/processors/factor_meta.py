@@ -427,6 +427,11 @@ FACTOR_REGISTRY: Dict[str, FactorMeta] = {
         lag_days=30,
         notes="主题纯度与跨市场暴露",
     ),
+    "j5_directional_catalyst": FactorMeta.scoring_supportive(
+        "j5_directional_catalyst", "J-5", "etf_specific",
+        visibility_class="event_driven", proxy_level="sector_proxy",
+        notes="基于跟踪基准、行业暴露和核心成分关键词共振的 ETF/基金方向催化代理",
+    ),
     "j5_fund_benchmark_fit": FactorMeta.scoring_supportive(
         "j5_fund_benchmark_fit", "J-5", "fund_specific",
         visibility_class="quarterly", proxy_level="direct",

@@ -33,6 +33,10 @@ def test_review_audit_flags_missing_solidification_for_actionable_findings(tmp_p
                 "",
                 "1. 存在框架外风险",
                 "",
+                "## 零提示发散审",
+                "",
+                "1. 不看模板时，第一反应仍然是主问题没有真正收口。",
+                "",
                 "## 收敛结论",
                 "",
                 "- round：1",
@@ -49,6 +53,50 @@ def test_review_audit_flags_missing_solidification_for_actionable_findings(tmp_p
     titles = {item["title"] for item in audit["findings"]}
     assert "缺少必需外审段落" in titles
     assert "finding 没有沉淀去向" in titles
+
+
+def test_review_audit_flags_missing_zero_prompt_divergence_section(tmp_path: Path) -> None:
+    _write_review(
+        tmp_path / "demo_round1.md",
+        "\n".join(
+            [
+                "# Demo",
+                "",
+                "- review_target：`docs/demo.md`",
+                "- review_prompt：`docs/prompts/demo.md`",
+                "",
+                "## 结论",
+                "",
+                "`go with conditions`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P2`：还有小问题",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题",
+                "",
+                "## 建议沉淀",
+                "",
+                "- prompt",
+                "  - 补 reviewer 约束",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：IN_REVIEW",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：不适用",
+                "- 本轮是否收敛：否",
+                "- 是否建议继续下一轮：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "缺少必需外审段落" in titles
 
 
 def test_review_audit_flags_round_drift_and_previous_round_mismatch(tmp_path: Path) -> None:
@@ -72,6 +120,10 @@ def test_review_audit_flags_round_drift_and_previous_round_mismatch(tmp_path: Pa
                 "## 框架外问题",
                 "",
                 "1. 无新的框架外阻塞问题",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
                 "",
                 "## 建议沉淀",
                 "",
@@ -110,6 +162,10 @@ def test_review_audit_flags_round_drift_and_previous_round_mismatch(tmp_path: Pa
                 "## 框架外问题",
                 "",
                 "1. 当前没有新的实质性框架外阻塞问题",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
                 "",
                 "## 建议沉淀",
                 "",
@@ -157,6 +213,10 @@ def test_review_audit_flags_pass_continue_conflict_and_renders_markdown(tmp_path
                 "## 框架外问题",
                 "",
                 "1. 当前没有新的实质性框架外阻塞问题",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
                 "",
                 "## 建议沉淀",
                 "",
@@ -230,6 +290,10 @@ def test_review_audit_accepts_numbered_alias_sections(tmp_path: Path) -> None:
                 "",
                 "1. 无新的实质性框架外阻塞问题",
                 "",
+                "## 8. 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
                 "## 建议沉淀",
                 "",
                 "- prompt / backlog",
@@ -279,6 +343,10 @@ def test_review_audit_flags_manifest_missing_factor_contract(tmp_path: Path) -> 
                 "## 框架外问题",
                 "",
                 "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
                 "",
                 "## 建议沉淀",
                 "",

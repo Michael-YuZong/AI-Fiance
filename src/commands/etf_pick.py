@@ -12,13 +12,14 @@ from src.commands.pick_visuals import attach_visuals_to_analyses
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle, exported_bundle_lines
 from src.commands.release_check import check_generic_client_report
 from src.output import ClientReportRenderer, OpportunityReportRenderer
-from src.output.client_report import _fund_profile_sections
+from src.output.client_report import _fund_profile_sections, _pick_horizon_profile
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.opportunity_engine import _client_safe_issue, analyze_opportunity, build_market_context, discover_opportunities
 from src.utils.fund_taxonomy import taxonomy_from_analysis, taxonomy_rows
 from src.utils.config import load_config, resolve_project_path
 from src.utils.data import load_watchlist
 from src.utils.logger import setup_logger
+from src.utils.market import close_yfinance_runtime_caches
 
 SNAPSHOT_PATH = resolve_project_path("data/etf_pick_score_history.json")
 MODEL_VERSION = "etf-pick-2026-03-14-candlestick-v4"
@@ -75,7 +76,7 @@ def _dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
         max_score = dimension.get("max_score", 100)
         display = "—" if score is None else f"{score}/{max_score}"
         reason = str(dimension.get("summary", "")).strip() or str(dimension.get("core_signal", "")).strip()
-        rows.append([label, display, reason])
+        rows.append([str(dimension.get("display_name", label)), display, reason])
     return rows
 
 
@@ -156,6 +157,78 @@ def _positioning_lines(analysis: Dict[str, Any]) -> List[str]:
     ]
 
 
+def _analysis_horizon(analysis: Mapping[str, Any]) -> Dict[str, str]:
+    return _pick_horizon_profile(
+        dict(analysis.get("action") or {}),
+        str(dict(dict(analysis.get("narrative") or {}).get("judgment") or {}).get("state", "")),
+    )
+
+
+def _track_bucket(analysis: Mapping[str, Any]) -> str:
+    horizon = _analysis_horizon(analysis)
+    code = str(horizon.get("code", "")).strip()
+    label = str(horizon.get("label", "")).strip()
+    if code in {"short_term", "swing"} or "短线" in label or "波段" in label:
+        return "short_term"
+    if code in {"position_trade", "long_term_allocation"} or "中线" in label or "长线" in label:
+        return "medium_term"
+    return ""
+
+
+def _track_reason(analysis: Mapping[str, Any]) -> str:
+    horizon = _analysis_horizon(analysis)
+    fit_reason = str(horizon.get("fit_reason", "")).strip()
+    if fit_reason:
+        return fit_reason
+    positives = _winner_reason_lines(dict(analysis))
+    return positives[0] if positives else "当前更适合作为跟踪对象，不适合空着不看。"
+
+
+def _track_payload(analysis: Mapping[str, Any]) -> Dict[str, Any]:
+    horizon = _analysis_horizon(analysis)
+    action = dict(analysis.get("action") or {})
+    return {
+        "name": analysis.get("name"),
+        "symbol": analysis.get("symbol"),
+        "horizon_label": horizon.get("label", "观察期"),
+        "trade_state": dict(dict(analysis.get("narrative") or {}).get("judgment") or {}).get("state", action.get("direction", "观察为主")),
+        "reason": _track_reason(analysis),
+        "reassessment": str(action.get("entry", "")).strip(),
+    }
+
+
+def _recommendation_tracks(ranked: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    tracks: Dict[str, Dict[str, Any]] = {}
+    used: set[str] = set()
+
+    short_exact = [item for item in ranked if _track_bucket(item) == "short_term"]
+    medium_exact = [item for item in ranked if _track_bucket(item) == "medium_term"]
+
+    if short_exact:
+        tracks["short_term"] = _track_payload(short_exact[0])
+        used.add(str(short_exact[0].get("symbol", "")))
+    if medium_exact:
+        for item in medium_exact:
+            symbol = str(item.get("symbol", ""))
+            if symbol in used:
+                continue
+            tracks["medium_term"] = _track_payload(item)
+            used.add(symbol)
+            break
+
+    for bucket_name in ("short_term", "medium_term"):
+        if bucket_name in tracks:
+            continue
+        for item in ranked:
+            symbol = str(item.get("symbol", ""))
+            if symbol in used:
+                continue
+            tracks[bucket_name] = _track_payload(item)
+            used.add(symbol)
+            break
+    return tracks
+
+
 def _discovery_mode_label(mode: str) -> str:
     return {
         "tushare_universe": "Tushare 全市场快照",
@@ -211,6 +284,7 @@ def _selection_context(
         "delivery_tier_code": str(delivery.get("code", "")),
         "delivery_tier_label": str(delivery.get("label", "未标注")),
         "delivery_observe_only": bool(delivery.get("observe_only")),
+        "delivery_summary_only": bool(delivery.get("summary_only")),
         "delivery_notes": [str(item).strip() for item in delivery.get("notes", []) if str(item).strip()],
     }
 
@@ -413,6 +487,7 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context
     ranked = sorted(analyses, key=_rank_key, reverse=True)
     winner = ranked[0]
     alternatives = ranked[1:3]
+    recommendation_tracks = _recommendation_tracks(ranked)
     evidence = list(dict(winner.get("dimensions", {}).get("catalyst") or {}).get("evidence") or [])
     if not evidence:
         coverage = dict(dict(winner.get("dimensions", {}).get("catalyst") or {}).get("coverage") or {})
@@ -423,6 +498,7 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context
     return {
         "generated_at": str(winner.get("generated_at", "")),
         "selection_context": dict(selection_context or {}),
+        "recommendation_tracks": recommendation_tracks,
         "winner": {
             "name": winner.get("name"),
             "symbol": winner.get("symbol"),
@@ -435,6 +511,7 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context
             "action": dict(winner.get("action") or {}),
             "positioning_lines": _positioning_lines(winner),
             "evidence": evidence,
+            "narrative": {"playbook": dict(dict(winner.get("narrative") or {}).get("playbook") or {})},
             "fund_sections": _fund_profile_sections(winner),
             "taxonomy_rows": taxonomy_rows(taxonomy_from_analysis(winner)),
             "taxonomy_summary": str(taxonomy_from_analysis(winner).get("summary", "")),
@@ -459,89 +536,92 @@ def main() -> None:
     ensure_report_task_registered("etf_pick")
     setup_logger("ERROR")
     config = load_config(args.config or None)
-    payload = discover_opportunities(config, top_n=max(args.top, 5), theme_filter=args.theme.strip())
-    if not list(payload.get("top") or []):
-        payload = _watchlist_fallback_payload(
-            config,
-            top_n=max(args.top, 5),
-            theme_filter=args.theme.strip(),
-        )
-    payload = enrich_pick_payload_with_score_history(
-        payload,
-        scope=f"theme:{args.theme.strip() or '*'}",
-        snapshot_path=SNAPSHOT_PATH,
-        model_version=MODEL_VERSION,
-        model_changelog=MODEL_CHANGELOG,
-        rank_key=_rank_key,
-    )
-    analyses = list(payload.get("top") or [])
-    if not analyses:
-        raise SystemExit("当前 ETF 推荐池没有可用候选，请稍后重试或放宽主题过滤。")
-    attach_visuals_to_analyses(analyses[:3])
-    delivery_tier = grade_pick_delivery(
-        report_type="etf_pick",
-        discovery_mode=str(payload.get("discovery_mode", "")),
-        coverage=payload.get("pick_coverage") or payload.get("data_coverage") or {},
-        scan_pool=int(payload.get("scan_pool") or 0),
-        passed_pool=int(payload.get("passed_pool") or 0),
-    )
-    selection_context = _selection_context(
-        discovery_mode=str(payload.get("discovery_mode", "")),
-        scan_pool=int(payload.get("scan_pool") or 0),
-        passed_pool=int(payload.get("passed_pool") or 0),
-        theme_filter=args.theme.strip(),
-        blind_spots=payload.get("blind_spots") or [],
-        coverage=payload.get("pick_coverage") or payload.get("data_coverage") or summarize_pick_coverage(analyses),
-        model_version=str(payload.get("model_version", "")),
-        baseline_snapshot_at=str(payload.get("baseline_snapshot_at", "")),
-        is_daily_baseline=bool(payload.get("is_daily_baseline")),
-        comparison_basis_at=str(payload.get("comparison_basis_at", "")),
-        comparison_basis_label=str(payload.get("comparison_basis_label", "")),
-        model_version_warning=str(payload.get("model_version_warning", "")),
-        delivery_tier=delivery_tier,
-    )
-    client_payload = _payload_from_analyses(analyses, selection_context=selection_context)
-    markdown = ClientReportRenderer().render_etf_pick(client_payload)
-    if not args.client_final:
-        print(markdown)
-        return
-
-    date_str = str(client_payload.get("generated_at", ""))[:10]
-    theme = args.theme.strip().replace("/", "_").replace(" ", "_")
-    filename = f"etf_pick_{theme}_{date_str}_final.md" if theme else f"etf_pick_{date_str}_final.md"
-    detail_markdown = _detail_markdown(
-        analyses,
-        str(dict(client_payload.get("winner") or {}).get("symbol", "")),
-        selection_context=selection_context,
-    )
-    factor_contract = summarize_factor_contracts_from_analyses(list(payload.get("coverage_analyses") or analyses), sample_limit=16)
-    detail_path = _detail_output_path(str(client_payload.get("generated_at", "")), theme)
-    detail_path.parent.mkdir(parents=True, exist_ok=True)
-    detail_path.write_text(detail_markdown, encoding="utf-8")
-    findings = check_generic_client_report(markdown, "etf_pick", source_text=detail_markdown)
     try:
-        bundle = export_reviewed_markdown_bundle(
-            report_type="etf_pick",
-            markdown_text=markdown,
-            markdown_path=resolve_project_path(f"reports/etf_picks/final/{filename}"),
-            release_findings=findings,
-            extra_manifest={
-                "theme_filter": args.theme.strip(),
-                "winner": dict(client_payload.get("winner") or {}).get("symbol", ""),
-                "detail_source": str(detail_path),
-                "scan_pool": int(payload.get("scan_pool") or 0),
-                "passed_pool": int(payload.get("passed_pool") or 0),
-                "discovery_mode": str(payload.get("discovery_mode", "")),
-                "delivery_tier": dict(delivery_tier),
-                "data_coverage": dict(payload.get("pick_coverage") or {}),
-                "factor_contract": factor_contract,
-            },
+        payload = discover_opportunities(config, top_n=max(args.top, 5), theme_filter=args.theme.strip())
+        if not list(payload.get("top") or []):
+            payload = _watchlist_fallback_payload(
+                config,
+                top_n=max(args.top, 5),
+                theme_filter=args.theme.strip(),
+            )
+        payload = enrich_pick_payload_with_score_history(
+            payload,
+            scope=f"theme:{args.theme.strip() or '*'}",
+            snapshot_path=SNAPSHOT_PATH,
+            model_version=MODEL_VERSION,
+            model_changelog=MODEL_CHANGELOG,
+            rank_key=_rank_key,
         )
-    except ReportGuardError as exc:
-        raise SystemExit(str(exc))
-    print(markdown)
-    for index, line in enumerate(exported_bundle_lines(bundle)):
-        print(f"\n{line}" if index == 0 else line)
+        analyses = list(payload.get("top") or [])
+        if not analyses:
+            raise SystemExit("当前 ETF 推荐池没有可用候选，请稍后重试或放宽主题过滤。")
+        attach_visuals_to_analyses(analyses[:3])
+        delivery_tier = grade_pick_delivery(
+            report_type="etf_pick",
+            discovery_mode=str(payload.get("discovery_mode", "")),
+            coverage=payload.get("pick_coverage") or payload.get("data_coverage") or {},
+            scan_pool=int(payload.get("scan_pool") or 0),
+            passed_pool=int(payload.get("passed_pool") or 0),
+        )
+        selection_context = _selection_context(
+            discovery_mode=str(payload.get("discovery_mode", "")),
+            scan_pool=int(payload.get("scan_pool") or 0),
+            passed_pool=int(payload.get("passed_pool") or 0),
+            theme_filter=args.theme.strip(),
+            blind_spots=payload.get("blind_spots") or [],
+            coverage=payload.get("pick_coverage") or payload.get("data_coverage") or summarize_pick_coverage(analyses),
+            model_version=str(payload.get("model_version", "")),
+            baseline_snapshot_at=str(payload.get("baseline_snapshot_at", "")),
+            is_daily_baseline=bool(payload.get("is_daily_baseline")),
+            comparison_basis_at=str(payload.get("comparison_basis_at", "")),
+            comparison_basis_label=str(payload.get("comparison_basis_label", "")),
+            model_version_warning=str(payload.get("model_version_warning", "")),
+            delivery_tier=delivery_tier,
+        )
+        client_payload = _payload_from_analyses(analyses, selection_context=selection_context)
+        markdown = ClientReportRenderer().render_etf_pick(client_payload)
+        if not args.client_final:
+            print(markdown)
+            return
+
+        date_str = str(client_payload.get("generated_at", ""))[:10]
+        theme = args.theme.strip().replace("/", "_").replace(" ", "_")
+        filename = f"etf_pick_{theme}_{date_str}_final.md" if theme else f"etf_pick_{date_str}_final.md"
+        detail_markdown = _detail_markdown(
+            analyses,
+            str(dict(client_payload.get("winner") or {}).get("symbol", "")),
+            selection_context=selection_context,
+        )
+        factor_contract = summarize_factor_contracts_from_analyses(list(payload.get("coverage_analyses") or analyses), sample_limit=16)
+        detail_path = _detail_output_path(str(client_payload.get("generated_at", "")), theme)
+        detail_path.parent.mkdir(parents=True, exist_ok=True)
+        detail_path.write_text(detail_markdown, encoding="utf-8")
+        findings = check_generic_client_report(markdown, "etf_pick", source_text=detail_markdown)
+        try:
+            bundle = export_reviewed_markdown_bundle(
+                report_type="etf_pick",
+                markdown_text=markdown,
+                markdown_path=resolve_project_path(f"reports/etf_picks/final/{filename}"),
+                release_findings=findings,
+                extra_manifest={
+                    "theme_filter": args.theme.strip(),
+                    "winner": dict(client_payload.get("winner") or {}).get("symbol", ""),
+                    "detail_source": str(detail_path),
+                    "scan_pool": int(payload.get("scan_pool") or 0),
+                    "passed_pool": int(payload.get("passed_pool") or 0),
+                    "discovery_mode": str(payload.get("discovery_mode", "")),
+                    "delivery_tier": dict(delivery_tier),
+                    "data_coverage": dict(payload.get("pick_coverage") or {}),
+                    "factor_contract": factor_contract,
+                },
+            )
+        except ReportGuardError as exc:
+            raise SystemExit(str(exc))
+        print(markdown)
+        for index, line in enumerate(exported_bundle_lines(bundle)):
+            print(f"\n{line}" if index == 0 else line)
+    finally:
+        close_yfinance_runtime_caches()
 
 
 if __name__ == "__main__":

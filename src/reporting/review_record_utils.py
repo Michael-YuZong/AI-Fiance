@@ -13,6 +13,9 @@ SECTION_PREFIX_RE = re.compile(r"^[0-9０-９]+[.．、)]\s*")
 SECTION_ALIASES = {
     "一句话总评": "结论",
     "总评": "结论",
+    "零提示审稿": "零提示发散审",
+    "零提示评审": "零提示发散审",
+    "零提示复核": "零提示发散审",
 }
 STATUS_PREFIXES = ("PASS", "BLOCKED", "IN_REVIEW")
 YES_PREFIXES = ("是", "否", "不适用", "N/A")

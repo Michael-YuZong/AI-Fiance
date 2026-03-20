@@ -93,7 +93,7 @@ def test_briefing_pdf_accepts_h4(tmp_path: Path) -> None:
     assert output.stat().st_size > 0
 
 
-def test_export_pdf_accepts_edge_timeout_if_pdf_already_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_export_pdf_returns_as_soon_as_pdf_is_stably_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     html_path = tmp_path / "demo.html"
     pdf_path = tmp_path / "demo.pdf"
     edge_path = tmp_path / "Microsoft Edge"
@@ -105,10 +105,13 @@ def test_export_pdf_accepts_edge_timeout_if_pdf_already_written(tmp_path: Path, 
             self.returncode = None
             self.terminated = False
             self.killed = False
+            self.poll_calls = 0
 
-        def communicate(self, timeout: float | None = None):  # noqa: ARG002
-            pdf_path.write_bytes(b"%PDF-1.4 demo")
-            raise subprocess.TimeoutExpired(cmd="edge", timeout=timeout or 0)
+        def poll(self) -> int | None:
+            self.poll_calls += 1
+            if self.poll_calls == 2:
+                pdf_path.write_bytes(b"%PDF-1.4 demo")
+            return self.returncode
 
         def terminate(self) -> None:
             self.terminated = True
@@ -125,6 +128,7 @@ def test_export_pdf_accepts_edge_timeout_if_pdf_already_written(tmp_path: Path, 
     fake_process = _FakeProcess()
     monkeypatch.setattr(client_export, "_EDGE_BINARY", edge_path)
     monkeypatch.setattr(client_export.subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(client_export.time, "sleep", lambda _seconds: None)
 
     _export_pdf("# demo", html_path, pdf_path)
 
@@ -132,3 +136,47 @@ def test_export_pdf_accepts_edge_timeout_if_pdf_already_written(tmp_path: Path, 
     assert pdf_path.stat().st_size > 0
     assert fake_process.terminated is True
     assert fake_process.killed is False
+    assert fake_process.poll_calls >= 3
+
+
+def test_export_pdf_ignores_stale_existing_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    html_path = tmp_path / "demo.html"
+    pdf_path = tmp_path / "demo.pdf"
+    edge_path = tmp_path / "Microsoft Edge"
+    html_path.write_text("<html><body>demo</body></html>", encoding="utf-8")
+    edge_path.write_text("", encoding="utf-8")
+    pdf_path.write_bytes(b"%PDF-1.4 stale")
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.terminated = False
+            self.poll_calls = 0
+
+        def poll(self) -> int | None:
+            self.poll_calls += 1
+            if self.poll_calls == 2:
+                pdf_path.write_bytes(b"%PDF-1.4 fresh")
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    fake_process = _FakeProcess()
+    monkeypatch.setattr(client_export, "_EDGE_BINARY", edge_path)
+    monkeypatch.setattr(client_export.subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(client_export.time, "sleep", lambda _seconds: None)
+
+    _export_pdf("# demo", html_path, pdf_path)
+
+    assert pdf_path.read_bytes() == b"%PDF-1.4 fresh"
+    assert fake_process.terminated is True
+    assert fake_process.poll_calls >= 3

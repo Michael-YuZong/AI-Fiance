@@ -183,6 +183,17 @@ def test_opportunity_renderer_scan_visual_section_skips_snapshot_fallback():
     assert "### 技术指标总览" not in rendered
 
 
+def test_opportunity_renderer_scan_uses_dimension_display_names() -> None:
+    analysis = _sample_analysis("561380", "电网ETF")
+    analysis["dimensions"]["fundamental"]["display_name"] = "产品质量/基本面代理"
+    analysis["dimensions"]["chips"]["display_name"] = "筹码结构（辅助项）"
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+
+    assert "| 产品质量/基本面代理 | 61/100 |" in rendered
+    assert "| 筹码结构（辅助项） | —/100 |" in rendered
+
+
 def test_opportunity_renderer_discovery_and_compare():
     analysis_a = _sample_analysis("561380", "电网ETF")
     analysis_b = _sample_analysis("159611", "电力ETF")

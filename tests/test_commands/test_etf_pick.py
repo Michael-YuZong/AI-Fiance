@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from src.commands.etf_pick import _watchlist_fallback_payload
+from src.commands.etf_pick import _payload_from_analyses, _watchlist_fallback_payload
 
 
 def _analysis(symbol: str, name: str, rank: int) -> dict:
@@ -80,3 +80,31 @@ def test_watchlist_fallback_payload_analyzes_candidates_in_parallel(monkeypatch)
     assert payload["passed_pool"] == 3
     assert len(payload["top"]) == 3
     assert elapsed < 0.20
+
+
+def test_payload_from_analyses_exposes_short_and_medium_tracks() -> None:
+    short = _analysis("159981", "能源化工ETF", 2)
+    short["action"] = {
+        "timeframe": "短线交易(1-2周)",
+        "horizon": {
+            "code": "short_term",
+            "label": "短线交易（3-10日）",
+            "fit_reason": "更适合看短催化和右侧确认。",
+        },
+    }
+    short["narrative"] = {"judgment": {"state": "观望偏多"}, "positives": ["方向没坏。"]}
+    medium = _analysis("510880", "红利ETF", 2)
+    medium["action"] = {
+        "timeframe": "中线配置(1-3月)",
+        "horizon": {
+            "code": "position_trade",
+            "label": "中线配置（1-3月）",
+            "fit_reason": "更适合按一段完整主线分批拿。",
+        },
+    }
+    medium["narrative"] = {"judgment": {"state": "持有优于追高"}, "positives": ["配置价值还在。"]}
+
+    payload = _payload_from_analyses([short, medium], {})
+
+    assert payload["recommendation_tracks"]["short_term"]["symbol"] == "159981"
+    assert payload["recommendation_tracks"]["medium_term"]["symbol"] == "510880"

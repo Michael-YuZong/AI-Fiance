@@ -83,6 +83,56 @@ def _append_sentence(base: str, extra: str) -> str:
     return f"{head} {tail}"
 
 
+def _with_execution_views(
+    horizon: Mapping[str, str],
+    *,
+    asset_type: str,
+    trade_state: str,
+    technical_score: int,
+    fundamental_score: int,
+    catalyst_score: int,
+    relative_score: int,
+    risk_score: int,
+    macro_reverse: bool,
+) -> Dict[str, str]:
+    result = dict(horizon)
+    if asset_type not in {"cn_etf", "cn_fund"}:
+        return result
+
+    code = str(result.get("code", "")).strip() or "watch"
+    if code in {"long_term_allocation", "position_trade"}:
+        allocation_view = "如果按配置视角理解，更适合作为一段主题/风格暴露的分批配置仓，接受中途震荡，但要持续复核主线、估值和容量。"
+    elif code == "swing":
+        allocation_view = "如果按配置视角理解，这条方向已经有一定配置价值，但更适合分批跟踪，不适合一次打满。"
+    else:
+        allocation_view = "如果按配置视角理解，这条方向还没到舒服的底仓阶段，先等趋势、赔率或催化再改善。"
+
+    if code == "short_term":
+        trading_view = "如果按交易视角理解，更看催化兑现、右侧确认和止损纪律，优先等回踩或放量确认，不追当天情绪。"
+    elif code == "swing":
+        trading_view = "如果按交易视角理解，更适合围绕回踩承接和几周级轮动去跟，不用把它当日内快进快出。"
+    elif code in {"position_trade", "long_term_allocation"} and relative_score >= 60 and technical_score >= 45:
+        trading_view = "如果按交易视角理解，更适合等强势整理或回踩确认后的再上车，不必因为短线波动频繁换仓。"
+    else:
+        trading_view = "如果按交易视角理解，当前更适合先等右侧确认，不把方向正确直接等同成今天就该追进去。"
+
+    if macro_reverse:
+        allocation_view = _append_sentence(allocation_view, "但当前宏观/风格逆风还在，仓位更适合保守。")
+    elif fundamental_score >= 55 and risk_score >= 55:
+        allocation_view = _append_sentence(allocation_view, "当前更适合把它当成中期方向载体，而不是只盯隔日波动。")
+
+    if trade_state == "持有优于追高":
+        trading_view = _append_sentence(trading_view, "当前位置更像持有或等回踩，不适合直接追高。")
+    elif trade_state == "等右侧确认":
+        trading_view = _append_sentence(trading_view, "先等趋势和资金重新同步，再把观察升级成执行。")
+    elif catalyst_score >= 50 and technical_score < 45:
+        trading_view = _append_sentence(trading_view, "催化已经先亮灯，但价格确认还没完全跟上。")
+
+    result["allocation_view"] = allocation_view
+    result["trading_view"] = trading_view
+    return result
+
+
 def _watch_contract_variant(
     *,
     asset_type: str,
@@ -262,7 +312,104 @@ def build_analysis_horizon_profile(
     position = str(position).strip()
 
     if direction in {"回避", "观望"} and ("暂不出手" in position or rating <= 1):
-        return _watch_contract_variant(
+        return _with_execution_views(
+            _watch_contract_variant(
+                asset_type=asset_type,
+                technical_score=technical_score,
+                fundamental_score=fundamental_score,
+                catalyst_score=catalyst_score,
+                relative_score=relative_score,
+                risk_score=risk_score,
+                macro_reverse=macro_reverse,
+                stop_hit_rate=stop_hit_rate,
+                win_rate_20d=win_rate_20d,
+                confidence_score=confidence_score,
+                source="analysis_inferred",
+            ),
+            asset_type=asset_type,
+            technical_score=technical_score,
+            fundamental_score=fundamental_score,
+            catalyst_score=catalyst_score,
+            relative_score=relative_score,
+            risk_score=risk_score,
+            macro_reverse=macro_reverse,
+            trade_state=trade_state,
+        )
+
+    if rating >= 4 and fundamental_score >= 70 and risk_score >= 65 and not macro_reverse:
+        return _with_execution_views(
+            _base_contract("long_term_allocation", source="analysis_inferred"),
+            asset_type=asset_type,
+            trade_state=trade_state,
+            technical_score=technical_score,
+            fundamental_score=fundamental_score,
+            catalyst_score=catalyst_score,
+            relative_score=relative_score,
+            risk_score=risk_score,
+            macro_reverse=macro_reverse,
+        )
+
+    if rating >= 3 and fundamental_score >= 58 and risk_score >= 55 and not macro_reverse:
+        return _with_execution_views(
+            _base_contract("position_trade", source="analysis_inferred"),
+            asset_type=asset_type,
+            trade_state=trade_state,
+            technical_score=technical_score,
+            fundamental_score=fundamental_score,
+            catalyst_score=catalyst_score,
+            relative_score=relative_score,
+            risk_score=risk_score,
+            macro_reverse=macro_reverse,
+        )
+
+    if catalyst_score >= 65 and technical_score >= 55 and relative_score >= 60:
+        return _with_execution_views(
+            _base_contract("short_term", source="analysis_inferred"),
+            asset_type=asset_type,
+            trade_state=trade_state,
+            technical_score=technical_score,
+            fundamental_score=fundamental_score,
+            catalyst_score=catalyst_score,
+            relative_score=relative_score,
+            risk_score=risk_score,
+            macro_reverse=macro_reverse,
+        )
+
+    if rating >= 2 or (risk_score >= 70 and relative_score >= 60) or (technical_score >= 55 and relative_score >= 55):
+        return _with_execution_views(
+            _swing_contract_variant(
+                technical_score=technical_score,
+                fundamental_score=fundamental_score,
+                catalyst_score=catalyst_score,
+                relative_score=relative_score,
+                risk_score=risk_score,
+                source="analysis_inferred",
+            ),
+            asset_type=asset_type,
+            trade_state=trade_state,
+            technical_score=technical_score,
+            fundamental_score=fundamental_score,
+            catalyst_score=catalyst_score,
+            relative_score=relative_score,
+            risk_score=risk_score,
+            macro_reverse=macro_reverse,
+        )
+
+    if "持有优于追高" in trade_state and asset_type in {"cn_etf", "cn_fund"} and fundamental_score >= 50 and risk_score >= 50:
+        return _with_execution_views(
+            _base_contract("position_trade", source="analysis_inferred"),
+            asset_type=asset_type,
+            trade_state=trade_state,
+            technical_score=technical_score,
+            fundamental_score=fundamental_score,
+            catalyst_score=catalyst_score,
+            relative_score=relative_score,
+            risk_score=risk_score,
+            macro_reverse=macro_reverse,
+        )
+
+    return _with_execution_views(
+        _watch_contract_variant(
             asset_type=asset_type,
             technical_score=technical_score,
             fundamental_score=fundamental_score,
@@ -274,42 +421,15 @@ def build_analysis_horizon_profile(
             win_rate_20d=win_rate_20d,
             confidence_score=confidence_score,
             source="analysis_inferred",
-        )
-
-    if rating >= 4 and fundamental_score >= 70 and risk_score >= 65 and not macro_reverse:
-        return _base_contract("long_term_allocation", source="analysis_inferred")
-
-    if rating >= 3 and fundamental_score >= 58 and risk_score >= 55 and not macro_reverse:
-        return _base_contract("position_trade", source="analysis_inferred")
-
-    if catalyst_score >= 65 and technical_score >= 55 and relative_score >= 60:
-        return _base_contract("short_term", source="analysis_inferred")
-
-    if rating >= 2 or (risk_score >= 70 and relative_score >= 60) or (technical_score >= 55 and relative_score >= 55):
-        return _swing_contract_variant(
-            technical_score=technical_score,
-            fundamental_score=fundamental_score,
-            catalyst_score=catalyst_score,
-            relative_score=relative_score,
-            risk_score=risk_score,
-            source="analysis_inferred",
-        )
-
-    if "持有优于追高" in trade_state and asset_type in {"cn_etf", "cn_fund"} and fundamental_score >= 50 and risk_score >= 50:
-        return _base_contract("position_trade", source="analysis_inferred")
-
-    return _watch_contract_variant(
+        ),
         asset_type=asset_type,
+        trade_state=trade_state,
         technical_score=technical_score,
         fundamental_score=fundamental_score,
         catalyst_score=catalyst_score,
         relative_score=relative_score,
         risk_score=risk_score,
         macro_reverse=macro_reverse,
-        stop_hit_rate=stop_hit_rate,
-        win_rate_20d=win_rate_20d,
-        confidence_score=confidence_score,
-        source="analysis_inferred",
     )
 
 
