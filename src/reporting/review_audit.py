@@ -31,7 +31,7 @@ _SOLIDIFICATION_KEYS = (
     "backlog",
 )
 _FACTOR_CONTRACT_REPORT_TYPES = {"stock_pick", "etf_pick", "fund_pick", "briefing"}
-_PROXY_CONTRACT_REPORT_TYPES = {"stock_pick", "etf_pick", "fund_pick"}
+_PROXY_CONTRACT_REPORT_TYPES = {"stock_pick", "etf_pick", "fund_pick", "briefing"}
 
 
 @dataclass(frozen=True)

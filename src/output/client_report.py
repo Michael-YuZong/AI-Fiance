@@ -2653,6 +2653,12 @@ class ClientReportRenderer:
             detail_lines = quality_lines
         for item in detail_lines[:2]:
             lines.append(f"- {item}")
+        proxy_section = _proxy_contract_section(
+            dict(payload.get("proxy_contract") or {}),
+            heading="## 市场代理信号",
+        )
+        if proxy_section:
+            lines.extend(["", *proxy_section])
         lines.extend(["", "## 今天怎么做", ""])
         for item in action_lines[:4]:
             lines.append(f"- {item}")

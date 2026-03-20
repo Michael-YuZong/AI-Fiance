@@ -42,6 +42,33 @@ def _append_table_subsection(lines: List[str], title: str, headers: List[str], r
     lines.extend(_table(headers, rows))
 
 
+def _append_proxy_contract_subsection(lines: List[str], title: str, proxy_contract: Dict[str, Any]) -> None:
+    contract = dict(proxy_contract or {})
+    if not contract:
+        return
+    market_flow = dict(contract.get("market_flow") or {})
+    social = dict(contract.get("social_sentiment") or {})
+    items = [
+        (
+            "市场风格代理："
+            f"{market_flow.get('interpretation', '当前没有形成稳定的市场风格代理结论。')}"
+            f"（置信度 `{market_flow.get('confidence_label', '低')}`，覆盖 `{market_flow.get('coverage_summary', '无有效代理样本')}`）。"
+        ),
+        (
+            "情绪代理："
+            f"已覆盖 `{social.get('covered', 0)}/{social.get('total', 0)}` 个样本，"
+            f"置信度分布 `{social.get('confidence_labels', {}) or {'低': 0}}`。"
+        ),
+    ]
+    limitation = str(market_flow.get("limitation") or social.get("limitation") or "").strip()
+    if limitation:
+        items.append(f"限制：{limitation}")
+    downgrade = str(market_flow.get("downgrade_impact") or social.get("downgrade_impact") or "").strip()
+    if downgrade:
+        items.append(f"降级影响：{downgrade}")
+    _append_subsection(lines, title, items)
+
+
 def _append_details(lines: List[str], title: str, items: List[str]) -> None:
     lines.extend(["", "<details>", f"<summary>{title}</summary>", ""])
     if not items:
@@ -299,6 +326,7 @@ class BriefingRenderer:
             ["标的", "最新价", "1日", "5日", "20日", "趋势", "信号", "简评"],
             payload.get("watchlist_rows", []),
         )
+        _append_proxy_contract_subsection(lines, "2.7 代理信号与限制", dict(payload.get("proxy_contract") or {}))
 
         _append_block(lines, "3. 资金与催化")
         _append_subsection(lines, "3.1 核心事件", payload.get("core_event_lines", []))

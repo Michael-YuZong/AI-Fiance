@@ -31,7 +31,7 @@
 
 ### 仍偏弱或仍未统一
 
-- proxy signals 仍是代理，不是原始全量 feed；pick 链已开始显式披露，但 repo-wide 还没完全统一
+- proxy signals 仍是代理，不是原始全量 feed；`pick / briefing / research` 已开始显式披露，但 `retrospect` 的历史 point-in-time 完整度和 repo-wide manifest / audit 还没完全统一
 - repo-wide point-in-time 合同仍未完全统一
 - `scheduler` 的持久化和运维监控还没做完
 
@@ -53,7 +53,7 @@
 - ETF/基金的 `基本面` 高分需要区分“产品质量/代理映射”与“真实行业基本面”
 - 长期缺失的维度不能只靠 `未纳入该维度` 反复披露，评分层要补权或归一化
 - 正式报告外审要补成双层：`rich prompt 结构化审稿 + 零提示发散审`
-- pick / final manifest / review audit 里，代理信号的 `置信度 / 限制 / 降级影响` 需要继续往 briefing / research / retrospect 等链路扩
+- `retrospect` 的旧交易记录还缺历史 `proxy_contract` 快照；这块需要继续补历史 fixture 或更明确地把“无历史代理快照”当成 point-in-time 边界披露
 
 ### 2026-03-16（阶段 J v1 收线）
 
@@ -69,6 +69,12 @@
   - setup / breadth / 质量阈值再校准 -> `校准和自学习`
 
 ## 最近重要变化
+
+### 2026-03-21（proxy signals 开始进入 briefing / research / retrospect）
+
+- `briefing` 现在也会正式生成 `proxy_contract`：`market` 简报正文新增统一的 `代理信号与限制` 小节，daily/weekly client 稿也会露出这层摘要；与此同时，briefing final manifest 已开始带 `proxy_contract`，`review_audit` 也把 `briefing` 纳入了代理合同审计。
+- `research` 不再把代理说明拆散在证据和风险里，而是新增统一的 `## 代理信号与限制` 段落；无论是市场诊断还是带标的的研究问答，都会把 `市场风格代理 / 情绪代理` 的判断、置信度/覆盖、主要限制和降级影响收成同一套合同。
+- `portfolio review / retrospect` 从当前起会把交易当时保存下来的 `proxy_contract` 写进 `decision_snapshot`，回溯报告中可展开 `代理信号快照`；但旧交易如果没有历史代理快照，不会回填或伪造 point-in-time 代理判断。
 
 ### 2026-03-21（proxy signals 开始进入 pick 正式合同）
 

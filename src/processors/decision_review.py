@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
 
@@ -249,6 +249,48 @@ def _attribution_summary(
     return {
         "label": "方向与执行都偏弱",
         "detail": "绝对回报和相对收益都偏弱，需要一起复查方向、节奏和仓位。",
+    }
+
+
+def _summarize_review_proxy_contract(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    market_flow: Dict[str, Any] = {}
+    covered = 0
+    total = 0
+    confidence_labels: Counter[str] = Counter()
+    limitation = ""
+    downgrade_impact = ""
+    for item in items:
+        decision_snapshot = dict(item.get("decision_snapshot") or {})
+        contract = dict(decision_snapshot.get("proxy_contract") or {})
+        if not contract:
+            continue
+        current_market = dict(contract.get("market_flow") or {})
+        if current_market and not market_flow:
+            market_flow = current_market
+        social = dict(contract.get("social_sentiment") or {})
+        covered += int(social.get("covered") or 0)
+        total += int(social.get("total") or 0)
+        for label, count in dict(social.get("confidence_labels") or {}).items():
+            try:
+                confidence_labels[str(label)] += int(count)
+            except Exception:
+                continue
+        if not limitation:
+            limitation = str(current_market.get("limitation") or social.get("limitation") or "").strip()
+        if not downgrade_impact:
+            downgrade_impact = str(current_market.get("downgrade_impact") or social.get("downgrade_impact") or "").strip()
+    if not market_flow and not total and not covered:
+        return {}
+    return {
+        "market_flow": market_flow,
+        "social_sentiment": {
+            "covered": covered,
+            "total": total,
+            "confidence_labels": dict(sorted(confidence_labels.items())),
+            "coverage_summary": f"{covered}/{total} 条历史决策保留了情绪代理快照" if total else "0/0 条历史决策保留了情绪代理快照",
+            "limitation": limitation,
+            "downgrade_impact": downgrade_impact,
+        },
     }
 
 
@@ -726,5 +768,6 @@ def build_monthly_decision_review(
         "setup_rows": setup_rows,
         "horizon_rows": horizon_rows,
         "attribution_rows": attribution_rows,
+        "proxy_contract": _summarize_review_proxy_contract(items),
         "items": items,
     }

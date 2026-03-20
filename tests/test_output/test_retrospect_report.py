@@ -65,6 +65,22 @@ def test_retrospect_report_renders_calibration_attribution_and_snapshot_sections
                         "strategy_candidate_factor_ids": ["j1_volume_structure"],
                         "point_in_time_blockers": [],
                     },
+                    "proxy_contract": {
+                        "market_flow": {
+                            "interpretation": "黄金相对成长更抗跌，市场风格偏防守。",
+                            "confidence_label": "中",
+                            "coverage_summary": "科技/黄金/国内/海外代理样本",
+                            "limitation": "这是相对强弱代理，不是原始资金流。",
+                            "downgrade_impact": "更适合辅助判断风格切换，不适合单独下交易结论。",
+                        },
+                        "social_sentiment": {
+                            "covered": 1,
+                            "total": 1,
+                            "confidence_labels": {"高": 1},
+                            "limitation": "这是价格和量能推导出的情绪代理，不是真实社媒抓取。",
+                            "downgrade_impact": "更适合提示拥挤线索，不适合单独作为买卖信号。",
+                        },
+                    },
                     "notes": ["只使用当时可见日线。"],
                 },
                 "execution_snapshot": {
@@ -89,6 +105,7 @@ def test_retrospect_report_renders_calibration_attribution_and_snapshot_sections
     assert "### 周期判断" in markdown
     assert "### 时点与执行快照" in markdown
     assert "### 因子合同快照" in markdown
+    assert "### 代理信号快照" in markdown
     assert "同区基准20日" in markdown
     assert "20日超额" in markdown
     assert "alpha兑现" in markdown

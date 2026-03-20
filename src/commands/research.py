@@ -25,7 +25,7 @@ from src.collectors import (
     SocialSentimentCollector,
 )
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot
-from src.processors.opportunity_engine import _today_theme
+from src.processors.opportunity_engine import _today_theme, summarize_proxy_contracts
 from src.processors.portfolio_actions import build_trade_plan
 from src.processors.policy_engine import PolicyEngine
 from src.processors.provenance import history_as_of
@@ -264,10 +264,11 @@ def _regime_lines(config: Dict[str, Any]) -> List[str]:
     return lines
 
 
-def _flow_and_sentiment_payload(symbols: List[str], config: Dict[str, Any]) -> Dict[str, List[str]]:
+def _flow_and_sentiment_payload(symbols: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
     snapshots = []
     sentiment_lines: List[str] = []
     risk_lines: List[str] = []
+    social_payloads: List[Dict[str, Any]] = []
     collector = SocialSentimentCollector(config)
     for symbol in symbols[:3]:
         asset_type = detect_asset_type(symbol, config)
@@ -298,6 +299,7 @@ def _flow_and_sentiment_payload(symbols: List[str], config: Dict[str, Any]) -> D
                     "trend": trend,
                 },
             )
+            social_payloads.append(sentiment)
             aggregate = dict(sentiment.get("aggregate") or {})
             sentiment_lines.append(
                 f"{symbol}: {aggregate.get('interpretation', '')}（代理置信度 `{aggregate.get('confidence_label', '低')}`）"
@@ -326,6 +328,11 @@ def _flow_and_sentiment_payload(symbols: List[str], config: Dict[str, Any]) -> D
     return {
         "evidence_lines": evidence_lines[:4],
         "risk_lines": risk_lines[:4],
+        "proxy_contract": summarize_proxy_contracts(
+            market_proxy=flow_report,
+            social_payloads=social_payloads,
+            total=len(symbols[:3]),
+        ),
     }
 
 
@@ -598,7 +605,7 @@ def _market_flow_payload(config: Dict[str, Any], watchlist: Sequence[Mapping[str
     return report
 
 
-def _market_diagnosis_payload(config: Dict[str, Any]) -> Dict[str, List[str]]:
+def _market_diagnosis_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     watchlist = load_watchlist()
     runtime_context = _light_market_context(config, watchlist)
     overview = _fast_market_overview(config)
@@ -664,6 +671,7 @@ def _market_diagnosis_payload(config: Dict[str, Any]) -> Dict[str, List[str]]:
             "[时点边界] 主线、宽度和代理信号默认只使用当前生成时点前可见覆盖；缺源或降级会单独写进风险与不确定性。",
         ],
         "risk_lines": risk_lines,
+        "proxy_contract": summarize_proxy_contracts(market_proxy=flow_report, social_payloads=[], total=0),
     }
 
 
@@ -1165,12 +1173,42 @@ def _pick_evidence_lines(intent: ResearchIntent, evidence_groups: Mapping[str, S
     return _dedupe_lines((item[2] for item in ranked), max_items=limit)
 
 
+def _render_research_proxy_section(proxy_contract: Mapping[str, Any]) -> List[str]:
+    contract = dict(proxy_contract or {})
+    if not contract:
+        return []
+    market_flow = dict(contract.get("market_flow") or {})
+    social = dict(contract.get("social_sentiment") or {})
+    lines = [
+        "## 代理信号与限制",
+        "",
+        (
+            "- 市场风格代理："
+            f"{market_flow.get('interpretation', '当前没有形成稳定的市场风格代理结论。')}"
+            f"（置信度 `{market_flow.get('confidence_label', '低')}`，覆盖 `{market_flow.get('coverage_summary', '无有效代理样本')}`）。"
+        ),
+        (
+            "- 情绪代理："
+            f"已覆盖 `{social.get('covered', 0)}/{social.get('total', 0)}` 个样本，"
+            f"置信度分布 `{social.get('confidence_labels', {}) or {'低': 0}}`。"
+        ),
+    ]
+    limitation = str(market_flow.get("limitation") or social.get("limitation") or "").strip()
+    if limitation:
+        lines.append(f"- 主要限制：{limitation}")
+    downgrade = str(market_flow.get("downgrade_impact") or social.get("downgrade_impact") or "").strip()
+    if downgrade:
+        lines.append(f"- 降级影响：{downgrade}")
+    return lines
+
+
 def _render_research_markdown(
     *,
     question: str,
     intent: ResearchIntent,
     symbols: List[str],
     direct_answer_lines: List[str],
+    proxy_contract: Mapping[str, Any],
     evidence_lines: List[str],
     provenance_lines: List[str],
     risk_lines: List[str],
@@ -1187,6 +1225,10 @@ def _render_research_markdown(
     ]
     for item in direct_answer_lines:
         lines.append(f"- {item}")
+
+    proxy_lines = _render_research_proxy_section(proxy_contract)
+    if proxy_lines:
+        lines.extend(["", *proxy_lines])
 
     lines.extend(["", "## 证据"])
     for item in evidence_lines or ["当前没有拿到足够证据，建议先缩小问题范围或指定标的。"]:
@@ -1227,6 +1269,7 @@ def main() -> None:
     )
     risk_lines: List[str] = []
     action_lines: List[str] = []
+    proxy_contract: Dict[str, Any] = {}
     regime_lines: List[str] = _regime_lines(config) if intent.needs_regime else []
     flow_lines: List[str] = []
     contextual_answer_lines: List[str] = []
@@ -1242,6 +1285,7 @@ def main() -> None:
             evidence_groups["market"].extend(list(market_payload.get("evidence_lines") or []))
             provenance_groups["market"].extend(list(market_payload.get("provenance_lines") or []))
             risk_lines.extend(list(market_payload.get("risk_lines") or []))
+            proxy_contract = dict(market_payload.get("proxy_contract") or proxy_contract)
         except Exception as exc:
             risk_lines.append(f"市场诊断上下文暂时拉取失败，当前先回退到宏观框架判断。{exc}")
 
@@ -1277,6 +1321,7 @@ def main() -> None:
         flow_lines = list(flow_payload.get("evidence_lines") or [])
         evidence_groups["flow"].extend(f"[资金/情绪代理] {item}" for item in flow_lines)
         risk_lines.extend(list(flow_payload.get("risk_lines") or []))
+        proxy_contract = dict(flow_payload.get("proxy_contract") or proxy_contract)
 
     if intent.needs_risk and holdings:
         context = build_portfolio_risk_context(config, repo=repo)
@@ -1379,6 +1424,7 @@ def main() -> None:
             intent=intent,
             symbols=symbols[:3],
             direct_answer_lines=direct_answer_lines,
+            proxy_contract=proxy_contract,
             evidence_lines=evidence_lines,
             provenance_lines=provenance_lines,
             risk_lines=risk_lines,

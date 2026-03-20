@@ -1383,22 +1383,20 @@ def _analysis_proxy_signals(
     }
 
 
-def summarize_proxy_contracts_from_analyses(
-    analyses: Sequence[Mapping[str, Any]],
+def summarize_proxy_contracts(
     *,
     market_proxy: Optional[Mapping[str, Any]] = None,
+    social_payloads: Optional[Sequence[Mapping[str, Any]]] = None,
+    total: Optional[int] = None,
 ) -> Dict[str, Any]:
-    rows = list(analyses or [])
     market_flow = dict(market_proxy or {})
-    if not market_flow:
-        market_flow = dict(dict((rows[0].get("proxy_signals") if rows else {}) or {}).get("market_flow") or {})
     social_counter: Counter[str] = Counter()
     social_limitations: List[str] = []
     social_downgrade = ""
     covered = 0
+    rows = list(social_payloads or [])
     for item in rows:
-        social = dict(dict(item.get("proxy_signals") or {}).get("social_sentiment") or {})
-        aggregate = dict(social.get("aggregate") or {})
+        aggregate = dict(item.get("aggregate") or item or {})
         if not aggregate:
             continue
         covered += 1
@@ -1421,9 +1419,13 @@ def summarize_proxy_contracts_from_analyses(
         },
         "social_sentiment": {
             "covered": covered,
-            "total": len(rows),
+            "total": int(total if total is not None else len(rows)),
             "confidence_labels": dict(sorted(social_counter.items())),
-            "coverage_summary": f"{covered}/{len(rows)} 只候选已生成情绪代理" if rows else "0/0 只候选已生成情绪代理",
+            "coverage_summary": (
+                f"{covered}/{int(total if total is not None else len(rows))} 只候选已生成情绪代理"
+                if (rows or total is not None)
+                else "0/0 只候选已生成情绪代理"
+            ),
             "limitation": social_limitations[0] if social_limitations else "",
             "downgrade_impact": social_downgrade,
         },
@@ -1434,10 +1436,28 @@ def summarize_proxy_contracts_from_analyses(
                 + f"（置信度 `{str(market_flow.get('confidence_label', '低')).strip() or '低'}`）。"
             ),
             (
-                f"情绪代理覆盖 `{covered}/{len(rows)}` 只候选；置信度分布 {dict(sorted(social_counter.items())) or {'低': 0}}。"
+                f"情绪代理覆盖 `{covered}/{int(total if total is not None else len(rows))}` 只候选；"
+                f"置信度分布 {dict(sorted(social_counter.items())) or {'低': 0}}。"
             ),
         ],
     }
+
+
+def summarize_proxy_contracts_from_analyses(
+    analyses: Sequence[Mapping[str, Any]],
+    *,
+    market_proxy: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    rows = list(analyses or [])
+    market_flow = dict(market_proxy or {})
+    if not market_flow:
+        market_flow = dict(dict((rows[0].get("proxy_signals") if rows else {}) or {}).get("market_flow") or {})
+    social_payloads = [dict(dict(item.get("proxy_signals") or {}).get("social_sentiment") or {}) for item in rows]
+    return summarize_proxy_contracts(
+        market_proxy=market_flow,
+        social_payloads=social_payloads,
+        total=len(rows),
+    )
 
 
 def _context_drivers(context: Mapping[str, Any], config: Mapping[str, Any]) -> Dict[str, Any]:

@@ -35,7 +35,11 @@ from src.commands.release_check import check_generic_client_report
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.horizon import get_horizon_contract
-from src.processors.opportunity_engine import discover_stock_opportunities, _today_theme as _opportunity_day_theme
+from src.processors.opportunity_engine import (
+    discover_stock_opportunities,
+    summarize_proxy_contracts,
+    _today_theme as _opportunity_day_theme,
+)
 from src.processors.regime import RegimeDetector
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.processors.trade_handoff import portfolio_whatif_handoff
@@ -692,6 +696,32 @@ def _flow_lines(snapshots: List[BriefingSnapshot], config: Dict[str, Any]) -> Li
     if limitations:
         lines.append(f"限制：{limitations[0]}")
     return lines
+
+
+def _briefing_proxy_contract(snapshots: List[BriefingSnapshot], config: Dict[str, Any]) -> Dict[str, Any]:
+    if not snapshots:
+        return summarize_proxy_contracts(market_proxy={}, social_payloads=[], total=0)
+    market_flow = GlobalFlowCollector(config).collect(snapshots)
+    collector = SocialSentimentCollector(config)
+    social_payloads: List[Dict[str, Any]] = []
+    for item in snapshots:
+        social_payloads.append(
+            collector.collect(
+                item.symbol,
+                {
+                    "return_1d": item.return_1d,
+                    "return_5d": item.return_5d,
+                    "return_20d": item.return_20d,
+                    "volume_ratio": item.volume_ratio,
+                    "trend": item.trend,
+                },
+            )
+        )
+    return summarize_proxy_contracts(
+        market_proxy=market_flow,
+        social_payloads=social_payloads,
+        total=len(snapshots),
+    )
 
 
 def _news_lines(
@@ -3838,6 +3868,7 @@ def _build_market_payload(
     macro_items: List[str],
     alerts: List[str],
     quality_lines: List[str],
+    proxy_contract: Dict[str, Any],
 ) -> Dict[str, Any]:
     domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
     style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
@@ -3883,6 +3914,7 @@ def _build_market_payload(
         "verification_rows": verification_rows,
         "alerts": alerts or ["当前没有触发额外强提醒，但市场风格切换仍需持续验证。"],
         "a_share_watch_meta": a_share_watch_meta,
+        "proxy_contract": proxy_contract,
     }
 
 
@@ -3967,6 +3999,7 @@ def main() -> None:
     regime_result = RegimeDetector(regime_inputs).detect_regime()
 
     snapshots, alerts, watchlist_rows = _collect_snapshots(config, args.mode)
+    proxy_contract = _briefing_proxy_contract(snapshots, config)
     overview = MarketOverviewCollector(config).collect()
     pulse = MarketPulseCollector(config).collect()
     drivers = MarketDriversCollector(config).collect()
@@ -4047,6 +4080,7 @@ def main() -> None:
             macro_items=macro_items,
             alerts=alerts,
             quality_lines=_quality_lines(news_report, anomaly_report, monitor_rows),
+            proxy_contract=proxy_contract,
         )
         rendered = BriefingRenderer().render_market(payload)
     else:
@@ -4108,6 +4142,7 @@ def main() -> None:
             "action_lines": _action_lines(snapshots, narrative, monitor_rows),
             "charts": briefing_charts,
             "a_share_watch_meta": a_share_watch_meta,
+            "proxy_contract": proxy_contract,
         }
         rendered = BriefingRenderer().render(payload)
     detail_path = _persist_briefing(rendered, args.mode)
@@ -4130,6 +4165,7 @@ def main() -> None:
                     "detail_source": str(detail_path),
                     "a_share_watch": payload.get("a_share_watch_meta", {}),
                     "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
+                    "proxy_contract": dict(payload.get("proxy_contract") or {}),
                 },
             )
         except ReportGuardError as exc:
@@ -4154,6 +4190,7 @@ def main() -> None:
                 "detail_source": str(detail_path),
                 "a_share_watch": payload.get("a_share_watch_meta", {}),
                 "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
+                "proxy_contract": dict(payload.get("proxy_contract") or {}),
             },
         )
     except ReportGuardError as exc:

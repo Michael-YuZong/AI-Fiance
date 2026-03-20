@@ -193,6 +193,22 @@ def test_market_renderer_outputs_core_sections():
         "a_share_watch_lines": ["A 股观察池来自 `Tushare 优先` 的全市场快照；初筛池 `60` 只，完整分析 `8` 只。"],
         "verification_rows": [["1", "上证指数", "能否收回 MA20", "修复延续", "继续震荡"]],
         "alerts": ["当前没有触发额外强提醒，但市场风格切换仍需持续验证。"],
+        "proxy_contract": {
+            "market_flow": {
+                "interpretation": "黄金相对成长更抗跌，市场风格偏防守。",
+                "confidence_label": "中",
+                "coverage_summary": "科技/黄金/国内/海外代理样本",
+                "limitation": "这是相对强弱代理，不是原始资金流。",
+                "downgrade_impact": "更适合辅助判断风格切换，不适合单独下交易结论。",
+            },
+            "social_sentiment": {
+                "covered": 2,
+                "total": 2,
+                "confidence_labels": {"中": 1, "高": 1},
+                "limitation": "这是价格和量能推导出的情绪代理，不是真实社媒抓取。",
+                "downgrade_impact": "更适合提示拥挤线索，不适合单独作为买卖信号。",
+            },
+        },
     }
     rendered = BriefingRenderer().render_market(payload)
     assert "# 全市场行情简报" in rendered
@@ -206,6 +222,7 @@ def test_market_renderer_outputs_core_sections():
     assert "### 2.4 宏观资产" in rendered
     assert "### 2.5 隔夜外盘" in rendered
     assert "### 2.6 跨市场观察哨" in rendered
+    assert "### 2.7 代理信号与限制" in rendered
     assert "## 3. 资金与催化" in rendered
     assert "### 3.1 核心事件" in rendered
     assert "### 3.2 主线跟踪" in rendered

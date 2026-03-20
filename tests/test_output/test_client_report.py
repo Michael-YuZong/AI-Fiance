@@ -1080,6 +1080,22 @@ def test_render_briefing_includes_macro_leading_section() -> None:
             "本次新闻覆盖源: Reuters / 财联社。",
             "HSTECH 当前使用 `3033.HK` 作为行情代理。",
         ],
+        "proxy_contract": {
+            "market_flow": {
+                "interpretation": "黄金相对成长更抗跌，市场风格偏防守。",
+                "confidence_label": "中",
+                "coverage_summary": "科技/黄金/国内/海外代理样本",
+                "limitation": "这是相对强弱代理，不是原始资金流。",
+                "downgrade_impact": "更适合辅助判断风格切换，不适合单独下交易结论。",
+            },
+            "social_sentiment": {
+                "covered": 2,
+                "total": 3,
+                "confidence_labels": {"中": 1, "高": 1},
+                "limitation": "这是价格和量能推导出的情绪代理，不是真实社媒抓取。",
+                "downgrade_impact": "更适合提示拥挤线索，不适合单独作为买卖信号。",
+            },
+        },
         "a_share_watch_rows": [["1", "宁德时代 (300750)", "新能源", "较强机会", "持有优于追高", "首次建仓 ≤3%"]],
         "a_share_watch_lines": [
             "A 股观察池来自 `Tushare 优先` 的全市场快照；初筛池 `60` 只，完整分析 `8` 只。",
@@ -1090,6 +1106,7 @@ def test_render_briefing_includes_macro_leading_section() -> None:
     rendered = ClientReportRenderer().render_briefing(payload)
     assert "## 宏观领先指标" in rendered
     assert "## 数据完整度" in rendered
+    assert "## 市场代理信号" in rendered
     assert "## 今日A股观察池" in rendered
     assert "## 重点观察" in rendered
     assert "PPI 同比 -0.9%" in rendered

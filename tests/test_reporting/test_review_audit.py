@@ -433,3 +433,67 @@ def test_review_audit_flags_manifest_missing_proxy_contract(tmp_path: Path) -> N
     audit = build_review_audit(tmp_path)
     titles = {item["title"] for item in audit["findings"]}
     assert "manifest 缺少 proxy_contract" in titles
+
+
+def test_review_audit_flags_briefing_manifest_missing_proxy_contract(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/briefings/final/daily_briefing_2026-03-21_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    manifest_path = tmp_path / "reports/reviews/briefings/final/daily_briefing_2026-03-21_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "briefing",
+                "artifacts": {"factor_contract": {"families": {"J-3": 1}}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "briefing_round1.md",
+        "\n".join(
+            [
+                "# Briefing",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "manifest 缺少 proxy_contract" in titles

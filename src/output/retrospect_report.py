@@ -179,6 +179,23 @@ class DecisionRetrospectReportRenderer:
                     contract_rows.append(["PTI blocker", f"{blocker.get('factor_id', '—')} | {blocker.get('reason', 'lag / visibility fixture incomplete')}"])
                 lines.extend(["", "### 因子合同快照"])
                 lines.extend(_table(["项目", "内容"], contract_rows))
+            proxy_contract = dict(decision_snapshot.get("proxy_contract") or {})
+            if proxy_contract:
+                market_flow = dict(proxy_contract.get("market_flow") or {})
+                social = dict(proxy_contract.get("social_sentiment") or {})
+                proxy_rows = [
+                    ["市场风格代理", str(market_flow.get("interpretation", "—") or "—")],
+                    ["市场代理置信度", str(market_flow.get("confidence_label", "—") or "—")],
+                    ["市场代理覆盖", str(market_flow.get("coverage_summary", "—") or "—")],
+                    [
+                        "情绪代理覆盖",
+                        f"{int(social.get('covered', 0))}/{int(social.get('total', 0))} | {dict(social.get('confidence_labels') or {}) or {'低': 0}}",
+                    ],
+                    ["主要限制", str(market_flow.get("limitation") or social.get("limitation") or "—")],
+                    ["降级影响", str(market_flow.get("downgrade_impact") or social.get("downgrade_impact") or "—")],
+                ]
+                lines.extend(["", "### 代理信号快照"])
+                lines.extend(_table(["项目", "内容"], proxy_rows))
             for note in decision_snapshot.get("notes", []) or []:
                 lines.append(f"- {note}")
             liquidity_note = str(execution_snapshot.get("liquidity_note", "") or "").strip()

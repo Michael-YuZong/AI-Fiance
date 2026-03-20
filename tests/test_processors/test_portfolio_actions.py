@@ -92,6 +92,22 @@ def test_build_trade_plan_estimates_budget_execution_and_provenance(monkeypatch,
         analysis={
             "symbol": "561380",
             "name": "电网ETF",
+            "proxy_signals": {
+                "market_flow": {
+                    "lines": ["黄金相对成长更抗跌，市场风格偏防守。"],
+                    "confidence_label": "中",
+                    "coverage_summary": "科技/黄金/国内/海外代理样本",
+                    "limitations": ["这是相对强弱代理，不是原始资金流。"],
+                    "downgrade_impact": "更适合辅助判断风格切换，不适合单独下交易结论。",
+                },
+                "social_sentiment": {
+                    "aggregate": {
+                        "confidence_label": "高",
+                        "limitations": ["这是价格和量能推导出的情绪代理，不是真实社媒抓取。"],
+                        "downgrade_impact": "更适合提示拥挤线索，不适合单独作为买卖信号。",
+                    }
+                },
+            },
             "dimensions": {
                 "technical": {
                     "factors": [
@@ -121,6 +137,8 @@ def test_build_trade_plan_estimates_budget_execution_and_provenance(monkeypatch,
     assert payload["execution"]["tradability_label"] in {"顺畅", "可成交", "谨慎", "冲击偏高", "数据不足"}
     assert payload["decision_snapshot"]["market_data_as_of"] == "2025-12-31"
     assert payload["decision_snapshot"]["factor_contract"]["families"]["J-1"] == 1
+    assert payload["decision_snapshot"]["proxy_contract"]["market_flow"]["confidence_label"] == "中"
+    assert payload["decision_snapshot"]["proxy_contract"]["social_sentiment"]["covered"] == 1
     assert payload["horizon"]["code"] == "position_trade"
     assert payload["decision_snapshot"]["horizon"]["code"] == "position_trade"
     assert payload["current_risk"]["annual_vol"] >= 0

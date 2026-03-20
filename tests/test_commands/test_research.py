@@ -122,6 +122,14 @@ def test_render_research_markdown_has_structured_sections() -> None:
         intent=ResearchIntent("asset_thesis", "标的研究 / 交易问题", True, False, True),
         symbols=["561380"],
         direct_answer_lines=["561380 当前更像回踩确认，而不是无条件追高。"],
+        proxy_contract={
+            "market_flow": {
+                "interpretation": "黄金相对成长更抗跌，市场风格偏防守。",
+                "confidence_label": "中",
+                "coverage_summary": "科技/黄金/国内/海外代理样本",
+            },
+            "social_sentiment": {"covered": 1, "total": 1, "confidence_labels": {"中": 1}},
+        },
         evidence_lines=["[宏观] 当前 macro regime 为 recovery。", "[行情/技术] 561380 近20日 +8.0%。"],
         provenance_lines=["[行情时点] 561380 日线 as_of `2026-03-13`，来源 `本地历史日线链路`。"],
         risk_lines=["RSI 已偏热。"],
@@ -129,6 +137,7 @@ def test_render_research_markdown_has_structured_sections() -> None:
     )
 
     assert "## 一句话回答" in markdown
+    assert "## 代理信号与限制" in markdown
     assert "## 证据" in markdown
     assert "## 证据时点与来源" in markdown
     assert "## 风险与不确定性" in markdown
@@ -218,6 +227,8 @@ def test_flow_and_sentiment_payload_exposes_proxy_confidence(monkeypatch) -> Non
     assert any("代理置信度 `中`" in item for item in payload["evidence_lines"])
     assert any("情绪代理限制" in item for item in payload["risk_lines"])
     assert any("资金流代理影响" in item for item in payload["risk_lines"])
+    assert payload["proxy_contract"]["market_flow"]["confidence_label"] == "中"
+    assert payload["proxy_contract"]["social_sentiment"]["covered"] == 1
 
 
 def test_pulse_stats_counts_dataframe_rows() -> None:
@@ -445,3 +456,4 @@ def test_market_diagnosis_payload_uses_proxy_flow_and_probability(monkeypatch) -
     assert any("场景概率" in item for item in payload["evidence_lines"])
     assert any("市场时点" in item for item in payload["provenance_lines"])
     assert any("市场风格代理限制" in item for item in payload["risk_lines"])
+    assert payload["proxy_contract"]["market_flow"]["confidence_label"] == "中"
