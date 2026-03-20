@@ -241,6 +241,42 @@ def test_render_stock_picks_detailed_compacts_watch_items() -> None:
     assert "**催化拆解：**" in rendered
 
 
+def test_render_stock_picks_detailed_includes_market_proxy_section() -> None:
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "day_theme": {"label": "能源冲击 + 地缘风险"},
+        "regime": {"current_regime": "stagflation"},
+        "market_label": "A股",
+        "proxy_contract": {
+            "market_flow": {
+                "interpretation": "黄金相对成长更抗跌，资金风格偏防守。",
+                "confidence_label": "中",
+                "coverage_summary": "科技 / 黄金 / 国内 / 海外",
+                "limitation": "这是相对强弱代理，不是原始流向数据。",
+                "downgrade_impact": "可辅助判断主线切换，但不应单独决定交易动作。",
+            },
+            "social_sentiment": {
+                "covered": 2,
+                "total": 2,
+                "confidence_labels": {"中": 1, "高": 1},
+                "coverage_summary": "2/2 只候选已生成情绪代理",
+                "limitation": "这是价格和量能行为推导出的情绪代理，不是真实社媒抓取。",
+                "downgrade_impact": "更适合提示拥挤线索，不适合单独作为买卖信号。",
+            },
+        },
+        "top": [_sample_analysis("300502", "新易盛", "cn_stock", rank=3)],
+        "watch_positive": [],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
+
+    assert "## 市场代理信号" in rendered
+    assert "市场风格代理" in rendered
+    assert "情绪代理" in rendered
+    assert "科技 / 黄金 / 国内 / 海外" in rendered
+    assert "真实社媒抓取" in rendered
+
+
 def test_render_stock_picks_marks_watch_only_market_as_observe() -> None:
     payload = {
         "generated_at": "2026-03-11 10:00:00",
@@ -780,6 +816,23 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
             "delivery_observe_only": True,
             "delivery_summary_only": False,
             "delivery_notes": ["当前流程不是把全市场每只标的都做完整八维深扫，而是先初筛 `9` 只，再对其中 `5` 只做完整分析。", "新闻/事件覆盖存在降级，本次更适合作为观察优先对象，不宜当成强执行型推荐。"],
+            "proxy_contract": {
+                "market_flow": {
+                    "interpretation": "黄金相对成长更抗跌，资金风格偏防守。",
+                    "confidence_label": "中",
+                    "coverage_summary": "科技 / 黄金 / 国内 / 海外",
+                    "limitation": "这是相对强弱代理，不是原始流向数据。",
+                    "downgrade_impact": "可辅助判断主线切换，但不应单独决定交易动作。",
+                },
+                "social_sentiment": {
+                    "covered": 5,
+                    "total": 5,
+                    "confidence_labels": {"中": 3, "高": 2},
+                    "coverage_summary": "5/5 只候选已生成情绪代理",
+                    "limitation": "这是价格和量能行为推导出的情绪代理，不是真实社媒抓取。",
+                    "downgrade_impact": "更适合提示拥挤线索，不适合单独作为买卖信号。",
+                },
+            },
         },
         "recommendation_tracks": {
             "short_term": {
@@ -841,6 +894,16 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
             ],
             "taxonomy_summary": "这只标的按统一分类更接近 `ETF / 场内ETF / 被动跟踪`，主暴露属于 `商品`。",
             "score_changes": [{"label": "催化面", "previous": 45, "current": 62, "reason": "商品链催化增强"}],
+            "proxy_signals": {
+                "social_sentiment": {
+                    "aggregate": {
+                        "interpretation": "情绪指数 61.0，讨论热度偏高，需防拥挤交易。",
+                        "confidence_label": "高",
+                        "limitations": ["这是价格和量能行为推导出的情绪代理，不是真实社媒抓取。"],
+                        "downgrade_impact": "更适合提示拥挤线索，不适合单独作为买卖信号。",
+                    }
+                }
+            },
         },
         "alternatives": [{"name": "红利ETF", "symbol": "510880", "cautions": ["今天弹性不如能源主线。"]}],
         "notes": ["当前数据源连接不稳定，已按可用数据降级处理。"],
@@ -851,6 +914,8 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     assert "这份建议的适用时段：" in rendered
     assert "## 数据完整度" in rendered
     assert "## 交付等级" in rendered
+    assert "## 代理信号与限制" in rendered
+    assert "真实社媒抓取" in rendered
     assert "降级观察稿" in rendered
     assert "## 当前分层建议" in rendered
     assert "**先看结论：** 这段只回答今天先看哪只、按什么周期先跟。" in rendered

@@ -14,7 +14,7 @@ from src.collectors.market_cn import ChinaMarketCollector
 from src.collectors.market_drivers import MarketDriversCollector
 from src.collectors.valuation import ValuationCollector
 from src.collectors.news import NewsCollector
-from src.processors.opportunity_engine import PoolItem, _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _correlation_to_watchlist, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _rating_from_dimensions, _refresh_action_from_signal_confidence, _relative_strength_dimension, _risk_dimension, _seasonality_dimension, _signal_confidence_warning_line, _stock_name_tokens, _technical_dimension, analyze_opportunity, build_default_pool, build_fund_pool, build_market_context, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities
+from src.processors.opportunity_engine import PoolItem, _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _correlation_to_watchlist, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _preferred_catalyst_sources, _rating_from_dimensions, _refresh_action_from_signal_confidence, _relative_strength_dimension, _risk_dimension, _seasonality_dimension, _signal_confidence_warning_line, _stock_name_tokens, _technical_dimension, analyze_opportunity, build_default_pool, build_fund_pool, build_market_context, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities, summarize_proxy_contracts_from_analyses
 from src.processors.opportunity_engine import _asset_note
 from src.processors.horizon import build_analysis_horizon_profile
 from src.utils.market import compute_history_metrics
@@ -4723,3 +4723,49 @@ def test_j4_lag_disclosure_in_cashflow_and_leverage_details():
     lev_factor = next((f for f in dim["factors"] if f["name"] == "杠杆压力"), None)
     assert cf_factor is not None and "lag" in cf_factor["detail"]
     assert lev_factor is not None and "lag" in lev_factor["detail"]
+
+
+def test_summarize_proxy_contracts_from_analyses_keeps_confidence_and_downgrade() -> None:
+    analyses = [
+        {
+            "proxy_signals": {
+                "social_sentiment": {
+                    "aggregate": {
+                        "interpretation": "情绪指数 62.0，讨论热度偏高，需防拥挤交易。",
+                        "confidence_label": "中",
+                        "limitations": ["这是价格和量能行为推导出的情绪代理，不是真实社媒抓取。"],
+                        "downgrade_impact": "更适合提示拥挤线索，不适合单独作为买卖信号。",
+                    }
+                }
+            }
+        },
+        {
+            "proxy_signals": {
+                "social_sentiment": {
+                    "aggregate": {
+                        "interpretation": "情绪指数 48.0，当前未出现极端一致预期。",
+                        "confidence_label": "高",
+                        "limitations": ["这是价格和量能行为推导出的情绪代理，不是真实社媒抓取。"],
+                        "downgrade_impact": "更适合提示拥挤线索，不适合单独作为买卖信号。",
+                    }
+                }
+            }
+        },
+    ]
+
+    summary = summarize_proxy_contracts_from_analyses(
+        analyses,
+        market_proxy={
+            "lines": ["成长相对黄金更强，资金风格偏 risk-on。"],
+            "confidence_label": "中",
+            "coverage_summary": "科技 / 黄金 / 国内 / 海外",
+            "limitations": ["这是相对强弱代理，不是原始资金流向数据。"],
+            "downgrade_impact": "可作为市场风格辅助证据，但不应单独决定交易动作。",
+        },
+    )
+
+    assert summary["market_flow"]["confidence_label"] == "中"
+    assert summary["market_flow"]["coverage_summary"] == "科技 / 黄金 / 国内 / 海外"
+    assert summary["social_sentiment"]["covered"] == 2
+    assert summary["social_sentiment"]["confidence_labels"] == {"中": 1, "高": 1}
+    assert "市场风格代理" in summary["lines"][0]

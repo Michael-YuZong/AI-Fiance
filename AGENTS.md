@@ -99,7 +99,7 @@
 2. `policy` v2
    继续提升扫描版、表格重 PDF/OFD 的抽取和 taxonomy。
 3. Proxy signals
-   把代理置信度和降级影响完整传到 pick 输出和 release / review guard。
+   pick 链已经开始显式传递代理置信度和降级影响；下一步把同样的合同继续扩到 `briefing / research / retrospect`，并让 repo-wide manifest / audit 都承认这层代理合同。
 4. `scheduler` v2
    做持久化 run history、失败可见性和运维状态。
 5. 校准与学习
@@ -115,6 +115,8 @@
 
 ## Recent Changes
 
+- 2026-03-21
+  `stock_pick / etf_pick / fund_pick` 现在会在客户稿里显式写出 `市场风格代理 / 情绪代理` 的当前判断、置信度/覆盖、主要限制和降级影响，不再只是内部 collector 知道用了 proxy、终稿里却看不见。与此同时，pick final 的 manifest 已补进 `proxy_contract`，`review_audit` 也开始审这层合同；如果 `stock_pick / etf_pick / fund_pick` 的 manifest 没有代理信号摘要，现在会直接报 finding。
 - 2026-03-20
   `stock_pick` 的客户详细稿现在开始区分 `正式推荐` 和 `观察/看好但暂不推荐` 的展开深度：正式推荐继续保留完整八维、催化、硬检查和风险拆解；观察类标的则压成短版卡片，只保留“为什么继续看 / 为什么不升级 / 触发条件 / 关键盯盘价位 / 证据口径”。为满足 final 门禁，观察名单同时会额外保留 1 只 `代表样本详细拆解`，确保成稿里仍有完整八维合同可复核，而不是把所有观察票都展开成大长稿。
 - 2026-03-20

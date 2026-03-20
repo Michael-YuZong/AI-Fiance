@@ -1460,6 +1460,56 @@ def _pick_delivery_summary_only(selection_context: Mapping[str, Any]) -> bool:
     return bool(dict(selection_context or {}).get("delivery_summary_only"))
 
 
+def _proxy_contract_section(
+    proxy_contract: Mapping[str, Any],
+    *,
+    winner: Optional[Mapping[str, Any]] = None,
+    heading: str = "## 代理信号与限制",
+) -> List[str]:
+    contract = dict(proxy_contract or {})
+    market_flow = dict(contract.get("market_flow") or {})
+    social_summary = dict(contract.get("social_sentiment") or {})
+    winner_proxy = dict(dict(winner or {}).get("proxy_signals") or {})
+    social_payload = dict(winner_proxy.get("social_sentiment") or {})
+    social_aggregate = dict(social_payload.get("aggregate") or {})
+
+    rows: List[List[str]] = []
+    if market_flow:
+        interpretation = str(market_flow.get("interpretation", "")).strip()
+        confidence = str(market_flow.get("confidence_label", "低")).strip() or "低"
+        coverage = str(market_flow.get("coverage_summary", "无有效代理样本")).strip() or "无有效代理样本"
+        limitation = str(market_flow.get("limitation", "")).strip() or "当前没有额外说明。"
+        downgrade = str(market_flow.get("downgrade_impact", "")).strip() or "当前没有额外降级影响说明。"
+        if interpretation:
+            rows.append(["市场风格代理", interpretation, f"`{confidence}` / {coverage}", limitation, downgrade])
+
+    if social_aggregate:
+        interpretation = str(social_aggregate.get("interpretation", "")).strip()
+        confidence = str(social_aggregate.get("confidence_label", "低")).strip() or "低"
+        limitation = str(next(iter(social_aggregate.get("limitations") or []), "")).strip() or "当前没有额外说明。"
+        downgrade = str(social_aggregate.get("downgrade_impact", "")).strip() or "当前没有额外降级影响说明。"
+        coverage = "日涨跌 / 5日涨跌 / 20日涨跌 / 量能比 / 趋势"
+        if interpretation:
+            rows.append(["情绪代理", interpretation, f"`{confidence}` / {coverage}", limitation, downgrade])
+    elif social_summary:
+        covered = social_summary.get("covered", 0)
+        total = social_summary.get("total", 0)
+        labels = dict(social_summary.get("confidence_labels") or {})
+        interpretation = f"已对 `{covered}/{total}` 只候选生成情绪代理；置信度分布 {labels or {'低': 0}}。"
+        limitation = str(social_summary.get("limitation", "")).strip() or "当前没有额外说明。"
+        downgrade = str(social_summary.get("downgrade_impact", "")).strip() or "当前没有额外降级影响说明。"
+        coverage = str(social_summary.get("coverage_summary", "")).strip() or f"{covered}/{total}"
+        rows.append(["情绪代理", interpretation, coverage, limitation, downgrade])
+
+    if not rows:
+        return []
+
+    lines = [heading, ""]
+    lines.extend(_section_lead_lines("这段只回答哪些判断来自代理层、这些代理能信到什么程度。"))
+    lines.extend(_table(["代理层", "当前判断", "置信度/覆盖", "主要限制", "降级影响"], rows))
+    return lines
+
+
 def _pick_reassessment_condition(
     winner: Mapping[str, Any],
     horizon: Mapping[str, Any],
@@ -1957,6 +2007,10 @@ class ClientReportRenderer:
             lines.append("- 新闻热度更看多源共振；单一来源只算提及，不等于热度确认。")
             lines.append("- 相关性/分散度按各市场观察池基准代理，不同市场之间只适合看相对高低，不适合直接横向比较绝对值。")
             lines.append("")
+        proxy_section = _proxy_contract_section(dict(payload.get("proxy_contract") or {}), heading="## 市场代理信号")
+        if proxy_section:
+            lines.extend(proxy_section)
+            lines.append("")
 
         for market_name in ("A股", "港股", "美股"):
             items = grouped.get(market_name, [])
@@ -2213,6 +2267,9 @@ class ClientReportRenderer:
                 "今天没有哪只票适合一把梭。更合理的做法仍然是：`先小仓，等回踩或确认后再加。`",
             ]
         )
+        proxy_section = _proxy_contract_section(dict(payload.get("proxy_contract") or {}), heading="## 市场代理信号")
+        if proxy_section:
+            lines.extend(["", *proxy_section])
 
         for market_name in ("A股", "港股", "美股"):
             items = grouped.get(market_name, [])
@@ -2759,6 +2816,13 @@ class ClientReportRenderer:
         lines.extend(_delivery_tier_section(selection_context, asset_label="场外基金"))
         lines.extend([""])
         lines.extend(_section_lead_lines("这段只回答这是不是正式成稿，能不能按正式推荐理解。"))
+        proxy_section = _proxy_contract_section(
+            dict(selection_context.get("proxy_contract") or {}),
+            winner=winner,
+        )
+        if proxy_section:
+            lines.extend(proxy_section)
+            lines.extend([""])
         lines.extend(
             [
             why_heading,
@@ -3015,6 +3079,13 @@ class ClientReportRenderer:
         lines.extend(_delivery_tier_section(selection_context, asset_label="ETF"))
         lines.extend([""])
         lines.extend(_section_lead_lines("这段只回答这是不是正式成稿，能不能按正式推荐理解。"))
+        proxy_section = _proxy_contract_section(
+            dict(selection_context.get("proxy_contract") or {}),
+            winner=winner,
+        )
+        if proxy_section:
+            lines.extend(proxy_section)
+            lines.extend([""])
         track_rows = _payload_track_rows(recommendation_tracks)
         if track_rows:
             lines.extend(["", "## 当前分层建议", ""])

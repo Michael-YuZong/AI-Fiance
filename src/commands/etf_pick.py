@@ -253,6 +253,7 @@ def _selection_context(
     comparison_basis_label: str = "",
     model_version_warning: str = "",
     delivery_tier: Mapping[str, Any] | None = None,
+    proxy_contract: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     coverage_payload = dict(coverage or {})
     delivery = dict(delivery_tier or {})
@@ -286,6 +287,7 @@ def _selection_context(
         "delivery_observe_only": bool(delivery.get("observe_only")),
         "delivery_summary_only": bool(delivery.get("summary_only")),
         "delivery_notes": [str(item).strip() for item in delivery.get("notes", []) if str(item).strip()],
+        "proxy_contract": dict(proxy_contract or {}),
     }
 
 
@@ -518,6 +520,7 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context
             "score_changes": list(winner.get("score_changes") or []),
             "comparison_basis_label": str(winner.get("comparison_basis_label", "")),
             "comparison_snapshot_at": str(winner.get("comparison_snapshot_at", "")),
+            "proxy_signals": dict(winner.get("proxy_signals") or {}),
         },
         "alternatives": [
             {
@@ -577,6 +580,7 @@ def main() -> None:
             comparison_basis_label=str(payload.get("comparison_basis_label", "")),
             model_version_warning=str(payload.get("model_version_warning", "")),
             delivery_tier=delivery_tier,
+            proxy_contract=payload.get("proxy_contract") or {},
         )
         client_payload = _payload_from_analyses(analyses, selection_context=selection_context)
         markdown = ClientReportRenderer().render_etf_pick(client_payload)
@@ -613,6 +617,7 @@ def main() -> None:
                     "delivery_tier": dict(delivery_tier),
                     "data_coverage": dict(payload.get("pick_coverage") or {}),
                     "factor_contract": factor_contract,
+                    "proxy_contract": dict(payload.get("proxy_contract") or {}),
                 },
             )
         except ReportGuardError as exc:

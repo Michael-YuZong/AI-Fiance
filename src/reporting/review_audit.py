@@ -31,6 +31,7 @@ _SOLIDIFICATION_KEYS = (
     "backlog",
 )
 _FACTOR_CONTRACT_REPORT_TYPES = {"stock_pick", "etf_pick", "fund_pick", "briefing"}
+_PROXY_CONTRACT_REPORT_TYPES = {"stock_pick", "etf_pick", "fund_pick"}
 
 
 @dataclass(frozen=True)
@@ -309,6 +310,31 @@ def _audit_manifest_factor_contract(record: ReviewRecord) -> List[ReviewAuditFin
     return findings
 
 
+def _audit_manifest_proxy_contract(record: ReviewRecord) -> List[ReviewAuditFinding]:
+    findings: List[ReviewAuditFinding] = []
+    manifest_payload = _manifest_payload_for_record(record)
+    if not manifest_payload:
+        return findings
+    report_type = str(manifest_payload.get("report_type", "")).strip()
+    if report_type not in _PROXY_CONTRACT_REPORT_TYPES:
+        return findings
+    artifacts = dict(manifest_payload.get("artifacts") or {})
+    proxy_contract = dict(artifacts.get("proxy_contract") or {})
+    if not proxy_contract:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="manifest 缺少 proxy_contract",
+                detail=f"`{report_type}` 的 manifest 已生成，但没有写入 proxy_contract 摘要，无法在 review audit 里追踪代理信号的置信度和降级影响。",
+            )
+        )
+    return findings
+
+
 def build_review_audit(root: Path) -> Dict[str, Any]:
     records = collect_review_records(root)
     audited_records = [record for record in records if record.protocol == "structured_round"]
@@ -320,6 +346,7 @@ def build_review_audit(root: Path) -> Dict[str, Any]:
         findings.extend(_audit_round_structure(record, sections))
         findings.extend(_audit_solidification(record, sections))
         findings.extend(_audit_manifest_factor_contract(record))
+        findings.extend(_audit_manifest_proxy_contract(record))
 
     for series_id, series_records in _records_by_series(audited_records).items():
         findings.extend(_audit_series_consistency(series_id, series_records))

@@ -53,6 +53,7 @@
 | `L036` | 长期缺失的维度不能只写“未纳入”，必须做补权、归一化或降格为信息项 | `opportunity_engine` / `external_review` |
 | `L037` | 观察类终稿必须按信息增量裁剪篇幅，重复 playbook 句式视为结构性解释不合格 | `renderer` / `release_check` / `external_review` |
 | `L038` | 外审必须包含“rich prompt 审稿 + 零提示发散审”双层结果，不能只跑模板化单层审稿 | `workflow` / `report_guard` / `review_audit` / `external_review` |
+| `L039` | pick 稿里的代理信号必须同时披露置信度、限制和降级影响，manifest / review audit 也必须能追踪这层合同 | `renderer` / `workflow` / `review_audit` / `external_review` |
 
 ## 处理规则
 

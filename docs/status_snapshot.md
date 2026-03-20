@@ -31,7 +31,7 @@
 
 ### 仍偏弱或仍未统一
 
-- proxy signals 仍是代理，不是原始全量 feed
+- proxy signals 仍是代理，不是原始全量 feed；pick 链已开始显式披露，但 repo-wide 还没完全统一
 - repo-wide point-in-time 合同仍未完全统一
 - `scheduler` 的持久化和运维监控还没做完
 
@@ -53,6 +53,7 @@
 - ETF/基金的 `基本面` 高分需要区分“产品质量/代理映射”与“真实行业基本面”
 - 长期缺失的维度不能只靠 `未纳入该维度` 反复披露，评分层要补权或归一化
 - 正式报告外审要补成双层：`rich prompt 结构化审稿 + 零提示发散审`
+- pick / final manifest / review audit 里，代理信号的 `置信度 / 限制 / 降级影响` 需要继续往 briefing / research / retrospect 等链路扩
 
 ### 2026-03-16（阶段 J v1 收线）
 
@@ -68,6 +69,12 @@
   - setup / breadth / 质量阈值再校准 -> `校准和自学习`
 
 ## 最近重要变化
+
+### 2026-03-21（proxy signals 开始进入 pick 正式合同）
+
+- `stock_pick / etf_pick / fund_pick` 现在不再只是“内部知道用了代理信号”，而是会在客户稿里显式给出 `市场风格代理 / 情绪代理` 的当前判断、置信度/覆盖、主要限制和降级影响。
+- `analyze_opportunity()` 已补出稳定的 `proxy_signals` payload：市场层优先复用 `global_flow`，单标的层则用价格/量能行为生成 `social_sentiment` 代理；这层信息不再只活在 `briefing / research`。
+- pick final 的 manifest 现在会带 `proxy_contract`；`review_audit` 也开始审这层，如果 `stock_pick / etf_pick / fund_pick` 的 manifest 缺少代理合同，会直接报 active finding，而不是默默放过。
 
 ### 2026-03-20（客户稿更强调“先给结论，再给解释”）
 

@@ -11,7 +11,7 @@ from src.commands.pick_visuals import attach_visuals_to_analyses
 from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle, exported_bundle_lines
 from src.output import ClientReportRenderer, OpportunityReportRenderer
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
-from src.processors.opportunity_engine import build_market_context, discover_stock_opportunities
+from src.processors.opportunity_engine import build_market_context, discover_stock_opportunities, summarize_proxy_contracts_from_analyses
 from src.utils.config import PROJECT_ROOT, load_config
 from src.utils.logger import setup_logger
 from src.utils.market import close_yfinance_runtime_caches
@@ -216,6 +216,8 @@ def _merge_payloads(payloads: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]
     first = dict(next(iter(payloads.values())) or {})
     coverage_rows = merged_coverage or merged_top
     coverage = _coverage_summary(coverage_rows)
+    market_proxy = dict(first.get("market_proxy") or {})
+    proxy_contract = summarize_proxy_contracts_from_analyses(coverage_rows, market_proxy=market_proxy)
     return {
         "generated_at": generated_at,
         "top": merged_top,
@@ -224,6 +226,8 @@ def _merge_payloads(payloads: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]
         "day_theme": dict(first.get("day_theme") or {}),
         "regime": dict(first.get("regime") or {}),
         "stock_pick_coverage": coverage,
+        "market_proxy": market_proxy,
+        "proxy_contract": proxy_contract,
         "data_coverage": {
             "news_mode": "mixed",
             "degraded": any(bool(dict(payload.get("data_coverage") or {}).get("degraded")) for payload in payloads.values()),
@@ -294,7 +298,12 @@ def main() -> None:
                     markdown_text=client_markdown,
                     markdown_path=target_path,
                     release_findings=findings,
-                    extra_manifest={"market": "all", "detail_source": str(source_path), "factor_contract": factor_contract},
+                    extra_manifest={
+                        "market": "all",
+                        "detail_source": str(source_path),
+                        "factor_contract": factor_contract,
+                        "proxy_contract": dict(client_payload.get("proxy_contract") or {}),
+                    },
                 )
             except (Exception, ReportGuardError) as exc:
                 raise SystemExit(str(exc))
@@ -325,7 +334,12 @@ def main() -> None:
                 markdown_text=client_markdown,
                 markdown_path=target_path,
                 release_findings=findings,
-                extra_manifest={"market": args.market, "detail_source": str(detail_path), "factor_contract": factor_contract},
+                extra_manifest={
+                    "market": args.market,
+                    "detail_source": str(detail_path),
+                    "factor_contract": factor_contract,
+                    "proxy_contract": dict(payload.get("proxy_contract") or {}),
+                },
             )
         except ReportGuardError as exc:
             raise SystemExit(str(exc))

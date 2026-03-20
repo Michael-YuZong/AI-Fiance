@@ -22,10 +22,12 @@ from src.collectors import (
     ChinaMarketCollector,
     EventsCollector,
     FundProfileCollector,
+    GlobalFlowCollector,
     MarketDriversCollector,
     MarketMonitorCollector,
     MarketPulseCollector,
     NewsCollector,
+    SocialSentimentCollector,
     ValuationCollector,
 )
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot
@@ -1159,11 +1161,13 @@ def build_market_context(
     close_yfinance_runtime_caches()
 
     day_theme = _today_theme(news_report, monitor_rows)
+    global_flow = _build_global_flow_report(watchlist, watchlist_returns, config)
 
     return {
         "as_of": datetime.now(),
         "china_macro": china_macro,
         "global_proxy": global_proxy,
+        "global_flow": global_flow,
         "monitor_rows": monitor_rows,
         "regime": regime,
         "day_theme": day_theme,
@@ -1213,6 +1217,227 @@ def _runtime_cache_bucket(context: Mapping[str, Any], bucket: str) -> Dict[Any, 
         bucket_cache = {}
         caches[bucket] = bucket_cache
     return bucket_cache
+
+
+def _window_return(returns: Any, window: int) -> float:
+    if not isinstance(returns, pd.Series):
+        return 0.0
+    cleaned = returns.dropna()
+    if cleaned.empty:
+        return 0.0
+    tail = cleaned.tail(max(int(window), 1))
+    if tail.empty:
+        return 0.0
+    return float((1.0 + tail).prod() - 1.0)
+
+
+def _proxy_region(item: Mapping[str, Any]) -> str:
+    region = str(item.get("region", "")).strip().upper()
+    if region:
+        return region
+    asset_type = str(item.get("asset_type", "")).strip()
+    if asset_type.startswith("cn") or asset_type == "futures":
+        return "CN"
+    if asset_type in {"hk", "hk_index"}:
+        return "HK"
+    if asset_type in {"us"}:
+        return "US"
+    symbol = str(item.get("symbol", "")).strip().upper()
+    if symbol.endswith(".HK"):
+        return "HK"
+    if re.fullmatch(r"[A-Z]{1,5}", symbol):
+        return "US"
+    return ""
+
+
+def _build_global_flow_report(
+    watchlist: Sequence[Mapping[str, Any]],
+    watchlist_returns: Mapping[str, pd.Series],
+    config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    rows: List[Dict[str, Any]] = []
+    for item in watchlist:
+        symbol = str(item.get("symbol", "")).strip()
+        if not symbol:
+            continue
+        returns = watchlist_returns.get(symbol)
+        if not isinstance(returns, pd.Series) or returns.dropna().empty:
+            continue
+        sector, _ = _normalize_sector(str(item.get("sector", "") or item.get("name", "")))
+        rows.append(
+            {
+                "symbol": symbol,
+                "sector": sector,
+                "region": _proxy_region(item),
+                "return_5d": _window_return(returns, 5),
+                "return_20d": _window_return(returns, 20),
+            }
+        )
+    return GlobalFlowCollector(config).collect(rows)
+
+
+def _context_global_flow(context: Mapping[str, Any], config: Mapping[str, Any]) -> Dict[str, Any]:
+    cached = dict(context.get("global_flow") or {})
+    if cached:
+        return cached
+    bucket = _runtime_cache_bucket(context, "global_flow")
+    if isinstance(bucket.get("report"), dict):
+        return dict(bucket["report"])
+    report = _build_global_flow_report(
+        list(context.get("watchlist") or []),
+        dict(context.get("watchlist_returns") or {}),
+        config,
+    )
+    bucket["report"] = report
+    if isinstance(context, dict):
+        context["global_flow"] = report
+    return dict(report)
+
+
+def _social_trend_label(metrics: Mapping[str, Any], technical: Mapping[str, Any]) -> str:
+    ma_signal = str(dict(technical.get("ma_system") or {}).get("signal", "")).strip()
+    macd_signal = str(dict(technical.get("macd") or {}).get("signal", "")).strip()
+    return_20d = float(metrics.get("return_20d", 0.0) or 0.0)
+    return_5d = float(metrics.get("return_5d", 0.0) or 0.0)
+    if ma_signal == "bullish" and macd_signal != "bearish" and return_20d >= -0.02:
+        return "多头"
+    if ma_signal == "bearish" and return_20d <= 0 and return_5d <= 0.01:
+        return "空头"
+    return "震荡"
+
+
+def _analysis_social_sentiment(
+    symbol: str,
+    metrics: Mapping[str, Any],
+    technical: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    volume_block = dict(technical.get("volume") or {})
+    snapshot = {
+        "return_1d": float(metrics.get("return_1d", 0.0) or 0.0),
+        "return_5d": float(metrics.get("return_5d", 0.0) or 0.0),
+        "return_20d": float(metrics.get("return_20d", 0.0) or 0.0),
+        "volume_ratio": float(volume_block.get("vol_ratio", technical.get("volume_ratio", 1.0)) or 1.0),
+        "trend": _social_trend_label(metrics, technical),
+    }
+    return SocialSentimentCollector(config).collect(symbol, snapshot)
+
+
+def _analysis_proxy_signals(
+    *,
+    symbol: str,
+    metrics: Mapping[str, Any],
+    technical: Mapping[str, Any],
+    runtime_context: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    market_flow = _context_global_flow(runtime_context, config)
+    social_payload = _analysis_social_sentiment(symbol, metrics, technical, config)
+    social_aggregate = dict(social_payload.get("aggregate") or {})
+    market_flow_lines = list(market_flow.get("lines") or [])
+    market_flow_line = str(market_flow_lines[0]).strip() if market_flow_lines else "当前没有形成稳定的市场风格代理结论。"
+    social_line = str(social_aggregate.get("interpretation", "")).strip() or "当前没有形成稳定的个体情绪代理结论。"
+    rows = [
+        {
+            "label": "市场风格代理",
+            "interpretation": market_flow_line,
+            "confidence_label": str(market_flow.get("confidence_label", "低")).strip() or "低",
+            "confidence_score": market_flow.get("confidence_score"),
+            "coverage_summary": str(market_flow.get("coverage_summary", "无有效代理样本")).strip() or "无有效代理样本",
+            "limitation": str(next(iter(market_flow.get("limitations") or []), "")).strip(),
+            "downgrade_impact": str(market_flow.get("downgrade_impact", "")).strip(),
+            "method": str(market_flow.get("method", "proxy")).strip() or "proxy",
+        },
+        {
+            "label": "情绪代理",
+            "interpretation": social_line,
+            "confidence_label": str(social_aggregate.get("confidence_label", "低")).strip() or "低",
+            "confidence_score": social_aggregate.get("confidence_score"),
+            "coverage_summary": "日涨跌 / 5日涨跌 / 20日涨跌 / 量能比 / 趋势",
+            "limitation": str(next(iter(social_aggregate.get("limitations") or []), "")).strip(),
+            "downgrade_impact": str(social_aggregate.get("downgrade_impact", "")).strip(),
+            "method": str(social_aggregate.get("method", "proxy")).strip() or "proxy",
+        },
+    ]
+    summary_lines = [
+        f"市场风格代理：{market_flow_line}（置信度 `{rows[0]['confidence_label']}`，覆盖 `{rows[0]['coverage_summary']}`）。",
+        f"情绪代理：{social_line}（置信度 `{rows[1]['confidence_label']}`）。",
+    ]
+    limitations = [
+        str(item).strip()
+        for item in (rows[0]["limitation"], rows[1]["limitation"])
+        if str(item).strip()
+    ]
+    downgrade_lines = [
+        str(item).strip()
+        for item in (rows[0]["downgrade_impact"], rows[1]["downgrade_impact"])
+        if str(item).strip()
+    ]
+    return {
+        "market_flow": market_flow,
+        "social_sentiment": social_payload,
+        "rows": rows,
+        "summary_lines": summary_lines,
+        "limitations": limitations,
+        "downgrade_lines": downgrade_lines,
+    }
+
+
+def summarize_proxy_contracts_from_analyses(
+    analyses: Sequence[Mapping[str, Any]],
+    *,
+    market_proxy: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    rows = list(analyses or [])
+    market_flow = dict(market_proxy or {})
+    if not market_flow:
+        market_flow = dict(dict((rows[0].get("proxy_signals") if rows else {}) or {}).get("market_flow") or {})
+    social_counter: Counter[str] = Counter()
+    social_limitations: List[str] = []
+    social_downgrade = ""
+    covered = 0
+    for item in rows:
+        social = dict(dict(item.get("proxy_signals") or {}).get("social_sentiment") or {})
+        aggregate = dict(social.get("aggregate") or {})
+        if not aggregate:
+            continue
+        covered += 1
+        label = str(aggregate.get("confidence_label", "")).strip()
+        if label:
+            social_counter[label] += 1
+        limitation = str(next(iter(aggregate.get("limitations") or []), "")).strip()
+        if limitation and limitation not in social_limitations:
+            social_limitations.append(limitation)
+        if not social_downgrade:
+            social_downgrade = str(aggregate.get("downgrade_impact", "")).strip()
+    return {
+        "market_flow": {
+            "interpretation": str(next(iter(market_flow.get("lines") or []), "当前没有形成稳定的市场风格代理结论。")).strip(),
+            "confidence_label": str(market_flow.get("confidence_label", "低")).strip() or "低",
+            "confidence_score": market_flow.get("confidence_score"),
+            "coverage_summary": str(market_flow.get("coverage_summary", "无有效代理样本")).strip() or "无有效代理样本",
+            "limitation": str(next(iter(market_flow.get("limitations") or []), "")).strip(),
+            "downgrade_impact": str(market_flow.get("downgrade_impact", "")).strip(),
+        },
+        "social_sentiment": {
+            "covered": covered,
+            "total": len(rows),
+            "confidence_labels": dict(sorted(social_counter.items())),
+            "coverage_summary": f"{covered}/{len(rows)} 只候选已生成情绪代理" if rows else "0/0 只候选已生成情绪代理",
+            "limitation": social_limitations[0] if social_limitations else "",
+            "downgrade_impact": social_downgrade,
+        },
+        "lines": [
+            (
+                "市场风格代理："
+                + str(next(iter(market_flow.get("lines") or []), "当前没有形成稳定的市场风格代理结论。")).strip()
+                + f"（置信度 `{str(market_flow.get('confidence_label', '低')).strip() or '低'}`）。"
+            ),
+            (
+                f"情绪代理覆盖 `{covered}/{len(rows)}` 只候选；置信度分布 {dict(sorted(social_counter.items())) or {'低': 0}}。"
+            ),
+        ],
+    }
 
 
 def _context_drivers(context: Mapping[str, Any], config: Mapping[str, Any]) -> Dict[str, Any]:
@@ -7213,6 +7438,13 @@ def analyze_opportunity(
         runtime_context,
         fund_profile,
     )
+    proxy_signals = _analysis_proxy_signals(
+        symbol=symbol,
+        metrics=metrics,
+        technical=technical,
+        runtime_context=runtime_context,
+        config=config,
+    )
 
     result = {
         "symbol": symbol,
@@ -7238,6 +7470,7 @@ def analyze_opportunity(
         "notes": notes,
         "intraday": intraday,
         "narrative": narrative,
+        "proxy_signals": proxy_signals,
         "history_fallback_mode": history_fallback_mode,
         "excluded": bool(exclusion_reasons),
         "exclusion_reasons": exclusion_reasons,
@@ -8551,6 +8784,11 @@ def discover_opportunities(config: Mapping[str, Any], top_n: int = 5, theme_filt
         "data_coverage": coverage,
         "coverage_analyses": coverage_analyses,
         "top": analyses[:top_n],
+        "market_proxy": dict(context.get("global_flow") or {}),
+        "proxy_contract": summarize_proxy_contracts_from_analyses(
+            coverage_analyses,
+            market_proxy=context.get("global_flow"),
+        ),
         "ready_candidates": ready_candidates,
         "observation_candidates": observation_candidates,
         "blind_spots": blind_spots[:8],
@@ -8667,6 +8905,11 @@ def discover_fund_opportunities(
         "data_coverage": _pick_coverage_state(analyses),
         "coverage_analyses": analyses,
         "top": analyses[:top_n],
+        "market_proxy": dict(context.get("global_flow") or {}),
+        "proxy_contract": summarize_proxy_contracts_from_analyses(
+            analyses,
+            market_proxy=context.get("global_flow"),
+        ),
         "blind_spots": blind_spots[:8],
         "theme_filter": theme_filter,
         "style_filter": style_filter,
@@ -9076,6 +9319,11 @@ def discover_stock_opportunities(
         "coverage_analyses": analyses,
         "top": analyses[:top_n],
         "watch_positive": watch_positive[:6],
+        "market_proxy": dict(runtime_context.get("global_flow") or {}),
+        "proxy_contract": summarize_proxy_contracts_from_analyses(
+            analyses,
+            market_proxy=runtime_context.get("global_flow"),
+        ),
         "blind_spots": blind_spots[:10],
         "sector_filter": sector_filter,
         "candidate_limit": candidate_limit,

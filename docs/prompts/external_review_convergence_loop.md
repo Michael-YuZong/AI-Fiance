@@ -96,6 +96,8 @@
 
 如果本轮发现的问题本来就应该由 reviewer 主动问到、但 reviewer prompt 并没有显式覆盖，这一轮不能只修当前稿，必须同步补 reviewer prompt 或 guard；否则默认这类问题下轮还会再漏。
 
+如果本轮问题与 `proxy signal` 有关，例如代理结论没有写清 `置信度 / 限制 / 降级影响`，或者 manifest / audit 里追踪不到这层合同，这一轮也不能只修正文；必须至少同步补一层 `payload / renderer / manifest / review_audit`。
+
 没有完成这一步，默认这轮外审闭环未完成。
 
 ---
