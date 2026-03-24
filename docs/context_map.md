@@ -1,6 +1,6 @@
 # Context Map
 
-这份文件的目标只有一个：减少开工时的默认读取量。
+这份文件只做一件事：把默认上下文压到最小。
 
 ## 默认读法
 
@@ -14,135 +14,57 @@
 
 ## 按任务读什么
 
-### 只改单个命令或输出
-
-读：
-
-- 对应 `src/commands/*.py`
-- 对应 `src/processors/*.py`
-- 对应 `src/output/*.py`
-- 对应 `tests/`
-
-不用默认读：
-
-- [plan.md](../plan.md)
-- `docs/plans/strategy.md`
-- 大部分 YAML
-
-### 改配置或数据源
-
-先读：
-
-- [config/README.md](../config/README.md)
-
-再按任务读：
-
-- `config/config*.yaml`
-- `config/watchlist.yaml`
-- `config/stock_pools.yaml`
-- `config/news_feeds.yaml`
-
-### 改研究、推荐、组合主链路
-
-先读：
-
-- [docs/status_snapshot.md](./status_snapshot.md)
-
-再读：
-
-- 对应 command / processor / renderer / tests
-
-### 改 `strategy`
-
-先读：
-
-- [docs/plans/strategy.md](./plans/strategy.md)
-
-再读：
-
-- `src/commands/strategy.py`
-- `src/processors/strategy.py`
-- `src/output/strategy_report.py`
-- `src/storage/strategy.py`
-- `tests/test_*strategy*`
-
-### 改强因子工程 / 维护强因子
-
-先读：
-
-- [docs/plans/strong_factors.md](./plans/strong_factors.md)
-- [docs/status_snapshot.md](./status_snapshot.md)
-
-当前默认口径：
-
-- 阶段 J 已按 `v1 已收口` 进入维护模式
-- 新任务优先落在 `校准 / point-in-time / strategy fixtures`
-- 不要默认把“继续补新因子”当成当前第一优先级
-
-再读：
-
-- `src/processors/technical.py`
-- `src/processors/opportunity_engine.py`
-- 相关 pick / analysis command
-- 对应 tests
-
-### 改外审 / guard / 文档合同
-
-先读：
-
-- `docs/prompts/`
-- `docs/review_kit/README.md`
-- [docs/status_snapshot.md](./status_snapshot.md)
-
-必要时再读：
-
-- [plan.md](../plan.md)
-- `src/reporting/review_ledger.py`
-- `src/commands/review_ledger.py`
-- `src/reporting/review_audit.py`
-- `src/commands/review_audit.py`
+| 任务 | 先读 | 再按需读 | 默认别读 |
+| --- | --- | --- | --- |
+| 修单个 command / renderer bug | 对应 `src/commands`、`src/processors`、`src/output`、`tests` | [docs/status_snapshot.md](./status_snapshot.md) | `plan.md`、大部分 YAML |
+| 改配置 / 数据源 | [config/README.md](../config/README.md) | 目标 YAML、必要时 `config/config*.yaml` | 其它无关 YAML |
+| 改推荐 / 简报 / 组合主链路 | [docs/status_snapshot.md](./status_snapshot.md) | 对应 command / processor / renderer / tests | `docs/plans/strategy.md` |
+| 改 `strategy` | [docs/plans/strategy.md](./plans/strategy.md) | `src/commands/strategy.py`、`src/processors/strategy.py`、`src/output/strategy_report.py`、`src/storage/strategy.py`、`tests/test_*strategy*` | `plan.md`、大部分 prompt |
+| 改强因子维护 | [docs/plans/strong_factors.md](./plans/strong_factors.md) | [docs/status_snapshot.md](./status_snapshot.md)、相关 processor / tests | 历史 final / reports |
+| 改外审 / guard / prompt | [docs/prompts/README.md](./prompts/README.md)、[docs/review_kit/README.md](./review_kit/README.md) | [docs/status_snapshot.md](./status_snapshot.md)、`review_ledger / review_audit` 代码 | 业务 command 细节 |
 
 ## 默认不要读什么
 
-这些文件默认不是开工前入口：
+这些文件或目录默认不是开工入口：
 
-- [docs/architecture_v2.md](./architecture_v2.md)
-  这是历史架构草案，不是当前主合同。
+- [docs/history/architecture_v2.md](./history/architecture_v2.md)
+  历史架构草案，不是当前主合同。
+- [docs/history/2026-03.md](./history/2026-03.md)
+  详细变更归档，只在需要追历史判断时再读。
 - `reports/`
-  这些是输出产物，不是默认上下文。
+  输出产物，不是默认上下文。
 - `tmp/`
   临时生成文件。
-- `.pytest_cache/README.md`
+- `.pytest_cache/`
   无产品价值。
 
-## 最常见的最小上下文组合
+## 最小上下文模板
 
-### 修一个 command bug
+修一个 command bug：
 
 - [AGENTS.md](../AGENTS.md)
 - 对应 command / processor / renderer / test
 
-### 改 pick 流水线
+改一条主链路：
 
 - [AGENTS.md](../AGENTS.md)
 - [docs/status_snapshot.md](./status_snapshot.md)
-- 对应 pick command / output / tests
-- 相关 config 文件
+- 对应 command / processor / renderer / test
 
-### 改 `strategy`
+改 `strategy`：
 
 - [AGENTS.md](../AGENTS.md)
 - [docs/plans/strategy.md](./plans/strategy.md)
 - `strategy` 代码和 tests
 
-### 改 YAML
+改 YAML：
 
 - [config/README.md](../config/README.md)
 - 目标 YAML
 
 ## 目标
 
-如果一个新 session 只是要改一条主链路，理想读取量应该控制在：
+一个普通 patch 的默认读取量应控制在：
 
 - 1 个短入口文档
 - 1 个专题文档

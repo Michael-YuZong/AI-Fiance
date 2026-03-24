@@ -20,9 +20,14 @@
    - 可能是一份 Markdown 报告
    - 可能是一段研究问答输出
    - 可能是一份计划文本
-2. 选择对应的 reviewer prompt
-3. 跑第 `N` 轮外审
-4. reviewer 输出时，必须包含：
+2. 先选 `Pass A 结构审` reviewer prompt，再选 `Pass B 发散审` reviewer prompt
+3. 先跑第 `N` 轮结构审，修正，再跑第 `N` 轮发散审
+4. 两轮必须由**不同 reviewer / 子 agent**执行，不能是同一个执行者换个标题重复审
+5. 合并记录时，必须写出：
+   - `结构审执行者`
+   - `发散审执行者`
+   - 且二者不同
+6. reviewer 输出时，必须包含：
    - `round`
    - `previous_round`
    - `本轮新增 P0/P1`
@@ -30,14 +35,14 @@
    - `框架外问题`
    - `零提示发散审`
    - `收敛结论`
-5. 主执行者按外审结果修正：
+7. 主执行者按两轮外审结果修正：
    - 代码
    - prompt
    - hard rule / guard / workflow
    - tests / fixtures
    - lesson / backlog
-6. 再进入下一轮外审
-7. 直到满足统一收敛条件，才允许停止
+8. 再进入下一轮外审
+9. 直到满足统一收敛条件，才允许停止
 
 ---
 

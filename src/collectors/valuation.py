@@ -187,6 +187,21 @@ class ValuationCollector(BaseCollector):
             elif has_pe:
                 ranked_proxy.append((rank_key, candidate))
 
+        if exact_without_pe:
+            exact_without_pe.sort(key=lambda item: item[0])
+            selected = exact_without_pe[0][1]
+            selected["match_quality"] = "exact_no_pe"
+            selected["display_label"] = "真实指数估值"
+            if ranked_proxy:
+                ranked_proxy.sort(key=lambda item: item[0])
+                selected["fallback_proxy_name"] = ranked_proxy[0][1]["index_name"]
+                selected["match_note"] = (
+                    f"估值库已命中 `{selected['index_name']}`，但当前缺少可用滚动PE；"
+                    "为避免错配，不再回退到其他主题指数代理。"
+                )
+            else:
+                selected["match_note"] = "估值库已命中基准指数，但当前缺少可用滚动PE。"
+            return selected
         if ranked_exact:
             ranked_exact.sort(key=lambda item: item[0])
             selected = ranked_exact[0][1]
@@ -195,19 +210,7 @@ class ValuationCollector(BaseCollector):
         if ranked_proxy:
             ranked_proxy.sort(key=lambda item: item[0])
             selected = ranked_proxy[0][1]
-            if exact_without_pe:
-                exact_without_pe.sort(key=lambda item: item[0])
-                selected["exact_benchmark_name"] = exact_without_pe[0][1]["index_name"]
-                selected["match_note"] = f"估值库未提供 `{selected['exact_benchmark_name']}` 的滚动PE，当前改用最接近的主题指数代理。"
-            else:
-                selected["match_note"] = "估值库未直接命中精确基准，当前使用最接近的主题指数代理。"
-            return selected
-        if exact_without_pe:
-            exact_without_pe.sort(key=lambda item: item[0])
-            selected = exact_without_pe[0][1]
-            selected["match_quality"] = "exact_no_pe"
-            selected["display_label"] = "真实指数估值"
-            selected["match_note"] = "估值库已命中基准指数，但当前缺少可用滚动PE。"
+            selected["match_note"] = "估值库未直接命中精确基准，当前使用最接近的主题指数代理。"
             return selected
         return None
 
@@ -738,10 +741,13 @@ class ValuationCollector(BaseCollector):
             }
 
         metrics = {
+            "pe_ttm": self._weighted_harmonic_average(rows, "pe_ttm"),
+            "ps_ttm": self._weighted_harmonic_average(rows, "ps_ttm"),
             "revenue_yoy": self._weighted_average(rows, "revenue_yoy"),
             "profit_yoy": self._weighted_average(rows, "profit_yoy"),
             "roe": self._weighted_average(rows, "roe"),
             "gross_margin": self._weighted_average(rows, "gross_margin"),
+            "dv_ratio": self._weighted_average(rows, "dv_ratio"),
         }
         report_dates = [str(item.get("report_date", "")).strip() for item in rows if str(item.get("report_date", "")).strip()]
         coverage_weight = float(sum(float(item.get("weight", 0.0)) for item in rows))
@@ -805,10 +811,13 @@ class ValuationCollector(BaseCollector):
             }
 
         metrics = {
+            "pe_ttm": self._weighted_harmonic_average(rows, "pe_ttm"),
+            "ps_ttm": self._weighted_harmonic_average(rows, "ps_ttm"),
             "revenue_yoy": self._weighted_average(rows, "revenue_yoy"),
             "profit_yoy": self._weighted_average(rows, "profit_yoy"),
             "roe": self._weighted_average(rows, "roe"),
             "gross_margin": self._weighted_average(rows, "gross_margin"),
+            "dv_ratio": self._weighted_average(rows, "dv_ratio"),
         }
         report_dates = [str(item.get("report_date", "")).strip() for item in rows if str(item.get("report_date", "")).strip()]
         coverage_weight = float(sum(float(item.get("weight", 0.0)) for item in rows))
@@ -819,6 +828,73 @@ class ValuationCollector(BaseCollector):
             "coverage_ratio": coverage_weight / total_weight if total_weight else 0.0,
             "coverage_count": len(rows),
             "report_date": max(report_dates) if report_dates else "",
+            "constituents": normalized_rows,
+        }
+
+    def get_weighted_market_financial_proxies(
+        self,
+        holdings: Sequence[Dict[str, Any]],
+        *,
+        asset_type: str,
+        symbol_key: str = "symbol",
+        name_key: str = "name",
+        weight_key: str = "weight",
+        top_n: int = 5,
+    ) -> Dict[str, Any]:
+        """Aggregate weighted fundamentals for HK/US holdings via yfinance."""
+        normalized_rows: list[Dict[str, Any]] = []
+        for raw in list(holdings)[:top_n]:
+            symbol = str(raw.get(symbol_key, "")).strip()
+            weight = pd.to_numeric(pd.Series([raw.get(weight_key)]), errors="coerce").iloc[0]
+            if not symbol or pd.isna(weight) or float(weight) <= 0:
+                continue
+            normalized_rows.append(
+                {
+                    "symbol": symbol,
+                    "name": str(raw.get(name_key, symbol)).strip() or symbol,
+                    "weight": float(weight),
+                }
+            )
+        if not normalized_rows:
+            return {}
+
+        total_weight = float(sum(float(item["weight"]) for item in normalized_rows))
+        if total_weight <= 0:
+            return {}
+
+        rows: list[Dict[str, Any]] = []
+        for row in normalized_rows:
+            try:
+                snapshot = self.get_yf_fundamental(row["symbol"], asset_type)
+            except Exception:
+                continue
+            if not snapshot:
+                continue
+            snapshot["weight"] = float(row["weight"])
+            snapshot["symbol"] = row["symbol"]
+            snapshot["name"] = row["name"]
+            rows.append(snapshot)
+
+        if not rows:
+            return {
+                "top_concentration": total_weight,
+                "coverage_weight": 0.0,
+                "coverage_ratio": 0.0,
+                "coverage_count": 0,
+                "constituents": normalized_rows,
+            }
+
+        coverage_weight = float(sum(float(item.get("weight", 0.0)) for item in rows))
+        return {
+            "pe_ttm": self._weighted_harmonic_average(rows, "pe_ttm"),
+            "ps_ttm": self._weighted_harmonic_average(rows, "ps_ttm"),
+            "revenue_yoy": self._weighted_average(rows, "revenue_yoy"),
+            "roe": self._weighted_average(rows, "roe"),
+            "gross_margin": self._weighted_average(rows, "gross_margin"),
+            "top_concentration": total_weight,
+            "coverage_weight": coverage_weight,
+            "coverage_ratio": coverage_weight / total_weight if total_weight else 0.0,
+            "coverage_count": len(rows),
             "constituents": normalized_rows,
         }
 
@@ -915,6 +991,24 @@ class ValuationCollector(BaseCollector):
         if total_weight <= 0:
             return None
         return sum(value * weight for value, weight in pairs) / total_weight
+
+    def _weighted_harmonic_average(self, rows: Iterable[Dict[str, Any]], field: str) -> Optional[float]:
+        numer = 0.0
+        denom = 0.0
+        for row in rows:
+            value = pd.to_numeric(pd.Series([row.get(field)]), errors="coerce").iloc[0]
+            weight = pd.to_numeric(pd.Series([row.get("weight")]), errors="coerce").iloc[0]
+            if pd.isna(value) or pd.isna(weight):
+                continue
+            value_num = float(value)
+            weight_num = float(weight)
+            if value_num <= 0 or weight_num <= 0:
+                continue
+            numer += weight_num
+            denom += weight_num / value_num
+        if numer <= 0 or denom <= 0:
+            return None
+        return numer / denom
 
     def _parse_stock_financial_frame(self, frame: pd.DataFrame) -> Dict[str, Any]:
         if frame is None or frame.empty:

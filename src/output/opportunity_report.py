@@ -22,14 +22,43 @@ DIMENSION_ORDER = [
     ("macro", "宏观敏感度"),
 ]
 
+DIRECT_CATALYST_FACTORS = {
+    "政策催化",
+    "龙头公告/业绩",
+    "个股公告/事件",
+    "结构化事件",
+    "负面事件",
+    "主题逆风",
+    "海外映射",
+    "产品/跟踪方向催化",
+    "前瞻催化",
+}
+SENTIMENT_CATALYST_FACTORS = {
+    "研报/新闻密度",
+    "新闻热度",
+}
+
+
+def _is_missing_scalar(value: Any) -> bool:
+    if value is None or value == "":
+        return True
+    text = str(value).strip()
+    return bool(pd.isna(value) or text.lower() in {"nan", "nat", "none", "inf", "-inf"})
+
 
 def _table(headers: Sequence[str], rows: Iterable[Sequence[str]]) -> List[str]:
+    def _escape(value: Any) -> str:
+        text = str(value).strip()
+        if _is_missing_scalar(value):
+            text = "—"
+        return text.replace("|", "\\|").replace("\n", "<br>")
+
     lines = [
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",
     ]
     for row in rows:
-        escaped = [str(cell).replace("|", "\\|").replace("\n", "<br>") for cell in row]
+        escaped = [_escape(cell) for cell in row]
         lines.append("| " + " | ".join(escaped) + " |")
     return lines
 
@@ -38,8 +67,15 @@ def _dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
     rows: List[List[str]] = []
     for key, label in DIMENSION_ORDER:
         dimension = analysis["dimensions"][key]
+        display_name = str(dimension.get("display_name", label))
         score = "缺失" if dimension.get("score") is None else f"{dimension['score']}/{dimension['max_score']}"
-        rows.append([str(dimension.get("display_name", label)), score, dimension.get("core_signal", "—")])
+        core_signal = dimension.get("core_signal", "—")
+        if key == "chips":
+            display_name = "筹码结构（辅助项）"
+            score = "辅助项"
+            if core_signal and "主排序不直接使用" not in str(core_signal):
+                core_signal = f"{core_signal} 当前主排序不直接使用这项。"
+        rows.append([display_name, score, core_signal])
     return rows
 
 
@@ -47,8 +83,22 @@ def _dimension_summary_rows(analysis: Dict[str, Any]) -> List[List[str]]:
     rows: List[List[str]] = []
     for key, label in DIMENSION_ORDER:
         dimension = analysis["dimensions"][key]
+        display_name = str(dimension.get("display_name", label))
         score = "—/100" if dimension.get("score") is None else f"{dimension['score']}/{dimension['max_score']}"
-        rows.append([str(dimension.get("display_name", label)), score, dimension.get("summary", "—"), dimension.get("core_signal", "—")])
+        summary = _dimension_summary_text(key, dimension)
+        if key == "chips":
+            display_name = "筹码结构（辅助项）"
+            score = "辅助项"
+            if summary and "主排序不直接使用" not in summary:
+                summary = f"{summary} 当前主排序不直接使用这项。".strip()
+        rows.append(
+            [
+                display_name,
+                score,
+                summary,
+                dimension.get("core_signal", "—"),
+            ]
+        )
     return rows
 
 
@@ -71,17 +121,70 @@ def _rating_header(analysis: Dict[str, Any]) -> str:
     return f"**{stars} {label}**"
 
 
+def _scan_topline_text(analysis: Mapping[str, Any]) -> str:
+    rating = dict(analysis.get("rating") or {})
+    raw_label = str(rating.get("label", "未评级")).strip() or "未评级"
+    if raw_label != "无信号":
+        return raw_label
+
+    narrative = dict(analysis.get("narrative") or {})
+    judgment = dict(narrative.get("judgment") or {})
+    narrative_blob = " / ".join(
+        part
+        for part in (
+            str(judgment.get("direction", "")).strip(),
+            str(judgment.get("state", "")).strip(),
+            str(narrative.get("headline", "")).strip(),
+        )
+        if part
+    )
+    positive_tokens = ("偏多", "逻辑未坏", "逻辑仍在", "持有优于追高", "看多", "方向没坏")
+    negative_tokens = ("偏空", "回避", "做空", "清仓", "趋势转弱")
+    if any(token in narrative_blob for token in positive_tokens) and not any(token in narrative_blob for token in negative_tokens):
+        cycle = str(judgment.get("cycle", "")).strip()
+        if "长" in cycle:
+            prefix = "长线"
+        elif "中" in cycle:
+            prefix = "中期"
+        else:
+            prefix = "逻辑"
+        if prefix == "逻辑":
+            return "逻辑未坏，短线暂无信号"
+        return f"{prefix}逻辑未坏，短线暂无信号"
+    return raw_label
+
+
+def _scan_rating_header(analysis: Mapping[str, Any]) -> str:
+    rating = dict(analysis.get("rating") or {})
+    stars = str(rating.get("stars", "—")).strip() or "—"
+    return f"**{stars} {_scan_topline_text(analysis)}**"
+
+
 def _hard_check_rows(analysis: Dict[str, Any]) -> List[List[str]]:
-    return [[item["name"], item["status"], item["detail"]] for item in analysis["hard_checks"]]
+    return [[item["name"], _display_check_status(item.get("name"), item.get("status")), item["detail"]] for item in analysis["hard_checks"]]
 
 
 def _hard_check_inline(analysis: Dict[str, Any]) -> str:
     items = []
     for item in analysis.get("hard_checks", []) or []:
         name = str(item.get("name", "—"))
-        status = str(item.get("status", "—"))
+        status = _display_check_status(item.get("name"), item.get("status"))
         items.append(f"`{name} {status}`")
     return " · ".join(items) if items else "—"
+
+
+def _display_check_status(name: Any, status: Any) -> str:
+    label = str(name or "").strip()
+    mapping = {
+        "✅": "通过",
+        "⚠️": "警示",
+        "❌": "不通过",
+        "ℹ️": "观察",
+    }
+    text = str(status or "—").strip()
+    if text == "✅" and label in {"估值极端", "趋势崩坏"}:
+        return "未触发"
+    return mapping.get(text, text or "—")
 
 
 def _factor_rows(dimension: Dict[str, Any]) -> List[List[str]]:
@@ -103,9 +206,11 @@ def _catalyst_layer(name: str) -> str:
         "政策催化": "市场/政策",
         "龙头公告/业绩": "个股/产业链",
         "个股公告/事件": "个股直连",
+        "结构化事件": "个股直连",
         "负面事件": "个股风险",
         "主题逆风": "主题逆风",
         "海外映射": "海外映射",
+        "产品/跟踪方向催化": "产品/主题",
         "研报/新闻密度": "个股热度",
         "新闻热度": "传播热度",
         "前瞻催化": "事件日历",
@@ -124,6 +229,150 @@ def _catalyst_factor_rows(dimension: Dict[str, Any]) -> List[List[str]]:
             ]
         )
     return rows
+
+
+def _parse_display_score(value: Any) -> Optional[tuple[int, int]]:
+    text = str(value or "").strip()
+    match = re.search(r"(-?\d+)\s*/\s*(\d+)", text)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _catalyst_score_snapshot(dimension: Mapping[str, Any], names: set[str]) -> tuple[int, int, List[str]]:
+    current = 0
+    maximum = 0
+    positive_names: List[str] = []
+    for factor in dimension.get("factors", []) or []:
+        name = str(factor.get("name", "")).strip()
+        if name not in names:
+            continue
+        parsed = _parse_display_score(factor.get("display_score"))
+        if not parsed:
+            continue
+        current += parsed[0]
+        maximum += parsed[1]
+        if parsed[0] > 0:
+            positive_names.append(name)
+    return current, maximum, positive_names
+
+
+def _catalyst_level(current: int, maximum: int) -> str:
+    if maximum <= 0:
+        return "未接入"
+    ratio = max(current, 0) / maximum
+    if ratio >= 0.45:
+        return "偏强"
+    if ratio >= 0.18:
+        return "一般"
+    return "偏弱"
+
+
+def _normalize_direct_catalyst_level(level: str, positive_names: Sequence[str]) -> str:
+    positive_set = {str(name).strip() for name in positive_names if str(name).strip()}
+    if positive_set and positive_set <= {"产品/跟踪方向催化"}:
+        return "偏弱"
+    return level
+
+
+def _catalyst_structure_rows(dimension: Mapping[str, Any]) -> List[List[str]]:
+    direct_current, direct_max, direct_positive_names = _catalyst_score_snapshot(dimension, DIRECT_CATALYST_FACTORS)
+    sentiment_current, sentiment_max, _ = _catalyst_score_snapshot(dimension, SENTIMENT_CATALYST_FACTORS)
+    direct_level = _normalize_direct_catalyst_level(_catalyst_level(direct_current, direct_max), direct_positive_names)
+    sentiment_level = _catalyst_level(sentiment_current, sentiment_max)
+
+    direct_detail = {
+        "偏强": "政策、事件或前瞻催化里已经有直接支撑，后面更看价格能不能接住。",
+        "一般": "已有零散直接触发器，但还不到单独升级成新开仓信号的程度。",
+        "偏弱": "政策、龙头公告、前瞻事件这些更直接的触发器还没形成共振。",
+        "未接入": "当前没有足够的结构化催化数据，只能按信息不足处理。",
+    }[direct_level]
+    sentiment_detail = {
+        "偏强": "新闻提及和覆盖源都不差，说明市场至少在持续看这条线。",
+        "一般": "有一定关注度，但还没到多源同步放大的程度。",
+        "偏弱": "提及和覆盖都偏弱，说明这条线暂时还没形成明显关注。",
+        "未接入": "当前没有可靠的舆情覆盖，只能按信息不足处理。",
+    }[sentiment_level]
+    return [
+        ["直接催化", direct_level, direct_detail],
+        ["舆情/信息环境", sentiment_level, sentiment_detail],
+    ]
+
+
+def _catalyst_summary_text(dimension: Mapping[str, Any]) -> str:
+    direct_current, direct_max, direct_positive_names = _catalyst_score_snapshot(dimension, DIRECT_CATALYST_FACTORS)
+    sentiment_current, sentiment_max, _ = _catalyst_score_snapshot(dimension, SENTIMENT_CATALYST_FACTORS)
+    direct_level = _normalize_direct_catalyst_level(_catalyst_level(direct_current, direct_max), direct_positive_names)
+    sentiment_level = _catalyst_level(sentiment_current, sentiment_max)
+    if direct_level == "偏弱" and sentiment_level in {"一般", "偏强"}:
+        return "直接催化偏弱，舆情关注度尚可，因此当前更像静态博弈。"
+    if direct_level in {"一般", "偏强"} and sentiment_level == "偏弱":
+        return "直接催化已有一定支撑，但舆情环境一般，确认还不够完整。"
+    if direct_level in {"一般", "偏强"} and sentiment_level in {"一般", "偏强"}:
+        return "直接催化和舆情环境都有支撑，但还要看能不能转成新的价格确认。"
+    if direct_level == "未接入" and sentiment_level == "未接入":
+        return "催化数据当前覆盖不足，只能按信息不足处理。"
+    return "直接催化和舆情环境都偏弱，当前更像静态博弈。"
+
+
+def _seasonality_summary_text(dimension: Mapping[str, Any]) -> str:
+    summary = str(dimension.get("summary", "")).strip() or str(dimension.get("core_signal", "")).strip() or "—"
+    blob = " ".join(
+        str(part).strip()
+        for factor in dimension.get("factors", []) or []
+        for part in (factor.get("signal", ""), factor.get("detail", ""))
+        if str(part).strip()
+    )
+    match = re.search(r"([1-4])\s*年样本", blob)
+    if match and int(match.group(1)) <= 3 and "辅助参考" not in summary:
+        return f"{summary} 当前样本偏薄，只作辅助参考，不作为主结论依据。"
+    return summary
+
+
+def _dimension_summary_text(key: str, dimension: Mapping[str, Any]) -> str:
+    if key == "catalyst":
+        return _catalyst_summary_text(dimension)
+    if key == "seasonality":
+        return _seasonality_summary_text(dimension)
+    return str(dimension.get("summary", "")).strip() or str(dimension.get("core_signal", "")).strip() or "—"
+
+
+def _decision_gate_explanation(analysis: Mapping[str, Any]) -> str:
+    dimensions = dict(analysis.get("dimensions") or {})
+    technical = dict(dimensions.get("technical") or {}).get("score")
+    catalyst = dict(dimensions.get("catalyst") or {}).get("score")
+    relative = dict(dimensions.get("relative_strength") or {}).get("score")
+    fundamental = dict(dimensions.get("fundamental") or {}).get("score")
+    risk = dict(dimensions.get("risk") or {}).get("score")
+
+    if technical is not None and catalyst is not None and technical < 40 and catalyst < 30:
+        return f"技术面 `{technical}/100` 且催化面 `{catalyst}/100`，说明方向未坏，但还没进入新开仓阶段。"
+    if technical is not None and relative is not None and technical < 40 and relative < 60:
+        return f"技术面 `{technical}/100` 还没修复完成，相对强弱 `{relative}/100` 也没回到领先区，先按观察处理。"
+    if catalyst is not None and relative is not None and catalyst < 30 and relative < 60:
+        return f"催化面 `{catalyst}/100` 和相对强弱 `{relative}/100` 都不够硬，当前更像静态博弈而不是右侧确认。"
+    if fundamental is not None and risk is not None and fundamental < 45 and risk < 60:
+        return f"基本面/产品承接 `{fundamental}/100` 还不够厚，风险收益比 `{risk}/100` 也没有明显占优，先别急着升级成可执行方案。"
+    return "当前更像方向观察而不是高胜率出手点，先等技术、催化和相对强弱里至少两项一起改善。"
+
+
+def _primary_upgrade_trigger(analysis: Mapping[str, Any]) -> str:
+    narrative = dict(analysis.get("narrative") or {})
+    validation_points = list(narrative.get("validation_points") or [])
+    if validation_points:
+        first = dict(validation_points[0] or {})
+        watch = str(first.get("watch", "")).strip()
+        judge = str(first.get("judge", "")).strip()
+        if watch and judge:
+            return f"{watch}：{judge}"
+        if judge:
+            return judge
+        if watch:
+            return watch
+    watch_points = [str(item).strip() for item in narrative.get("watch_points", []) or [] if str(item).strip()]
+    if watch_points:
+        return watch_points[0]
+    return "先等技术、催化和相对强弱里至少两项一起改善。"
 
 
 def _manager_profile_text(manager: Mapping[str, Any], overview: Optional[Mapping[str, Any]] = None) -> str:
@@ -467,37 +716,49 @@ def _compare_leading_dimensions(analysis: Dict[str, Any]) -> str:
 
 
 def _fmt_number(value: Any, digits: int = 2, suffix: str = "") -> str:
-    if value is None or value == "":
+    if _is_missing_scalar(value):
         return "—"
     try:
-        return f"{float(value):.{digits}f}{suffix}"
+        numeric = float(value)
+        if pd.isna(numeric):
+            return "—"
+        return f"{numeric:.{digits}f}{suffix}"
     except (TypeError, ValueError):
         return str(value)
 
 
 def _fmt_pct_point(value: Any) -> str:
-    if value is None or value == "":
+    if _is_missing_scalar(value):
         return "—"
     try:
-        return f"{float(value):.2f}%"
+        numeric = float(value)
+        if pd.isna(numeric):
+            return "—"
+        return f"{numeric:.2f}%"
     except (TypeError, ValueError):
         return str(value)
 
 
 def _fmt_ratio(value: Any) -> str:
-    if value is None or value == "":
+    if _is_missing_scalar(value):
         return "—"
     try:
-        return f"{float(value):.0%}"
+        numeric = float(value)
+        if pd.isna(numeric):
+            return "—"
+        return f"{numeric:.0%}"
     except (TypeError, ValueError):
         return str(value)
 
 
 def _fmt_return(value: Any) -> str:
-    if value is None or value == "":
+    if _is_missing_scalar(value):
         return "—"
     try:
-        return f"{float(value):+.1%}"
+        numeric = float(value)
+        if pd.isna(numeric):
+            return "—"
+        return f"{numeric:+.1%}"
     except (TypeError, ValueError):
         return str(value)
 
@@ -659,7 +920,7 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
                 [
                     [
                         item.get("股票代码", "—"),
-                        item.get("股票名称", "—"),
+                        _holding_name_text(item.get("股票名称"), item.get("股票代码")),
                         _fmt_pct_point(item.get("占净值比例")),
                         _fmt_number(item.get("持仓市值")),
                         item.get("季度", "—"),
@@ -774,6 +1035,14 @@ def _visual_lines(visuals: Optional[Mapping[str, str]]) -> List[str]:
     return lines
 
 
+def _holding_name_text(name: Any, code: Any) -> str:
+    text = str(name).strip()
+    if text.lower() in {"", "nan", "none"}:
+        fallback = str(code).strip()
+        return fallback or "—"
+    return text
+
+
 def _fallback_narrative(analysis: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "headline": analysis.get("conclusion", ""),
@@ -814,6 +1083,21 @@ def _fallback_narrative(analysis: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _merge_unique_lines(primary: Sequence[str], secondary: Sequence[str], *, max_items: int = 3) -> List[str]:
+    merged: List[str] = []
+    seen = set()
+    for source in (primary, secondary):
+        for item in source:
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+            if len(merged) >= max_items:
+                return merged
+    return merged
+
+
 class OpportunityReportRenderer:
     """Render opportunity scan, analysis, and compare payloads."""
 
@@ -828,7 +1112,7 @@ class OpportunityReportRenderer:
             f"# {name} ({symbol}) 全景分析 | {analysis['generated_at'][:10]}",
             "",
             "## 一句话结论",
-            _rating_header(analysis),
+            _scan_rating_header(analysis),
             "",
             narrative["headline"],
         ]
@@ -850,6 +1134,8 @@ class OpportunityReportRenderer:
                     ["赔率", narrative["judgment"]["odds"], "基于位置、支撑和目标空间的综合判断。"],
                     ["胜率", win_rate, win_rate_note],
                     ["交易状态", narrative["judgment"]["state"], "这是当前更合理的参与方式，而不是口号式买卖建议。"],
+                    ["为什么还不升级", "主要卡在确认不足", _decision_gate_explanation(analysis)],
+                    ["升级条件", "先看首个触发器", _primary_upgrade_trigger(analysis)],
                 ],
             )
         )
@@ -887,8 +1173,22 @@ class OpportunityReportRenderer:
         lines.extend(["", "## 值得继续看的理由"])
         for item in narrative["positives"]:
             lines.append(f"- {item}")
+        caution_lines = [str(item).strip() for item in narrative["cautions"] if str(item).strip()]
+        if len(caution_lines) < 2:
+            fallback_cautions = []
+            entry_text = str(analysis.get("action", {}).get("entry", "")).strip()
+            if entry_text:
+                fallback_cautions.append(f"执行层仍要求等待确认：{entry_text}")
+            technical_summary = str(dict(analysis.get("dimensions", {}).get("technical") or {}).get("summary", "")).strip()
+            if technical_summary:
+                fallback_cautions.append(f"技术面仍在拖后腿：{technical_summary}")
+            risk_summary = str(dict(analysis.get("dimensions", {}).get("risk") or {}).get("summary", "")).strip()
+            if risk_summary:
+                fallback_cautions.append(f"风险特征提示：{risk_summary}")
+            fallback_cautions.append("当前更适合先按观察位理解，不要把它当成已经确认的执行仓。")
+            caution_lines = _merge_unique_lines(caution_lines, fallback_cautions, max_items=3)
         lines.extend(["", "## 现在不适合激进的理由"])
-        for item in narrative["cautions"]:
+        for item in caution_lines:
             lines.append(f"- {item}")
         lines.extend(
             [
@@ -909,9 +1209,12 @@ class OpportunityReportRenderer:
                     f"### {label} {score}",
                 ]
             )
+            if key == "catalyst":
+                lines.extend(_table(["层次", "当前判断", "说明"], _catalyst_structure_rows(dimension)))
+                lines.append("")
             lines.extend(_table(["因子", "当前值/信号", "说明", "得分"], _factor_rows(dimension)))
             lines.append("")
-            lines.append(f"**小结：** {dimension['summary']}")
+            lines.append(f"**小结：** {_dimension_summary_text(key, dimension)}")
         lines.extend(
             [
                 "",

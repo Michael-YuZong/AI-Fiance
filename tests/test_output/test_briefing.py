@@ -179,8 +179,14 @@ def test_market_renderer_outputs_core_sections():
         "macro_items": ["制造业 PMI 50.1，较前值回升。", "当前宏观环境判断: 通缩/偏弱。"],
         "domestic_index_rows": [["上证指数", "3420.00", "+0.20%", "5200", "+3%", "震荡偏强"]],
         "domestic_market_lines": ["全市场成交额: 12800亿。", "watchlist 平均 5 日表现 +1.2%。"],
+        "index_signal_rows": [["上证指数", "3420.00", "+0.20%", "偏强修复", "周线金叉", "月线修复", "常态量能", "等待确认"]],
+        "index_signal_lines": ["上证指数：偏强修复。"],
+        "market_signal_rows": [["市场宽度", "上涨 2800 / 下跌 2100", "分歧中性", "涨跌比 1.33，涨停 52 / 跌停 4"]],
+        "market_signal_lines": ["情绪极端指标 `分歧中性`：当前 54/100。"],
         "style_rows": [["大盘 vs 小盘", "沪深300 +0.6%", "中证1000 -0.1%", "偏大盘"]],
         "industry_rows": [["1", "银行", "+1.40%", "红利承接"]],
+        "rotation_rows": [["行业", "银行(+1.40%)、电力(+1.20%)", "半导体(-0.80%)", "防守占优，高低切明显"]],
+        "rotation_lines": ["行业轮动靠前: 银行(+1.40%)、电力(+1.20%)。"],
         "macro_asset_rows": [["美元指数", "103.200", "-0.20%", "-0.50%", "+1.00%", "中性", "—"]],
         "overnight_rows": [["美股", "标普500", "5100.00", "+0.40%", "偏强"]],
         "watchlist_rows": [["510210", "1.026", "-0.20%", "+0.30%", "+1.00%", "震荡", "44", "宽基修复观察"]],
@@ -218,11 +224,14 @@ def test_market_renderer_outputs_core_sections():
     assert "## 2. 宏观与市场全景" in rendered
     assert "### 2.1 宏观框架" in rendered
     assert "### 2.2 国内市场概览" in rendered
-    assert "### 2.3 风格与行业" in rendered
-    assert "### 2.4 宏观资产" in rendered
-    assert "### 2.5 隔夜外盘" in rendered
-    assert "### 2.6 跨市场观察哨" in rendered
-    assert "### 2.7 代理信号与限制" in rendered
+    assert "### 2.3 核心指数信号" in rendered
+    assert "### 2.4 市场宽度与情绪" in rendered
+    assert "### 2.5 风格与行业" in rendered
+    assert "### 2.6 板块轮动" in rendered
+    assert "### 2.7 宏观资产" in rendered
+    assert "### 2.8 隔夜外盘" in rendered
+    assert "### 2.9 跨市场观察哨" in rendered
+    assert "### 2.10 代理信号与限制" in rendered
     assert "## 3. 资金与催化" in rendered
     assert "### 3.1 核心事件" in rendered
     assert "### 3.2 主线跟踪" in rendered

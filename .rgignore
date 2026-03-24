@@ -1,0 +1,20 @@
+# On-demand history and generated outputs
+/docs/history/
+/reports/
+/tmp/
+
+# Routed docs: open via README first
+/docs/prompts/*.md
+!/docs/prompts/README.md
+/docs/review_kit/*.md
+!/docs/review_kit/README.md
+/skill/commands/*.md
+!/skill/commands/README.md
+/skill/references/*.md
+!/skill/references/README.md
+
+# Local mirrors and caches
+/.claude/
+/.pytest_cache/
+/.venv/
+/data/cache/

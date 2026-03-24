@@ -23,18 +23,20 @@
 ## 默认流程
 
 1. 先生成第一版 `Markdown`
-2. 调用外部金融专家审稿器做独立审稿
-3. 让外部审稿器对同一个任务独立做一版简洁答案/推荐，并和成稿对比
-4. 根据反馈修正代码、数据口径、展示层、交易参数，或吸收独立答案里值得学习的部分
-5. 重新生成新版 `Markdown`
+2. 先调用 `Pass A 结构审`
+3. 根据结构审反馈修正代码、数据口径、展示层、交易参数
+4. 重新生成新版 `Markdown`
+5. 再把修后的新版交给**另一个 reviewer / 子 agent**跑 `Pass B 发散审`
 6. 对外交付前做一轮发布前一致性校验，确认客户稿和当前详细稿没有漂移
-7. 再次审稿
+7. 再进入下一轮结构审/发散审
 8. 直到外部审稿明确表示没有新的实质问题
 9. 最终成稿默认交付“详细解释版”，不是只有结论的“摘要版”
 10. 如果用户没有明确要求短版，默认交付完整成稿；自动客户版/摘要版只能作为派生稿，且不能写入 `final`
-11. 如果外审意见值得长期采纳，必须沉淀到 [`docs/report_review_lessons.md`](../../docs/report_review_lessons.md) 或对应代码门禁里，不能只修当前这一稿
+11. 如果外审意见值得长期采纳，必须沉淀到规则或代码门禁里，不能只修当前这一稿
 
 不要把第一版成稿直接交付给用户。
+不要停在“这次还没有 review 文件”的状态；缺 review 文件本身就是要继续补链路的信号，不是停止条件。
+如果已经知道 `final` 目标路径，就直接把该路径对应的 `__external_review.md` 补出来，再继续修正和再审。
 不要把“只有个股推荐走外审、其它报告先直接交付”当成默认做法。
 
 ---
@@ -60,13 +62,14 @@
 
 实际 prompt 存在：
 
-- [`docs/prompts/external_financial_reviewer.md`](../../docs/prompts/external_financial_reviewer.md)
+- [`docs/prompts/external_financial_structural_reviewer.md`](../../docs/prompts/external_financial_structural_reviewer.md)
+- [`docs/prompts/external_financial_divergent_reviewer.md`](../../docs/prompts/external_financial_divergent_reviewer.md)
 
 主执行者的闭环 prompt 存在：
 
 - [`docs/prompts/report_revision_loop.md`](../../docs/prompts/report_revision_loop.md)
 - 已采纳的外审经验沉淀在：
-  - [`docs/report_review_lessons.md`](../../docs/report_review_lessons.md)
+  - [`docs/history/report_review_lessons.md`](../../docs/history/report_review_lessons.md)
 
 ---
 

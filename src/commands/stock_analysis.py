@@ -6,7 +6,8 @@ import argparse
 from pathlib import Path
 from typing import Dict, Tuple
 
-from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle, exported_bundle_lines
+from src.commands.final_runner import finalize_client_markdown
+from src.commands.report_guard import ensure_report_task_registered, exported_bundle_lines
 from src.commands.release_check import check_generic_client_report
 from src.output import AnalysisChartRenderer, ClientReportRenderer, OpportunityReportRenderer
 from src.processors.opportunity_engine import _attach_signal_confidence, analyze_opportunity, build_market_context
@@ -59,24 +60,19 @@ def main() -> None:
         return
 
     detail_path = _detail_output_path(args.symbol, str(analysis.get("generated_at", "")))
-    detail_path.parent.mkdir(parents=True, exist_ok=True)
-    detail_path.write_text(report, encoding="utf-8")
     client_markdown = ClientReportRenderer().render_stock_analysis_detailed(analysis)
-    findings = check_generic_client_report(client_markdown, "stock_analysis", source_text=report)
-    try:
-        bundle = export_reviewed_markdown_bundle(
-            report_type="stock_analysis",
-            markdown_text=client_markdown,
-            markdown_path=_client_output_path(args.symbol, str(analysis.get("generated_at", ""))),
-            release_findings=findings,
-            extra_manifest={
-                "symbol": str(args.symbol),
-                "asset_type": str(analysis.get("asset_type", "")),
-                "detail_source": str(detail_path),
-            },
-        )
-    except ReportGuardError as exc:
-        raise SystemExit(str(exc))
+    bundle = finalize_client_markdown(
+        report_type="stock_analysis",
+        client_markdown=client_markdown,
+        markdown_path=_client_output_path(args.symbol, str(analysis.get("generated_at", ""))),
+        detail_markdown=report,
+        detail_path=detail_path,
+        extra_manifest={
+            "symbol": str(args.symbol),
+            "asset_type": str(analysis.get("asset_type", "")),
+        },
+        release_checker=lambda markdown, source_text: check_generic_client_report(markdown, "stock_analysis", source_text=source_text),
+    )
     print(client_markdown)
     for index, line in enumerate(exported_bundle_lines(bundle)):
         print(f"\n{line}" if index == 0 else line)

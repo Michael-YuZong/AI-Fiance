@@ -46,6 +46,77 @@ def test_valuation_index_snapshot_prefers_specific_theme_proxy_over_generic_keyw
     assert "代理" in snapshot["match_note"]
 
 
+def test_valuation_index_snapshot_keeps_exact_benchmark_without_pe_instead_of_wrong_theme_proxy(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    ValuationCollector._CN_INDEX_MASTER_FRAME = None
+    frame = pd.DataFrame(
+        [
+            {"指数简称": "港股通科技", "指数代码": "987008", "PE滚动": None},
+            {"指数简称": "人工智能精选", "指数代码": "980087", "PE滚动": 71.6},
+        ]
+    )
+
+    monkeypatch.setattr(collector, "cached_call", lambda *args, **kwargs: frame)
+    monkeypatch.setattr(collector, "_require_ak", lambda: type("AKClient", (), {"index_all_cni": object()})())
+
+    snapshot = collector.get_cn_index_snapshot(["恒生港股通科技主题指数", "港股通科技", "科技"])
+    assert snapshot is not None
+    assert snapshot["index_name"] == "港股通科技"
+    assert snapshot["match_quality"] == "exact_no_pe"
+    assert snapshot["display_label"] == "真实指数估值"
+    assert "缺少可用滚动PE" in snapshot["match_note"]
+    ValuationCollector._CN_INDEX_MASTER_FRAME = None
+
+
+def test_weighted_market_financial_proxies_uses_harmonic_pe(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(
+        collector,
+        "get_yf_fundamental",
+        lambda symbol, asset_type: {  # noqa: ARG005
+            "0700": {"pe_ttm": 20.0, "roe": 20.0},
+            "9988": {"pe_ttm": 40.0, "roe": 10.0},
+        }.get(symbol, {}),
+    )
+
+    proxies = collector.get_weighted_market_financial_proxies(
+        [
+            {"symbol": "0700", "name": "腾讯", "weight": 15.0},
+            {"symbol": "9988", "name": "阿里", "weight": 15.0},
+        ],
+        asset_type="hk",
+        top_n=2,
+    )
+
+    assert proxies["coverage_weight"] == 30.0
+    assert proxies["coverage_count"] == 2
+    assert proxies["pe_ttm"] == 26.666666666666668
+
+
+def test_weighted_stock_financial_proxies_include_harmonic_pe(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(
+        collector,
+        "get_cn_stock_financial_proxy",
+        lambda symbol: {  # noqa: ARG005
+            "000998": {"pe_ttm": 10.0, "roe": 8.0, "gross_margin": 20.0},
+            "600598": {"pe_ttm": 30.0, "roe": 12.0, "gross_margin": 30.0},
+        }.get(symbol, {}),
+    )
+
+    proxies = collector.get_weighted_stock_financial_proxies(
+        [
+            {"symbol": "000998", "name": "隆平高科", "weight": 15.0},
+            {"symbol": "600598", "name": "北大荒", "weight": 15.0},
+        ],
+        top_n=2,
+    )
+
+    assert proxies["coverage_weight"] == 30.0
+    assert proxies["coverage_count"] == 2
+    assert proxies["pe_ttm"] == 15.0
+
+
 def test_valuation_index_snapshot_reuses_process_index_master_frame(monkeypatch, tmp_path):
     collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
     ValuationCollector._CN_INDEX_MASTER_FRAME = None

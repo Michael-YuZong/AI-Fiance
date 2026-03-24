@@ -19,6 +19,17 @@ SECTION_ALIASES = {
 }
 STATUS_PREFIXES = ("PASS", "BLOCKED", "IN_REVIEW")
 YES_PREFIXES = ("是", "否", "不适用", "N/A")
+EMPTY_ACTIONABLE_MARKERS = (
+    "无新增",
+    "没有新增",
+    "没有新的",
+    "没有再发现新的",
+    "未发现新的",
+    "无新的",
+    "不适用",
+    "已满足",
+)
+EMPTY_BLOCK_ITEM_MARKERS = {"无", "none", "n/a", "不适用", "无新增", "没有新的", "无新的"}
 
 
 def clean_text(value: str) -> str:
@@ -135,6 +146,80 @@ def normalize_yes_no(value: str) -> str:
         if text.startswith(prefix):
             return prefix
     return text
+
+
+def meaningful_lines(text: str) -> List[str]:
+    result: List[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = clean_text(raw_line)
+        if not line:
+            continue
+        if line in {"`go`", "`hold`", "`blocked`", "无", "无新增阻塞项"}:
+            continue
+        result.append(line)
+    return result
+
+
+def has_actionable_content(text: str) -> bool:
+    lines = meaningful_lines(text)
+    if not lines:
+        return False
+    normalized_lines = [re.sub(r"^[\-*]\s*", "", line).strip() for line in lines]
+    if all(any(marker in line for marker in EMPTY_ACTIONABLE_MARKERS) for line in normalized_lines):
+        return False
+    normalized = " ".join(normalized_lines)
+    return not any(marker in normalized for marker in EMPTY_ACTIONABLE_MARKERS)
+
+
+def bullet_block_items(text: str, key: str) -> List[str]:
+    target = clean_text(key)
+    if not target:
+        return []
+
+    items: List[str] = []
+    collecting = False
+    base_indent = -1
+
+    for raw_line in str(text or "").splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if stripped.startswith("- "):
+            body = stripped[2:].strip()
+            split_char = "：" if "：" in body else ":" if ":" in body else ""
+            if split_char:
+                block_key, value = body.split(split_char, 1)
+                normalized_key = clean_text(block_key)
+                if collecting and indent <= base_indent and normalized_key != target:
+                    break
+                if normalized_key == target:
+                    collecting = True
+                    base_indent = indent
+                    inline_value = clean_text(value)
+                    if inline_value:
+                        items.append(inline_value)
+                    continue
+            if collecting:
+                if indent <= base_indent:
+                    break
+                items.append(clean_text(body))
+            continue
+
+        if collecting:
+            if indent <= base_indent:
+                break
+            continuation = clean_text(stripped)
+            if not continuation:
+                continue
+            if items:
+                items[-1] = items[-1] + " " + continuation
+            else:
+                items.append(continuation)
+
+    cleaned_items = [clean_text(item) for item in items]
+    return [item for item in cleaned_items if item and item.lower() not in EMPTY_BLOCK_ITEM_MARKERS]
 
 
 def decision_from_sections(sections: Mapping[str, str]) -> str:

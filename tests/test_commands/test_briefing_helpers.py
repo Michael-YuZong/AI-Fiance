@@ -11,7 +11,9 @@ from src.commands.briefing import (
     _appendix_derivative_lines,
     _action_lines,
     _briefing_a_share_watch_rows,
+    _briefing_evidence_rows,
     _briefing_shared_market_context,
+    _build_market_payload,
     _briefing_internal_dir,
     _compact_headline_lines,
     _coverage_metadata,
@@ -23,6 +25,7 @@ from src.commands.briefing import (
     _persist_briefing,
     _quality_lines,
     _sentiment_lines,
+    _timed_collect,
     _tomorrow_action_lines,
     build_parser,
 )
@@ -140,7 +143,7 @@ def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> 
         },
     )
 
-    rows, lines, meta = _briefing_a_share_watch_rows({})
+    rows, lines, meta, candidates = _briefing_a_share_watch_rows({})
 
     assert rows == [["1", "宁德时代 (300750)", "新能源", "较强机会", "持有优于追高", "首次建仓 ≤3%"]]
     assert any("Tushare 优先" in item for item in lines)
@@ -153,6 +156,7 @@ def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> 
     assert meta["report_top_n"] == 1
     assert meta["blind_spot"] == "部分样本缺少完整事件覆盖。"
     assert "factor_contract" in meta
+    assert candidates[0]["symbol"] == "300750"
     assert captured["context"] is None
     assert captured["max_candidates"] == 16
     assert captured["attach_signal_confidence"] is False
@@ -218,11 +222,42 @@ def test_briefing_a_share_watch_rows_discloses_candidate_limit(monkeypatch) -> N
         },
     )
 
-    rows, lines, meta = _briefing_a_share_watch_rows({})
+    rows, lines, meta, _ = _briefing_a_share_watch_rows({})
 
     assert rows[0][1] == "宁德时代 (300750)"
     assert any("候选上限 `16`" in item for item in lines)
     assert meta["candidate_limit"] == 16
+
+
+def test_briefing_evidence_rows_include_watch_pool_and_point_in_time_note() -> None:
+    rows = _briefing_evidence_rows(
+        generated_at="2026-03-23 08:30:00",
+        narrative={"label": "中国政策 / 内需确定性"},
+        regime_result={"current_regime": "recovery"},
+        data_coverage="中国宏观 | Watchlist 行情 | RSS新闻",
+        missing_sources="跨市场代理",
+        a_share_watch_meta={"pool_size": 16, "complete_analysis_size": 5, "candidate_limit": 16},
+        proxy_contract={
+            "market_flow": {"interpretation": "高股息相对成长更抗跌。", "confidence_label": "中"},
+            "social_sentiment": {"covered": 2, "total": 3},
+        },
+    )
+
+    payload = {row[0]: row[1] for row in rows}
+    assert payload["A股观察池来源"].startswith("Tushare 优先全市场初筛")
+    assert payload["时点边界"].startswith("默认只使用生成时点前可见")
+
+
+def test_timed_collect_timeout_returns_fallback_and_warning() -> None:
+    result, warning = _timed_collect(
+        "市场驱动",
+        lambda: (__import__("time").sleep(0.05), {"ok": True})[1],
+        fallback={},
+        timeout_seconds=0.01,
+    )
+
+    assert result == {}
+    assert "市场驱动 拉取超时" in warning
 
 
 def test_briefing_action_helpers_include_portfolio_whatif_handoff() -> None:
@@ -321,3 +356,52 @@ def test_primary_narrative_uses_a_share_watch_sector_counts_to_boost_theme() -> 
 
     assert narrative["theme"] == "broad_market_repair"
     assert narrative["scores"]["broad_market_repair"] > narrative["scores"]["rate_growth"]
+
+
+def test_build_market_payload_includes_market_analysis_blocks(monkeypatch) -> None:
+    monkeypatch.setattr(
+        briefing_module,
+        "build_market_analysis",
+        lambda config, overview, pulse, drivers: {  # noqa: ARG005
+            "index_rows": [["上证指数", "3400.00", "+0.20%", "偏强修复", "周线金叉", "月线修复", "常态量能", "等待确认"]],
+            "index_lines": ["上证指数：偏强修复。"],
+            "market_signal_rows": [["市场宽度", "上涨 2800 / 下跌 2100", "分歧中性", "涨跌比 1.33"]],
+            "market_signal_lines": ["市场宽度 `分歧中性`。"],
+            "rotation_rows": [["行业", "银行(+1.40%)", "半导体(-0.80%)", "防守占优，高低切明显"]],
+            "rotation_lines": ["行业轮动靠前: 银行(+1.40%)。"],
+            "summary_lines": ["核心指数强弱并不统一，当前更像结构性行情而不是全市场同向共振。"],
+        },
+    )
+
+    payload = _build_market_payload(
+        config={},
+        narrative={"summary": "当前主线候选: `宽基修复`。", "background_regime": "通缩/偏弱"},
+        china_macro={"pmi": 50.1},
+        regime_result={"current_regime": "deflation", "reasoning": [], "preferred_assets": ["宽基"]},
+        overview={"domestic_indices": [], "breadth": {}},
+        pulse={"zt_pool": pd.DataFrame(), "dt_pool": pd.DataFrame()},
+        drivers={"industry_spot": pd.DataFrame(), "concept_spot": pd.DataFrame()},
+        news_report={"items": []},
+        monitor_rows=[],
+        snapshots=[],
+        anomaly_report={},
+        liquidity_lines=[],
+        overnight_rows=[],
+        watchlist_rows=[],
+        a_share_watch_rows=[],
+        a_share_watch_lines=[],
+        a_share_watch_meta={},
+        a_share_watch_candidates=[],
+        data_coverage="中国宏观 | 全市场快照",
+        missing_sources="无",
+        macro_items=[],
+        alerts=[],
+        quality_lines=[],
+        proxy_contract={},
+        evidence_rows=[],
+    )
+
+    assert payload["index_signal_rows"][0][0] == "上证指数"
+    assert payload["market_signal_rows"][0][0] == "市场宽度"
+    assert payload["rotation_rows"][0][0] == "行业"
+    assert payload["headline_lines"][0].startswith("核心指数强弱并不统一")

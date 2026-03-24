@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
+from src.commands.final_runner import finalize_client_markdown
 from src.commands.pick_history import enrich_pick_payload_with_score_history, summarize_pick_coverage
 from src.commands.pick_visuals import attach_visuals_to_analyses
-from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle, exported_bundle_lines
+from src.commands.report_guard import ensure_report_task_registered, exported_bundle_lines
 from src.output import ClientReportRenderer, OpportunityReportRenderer
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.opportunity_engine import build_market_context, discover_stock_opportunities, summarize_proxy_contracts_from_analyses
@@ -174,20 +176,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _internal_detail_stem(market: str, generated_at: str) -> str:
-    return f"stock_picks_{market}_{generated_at[:10]}_internal_detail"
+def _sector_suffix(sector_filter: str) -> str:
+    text = str(sector_filter or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"[\\/:*?\"<>|]+", "_", text)
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return f"_{text}" if text else ""
 
 
-def _internal_merged_stem(generated_at: str) -> str:
-    return f"stock_picks_{generated_at[:10]}_internal_detail"
+def _internal_detail_stem(market: str, generated_at: str, sector_filter: str = "") -> str:
+    return f"stock_picks_{market}{_sector_suffix(sector_filter)}_{generated_at[:10]}_internal_detail"
 
 
-def _final_stem(generated_at: str) -> str:
-    return f"stock_picks_{generated_at[:10]}_final"
+def _internal_merged_stem(generated_at: str, sector_filter: str = "") -> str:
+    return f"stock_picks{_sector_suffix(sector_filter)}_{generated_at[:10]}_internal_detail"
 
 
-def _market_final_stem(market: str, generated_at: str) -> str:
-    return f"stock_picks_{market}_{generated_at[:10]}_final"
+def _final_stem(generated_at: str, sector_filter: str = "") -> str:
+    return f"stock_picks{_sector_suffix(sector_filter)}_{generated_at[:10]}_final"
+
+
+def _market_final_stem(market: str, generated_at: str, sector_filter: str = "") -> str:
+    return f"stock_picks_{market}{_sector_suffix(sector_filter)}_{generated_at[:10]}_final"
 
 
 def _persist_internal_detail_report(stem: str, markdown: str) -> Path:
@@ -273,7 +285,10 @@ def main() -> None:
             }
             for market, payload in market_payloads.items():
                 detailed = OpportunityReportRenderer().render_stock_picks(payload)
-                _persist_internal_detail_report(_internal_detail_stem(market, str(payload.get("generated_at", ""))), detailed)
+                _persist_internal_detail_report(
+                    _internal_detail_stem(market, str(payload.get("generated_at", "")), sector_filter),
+                    detailed,
+                )
             client_payload = _merge_payloads(market_payloads)
             factor_contract = _factor_contract_summary(
                 [
@@ -283,29 +298,29 @@ def main() -> None:
                 ]
             )
             source_path = _persist_internal_detail_report(
-                _internal_merged_stem(str(client_payload.get("generated_at", ""))),
+                _internal_merged_stem(str(client_payload.get("generated_at", "")), sector_filter),
                 OpportunityReportRenderer().render_stock_picks(client_payload),
             )
             client_markdown = ClientReportRenderer().render_stock_picks_detailed(client_payload)
-            target_path = FINAL_DIR / f"{_final_stem(str(client_payload.get('generated_at', '')))}.md"
+            target_path = FINAL_DIR / f"{_final_stem(str(client_payload.get('generated_at', '')), sector_filter)}.md"
 
             try:
                 from src.commands.release_check import check_stock_pick_client_report
 
-                findings = check_stock_pick_client_report(client_markdown, source_path.read_text(encoding="utf-8"))
-                bundle = export_reviewed_markdown_bundle(
+                bundle = finalize_client_markdown(
                     report_type="stock_pick",
-                    markdown_text=client_markdown,
+                    client_markdown=client_markdown,
                     markdown_path=target_path,
-                    release_findings=findings,
+                    detail_markdown=source_path.read_text(encoding="utf-8"),
+                    detail_path=source_path,
                     extra_manifest={
                         "market": "all",
-                        "detail_source": str(source_path),
                         "factor_contract": factor_contract,
                         "proxy_contract": dict(client_payload.get("proxy_contract") or {}),
                     },
+                    release_checker=check_stock_pick_client_report,
                 )
-            except (Exception, ReportGuardError) as exc:
+            except Exception as exc:
                 raise SystemExit(str(exc))
 
             print(client_markdown)
@@ -315,9 +330,12 @@ def main() -> None:
 
         payload = _run_market(config, args.market, args.top, sector_filter)
         detailed = OpportunityReportRenderer().render_stock_picks(payload)
-        detail_path = _persist_internal_detail_report(_internal_detail_stem(args.market, str(payload.get("generated_at", ""))), detailed)
+        detail_path = _persist_internal_detail_report(
+            _internal_detail_stem(args.market, str(payload.get("generated_at", "")), sector_filter),
+            detailed,
+        )
         client_markdown = ClientReportRenderer().render_stock_picks_detailed(payload)
-        target_path = FINAL_DIR / f"{_market_final_stem(args.market, str(payload.get('generated_at', '')))}.md"
+        target_path = FINAL_DIR / f"{_market_final_stem(args.market, str(payload.get('generated_at', '')), sector_filter)}.md"
         factor_contract = _factor_contract_summary(list(payload.get("coverage_analyses") or payload.get("top") or []))
 
         findings = []
@@ -328,21 +346,19 @@ def main() -> None:
                 findings = check_stock_pick_client_report(client_markdown, detail_path.read_text(encoding="utf-8"))
             except Exception as exc:
                 raise SystemExit(f"发布前一致性校验失败: {exc}")
-        try:
-            bundle = export_reviewed_markdown_bundle(
-                report_type="stock_pick",
-                markdown_text=client_markdown,
-                markdown_path=target_path,
-                release_findings=findings,
-                extra_manifest={
-                    "market": args.market,
-                    "detail_source": str(detail_path),
-                    "factor_contract": factor_contract,
-                    "proxy_contract": dict(payload.get("proxy_contract") or {}),
-                },
-            )
-        except ReportGuardError as exc:
-            raise SystemExit(str(exc))
+        bundle = finalize_client_markdown(
+            report_type="stock_pick",
+            client_markdown=client_markdown,
+            markdown_path=target_path,
+            detail_markdown=detailed,
+            detail_path=detail_path,
+            extra_manifest={
+                "market": args.market,
+                "factor_contract": factor_contract,
+                "proxy_contract": dict(payload.get("proxy_contract") or {}),
+            },
+            release_checker=(lambda markdown, source_text: findings) if findings else None,
+        )
 
         print(client_markdown)
         for index, line in enumerate(exported_bundle_lines(bundle)):

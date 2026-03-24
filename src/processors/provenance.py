@@ -60,6 +60,7 @@ def unique_sources(items: Sequence[Mapping[str, Any]], *, limit: int = 4) -> Lis
 
 def build_analysis_provenance(analysis: Mapping[str, Any]) -> Dict[str, Any]:
     catalyst = dict(dict(analysis.get("dimensions") or {}).get("catalyst") or {})
+    relative = dict(dict(analysis.get("dimensions") or {}).get("relative_strength") or {})
     coverage = dict(catalyst.get("coverage") or {})
     evidence = list(catalyst.get("evidence") or [])
     intraday = dict(analysis.get("intraday") or {})
@@ -94,6 +95,8 @@ def build_analysis_provenance(analysis: Mapping[str, Any]) -> Dict[str, Any]:
         "market_data_as_of": history_as_of(analysis.get("history")),
         "market_data_source": market_source,
         "market_data_source_code": history_source or "unknown",
+        "relative_benchmark_name": str(relative.get("benchmark_name") or analysis.get("benchmark_name") or "未显式标注"),
+        "relative_benchmark_symbol": str(relative.get("benchmark_symbol") or analysis.get("benchmark_symbol") or ""),
         "intraday_as_of": intraday_as_of,
         "intraday_source": "AKShare 分钟线 / 实时行情" if intraday.get("enabled") else "未启用",
         "catalyst_evidence_as_of": latest_evidence_as_of(evidence),

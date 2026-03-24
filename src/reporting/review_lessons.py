@@ -240,6 +240,55 @@ ACTIVE_REVIEW_LESSONS: List[ReviewLesson] = [
         owner_layer="release_check",
         rationale="如果交付等级仍是标准推荐稿，单候选说明不能再把同一份报告写成观察优先或降级稿；候选数量说明和交付等级必须一致。",
     ),
+    ReviewLesson(
+        lesson_id="L033",
+        title="零动作稿不能伪装成推荐稿",
+        scope="pick_reports",
+        owner_layer="release_check",
+        rationale="如果整份稿件没有可执行候选，就不能继续用推荐、核心主线、低门槛可执行这类包装误导读者。",
+    ),
+    ReviewLesson(
+        lesson_id="L034",
+        title="单票段落必须保持标的归属一致",
+        scope="stock_pick_reports",
+        owner_layer="release_check",
+        rationale="客户稿里单只股票的段落如果混入另一只股票的名称、符号或八维信号，会直接伤害可信度，应在发布前拦截。",
+    ),
+    ReviewLesson(
+        lesson_id="L035",
+        title="单票说明小标题不能空挂",
+        scope="stock_pick_reports",
+        owner_layer="release_check",
+        rationale="像“为什么继续看它”“下一步怎么盯”“证据口径”这类标题如果下面没有实质内容，会让成稿看起来像半成品或拼页残留。",
+    ),
+    ReviewLesson(
+        lesson_id="L036",
+        title="ETF/基金标签、基准与持仓必须互相印证",
+        scope="fund_and_etf_reports",
+        owner_layer="external_review",
+        rationale="如果前文主题标签、估值代理、资金代理和基金画像/业绩比较基准/前十大持仓/行业暴露不一致，应视为高优先级映射错误，而不是普通措辞问题。",
+    ),
+    ReviewLesson(
+        lesson_id="L037",
+        title="观察结论必须写清升级触发器",
+        scope="all_reports",
+        owner_layer="renderer",
+        rationale="如果当前结论是观察、等待或暂不出手，成稿还应说明在什么条件下会升级为试仓或推荐；否则只有保守结论，没有动作闭环。",
+    ),
+    ReviewLesson(
+        lesson_id="L038",
+        title="终稿不得暴露原始缺失值且检查符号必须方向正确",
+        scope="all_reports",
+        owner_layer="release_check",
+        rationale="像 nan/None/nat 这类原始缺失值不应直接出现在客户稿；硬检查或风险检查里的状态符号也必须和经济含义一致，不能把高分位风险项包装成“通过”。",
+    ),
+    ReviewLesson(
+        lesson_id="L039",
+        title="宏观背景和主题逻辑不能冒充个股直接催化",
+        scope="cn_stock_reports",
+        owner_layer="opportunity_engine",
+        rationale="A股个股稿里，宏观晨报、行业早报和泛主题新闻只能作为宏观背景或主题线索，不能同时写成个股级龙头公告/业绩或直接催化；否则会把弱催化误包装成可执行信号。",
+    ),
 ]
 
 

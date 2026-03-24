@@ -200,3 +200,21 @@ def test_grade_pick_delivery_marks_low_coverage_etf_as_summary_only() -> None:
     assert delivery["observe_only"] is True
     assert delivery["summary_only"] is True
     assert any("摘要观察稿" in note for note in delivery["notes"])
+
+
+def test_grade_pick_delivery_downgrades_observe_only_etf_winner() -> None:
+    delivery = grade_pick_delivery(
+        report_type="etf_pick",
+        discovery_mode="tushare_universe",
+        coverage={"degraded": False, "total": 5, "structured_rate": 0.6, "direct_news_rate": 0.4},
+        scan_pool=30,
+        passed_pool=5,
+        winner={
+            "trade_state": "观察为主",
+            "action": {"direction": "做多", "position": "暂不出手"},
+        },
+    )
+
+    assert delivery["label"] == "观察优先稿"
+    assert delivery["observe_only"] is True
+    assert any("观察/持有优先口径" in note for note in delivery["notes"])

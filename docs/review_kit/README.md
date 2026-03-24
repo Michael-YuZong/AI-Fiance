@@ -1,46 +1,49 @@
 # External Review Kit
 
-这套 kit 的目标不是“再给一个 reviewer prompt”，而是把外审变成一套可迁移的系统。
+这份文件是 `review_kit` 的入口页，不是完整说明书。
 
-适合复制到别的项目里的最小组成：
+默认不要把本目录所有文档一起读完。先看这份，再按任务只打开一到两份模板。
 
-1. `docs/prompts/`
-   - reviewer prompt
-   - convergence loop prompt
-   - revision loop prompt
-2. `docs/review_kit/review_record_template.md`
-3. `docs/review_kit/review_ledger_schema.md`
-4. `docs/review_kit/migration_checklist.md`
-5. `src/reporting/review_ledger.py`
-6. 可选：`src/commands/review_ledger.py`
-7. 可选：`src/reporting/review_audit.py` / `src/commands/review_audit.py`
+## 这套 kit 是干什么的
 
-## 这套 kit 解决什么问题
+它不是“再给一个 reviewer prompt”，而是把外审做成一套可迁移的系统：
 
-- 外审不是一次性点评，而是 round-based 收敛循环
-- 发散审找到的问题，不允许只停在评论里
-- finding 要能沉淀成 prompt / hard rule / tests / backlog
-- review 记录要能被索引、统计、追踪
-- 换项目后不需要先重新发明流程
+- 外审按轮次收敛，不是一轮点评
+- finding 不能只留在评论里，要沉淀到 prompt / rule / test / backlog
+- review 记录要能被索引、追踪、审计
 
-## 最小落地顺序
+## 默认读法
 
-1. 先复制 prompt 和本目录下的模板文档
-2. 在新项目里选一个最小审稿对象
-   - 一份报告
-   - 一个计划
-   - 一段研究输出
-3. 用 [review_record_template.md](./review_record_template.md) 产出 round 1 审稿记录
-4. 用 `external_review_convergence_loop.md` 继续跑 round 2, round 3
-5. 把合理 finding 固化到：
-   - prompt
-   - hard rule / guard / workflow
-   - tests / fixtures
-   - lesson / backlog
-6. 用 `review_ledger.py` 建索引，确认哪些 loop 还没收敛
-7. 用 `review_audit.py` 审当前 `structured-round` 合同和沉淀去向是否真的成立
+1. 先看 [docs/prompts/README.md](../prompts/README.md)
+2. 再看这份 [README.md](./README.md)
+3. 然后只按任务打开下面之一：
+   - 审稿记录模板：[review_record_template.md](./review_record_template.md)
+   - ledger 字段定义：[review_ledger_schema.md](./review_ledger_schema.md)
+   - 迁移清单：[migration_checklist.md](./migration_checklist.md)
 
-## 在本仓库怎么用
+## 本目录每份文件做什么
+
+| 文件 | 用途 | 什么时候看 |
+| --- | --- | --- |
+| [review_record_template.md](./review_record_template.md) | 每轮外审记录模板 | 要落 round 记录时 |
+| [review_ledger_schema.md](./review_ledger_schema.md) | review 记录字段和语义 | 要写 parser / audit / 校验时 |
+| [migration_checklist.md](./migration_checklist.md) | 把这套外审流程迁到别的项目 | 要复制这套能力时 |
+
+## 最小使用路径
+
+在本仓库里，最小闭环通常是：
+
+1. 选 reviewer prompt
+   先看 [docs/prompts/README.md](../prompts/README.md)
+   正式研究型 Markdown 成稿默认是 `Pass A 结构审 + Pass B 发散审` 两段，不是一个 reviewer 一把做完。
+2. 产出 round 1 记录
+   用 [review_record_template.md](./review_record_template.md)
+3. 跑 round-based 收敛
+   配合 `external_review_convergence_loop.md`
+4. 建索引 / 做治理审计
+   用 `review_ledger` 和 `review_audit`
+
+## 本仓库常用命令
 
 ```bash
 python -m src.commands.review_ledger
@@ -52,49 +55,15 @@ python -m src.commands.review_audit
 
 - `reports/reviews/*.md`
 
-输出内容：
+## 什么时候不需要看这份
 
-- 当前有多少 review records
-- 有多少条 review series
-- 哪些 series 已收敛
-- 哪些 series 还在 active loop
-- 哪些 prompt 正在被使用
-- 哪些当前 `structured-round` review records 在 round 合同或沉淀去向上有问题
+- 只是改单个业务 command
+- 只是修 renderer / processor bug
+- 只是跑一轮具体 reviewer prompt，而不是搭外审流程
 
-## 可迁移时哪些是项目无关的
+## 迁移时别做的事
 
-这些几乎可以直接复制：
-
-- round-based 收敛规则
-- 发散审必须单列
-- 合理 finding 必须固化
-- review record 模板
-- ledger schema
-- ledger parser / indexer
-- review governance audit（默认只审结构化 round 协议）
-
-## 哪些需要按新项目适配
-
-- 审稿对象的命名
-- `PASS / BLOCKED / allow delivery` 的门禁语义
-- 哪些 finding 应该进 code guard，哪些进测试
-- reviewer prompt 里的领域知识
-
-## 推荐的目录结构
-
-```text
-docs/prompts/
-docs/review_kit/
-reports/reviews/
-src/reporting/review_ledger.py
-src/commands/review_ledger.py
-src/reporting/review_audit.py
-src/commands/review_audit.py
-```
-
-## 迁移时不要做的事
-
-- 不要只复制 prompt，不复制模板和固化规则
-- 不要把外审当成一次性点评
+- 不要只复制 reviewer prompt，不复制记录模板和 schema
+- 不要只做单轮外审就宣布收敛
 - 不要让 finding 只留在 review 文档里
-- 不要在没有 ledger/index 的情况下宣称“已经收敛”
+- 不要没有 ledger / audit 就声称“治理闭环已完成”

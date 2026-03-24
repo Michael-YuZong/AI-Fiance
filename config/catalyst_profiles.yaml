@@ -87,6 +87,14 @@ profiles:
       - "量产"
       - "并购"
       - "重组"
+    factor_max_overrides:
+      policy: 20
+      leader: 20
+      structured: 15
+      overseas: 20
+      news_density: 10
+      news_heat: 10
+      forward_event: 5
 
   电网:
     themes:
@@ -131,6 +139,14 @@ profiles:
       - "订单"
       - "电网投资"
       - "配电网"
+    factor_max_overrides:
+      policy: 25
+      leader: 20
+      structured: 15
+      overseas: 5
+      news_density: 10
+      news_heat: 10
+      forward_event: 15
 
   黄金:
     themes:
@@ -165,6 +181,14 @@ profiles:
       - "CPI"
       - "FOMC"
       - "利率决议"
+    factor_max_overrides:
+      policy: 15
+      leader: 15
+      structured: 20
+      overseas: 20
+      news_density: 10
+      news_heat: 10
+      forward_event: 10
 
   有色:
     themes:
@@ -203,3 +227,11 @@ profiles:
       - "库存"
       - "减产"
       - "扩产"
+    factor_max_overrides:
+      policy: 15
+      leader: 20
+      structured: 15
+      overseas: 20
+      news_density: 10
+      news_heat: 10
+      forward_event: 10

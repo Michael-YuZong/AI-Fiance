@@ -64,6 +64,7 @@ SECTOR_RULES = [
     (("油", "煤", "能源"), "能源", ["原油", "通胀预期", "能源安全"]),
     (("银行", "红利", "高股息"), "高股息", ["高股息", "防守"]),
     (("医药", "医疗"), "医药", ["医药", "老龄化"]),
+    (("农业", "农牧", "农林", "粮食", "粮油", "种业", "种植", "农化", "化肥", "农资", "粮食安全"), "农业", ["粮食安全", "种业", "农化"]),
     (("消费", "酒", "食品"), "消费", ["内需", "消费修复"]),
     (("军工", "国防"), "军工", ["军工", "地缘风险"]),
     (("有色", "铜", "铝"), "有色", ["铜铝", "顺周期"]),
@@ -90,6 +91,7 @@ MONTHLY_SEASONAL_WINDOWS = {
     "能源": {9, 10, 11},
     "军工": {7, 8, 9},
     "有色": {2, 3, 4},
+    "农业": {3, 4, 9, 10},
 }
 
 NEGATIVE_DILUTION_KEYS = (
@@ -307,6 +309,7 @@ SENSITIVITY_MAP = {
     "能源": {"rate": 0, "usd": 1, "oil": 1, "cny": -1},
     "高股息": {"rate": 1, "usd": 0, "oil": 0, "cny": 0},
     "医药": {"rate": -1, "usd": 0, "oil": -1, "cny": 1},
+    "农业": {"rate": -1, "usd": -1, "oil": 1, "cny": 1},
     "消费": {"rate": -1, "usd": -1, "oil": -1, "cny": 1},
     "军工": {"rate": 0, "usd": 1, "oil": 1, "cny": -1},
     "有色": {"rate": -1, "usd": -1, "oil": 1, "cny": 1},
@@ -320,6 +323,7 @@ MACRO_LEADING_MAP = {
     "能源": {"recovery": -1, "credit": -1, "reflation": 1, "defensive": -1},
     "高股息": {"recovery": -1, "credit": -1, "reflation": 0, "defensive": 1},
     "医药": {"recovery": 0, "credit": 0, "reflation": -1, "defensive": 1},
+    "农业": {"recovery": 0, "credit": 1, "reflation": 1, "defensive": 1},
     "消费": {"recovery": 1, "credit": 1, "reflation": -1, "defensive": 0},
     "军工": {"recovery": 1, "credit": 0, "reflation": 1, "defensive": 0},
     "有色": {"recovery": 1, "credit": 1, "reflation": 1, "defensive": -1},
@@ -333,6 +337,7 @@ NEWS_KEYWORD_ALIASES = {
     "能源": ["能源", "oil", "opec", "gas", "原油", "煤炭"],
     "高股息": ["高股息", "红利", "dividend", "yield", "utility"],
     "医药": ["医药", "医疗", "biotech", "pharma", "drug", "医疗器械"],
+    "农业": ["农业", "agriculture", "grain", "粮食", "粮油", "种业", "seed", "fertilizer", "化肥", "农化", "农资", "food security"],
     "消费": ["消费", "零售", "retail", "消费电子", "beer", "food"],
     "军工": ["军工", "国防", "defense", "aerospace", "制裁"],
     "有色": ["有色", "copper", "aluminum", "metal", "铜", "铝", "矿业"],
@@ -350,6 +355,7 @@ VALUATION_KEYWORD_MAP = {
     "能源": ["能源", "油气", "煤炭"],
     "高股息": ["红利", "高股息"],
     "医药": ["医药"],
+    "农业": ["农业", "粮食", "种业", "农林牧渔", "农化"],
     "消费": ["消费"],
     "军工": ["军工"],
     "有色": ["有色", "铜", "铝"],
@@ -365,6 +371,7 @@ THEME_INDEX_KEYWORD_MAP = {
     "创新药": ["创新药", "医药", "生物医药"],
     "商业航天": ["商业航天", "卫星", "航天"],
     "电网设备": ["电网设备", "智能电网", "特高压"],
+    "农业": ["农业", "粮食", "种业", "农化", "化肥"],
 }
 
 BOARD_MATCH_ALIASES = {
@@ -375,6 +382,7 @@ BOARD_MATCH_ALIASES = {
     "能源": ["能源", "油气", "石油", "煤炭", "天然气"],
     "高股息": ["红利", "高股息", "电信", "运营商", "公用事业"],
     "医药": ["医药", "医疗", "创新药", "医疗器械"],
+    "农业": ["农业", "农林牧渔", "种业", "化肥", "粮食", "饲料"],
     "消费": ["消费", "食品饮料", "家电", "零售", "旅游"],
     "军工": ["军工", "国防军工", "航天航空", "商业航天", "军民融合", "卫星"],
     "有色": ["有色金属", "工业金属", "铜", "铝", "黄金"],
@@ -389,6 +397,7 @@ GENERIC_CATALYST_PROFILES = {
         "overseas_leaders": ["Microsoft", "Apple", "NVIDIA", "Amazon", "Meta", "Alphabet", "Broadcom", "AMD"],
         "earnings_keywords": ["earnings", "results", "guidance", "capex", "cloud", "AI", "财报", "指引", "资本开支"],
         "event_keywords": ["财报", "指引", "资本开支", "capex", "云", "AI", "产品发布", "模型发布"],
+        "factor_max_overrides": {"policy": 20, "leader": 20, "structured": 15, "overseas": 20, "news_density": 10, "news_heat": 10, "forward_event": 5},
     },
     "军工": {
         "themes": ["军工", "地缘风险", "国防"],
@@ -398,6 +407,7 @@ GENERIC_CATALYST_PROFILES = {
         "overseas_leaders": ["Lockheed Martin", "Northrop", "RTX", "General Dynamics", "Boeing", "Palantir"],
         "earnings_keywords": ["order", "guidance", "delivery", "财报", "订单", "交付", "指引"],
         "event_keywords": ["军演", "军贸", "订单", "交付", "首飞", "试飞", "卫星", "无人机"],
+        "factor_max_overrides": {"policy": 25, "leader": 20, "structured": 15, "overseas": 10, "news_density": 10, "news_heat": 10, "forward_event": 10},
     },
     "能源": {
         "themes": ["能源", "原油", "通胀预期"],
@@ -407,6 +417,7 @@ GENERIC_CATALYST_PROFILES = {
         "overseas_leaders": ["Exxon", "Chevron", "Shell", "BP", "Saudi Aramco"],
         "earnings_keywords": ["earnings", "results", "production", "output", "财报", "产量", "指引"],
         "event_keywords": ["OPEC", "减产", "增产", "库存", "油价", "气价"],
+        "factor_max_overrides": {"policy": 20, "leader": 20, "structured": 15, "overseas": 15, "news_density": 10, "news_heat": 10, "forward_event": 10},
     },
     "高股息": {
         "themes": ["高股息", "防守", "红利"],
@@ -416,6 +427,7 @@ GENERIC_CATALYST_PROFILES = {
         "overseas_leaders": ["AT&T", "Verizon", "Duke Energy", "Coca-Cola"],
         "earnings_keywords": ["dividend", "buyback", "cash flow", "分红", "回购", "现金流"],
         "event_keywords": ["分红", "除权", "回购", "现金流"],
+        "factor_max_overrides": {"policy": 20, "leader": 20, "structured": 20, "overseas": 5, "news_density": 10, "news_heat": 10, "forward_event": 15},
     },
     "医药": {
         "themes": ["医药", "老龄化"],
@@ -425,6 +437,17 @@ GENERIC_CATALYST_PROFILES = {
         "overseas_leaders": ["Eli Lilly", "Novo Nordisk", "Pfizer", "Merck", "AbbVie"],
         "earnings_keywords": ["trial", "approval", "guidance", "财报", "临床", "获批", "指引"],
         "event_keywords": ["临床", "获批", "医保谈判", "集采", "新药"],
+        "factor_max_overrides": {"policy": 15, "leader": 20, "structured": 20, "overseas": 10, "news_density": 10, "news_heat": 10, "forward_event": 15},
+    },
+    "农业": {
+        "themes": ["农业", "粮食安全", "种业"],
+        "keywords": ["农业", "粮食", "grain", "seed", "种业", "化肥", "fertilizer", "农化", "农资", "food security"],
+        "policy_keywords": ["粮食安全", "种业振兴", "乡村振兴", "耕地", "农资", "化肥", "农业"],
+        "domestic_leaders": ["北大荒", "隆平高科", "大北农", "荃银高科", "农发种业", "云天化", "盐湖股份"],
+        "overseas_leaders": ["Deere", "Corteva", "Nutrien", "Mosaic", "Bunge", "Archer Daniels Midland"],
+        "earnings_keywords": ["harvest", "acreage", "fertilizer", "guidance", "crop", "财报", "种植", "库存", "价格", "指引"],
+        "event_keywords": ["天气", "播种", "收割", "化肥", "粮价", "政策收储", "种业", "农资"],
+        "factor_max_overrides": {"policy": 20, "leader": 20, "structured": 15, "overseas": 10, "news_density": 10, "news_heat": 10, "forward_event": 15},
     },
     "消费": {
         "themes": ["消费", "内需"],
@@ -434,6 +457,7 @@ GENERIC_CATALYST_PROFILES = {
         "overseas_leaders": ["Nike", "Costco", "Walmart", "LVMH", "McDonald's"],
         "earnings_keywords": ["same-store", "guidance", "sales", "财报", "销售", "指引"],
         "event_keywords": ["促销", "补贴", "新品", "假期", "旺季"],
+        "factor_max_overrides": {"policy": 15, "leader": 20, "structured": 20, "overseas": 10, "news_density": 10, "news_heat": 10, "forward_event": 10},
     },
     "宽基": {
         "themes": ["宽基", "大盘", "指数"],
@@ -443,7 +467,23 @@ GENERIC_CATALYST_PROFILES = {
         "overseas_leaders": ["Microsoft", "Apple", "NVIDIA", "Amazon", "Meta"],
         "earnings_keywords": ["earnings", "guidance", "rates", "payrolls", "cpi", "财报", "指引", "非农", "CPI"],
         "event_keywords": ["财报季", "利率决议", "CPI", "非农", "PMI"],
+        "factor_max_overrides": {"policy": 20, "leader": 20, "structured": 15, "overseas": 15, "news_density": 10, "news_heat": 10, "forward_event": 10},
     },
+}
+
+CN_STOCK_CATALYST_OVERRIDE_PROFILES = {
+    "科技",
+    "军工",
+    "能源",
+    "消费",
+    "宽基",
+    "医药",
+    "农业",
+    "高股息",
+    "半导体",
+    "电网",
+    "黄金",
+    "有色",
 }
 
 CATALYST_CATEGORY_MAP = {
@@ -572,7 +612,7 @@ def _enrich_metadata_with_fund_profile(metadata: Dict[str, Any], fund_profile: M
 
 FUND_BENCHMARK_HINTS = [
     (("战略新兴", "新兴产业"), ["战略新兴", "新兴产业"]),
-    (("恒生科技", "港股科技"), ["恒生科技", "港股科技"]),
+    (("恒生科技", "港股科技", "港股通科技"), ["恒生科技", "港股科技", "港股通科技"]),
     (("沪深300",), ["沪深300"]),
     (("中证a500", "a500"), ["中证A500"]),
     (("中证500",), ["中证500"]),
@@ -580,6 +620,7 @@ FUND_BENCHMARK_HINTS = [
     (("科创50",), ["科创50"]),
     (("半导体", "芯片"), ["半导体", "芯片"]),
     (("军工", "国防"), ["军工", "国防"]),
+    (("农业", "粮食", "种业", "农化", "国证粮食"), ["农业", "粮食", "种业", "农化", "国证粮食"]),
     (("消费", "食品饮料", "家电"), ["消费", "内需"]),
     (("高股息", "红利"), ["高股息", "红利"]),
     (("黄金", "贵金属"), ["黄金", "贵金属"]),
@@ -594,6 +635,7 @@ FUND_INDUSTRY_HINTS = [
     (("有色", "金属", "铜", "铝"), ["有色", "铜", "铝"]),
     (("公用事业", "电力", "电网"), ["电力", "电网", "公用事业"]),
     (("医药", "医疗"), ["医药", "医疗"]),
+    (("农", "林", "牧", "渔", "农业", "种植", "种业", "化肥"), ["农业", "粮食", "种业", "农化"]),
     (("消费", "零售", "食品", "饮料", "家电"), ["消费", "零售", "家电"]),
 ]
 
@@ -748,12 +790,20 @@ def _safe_series(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(frame[column], errors="coerce").dropna()
 
 
-def _dimension_summary(score: Optional[int], positive: str, neutral: str, negative: str, missing: str) -> str:
+def _dimension_summary(
+    score: Optional[int],
+    positive: str,
+    neutral: str,
+    negative: str,
+    missing: str,
+    *,
+    max_score: int = 100,
+) -> str:
     if score is None:
         return missing
-    if score >= 70:
+    if score >= int(round(max_score * 0.70)):
         return positive
-    if score >= 40:
+    if score >= int(round(max_score * 0.40)):
         return neutral
     return negative
 
@@ -1685,6 +1735,55 @@ def _fund_financial_proxy(
         return {}
 
 
+def _infer_holdings_asset_type(holdings: Sequence[Mapping[str, Any]]) -> str:
+    counts = {"cn_stock": 0, "hk": 0, "us": 0}
+    for item in holdings:
+        symbol = str(item.get("symbol", "") or item.get("股票代码", "")).strip()
+        if not symbol:
+            continue
+        if re.fullmatch(r"\d{6}", symbol):
+            counts["cn_stock"] += 1
+        elif re.fullmatch(r"\d{1,5}", symbol):
+            counts["hk"] += 1
+        elif re.search(r"[A-Za-z]", symbol):
+            counts["us"] += 1
+    best = max(counts, key=counts.get)
+    return best if counts[best] > 0 else ""
+
+
+def _fund_holdings_valuation_proxy(
+    collector: ValuationCollector,
+    fund_profile: Optional[Mapping[str, Any]],
+    *,
+    top_n: int = 5,
+) -> Dict[str, Any]:
+    holdings = _fund_top_holdings(fund_profile, top_n=top_n)
+    normalized_holdings = [
+        {
+            "symbol": item.get("股票代码", ""),
+            "name": item.get("股票名称", ""),
+            "weight": item.get("占净值比例", 0.0),
+        }
+        for item in holdings
+        if str(item.get("股票代码", "")).strip()
+    ]
+    if not normalized_holdings:
+        return {}
+    holdings_asset_type = _infer_holdings_asset_type(normalized_holdings)
+    try:
+        if holdings_asset_type == "cn_stock":
+            return collector.get_weighted_stock_financial_proxies(normalized_holdings, top_n=top_n)
+        if holdings_asset_type not in {"hk", "us"}:
+            return {}
+        return collector.get_weighted_market_financial_proxies(
+            normalized_holdings,
+            asset_type=holdings_asset_type,
+            top_n=top_n,
+        )
+    except Exception:
+        return {}
+
+
 def _intraday_snapshot(
     symbol: str,
     asset_type: str,
@@ -1740,12 +1839,26 @@ def _match_driver_row_with_score(
     keywords = [keyword.lower() for keyword in _board_keywords(metadata)]
     best_row: Optional[pd.Series] = None
     best_score = 0
+
+    def _keyword_score(keyword: str, lowered_label: str) -> int:
+        token = str(keyword or "").strip().lower()
+        if not token:
+            return 0
+        if token == lowered_label:
+            return 3
+        # Two-character Chinese sector words like “消费 / 零售 / 旅游 / 科技”
+        # are too broad for fuzzy contains matching; only longer tokens are allowed
+        # to match by substring so “消费” no longer accidentally hits “消费电子”.
+        if all("\u4e00" <= ch <= "\u9fff" for ch in token) and len(token) <= 2:
+            return 0
+        return 1 if token in lowered_label else 0
+
     for _, row in frame.iterrows():
         label = str(row.get(name_col, "")).strip()
         if not label:
             continue
         lowered = label.lower()
-        score = sum(1 for keyword in keywords if keyword and keyword in lowered)
+        score = sum(_keyword_score(keyword, lowered) for keyword in keywords)
         if score > best_score:
             best_row = row
             best_score = score
@@ -2118,6 +2231,53 @@ def _fund_specific_catalyst_profile(
         },
     )
     return profile
+
+
+def _catalyst_factor_maxima(
+    profile: Mapping[str, Any],
+    *,
+    asset_type: str,
+    is_individual_stock: bool,
+) -> Dict[str, int]:
+    maxima = {
+        "policy": 25 if (asset_type == "cn_stock" and is_individual_stock) else 30,
+        "leader": 15 if (asset_type == "cn_stock" and is_individual_stock) else 25,
+        "structured": 15,
+        "overseas": 20,
+        "news_density": 10,
+        "news_heat": 10,
+        "forward_event": 5,
+        "directional": 12,
+    }
+    if not (asset_type == "cn_stock" and is_individual_stock):
+        return maxima
+    profile_keys = {
+        str(profile.get("profile_name", "")).strip(),
+        str(profile.get("sector_hint", "")).strip(),
+    }
+    if not any(key in CN_STOCK_CATALYST_OVERRIDE_PROFILES for key in profile_keys if key):
+        return maxima
+    overrides = dict(profile.get("factor_max_overrides") or {})
+    for key, value in overrides.items():
+        if key not in maxima:
+            continue
+        try:
+            maxima[key] = max(int(value), 0)
+        except (TypeError, ValueError):
+            continue
+    return maxima
+
+
+def _rescale_catalyst_award(awarded: int, current_max: int, target_max: int) -> int:
+    if awarded == 0 or current_max <= 0 or target_max == current_max:
+        return int(awarded)
+    if target_max <= 0:
+        return 0
+    scaled = int(round(abs(float(awarded)) / float(current_max) * float(target_max)))
+    if abs(awarded) > 0 and scaled == 0:
+        scaled = 1
+    scaled = min(int(target_max), scaled)
+    return scaled if awarded > 0 else -scaled
 
 
 def _fund_directional_catalyst_signal(
@@ -2558,7 +2718,10 @@ def _is_structured_company_event_item(item: Mapping[str, Any], stock_name_tokens
 
 
 def _is_non_positive_company_statement(item: Mapping[str, Any]) -> bool:
-    return _contains_any(_headline_text(item), NON_POSITIVE_COMPANY_STATEMENT_KEYS)
+    return _contains_any(
+        _headline_text(item),
+        [*NON_POSITIVE_COMPANY_STATEMENT_KEYS, *NEGATIVE_DILUTION_KEYS, *NEGATIVE_REGULATORY_KEYS],
+    )
 
 
 def _direct_company_event_search_terms(metadata: Mapping[str, Any], profile: Mapping[str, Any]) -> List[List[str]]:
@@ -3405,7 +3568,7 @@ def _hard_checks(
         )
         exclusion_reasons.append(f"{valuation_label}处于极高区间")
         warnings.append(f"⚠️ {valuation_label}已处于极高区间，后续更需要靠盈利兑现来消化估值")
-    elif price_percentile > 0.90:
+    elif price_percentile >= 0.90:
         checks.append({"name": "估值极端", "status": "⚠️", "detail": f"价格位置代理分位 {price_percentile:.0%}，接近极端高位"})
         exclusion_reasons.append("价格位置代理已处于极端高位")
         warnings.append("⚠️ 价格位置已在高位区，追高性价比明显下降")
@@ -3505,6 +3668,38 @@ def _support_signals(history: pd.DataFrame, technical: Mapping[str, Any]) -> tup
     score = 20 if len(hits) >= 2 else 15 if hits else 0
     detail = " / ".join(hits) if hits else "当前价格未明显贴近 MA60、前低或关键斐波那契支撑"
     return score, detail
+
+
+def _support_reference_candidates(history: pd.DataFrame, technical: Mapping[str, Any]) -> List[tuple[float, str, float]]:
+    close = history["close"].astype(float)
+    low = history["low"].astype(float) if "low" in history.columns else close
+    price = float(close.iloc[-1])
+    ma_values = dict(technical.get("ma_system", {}).get("mas", {}) or {})
+    fib_levels = dict(technical.get("fibonacci", {}).get("levels", {}) or {})
+    candidates: List[tuple[float, str, float]] = []
+
+    def _add(label: str, level: float) -> None:
+        if level <= 0 or level >= price:
+            return
+        gap = float(price / level - 1.0)
+        candidates.append((gap, label, float(level)))
+
+    _add("MA20", float(ma_values.get("MA20", 0.0) or 0.0))
+    _add("MA60", float(ma_values.get("MA60", 0.0) or 0.0))
+    for level_name in ("0.382", "0.500", "0.618"):
+        _add(f"斐波那契 {level_name}", float(fib_levels.get(level_name, 0.0) or 0.0))
+    _add("近20日低点", float(low.tail(20).min()))
+    _add("近60日低点", float(low.tail(60).min()))
+    candidates.sort(key=lambda item: (item[0], item[2]))
+    return candidates
+
+
+def _nearest_support_reference(history: pd.DataFrame, technical: Mapping[str, Any]) -> tuple[str, float]:
+    candidates = _support_reference_candidates(history, technical)
+    if not candidates:
+        return "", 0.0
+    _, label, level = candidates[0]
+    return label, level
 
 
 def _pressure_signals(history: pd.DataFrame, technical: Mapping[str, Any]) -> tuple[int, str, float]:
@@ -4352,6 +4547,30 @@ def _fundamental_dimension(
                 financial_proxy = collector.get_cn_index_financial_proxies(str(valuation_snapshot.get("index_code", "")), top_n=5)
         except Exception:
             financial_proxy = {}
+        if asset_type in {"cn_fund", "cn_etf"} and fund_profile and valuation_snapshot:
+            match_quality = str(valuation_snapshot.get("match_quality", "")).strip()
+            if match_quality == "exact_no_pe":
+                holdings_proxy = _fund_holdings_valuation_proxy(collector, fund_profile, top_n=5)
+                if holdings_proxy:
+                    for key, value in holdings_proxy.items():
+                        if financial_proxy.get(key) is None:
+                            financial_proxy[key] = value
+                holdings_pe = holdings_proxy.get("pe_ttm")
+                coverage_weight = float(holdings_proxy.get("coverage_weight", 0.0) or 0.0)
+                coverage_ratio = float(holdings_proxy.get("coverage_ratio", 0.0) or 0.0)
+                if holdings_pe is not None and (coverage_ratio >= 0.35 or coverage_weight >= 35.0):
+                    benchmark_name = str(valuation_snapshot.get("index_name", "相关指数")).strip() or "相关指数"
+                    valuation_snapshot = {
+                        **valuation_snapshot,
+                        "pe_ttm": float(holdings_pe),
+                        "metric_label": "前五大重仓加权PE",
+                        "display_label": "真实基准重仓股PE代理",
+                        "match_quality": "exact_holdings_proxy",
+                        "match_note": (
+                            f"估值库已命中 `{benchmark_name}`，但缺少直接滚动PE；"
+                            f"当前改用最近一期前五大重仓加权PE代理（覆盖约 {coverage_weight:.1f}% 持仓）。"
+                        ),
+                    }
         try:
             sector_flow = _sector_flow_snapshot(metadata, _context_drivers(context or {}, config))
         except Exception:
@@ -4460,7 +4679,15 @@ def _fundamental_dimension(
                 pe_award = -10
             else:
                 pe_award = 0
-            detail = "当前接入的是目标基准或最接近主题指数的滚动 PE；价格位置另算，不与估值分位混用。"
+            match_quality = str(valuation_snapshot.get("match_quality", "")).strip()
+            if match_quality == "exact_holdings_proxy":
+                detail = "估值库已命中精确基准，但直接滚动PE缺失；当前改用最近一期前五大重仓加权PE代理，价格位置另算，不与估值分位混用。"
+            elif match_quality == "exact":
+                detail = "当前接入的是目标基准的滚动 PE；价格位置另算，不与估值分位混用。"
+            elif match_quality == "theme_proxy":
+                detail = "当前接入的是最接近主题指数的滚动 PE；价格位置另算，不与估值分位混用。"
+            else:
+                detail = "当前接入的是目标基准或最接近主题指数的滚动 PE；价格位置另算，不与估值分位混用。"
         raw += pe_award
         available += 25
         if pe_percentile is not None:
@@ -4864,6 +5091,11 @@ def _catalyst_dimension(
     _individual_asset_types = {"cn_stock", "hk", "us"}
     is_individual_stock = str(metadata.get("asset_type", "")) in _individual_asset_types
     stock_name_tokens = _stock_name_tokens(metadata) if is_individual_stock else []
+    catalyst_maxima = _catalyst_factor_maxima(
+        profile,
+        asset_type=asset_type_str,
+        is_individual_stock=bool(stock_name_tokens),
+    )
     stock_specific_pool = (
         [item for item in news_pool if _contains_any(_headline_text(item), stock_name_tokens)]
         if stock_name_tokens else news_pool
@@ -4925,8 +5157,10 @@ def _catalyst_dimension(
         policy_pick = None
         policy_award = 0
     # For cn_stock with per-stock news: redistribute weights (policy 25, leader 15, new factor 15)
-    _policy_max = 25 if (asset_type_str == "cn_stock" and stock_name_tokens) else 30
-    policy_award = min(policy_award, _policy_max)
+    _policy_default_max = 25 if (asset_type_str == "cn_stock" and stock_name_tokens) else 30
+    _policy_max = catalyst_maxima.get("policy", _policy_default_max)
+    policy_award = min(policy_award, _policy_default_max)
+    policy_award = _rescale_catalyst_award(policy_award, _policy_default_max, _policy_max)
     raw += policy_award
     available += _policy_max
     policy_signal = (
@@ -4992,13 +5226,19 @@ def _catalyst_dimension(
         ]
         if stock_specific_leader_items:
             leader_pick = _pick_best_news_item(stock_specific_leader_items, [*keyword_keys, *strict_event_keys], stock_name_tokens or keyword_keys)
-    _leader_max = 15 if (asset_type_str == "cn_stock" and stock_name_tokens) else 25
+    _leader_default_max = 15 if (asset_type_str == "cn_stock" and stock_name_tokens) else 25
+    _leader_max = catalyst_maxima.get("leader", _leader_default_max)
     if asset_type_str in {"hk", "us"} and stock_name_tokens:
-        leader_award = _leader_max if stock_specific_leader_items else 0
+        leader_award = _leader_default_max if stock_specific_leader_items else 0
         if not company_specific_news_available:
             leader_pick = None
+    elif asset_type_str == "cn_stock" and stock_name_tokens:
+        leader_award = _leader_default_max if stock_specific_leader_items else 0
+        if not stock_specific_leader_items:
+            leader_pick = None
     else:
-        leader_award = _leader_max if (leader_items or stock_specific_leader_items) else 0
+        leader_award = _leader_default_max if (leader_items or stock_specific_leader_items) else 0
+    leader_award = _rescale_catalyst_award(leader_award, _leader_default_max, _leader_max)
     raw += leader_award
     available += _leader_max
     leader_signal = (
@@ -5056,14 +5296,16 @@ def _catalyst_dimension(
     else:
         structured_award = 0
         structured_detail = "当前未命中结构化公司事件；这里按信息不足处理，不直接等于个股没有催化。"
+    _structured_max = catalyst_maxima.get("structured", 15)
+    structured_award = _rescale_catalyst_award(structured_award, 15, _structured_max)
     raw += structured_award
-    available += 15
+    available += _structured_max
     factors.append(
         _factor_row(
             "结构化事件",
             structured_pick["title"] if structured_pick else "未命中明确结构化公司事件",
             structured_award,
-            15,
+            _structured_max,
             structured_detail,
         )
     )
@@ -5231,19 +5473,21 @@ def _catalyst_dimension(
         )
     ]
     overseas_pick = _pick_best_news_item(overseas_items, [*overseas_leaders, *earnings_keys, *strict_event_keys], [*keyword_keys, *overseas_keyword_map.get(sector, [])])
+    _overseas_max = catalyst_maxima.get("overseas", 20)
     overseas_award = 20 if overseas_items else 0
     if asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available:
         overseas_pick = None
         overseas_award = 0
+    overseas_award = _rescale_catalyst_award(overseas_award, 20, _overseas_max)
     raw += overseas_award
-    available += 20
+    available += _overseas_max
     overseas_signal = (
         "未命中高置信个股直连新闻，海外映射暂不计分"
         if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available)
         else (overseas_pick["title"] if overseas_award > 0 and overseas_pick else "未命中直接海外映射")
     )
     overseas_detail = "当前未命中与公司直接相关的高置信海外映射新闻，避免把行业级海外消息直接算成个股催化。" if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available) else "重点看海外龙头财报/指引或模型产品催化"
-    factors.append(_factor_row("海外映射", overseas_signal, overseas_award, 20, overseas_detail))
+    factors.append(_factor_row("海外映射", overseas_signal, overseas_award, _overseas_max, overseas_detail))
     if overseas_award > 0 and overseas_pick:
         evidence_rows.append(_evidence_row(layer="海外映射", item=overseas_pick))
 
@@ -5289,17 +5533,21 @@ def _catalyst_dimension(
     density_pool = company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool if (is_individual_stock and stock_name_tokens) else news_pool)
     density_count = len(density_pool)
     density_label = f"个股相关头条 {density_count} 条（行业头条 {len(news_pool)} 条）" if (is_individual_stock and stock_name_tokens) else f"相关头条 {len(news_pool)} 条"
+    _density_max = catalyst_maxima.get("news_density", 10)
     density_award = 10 if density_count >= 2 else (5 if density_count >= 1 else 0)
+    density_award = _rescale_catalyst_award(density_award, 10, _density_max)
     raw += density_award
-    available += 10
-    factors.append(_factor_row("研报/新闻密度", density_label, density_award, 10, "个股直接提及的一级媒体头条密度"))
+    available += _density_max
+    factors.append(_factor_row("研报/新闻密度", density_label, density_award, _density_max, "个股直接提及的一级媒体头条密度"))
 
     heat_pool = company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool if (is_individual_stock and stock_name_tokens) else news_pool)
     source_count = len({str(item.get("source", "")) for item in heat_pool if item.get("source")})
+    _heat_max = catalyst_maxima.get("news_heat", 10)
     heat_award = 10 if source_count >= 2 else 0
+    heat_award = _rescale_catalyst_award(heat_award, 10, _heat_max)
     raw += heat_award
-    available += 10
-    factors.append(_factor_row("新闻热度", f"覆盖源 {source_count} 个", heat_award, 10, "从少量提及到多源同步，是热度拐点的代理"))
+    available += _heat_max
+    factors.append(_factor_row("新闻热度", f"覆盖源 {source_count} 个", heat_award, _heat_max, "从少量提及到多源同步，是热度拐点的代理"))
     if density_award > 0 or heat_award > 0:
         existing_titles = {str(item.get("title", "")).strip() for item in evidence_rows if str(item.get("title", "")).strip()}
         for item in _dedupe_news_items(list(heat_pool))[:2]:
@@ -5310,15 +5558,17 @@ def _catalyst_dimension(
             existing_titles.add(title)
 
     forward_events = _dedupe_news_items([*related_events, *existing_forward_events])
+    _forward_max = catalyst_maxima.get("forward_event", 5)
     forward_award = 5 if forward_events else 0
+    forward_award = _rescale_catalyst_award(forward_award, 5, _forward_max)
     raw += forward_award
-    available += 5
+    available += _forward_max
     factors.append(
         _factor_row(
             "前瞻催化",
             forward_events[0]["title"] if forward_events else f"未来 {FORWARD_EVENT_LOOKAHEAD_DAYS} 日未命中直接催化事件",
             forward_award,
-            5,
+            _forward_max,
             "未来财报/发布会/事件窗口已纳入；HK/US 个股优先读取公司级财报日历。",
         )
     )
@@ -5472,6 +5722,9 @@ def _relative_strength_dimension(
     factors: List[Dict[str, Any]] = []
     raw = 0
     available = 0
+    benchmark_spec = BENCHMARKS.get(asset_type)
+    benchmark_symbol = str(benchmark_spec[0]).strip() if benchmark_spec else ""
+    benchmark_name = str(benchmark_spec[2]).strip() if benchmark_spec else "基准"
     benchmark_returns = context.get("benchmark_returns", {}).get(asset_type)
     rel_5d = None
     rel_20d = None
@@ -5496,9 +5749,27 @@ def _relative_strength_dimension(
             turn_award = 0
         raw += turn_award
         available += 30
-        factors.append(_factor_row("超额拐点", f"相对基准 5日 {format_pct(rel_5d)} / 20日 {format_pct(rel_20d)}", turn_award, 30, "相对基准从负转正更接近轮动切换窗口", factor_id="j3_benchmark_relative"))
+        factors.append(
+            _factor_row(
+                "超额拐点",
+                f"相对基准（{benchmark_name}） 5日 {format_pct(rel_5d)} / 20日 {format_pct(rel_20d)}",
+                turn_award,
+                30,
+                f"当前相对强弱基准使用 `{benchmark_name}`；相对基准从负转正更接近轮动切换窗口。",
+                factor_id="j3_benchmark_relative",
+            )
+        )
     else:
-        factors.append(_factor_row("超额拐点", "缺失", None, 30, "基准收益序列缺失，未计算超额拐点", factor_id="j3_benchmark_relative"))
+        factors.append(
+            _factor_row(
+                "超额拐点",
+                f"缺失（相对基准：{benchmark_name}）",
+                None,
+                30,
+                f"基准收益序列缺失，未计算相对 `{benchmark_name}` 的超额拐点。",
+                factor_id="j3_benchmark_relative",
+            )
+        )
 
     board_move = _sector_board_match(metadata, context.get("drivers", {}))
     if board_move is not None:
@@ -5636,6 +5907,8 @@ def _relative_strength_dimension(
         "factors": factors,
         "core_signal": _top_material_signals(factors),
         "missing": score is None,
+        "benchmark_name": benchmark_name,
+        "benchmark_symbol": benchmark_symbol,
     }
 
 
@@ -6239,7 +6512,7 @@ def _seasonality_dimension(metadata: Mapping[str, Any], history: pd.DataFrame, c
     else:
         holiday_award = 0
         holiday_signal = "节假日窗口：该行业不适用"
-        holiday_detail = "节假日消费/出行窗口主要适用于消费/旅游/餐饮/零售/航空/酒店等行业。"
+        holiday_detail = "节假日窗口主要适用于需求会被假期直接抬升的行业；当前主题不按这条规则加分。"
     raw += holiday_award
     available += 10
     factors.append(_factor_row("节假日窗口", holiday_signal, holiday_award, 10, holiday_detail, factor_id="j2_holiday_window"))
@@ -6474,6 +6747,7 @@ def _macro_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) ->
             "宏观没有明显顺风，但也不是决定性逆风。",
             "宏观领先指标和当前风格都偏逆风，更适合保守处理。",
             "ℹ️ 宏观领先指标缺失，本次评级未纳入该维度",
+            max_score=40,
         ),
         "factors": factors,
         "core_signal": _top_material_signals(factors),
@@ -6745,14 +7019,20 @@ def _build_narrative(
     compression_award = int(compression_factor.get("awarded", 0) or 0)
     rsi = float(technical.get("rsi", {}).get("RSI", 50.0))
     ma20 = float(technical.get("ma_system", {}).get("mas", {}).get("MA20", 0.0))
-    ma60 = float(technical.get("ma_system", {}).get("mas", {}).get("MA60", ma20))
-    support_level = max(float(technical.get("fibonacci", {}).get("levels", {}).get("0.618", 0.0)), ma60)
+    _support_label, support_level = _nearest_support_reference(history, technical)
     _, _, nearest_pressure_level = _pressure_signals(history, technical)
+    macro_tilt = "偏顺风" if macro_score >= 28 else "大体中性" if macro_score >= 16 else "偏逆风"
 
-    macro_driver = (
-        f"当前更偏 `{theme}` / `{regime}` 背景。对 `{sector}` 方向来说，宏观与主线整体是 {'顺风' if macro_score >= 30 else '中性或略逆风'}，"
-        f"问题不在于故事是否完全失效，而在于这种顺风能否继续转化成新的价格确认。"
-    )
+    if theme and theme != "背景宏观主导":
+        macro_driver = (
+            f"中期背景仍按 `{regime}` 处理，当天交易主线更偏 `{theme}`。对 `{sector}` 方向来说，宏观与主线整体{macro_tilt}，"
+            f"问题不在于故事是否完全失效，而在于这种环境能否继续转化成新的价格确认。"
+        )
+    else:
+        macro_driver = (
+            f"当前中期背景更偏 `{regime}`。对 `{sector}` 方向来说，宏观整体{macro_tilt}，"
+            f"问题不在于故事是否完全失效，而在于这种环境能否继续转化成新的价格确认。"
+        )
     if _asset_note(metadata, asset_type):
         macro_driver += f" {_asset_note(metadata, asset_type)}"
     if asset_type == "cn_fund" and fund_profile:
@@ -6829,7 +7109,10 @@ def _build_narrative(
 
     positives: List[str] = []
     if macro_score >= 30:
-        positives.append(f"`{theme}` 和 `{regime}` 背景下，这个方向至少没有明显宏观逆风。")
+        if theme and theme != "背景宏观主导":
+            positives.append(f"中期 `{regime}` 背景仍在，当天主线 `{theme}` 也没有把这个方向推成纯宏观逆风。")
+        else:
+            positives.append(f"当前 `{regime}` 背景下，这个方向至少没有明显宏观逆风。")
     if relative_score >= 60:
         positives.append("相对强弱仍占优，说明它不是市场最先被放弃的方向。")
     if risk_score >= 60:
@@ -6863,6 +7146,7 @@ def _build_narrative(
         "电网": "需要继续盯政策节奏、商品价格和风险偏好；若主线切走，强势方向也可能进入获利了结。",
         "能源": "需要继续盯油价、地缘和政策调控；一旦油价冲高回落，交易拥挤可能迅速反噬。",
         "有色": "需要继续盯美元、商品价格和全球增长预期；外部需求转弱时弹性会明显收缩。",
+        "农业": "需要继续盯天气、粮价、化肥成本和政策节奏；如果粮食安全和农资价格主线降温，主题溢价回吐也会很快。",
     }
     risk_points = {
         "fundamental": f"真正的基本面风险不在 {metadata.get('name', analysis_seed.get('symbol'))} 本身，而在其所暴露的 `{sector}` 景气如果不及预期，估值支撑会继续下移。",
@@ -6902,7 +7186,11 @@ def _build_narrative(
         },
         {
             "watch": "关键支撑是否守住",
-            "judge": f"收盘不低于关键支撑 `{support_level:.3f}` 下方 2%",
+            "judge": (
+                f"收盘不低于关键支撑 `{support_level:.3f}` 下方 2%"
+                if support_level > 0
+                else "近端低点不再被连续跌破"
+            ),
             "bull": "说明回调更像消化而不是破位，左侧观察价值仍在。",
             "bear": "说明支撑失效，先处理风险，再谈逻辑。",
         },
@@ -7138,18 +7426,7 @@ def _action_plan(
         stop_loss_pct = "-10%"
 
     stop_buffer = abs(float(stop_loss_pct.strip("%"))) / 100.0
-    support_candidates = [
-        candidate
-        for candidate in [
-            ma20,
-            ma60,
-            float(fib_levels.get("0.382", 0.0)),
-            float(fib_levels.get("0.500", 0.0)),
-            float(fib_levels.get("0.618", 0.0)),
-            float(history["low"].tail(20).min()),
-        ]
-        if candidate and candidate < close_now
-    ]
+    support_candidates = [level for _, _, level in _support_reference_candidates(history, technical)]
     structural_stop = max(support_candidates) * 0.995 if support_candidates else 0.0
     stop_floor = close_now * (1.0 - stop_buffer)
     stop_ref = max(structural_stop, stop_floor) if structural_stop else stop_floor
@@ -7178,6 +7455,7 @@ def _action_plan(
 
     buy_low_ref: Optional[float] = None
     buy_high_ref: Optional[float] = None
+    buy_range_note = ""
     if not (direction == "回避" and "暂不出手" in position):
         buy_candidates = [
             candidate
@@ -7203,10 +7481,18 @@ def _action_plan(
         else:
             buy_anchor = 0.0
         if buy_anchor > 0:
-            buy_high_ref = min(close_now * 1.005, max(buy_anchor, close_now * 0.985))
-            buy_low_ref = max(stop_ref * 1.02, min(buy_anchor, buy_high_ref) * 0.985)
-            if buy_low_ref >= buy_high_ref:
-                buy_low_ref = buy_high_ref * 0.985
+            buy_high_candidate = min(close_now * 1.005, max(buy_anchor * 1.01, close_now * 0.985))
+            min_entry_stop_gap = max(0.015 if asset_type in {"hk", "us"} else 0.01, stop_buffer * 0.10)
+            min_buy_low = stop_ref / max(1.0 - min_entry_stop_gap, 0.01)
+            buy_low_candidate = max(min_buy_low, min(buy_anchor, buy_high_candidate) * 0.985)
+            if buy_low_candidate < buy_high_candidate:
+                buy_low_ref = buy_low_candidate
+                buy_high_ref = buy_high_candidate
+            else:
+                buy_range_note = (
+                    f"暂不设，当前候选买点离止损位太近（至少留 `{min_entry_stop_gap:.1%}` 缓冲）,"
+                    " 先等回踩更深或右侧确认后再给区间。"
+                )
 
     trim_low_ref = max(close_now * (1.06 if rating >= 3 else 1.04), target_ref * 0.97)
     trim_high_ref = max(trim_low_ref * 1.02, target_ref * 1.03)
@@ -7224,7 +7510,11 @@ def _action_plan(
     )
     target = f"先看前高/近 60 日高点 {target_ref:.3f} 附近的承压与突破情况"
     stop = f"跌破 {stop_ref:.3f} 或主线/催化失效时重新评估"
-    buy_range = _format_execution_price_range(buy_low_ref, buy_high_ref) if buy_low_ref and buy_high_ref else "暂不设，先等右侧确认"
+    buy_range = (
+        _format_execution_price_range(buy_low_ref, buy_high_ref)
+        if buy_low_ref and buy_high_ref
+        else buy_range_note or "暂不设，先等右侧确认"
+    )
     trim_range = _format_execution_price_range(trim_low_ref, trim_high_ref)
 
     # --- Portfolio-level position management ---
@@ -7328,7 +7618,11 @@ def analyze_opportunity(
     runtime_context["fund_profile"] = fund_profile
     if fund_profile:
         metadata = _enrich_metadata_with_fund_profile(metadata, fund_profile)
-    notes: List[str] = []
+    notes: List[str] = [
+        str(item).strip()
+        for item in (fund_profile.get("notes") or [])
+        if str(item).strip() and any(token in str(item) for token in ("降级", "异常", "不可用"))
+    ]
     history_fallback_mode = False
     try:
         raw_history = fetch_asset_history(symbol, asset_type, dict(config))
@@ -7873,6 +8167,64 @@ def _matches_manager_filter(row: Mapping[str, Any], manager_filter: str) -> bool
     return keyword in manager or keyword in name
 
 
+def _sector_round_robin_head(
+    frame: pd.DataFrame,
+    *,
+    sector_col: str,
+    limit: int,
+    preferred_sectors: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    """Keep sector breadth so one hot theme does not crowd out the whole pool.
+
+    ``frame`` is expected to be sorted by the primary pre-rank already. This helper
+    only changes which rows survive the candidate cap; it does not weaken any hard
+    filters or re-score the rows.
+    """
+    if frame.empty or limit <= 0:
+        return frame.head(0)
+    if len(frame) <= limit:
+        return frame
+
+    sector_buckets: Dict[str, List[Any]] = {}
+    seen_sectors: List[str] = []
+    for index, raw_sector in zip(frame.index, frame[sector_col].tolist()):
+        sector = str(raw_sector or "").strip() or "综合"
+        if sector not in sector_buckets:
+            sector_buckets[sector] = []
+            seen_sectors.append(sector)
+        sector_buckets[sector].append(index)
+
+    preferred: List[str] = []
+    for item in preferred_sectors or []:
+        sector = str(item).strip()
+        if sector and sector in sector_buckets and sector not in preferred:
+            preferred.append(sector)
+
+    ordered_sectors = [
+        *preferred,
+        *[sector for sector in seen_sectors if sector not in preferred and sector != "综合"],
+    ]
+    if "综合" in sector_buckets and "综合" not in ordered_sectors:
+        ordered_sectors.append("综合")
+
+    selected_indexes: List[Any] = []
+    layer = 0
+    while len(selected_indexes) < limit:
+        progressed = False
+        for sector in ordered_sectors:
+            bucket = sector_buckets.get(sector) or []
+            if layer >= len(bucket):
+                continue
+            selected_indexes.append(bucket[layer])
+            progressed = True
+            if len(selected_indexes) >= limit:
+                break
+        if not progressed:
+            break
+        layer += 1
+    return frame.loc[selected_indexes]
+
+
 def build_fund_pool(
     config: Mapping[str, Any],
     theme_filter: str = "",
@@ -8181,7 +8533,13 @@ def build_default_pool(
         working["_pre_rank"] = working.apply(_pre_rank, axis=1)
         working = working.sort_values(by=["_tracking_key", "_pre_rank", amount_col], ascending=[True, False, False])
         working = working.drop_duplicates(subset=["_tracking_key"], keep="first")
-        working = working.sort_values(by=["_pre_rank", amount_col], ascending=[False, False]).head(max_candidates)
+        working = working.sort_values(by=["_pre_rank", amount_col], ascending=[False, False])
+        working = _sector_round_robin_head(
+            working,
+            sector_col="_sector",
+            limit=max_candidates,
+            preferred_sectors=preferred,
+        )
         added = 0
         for _, row in working.iterrows():
             symbol = str(row[symbol_col])
@@ -9065,8 +9423,19 @@ def build_stock_pool(
                     name_match = frame[name_col].astype(str).str.lower().str.contains(lowered_filter, na=False)
                     industry_match = frame[industry_col].astype(str).str.lower().str.contains(lowered_filter, na=False) if industry_col else pd.Series(False, index=frame.index)
                     frame = frame[name_match | industry_match]
-                # Sort by turnover and take top candidates
-                frame = frame.sort_values(amount_col, ascending=False).head(max_candidates)
+                frame["_pool_sector"] = frame.apply(
+                    lambda row: _map_industry_to_sector(
+                        str(row[industry_col]) if industry_col and pd.notna(row.get(industry_col)) else "",
+                        str(row[name_col]),
+                    )[0],
+                    axis=1,
+                )
+                frame = frame.sort_values(amount_col, ascending=False)
+                frame = _sector_round_robin_head(
+                    frame,
+                    sector_col="_pool_sector",
+                    limit=max_candidates,
+                )
 
                 for _, row in frame.iterrows():
                     symbol = str(row[code_col])

@@ -30,6 +30,137 @@ SCAN_DETAIL_MARKDOWN = "\n".join(
     ]
 )
 
+STRATEGY_VALIDATE_MARKDOWN = "\n".join(
+    [
+        "# Strategy Validation",
+        "",
+        "## 这套策略是什么",
+        "",
+        "| 项目 | 结论 |",
+        "| --- | --- |",
+        "| 是不是具体策略 | 是，但当前是窄版研究策略。 |",
+        "| 这份报告在回答什么 | 它在看这套固定打分逻辑历史上是否稳定。 |",
+        "",
+        "## 这次到底看出来什么",
+        "",
+        "| 项目 | 结论 |",
+        "| --- | --- |",
+        "| 一句话结论 | 当前 batch 仍在观察。 |",
+        "| 现在能不能用 | 现在不能把它当成稳定可用策略。 |",
+        "",
+        "## 执行摘要",
+        "",
+        "| 项目 | 结论 |",
+        "| --- | --- |",
+        "| 当前判断 | 当前 batch 仍在观察。 |",
+        "| 主要问题 | 平均超额收益偏弱。 |",
+        "| 下一步 | 继续扩大样本。 |",
+        "",
+        "## 总体结果",
+        "",
+        "- hit rate: `50.0%`",
+        "- 平均超额收益: `-1.0%`",
+        "- 平均成本后方向收益: `-1.5%`",
+        "",
+        "## Out-Of-Sample Validation",
+        "",
+        "- 当前 holdout 已开始承压。",
+        "",
+        "## Rollback Gate",
+        "",
+        "- 当前 baseline 已进入观察。",
+    ]
+)
+
+STRATEGY_EXPERIMENT_MARKDOWN = "\n".join(
+    [
+        "# Strategy Experiment",
+        "",
+        "## 这套策略是什么",
+        "",
+        "| 项目 | 结论 |",
+        "| --- | --- |",
+        "| 是不是具体策略 | 是，但当前是窄版研究策略。 |",
+        "| 这份报告在回答什么 | 它在比较 baseline 和几种预定义权重变体。 |",
+        "",
+        "## 这次到底看出来什么",
+        "",
+        "| 项目 | 结论 |",
+        "| --- | --- |",
+        "| 一句话结论 | 当前 baseline 继续保留。 |",
+        "| 现在能不能切换 | 现在不能切换，应继续保留 baseline。 |",
+        "",
+        "## 执行摘要",
+        "",
+        "| 项目 | 结论 |",
+        "| --- | --- |",
+        "| 当前判断 | 当前 baseline 继续保留。 |",
+        "| 主要问题 | challenger 还没有稳定跑赢。 |",
+        "| 下一步 | 继续扩大样本。 |",
+        "",
+        "## Promotion Gate",
+        "",
+        "- 当前 challenger 仍未过 gate。",
+        "",
+        "## Rollback Gate",
+        "",
+        "- 当前 baseline 仍可 hold。",
+        "",
+        "## 变体对比",
+        "",
+        "| variant | validated | oos | xsec | hit rate | avg excess | avg net directional | avg drawdown | dominant attribution |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| baseline | 8 | stable | stable | 50.0% | -1.0% | -1.5% | -5.0% | weight_misallocation |",
+    ]
+)
+
+
+def _review_text(
+    *,
+    status: str,
+    no_p1: str,
+    allow_delivery: str,
+    round_value: int = 1,
+    previous_round: int | None = None,
+    converged: str = "否",
+    continue_next: str = "是",
+    summary: str = "可审",
+    issues: list[str] | None = None,
+    independent: list[str] | None = None,
+    zero_prompt: list[str] | None = None,
+    convergence_extra: list[str] | None = None,
+    structural_reviewer: str = "gpt-5.4 / reviewer_structural",
+    divergent_reviewer: str = "gpt-5.4-mini / reviewer_divergent",
+) -> str:
+    lines = [
+        "## 一句话总评",
+        summary,
+        "## 主要问题",
+        *(issues or ["- 无新的实质问题"]),
+        "## 独立答案",
+        *(independent or ["- 结论一致"]),
+        "## 零提示发散审",
+        *(zero_prompt or ["- 零提示复核后，没有新的高优先级问题。"]),
+        "## 收敛结论",
+        f"- round：{round_value}",
+    ]
+    if previous_round is not None:
+        lines.append(f"- previous_round：{previous_round}")
+    lines.extend(
+        [
+            f"- 状态：{status}",
+            f"- 无新的 P0/P1：{no_p1}",
+            f"- 本轮是否收敛：{converged}",
+            f"- 是否建议继续下一轮：{continue_next}",
+            f"- 允许作为成稿交付：{allow_delivery}",
+            f"- 结构审执行者：{structural_reviewer}",
+            f"- 发散审执行者：{divergent_reviewer}",
+        ]
+    )
+    if convergence_extra:
+        lines.extend(convergence_extra)
+    return "\n".join(lines)
+
 
 @pytest.fixture()
 def isolated_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -68,21 +199,17 @@ def test_report_guard_blocks_non_pass_review(isolated_reports: Path) -> None:
     review = review_path_for(target)
     review.parent.mkdir(parents=True, exist_ok=True)
     review.write_text(
-        "\n".join(
-            [
-                "## 一句话总评",
-                "还不能发",
-                "## 主要问题",
-                "- 存在实质问题",
-                "## 独立答案",
-                "- 保守处理",
-                "## 零提示发散审",
-                "- 不看模板时，第一反应仍是风险没有收口。",
-                "## 收敛结论",
-                "- 状态：BLOCKED",
-                "- 无新的 P0/P1：否",
-                "- 允许作为成稿交付：否",
-            ]
+        _review_text(
+            status="BLOCKED",
+            no_p1="否",
+            allow_delivery="否",
+            round_value=1,
+            converged="否",
+            continue_next="是",
+            summary="还不能发",
+            issues=["- 存在实质问题"],
+            independent=["- 保守处理"],
+            zero_prompt=["- 不看模板时，第一反应仍是风险没有收口。"],
         ),
         encoding="utf-8",
     )
@@ -110,9 +237,14 @@ def test_report_guard_blocks_review_missing_zero_prompt_divergence_section(isola
                 "## 独立答案",
                 "- 结论一致",
                 "## 收敛结论",
+                "- round：1",
                 "- 状态：PASS",
                 "- 无新的 P0/P1：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
                 "- 允许作为成稿交付：是",
+                "- 结构审执行者：gpt-5.4 / reviewer_structural",
+                "- 发散审执行者：gpt-5.4-mini / reviewer_divergent",
             ]
         ),
         encoding="utf-8",
@@ -127,27 +259,140 @@ def test_report_guard_blocks_review_missing_zero_prompt_divergence_section(isola
         )
 
 
+def test_report_guard_blocks_missing_split_review_roles(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/scans/etfs/final/scan_159981_2026-03-11_client_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+            zero_prompt=["- 零提示复核后，没有新的高优先级问题。"],
+            structural_reviewer="",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReportGuardError, match="结构审执行者"):
+        export_reviewed_markdown_bundle(
+            report_type="scan",
+            markdown_text=SCAN_DETAIL_MARKDOWN,
+            markdown_path=target,
+            release_findings=[],
+        )
+
+
+def test_report_guard_allows_round1_pass_when_sections_only_state_no_new_findings(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/briefings/final/daily_briefing_2026-03-23_client_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+            issues=["- 无新的实质问题。"],
+            independent=["- 结论一致。"],
+            zero_prompt=["- 零提示二审未发现新的实质性问题。"],
+            convergence_extra=["- closed_items：无"],
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = export_reviewed_markdown_bundle(
+        report_type="briefing",
+        markdown_text="\n".join(
+            [
+                "# 今日晨报 | 2026-03-23",
+                "",
+                "## 为什么今天这么判断",
+                "",
+                "- 原因一",
+                "",
+                "## 宏观领先指标",
+                "",
+                "- 指标一",
+                "",
+                "## 数据完整度",
+                "",
+                "- 覆盖完整",
+                "",
+                "## 今天怎么做",
+                "",
+                "- 先观察",
+                "",
+                "## 重点观察",
+                "",
+                "- 方向一",
+                "",
+                "## 今日A股观察池",
+                "",
+                "| 排名 | 标的 |",
+                "| --- | --- |",
+                "| 1 | 演示标的 |",
+            ]
+        ),
+        markdown_path=target,
+        release_findings=[],
+    )
+
+    assert bundle["review"] == review
+
+
+def test_report_guard_blocks_same_split_review_role(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/scans/etfs/final/scan_159981_2026-03-11_client_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+            zero_prompt=["- 零提示复核后，没有新的高优先级问题。"],
+            structural_reviewer="gpt-5.4 / reviewer_shared",
+            divergent_reviewer="gpt-5.4 / reviewer_shared",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReportGuardError, match="不能是同一个 reviewer"):
+        export_reviewed_markdown_bundle(
+            report_type="scan",
+            markdown_text=SCAN_DETAIL_MARKDOWN,
+            markdown_path=target,
+            release_findings=[],
+        )
+
+
 def test_report_guard_blocks_conflicting_pass_review_text(isolated_reports: Path) -> None:
     target = isolated_reports / "reports/scans/etfs/final/scan_159981_2026-03-11_client_final.md"
     review = review_path_for(target)
     review.parent.mkdir(parents=True, exist_ok=True)
     review.write_text(
-        "\n".join(
-            [
-                "## 一句话总评",
-                "正文仍写着未关闭问题。",
-                "## 主要问题",
-                "- 还有问题",
-                "### P1-1 关闭状态：未关闭",
-                "## 独立答案",
-                "- 结论还没完全收口",
-                "## 零提示发散审",
-                "- 零提示再看，仍然先担心未关闭的阻塞项。",
-                "## 收敛结论",
-                "- 状态：PASS",
-                "- 无新的 P0/P1：是",
-                "- 允许作为成稿交付：是",
-            ]
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="正文仍写着未关闭问题。",
+            issues=["- 还有问题", "### P1-1 关闭状态：未关闭"],
+            independent=["- 结论还没完全收口"],
+            zero_prompt=["- 零提示再看，仍然先担心未关闭的阻塞项。"],
         ),
         encoding="utf-8",
     )
@@ -166,21 +411,15 @@ def test_report_guard_allows_passed_review_and_writes_manifest(isolated_reports:
     review = review_path_for(target)
     review.parent.mkdir(parents=True, exist_ok=True)
     review.write_text(
-        "\n".join(
-            [
-                "## 一句话总评",
-                "已接近可发",
-                "## 主要问题",
-                "- 无新的实质问题",
-                "## 独立答案",
-                "- 结论一致",
-                "## 零提示发散审",
-                "- 只看成稿时，没有再发现新的高优先级问题。",
-                "## 收敛结论",
-                "- 状态：PASS",
-                "- 无新的 P0/P1：是",
-                "- 允许作为成稿交付：是",
-            ]
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="已接近可发",
+            zero_prompt=["- 只看成稿时，没有再发现新的高优先级问题。"],
         ),
         encoding="utf-8",
     )
@@ -208,21 +447,15 @@ def test_report_guard_blocks_summary_like_markdown(isolated_reports: Path) -> No
     review = review_path_for(target)
     review.parent.mkdir(parents=True, exist_ok=True)
     review.write_text(
-        "\n".join(
-            [
-                "## 一句话总评",
-                "可发",
-                "## 主要问题",
-                "- 无新的实质问题",
-                "## 独立答案",
-                "- 结论一致",
-                "## 零提示发散审",
-                "- 零提示再审，没有新的阻塞项。",
-                "## 收敛结论",
-                "- 状态：PASS",
-                "- 无新的 P0/P1：是",
-                "- 允许作为成稿交付：是",
-            ]
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+            zero_prompt=["- 零提示再审，没有新的阻塞项。"],
         ),
         encoding="utf-8",
     )
@@ -241,21 +474,15 @@ def test_report_guard_accepts_detailed_retrospect_markdown(isolated_reports: Pat
     review = review_path_for(target)
     review.parent.mkdir(parents=True, exist_ok=True)
     review.write_text(
-        "\n".join(
-            [
-                "## 一句话总评",
-                "可发",
-                "## 主要问题",
-                "- 无新的实质问题",
-                "## 独立答案",
-                "- 结论一致",
-                "## 零提示发散审",
-                "- 零提示再审，没有新的阻塞项。",
-                "## 收敛结论",
-                "- 状态：PASS",
-                "- 无新的 P0/P1：是",
-                "- 允许作为成稿交付：是",
-            ]
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+            zero_prompt=["- 零提示再审，没有新的阻塞项。"],
         ),
         encoding="utf-8",
     )
@@ -290,21 +517,14 @@ def test_report_guard_accepts_stock_analysis_markdown(isolated_reports: Path) ->
     review = review_path_for(target)
     review.parent.mkdir(parents=True, exist_ok=True)
     review.write_text(
-        "\n".join(
-            [
-                "## 一句话总评",
-                "可发",
-                "## 主要问题",
-                "- 无新的实质问题",
-                "## 独立答案",
-                "- 结论一致",
-                "## 零提示发散审",
-                "- 零提示复核后，没有新的高优先级问题。",
-                "## 收敛结论",
-                "- 状态：PASS",
-                "- 无新的 P0/P1：是",
-                "- 允许作为成稿交付：是",
-            ]
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
         ),
         encoding="utf-8",
     )
@@ -334,26 +554,75 @@ def test_report_guard_accepts_stock_analysis_markdown(isolated_reports: Path) ->
     assert bundle["markdown"] == target
 
 
+def test_report_guard_accepts_strategy_validation_markdown(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/strategy/validate/final/strategy_validate_600519_2026-03-23_client_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+            zero_prompt=["- 零提示再审，没有新的阻塞项。"],
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = export_reviewed_markdown_bundle(
+        report_type="strategy",
+        markdown_text=STRATEGY_VALIDATE_MARKDOWN,
+        markdown_path=target,
+        release_findings=[],
+    )
+
+    assert bundle["markdown"] == target
+
+
+def test_report_guard_accepts_strategy_experiment_markdown(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/strategy/experiment/final/strategy_experiment_600519_2026-03-23_client_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+            zero_prompt=["- 零提示再审，没有新的阻塞项。"],
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = export_reviewed_markdown_bundle(
+        report_type="strategy",
+        markdown_text=STRATEGY_EXPERIMENT_MARKDOWN,
+        markdown_path=target,
+        release_findings=[],
+    )
+
+    assert bundle["markdown"] == target
+
+
 def test_report_guard_accepts_etf_pick_markdown(isolated_reports: Path) -> None:
     target = isolated_reports / "reports/etf_picks/final/etf_pick_2026-03-12_final.md"
     review = review_path_for(target)
     review.parent.mkdir(parents=True, exist_ok=True)
     review.write_text(
-        "\n".join(
-            [
-                "## 一句话总评",
-                "可发",
-                "## 主要问题",
-                "- 无新的实质问题",
-                "## 独立答案",
-                "- 结论一致",
-                "## 零提示发散审",
-                "- 零提示复核后，没有新的高优先级问题。",
-                "## 收敛结论",
-                "- 状态：PASS",
-                "- 无新的 P0/P1：是",
-                "- 允许作为成稿交付：是",
-            ]
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
         ),
         encoding="utf-8",
     )
@@ -412,21 +681,14 @@ def test_report_guard_accepts_observe_etf_pick_markdown(isolated_reports: Path) 
     review = review_path_for(target)
     review.parent.mkdir(parents=True, exist_ok=True)
     review.write_text(
-        "\n".join(
-            [
-                "## 一句话总评",
-                "可发",
-                "## 主要问题",
-                "- 无新的实质问题",
-                "## 独立答案",
-                "- 结论一致",
-                "## 零提示发散审",
-                "- 零提示复核后，没有新的高优先级问题。",
-                "## 收敛结论",
-                "- 状态：PASS",
-                "- 无新的 P0/P1：是",
-                "- 允许作为成稿交付：是",
-            ]
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
         ),
         encoding="utf-8",
     )
@@ -494,3 +756,89 @@ def test_exported_bundle_lines_includes_html_between_markdown_and_pdf() -> None:
         "[client html] /tmp/demo.html",
         "[client pdf] /tmp/demo.pdf",
     ]
+
+
+def test_report_guard_blocks_single_round_pass_with_actionable_findings(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/scans/final/scan_300308_2026-03-21_client_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="形式上想放行，但正文还有问题。",
+            issues=["- `P2`：解释链还没收口。"],
+            zero_prompt=["- 零提示再看，最先冒出来的问题仍然是解释链断裂。"],
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReportGuardError, match="缺少回修闭环"):
+        export_reviewed_markdown_bundle(
+            report_type="scan",
+            markdown_text=SCAN_DETAIL_MARKDOWN,
+            markdown_path=target,
+            release_findings=[],
+        )
+
+
+def test_report_guard_blocks_multi_round_pass_without_close_or_carry_evidence(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/scans/final/scan_300308_2026-03-22_client_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=2,
+            previous_round=1,
+            converged="是",
+            continue_next="否",
+            summary="看起来想收敛，但没写闭环证据。",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReportGuardError, match="收敛证据不足"):
+        export_reviewed_markdown_bundle(
+            report_type="scan",
+            markdown_text=SCAN_DETAIL_MARKDOWN,
+            markdown_path=target,
+            release_findings=[],
+        )
+
+
+def test_report_guard_blocks_multi_round_pass_with_only_placeholder_handoff(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/scans/final/scan_300308_2026-03-23_client_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=2,
+            previous_round=1,
+            converged="是",
+            continue_next="否",
+            summary="看起来已经收敛，但闭环字段只有占位词。",
+            convergence_extra=[
+                "- carried_p0_p1：无",
+                "- closed_items：无",
+            ],
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReportGuardError, match="收敛证据不足"):
+        export_reviewed_markdown_bundle(
+            report_type="scan",
+            markdown_text=SCAN_DETAIL_MARKDOWN,
+            markdown_path=target,
+            release_findings=[],
+        )

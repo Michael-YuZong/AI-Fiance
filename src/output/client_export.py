@@ -470,16 +470,44 @@ def _render_table(table_lines: Iterable[str], source_dir: Path | None = None) ->
     rows = [line.strip() for line in table_lines if line.strip()]
     if len(rows) < 2:
         return ""
-    parsed = [[cell.strip() for cell in row.strip("|").split("|")] for row in rows]
+    parsed = [[cell.strip() for cell in _split_markdown_table_row(row)] for row in rows]
     header = parsed[0]
     body = parsed[2:]
     head_html = "".join(f"<th>{_format_inline(cell, source_dir)}</th>" for cell in header)
     body_html = []
     for row in body:
+        if len(row) < len(header):
+            row = row + [""] * (len(header) - len(row))
+        elif len(row) > len(header):
+            row = row[: len(header) - 1] + [" | ".join(row[len(header) - 1 :])]
         body_html.append(
             "<tr>" + "".join(f"<td>{_format_inline(cell, source_dir)}</td>" for cell in row) + "</tr>"
         )
     return "<table><thead><tr>" + head_html + "</tr></thead><tbody>" + "".join(body_html) + "</tbody></table>"
+
+
+def _split_markdown_table_row(row: str) -> List[str]:
+    body = row.strip().strip("|")
+    cells: List[str] = []
+    current: List[str] = []
+    escaped = False
+    for char in body:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "|":
+            cells.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    if escaped:
+        current.append("\\")
+    cells.append("".join(current))
+    return cells
 
 
 def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None = None) -> str:
@@ -712,21 +740,45 @@ def _export_pdf(markdown_text: str, html_path: Path, pdf_path: Path) -> None:
     raise RuntimeError("PDF 导出失败：既没有可用的 Microsoft Edge，也没有可用的 fpdf。")
 
 
+def _rewrite_local_report_asset_paths(markdown_text: str, markdown_dir: Path) -> str:
+    base = Path(markdown_dir).resolve()
+
+    def _replace(match: re.Match[str]) -> str:
+        prefix, raw_path, suffix = match.group(1), match.group(2), match.group(3)
+        candidate = Path(raw_path)
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            return match.group(0)
+        if not resolved.is_absolute():
+            return match.group(0)
+        if "reports" not in resolved.parts or "assets" not in resolved.parts:
+            return match.group(0)
+        try:
+            relative = os.path.relpath(resolved, base)
+        except ValueError:
+            return match.group(0)
+        return f"{prefix}{relative}{suffix}"
+
+    return re.sub(r"(!?\[[^\]]*\]\()(/[^)\s]+)(\))", _replace, markdown_text)
+
+
 def export_markdown_bundle(markdown_text: str, markdown_path: Path, *, allow_unreviewed_final: bool = False) -> Dict[str, Path]:
     """Persist markdown and export same-style HTML/PDF bundle."""
     if "final" in markdown_path.parts and not allow_unreviewed_final:
         raise RuntimeError("禁止直接写入 final 目录；请先通过外部评审门禁，再使用 report_guard 导出成稿。")
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
-    markdown_path.write_text(markdown_text, encoding="utf-8")
+    normalized_markdown = _rewrite_local_report_asset_paths(markdown_text, markdown_path.parent)
+    markdown_path.write_text(normalized_markdown, encoding="utf-8")
 
     html_path = markdown_path.with_suffix(".html")
     html_path.write_text(
-        markdown_to_html(markdown_text, markdown_path.stem, source_dir=markdown_path.parent),
+        markdown_to_html(normalized_markdown, markdown_path.stem, source_dir=markdown_path.parent),
         encoding="utf-8",
     )
 
     pdf_path = markdown_path.with_suffix(".pdf")
-    _export_pdf(markdown_text, html_path, pdf_path)
+    _export_pdf(normalized_markdown, html_path, pdf_path)
     return {
         "markdown": markdown_path,
         "html": html_path,

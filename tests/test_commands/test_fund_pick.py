@@ -76,3 +76,71 @@ def test_payload_keeps_selection_context() -> None:
     assert payload["selection_context"]["discovery_mode_label"] == "全市场初筛"
     assert payload["selection_context"]["style_filter_label"] == "主动权益"
     assert payload["selection_context"]["blind_spots"] == ["全市场基金池有 3 只因画像拉取失败被跳过。"]
+
+
+def test_payload_uses_shared_dimension_summary_for_catalyst() -> None:
+    analysis = _analysis("021740", "前海开源黄金ETF联接C", "黄金", technical=30, fundamental=45, catalyst=23, relative=35, risk=60)
+    analysis["dimensions"]["catalyst"] = {
+        "score": 23,
+        "max_score": 100,
+        "summary": "催化不足，当前更像静态博弈。",
+        "factors": [
+            {"name": "政策催化", "display_score": "0/30"},
+            {"name": "产品/跟踪方向催化", "display_score": "12/12"},
+            {"name": "研报/新闻密度", "display_score": "10/10"},
+            {"name": "新闻热度", "display_score": "10/10"},
+        ],
+    }
+
+    payload = _payload_from_analyses([analysis])
+
+    catalyst_row = next(row for row in payload["winner"]["dimension_rows"] if row[0] == "催化面")
+    assert catalyst_row[2] == "直接催化偏弱，舆情关注度尚可，因此当前更像静态博弈。"
+
+
+def test_payload_marks_fund_chips_as_auxiliary_dimension() -> None:
+    analysis = _analysis("021740", "前海开源黄金ETF联接C", "黄金", technical=30, fundamental=45, catalyst=23, relative=35, risk=60)
+
+    payload = _payload_from_analyses([analysis])
+
+    chips_row = next(row for row in payload["winner"]["dimension_rows"] if row[0] == "筹码结构（辅助项）")
+    assert chips_row[1] == "辅助项"
+    assert "主排序不直接使用这项" in chips_row[2]
+
+
+def test_payload_keeps_regime_context() -> None:
+    analysis = _analysis("022365", "永赢科技智选混合发起C", "科技", technical=35, fundamental=75, catalyst=50, relative=47, risk=85, macro=30)
+
+    payload = _payload_from_analyses(
+        [analysis],
+        regime={
+            "current_regime": "recovery",
+            "reasoning": ["PMI 回到 50 上方。", "信用脉冲边际改善。"],
+        },
+        day_theme={"label": "能源冲击 + 地缘风险"},
+    )
+
+    assert payload["regime"]["current_regime"] == "recovery"
+    assert payload["day_theme"]["label"] == "能源冲击 + 地缘风险"
+
+
+def test_payload_keeps_provenance_fields_for_renderer() -> None:
+    analysis = _analysis("022365", "永赢科技智选混合发起C", "科技", technical=35, fundamental=75, catalyst=50, relative=47, risk=85, macro=30)
+    analysis["history"] = {"stub": True}
+    analysis["intraday"] = {"enabled": False}
+    analysis["metadata"]["history_source_label"] = "基金净值"
+    analysis["benchmark_name"] = "中证科技"
+    analysis["benchmark_symbol"] = "000985"
+    analysis["provenance"] = {
+        "analysis_generated_at": "2026-03-11 10:00",
+        "market_data_as_of": "2026-03-11",
+        "relative_benchmark_name": "中证科技",
+        "relative_benchmark_symbol": "000985",
+        "news_mode": "proxy",
+    }
+
+    payload = _payload_from_analyses([analysis], {})
+
+    assert payload["winner"]["generated_at"] == "2026-03-11 10:00:00"
+    assert payload["winner"]["provenance"]["relative_benchmark_symbol"] == "000985"
+    assert payload["winner"]["benchmark_name"] == "中证科技"

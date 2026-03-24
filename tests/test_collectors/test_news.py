@@ -197,6 +197,39 @@ feeds: []
     assert "gaming stakes" in items[0]["title"].lower()
 
 
+def test_news_collector_search_by_keywords_filters_generic_or_stale_market_pages(tmp_path, monkeypatch):
+    config_path = tmp_path / "news.yaml"
+    config_path.write_text(
+        """
+preferences:
+  preferred_sources: ["Reuters"]
+  required_sources: []
+  max_items_per_feed: 2
+feeds: []
+""".strip(),
+        encoding="utf-8",
+    )
+    collector = NewsCollector({"news_feeds_file": str(config_path)})
+
+    def fake_cached_call(cache_key, fetcher, *args, **kwargs):  # noqa: ANN001
+        if "reuters.com" in cache_key.lower():
+            return feedparser.parse(
+                """
+<rss><channel>
+  <item><title>Global Market Headlines | Breaking Stock Market News - Reuters</title><link>https://example.com/generic</link><pubDate>Mon, 06 Jun 2016 02:15:43 GMT</pubDate><source>Reuters</source></item>
+  <item><title>PBOC signals ample liquidity support for domestic demand - Reuters</title><link>https://example.com/policy</link><pubDate>Sat, 21 Mar 2026 02:15:43 GMT</pubDate><source>Reuters</source></item>
+</channel></rss>
+""".strip()
+            )
+        return feedparser.parse("<rss><channel></channel></rss>")
+
+    monkeypatch.setattr(collector, "cached_call", fake_cached_call)
+    items = collector.search_by_keywords(["流动性", "内需"], preferred_sources=["Reuters"], limit=4, recent_days=7)
+    assert len(items) == 1
+    assert "Global Market Headlines" not in items[0]["title"]
+    assert "ample liquidity support" in items[0]["title"]
+
+
 def test_news_collector_search_by_keywords_can_be_disabled(tmp_path, monkeypatch):
     config_path = tmp_path / "news.yaml"
     config_path.write_text(

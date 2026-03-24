@@ -519,8 +519,22 @@ def summarize_factor_contracts(
             "states": {},
             "visibility_classes": {},
             "proxy_levels": {},
+            "fixture_readiness": {
+                "total_factors": 0,
+                "lag_ready_count": 0,
+                "lag_blocked_count": 0,
+                "visibility_ready_count": 0,
+                "visibility_blocked_count": 0,
+                "point_in_time_ready_count": 0,
+                "point_in_time_blocked_count": 0,
+                "strategy_candidate_total": 0,
+                "strategy_candidate_ready_count": 0,
+                "degraded_count": 0,
+                "max_lag_days": 0,
+            },
             "strategy_candidate_factor_ids": [],
             "point_in_time_blockers": [],
+            "lag_visibility_blockers": [],
             "degraded_factor_ids": [],
             "sample_rows": [],
         }
@@ -531,19 +545,36 @@ def summarize_factor_contracts(
     proxy_counter: Counter[str] = Counter()
     strategy_candidate_factor_ids: List[str] = []
     point_in_time_blockers: List[Dict[str, str]] = []
+    lag_visibility_blockers: List[Dict[str, Any]] = []
     degraded_factor_ids: List[str] = []
     sample_rows: List[Dict[str, Any]] = []
     seen_samples: set[str] = set()
+    lag_ready_count = 0
+    lag_blocked_count = 0
+    visibility_ready_count = 0
+    visibility_blocked_count = 0
+    point_in_time_ready_count = 0
+    point_in_time_blocked_count = 0
+    strategy_candidate_total = 0
+    strategy_candidate_ready_count = 0
+    degraded_count = 0
+    max_lag_days = 0
 
     for item in rows:
         factor_id = str(item.get("factor_id", "")).strip()
         payload = dict(item.get("factor_meta") or factor_meta_payload(factor_id))
         if not payload:
             continue
+        base_meta = get_factor_meta(factor_id)
         family = str(payload.get("family", "")).strip()
         state = str(payload.get("state", "")).strip()
         visibility = str(payload.get("visibility_class", "")).strip()
         proxy_level = str(payload.get("proxy_level", "")).strip()
+        lag_days = max(int(payload.get("lag_days") or 0), 0)
+        lag_ready = bool(payload.get("lag_fixture_ready"))
+        visibility_ready = bool(payload.get("visibility_fixture_ready"))
+        point_in_time_ready = bool(payload.get("point_in_time_ready"))
+        intended_strategy_candidate = bool(base_meta.supports_strategy_candidate) if base_meta is not None else bool(payload.get("supports_strategy_candidate"))
         if family:
             family_counter[family] += 1
         if state:
@@ -552,16 +583,48 @@ def summarize_factor_contracts(
             visibility_counter[visibility] += 1
         if proxy_level:
             proxy_counter[proxy_level] += 1
+        max_lag_days = max(max_lag_days, lag_days)
+        if lag_ready:
+            lag_ready_count += 1
+        else:
+            lag_blocked_count += 1
+        if visibility_ready:
+            visibility_ready_count += 1
+        else:
+            visibility_blocked_count += 1
+        if point_in_time_ready:
+            point_in_time_ready_count += 1
+        else:
+            point_in_time_blocked_count += 1
+        if intended_strategy_candidate:
+            strategy_candidate_total += 1
+            if point_in_time_ready:
+                strategy_candidate_ready_count += 1
         if bool(payload.get("supports_strategy_candidate")):
             strategy_candidate_factor_ids.append(factor_id)
         if bool(payload.get("degraded")):
             degraded_factor_ids.append(factor_id)
-        if not bool(payload.get("point_in_time_ready")):
+            degraded_count += 1
+        if not point_in_time_ready:
             point_in_time_blockers.append(
                 {
                     "factor_id": factor_id,
                     "family": family,
                     "reason": str(payload.get("degraded_reason") or payload.get("notes") or "lag / visibility fixture incomplete").strip(),
+                }
+            )
+            lag_visibility_blockers.append(
+                {
+                    "factor_id": factor_id,
+                    "family": family,
+                    "reason": str(payload.get("degraded_reason") or payload.get("notes") or "lag / visibility fixture incomplete").strip(),
+                    "lag_days": lag_days,
+                    "visibility_class": visibility,
+                    "proxy_level": proxy_level,
+                    "lag_fixture_ready": lag_ready,
+                    "visibility_fixture_ready": visibility_ready,
+                    "point_in_time_ready": point_in_time_ready,
+                    "supports_strategy_candidate": intended_strategy_candidate,
                 }
             )
         if factor_id not in seen_samples and len(sample_rows) < max(int(sample_limit), 0):
@@ -575,7 +638,11 @@ def summarize_factor_contracts(
                     "proxy_level": proxy_level,
                     "supports_scoring": bool(payload.get("supports_scoring")),
                     "supports_strategy_candidate": bool(payload.get("supports_strategy_candidate")),
-                    "point_in_time_ready": bool(payload.get("point_in_time_ready")),
+                    "intended_strategy_candidate": intended_strategy_candidate,
+                    "lag_days": lag_days,
+                    "lag_fixture_ready": lag_ready,
+                    "visibility_fixture_ready": visibility_ready,
+                    "point_in_time_ready": point_in_time_ready,
                 }
             )
             seen_samples.add(factor_id)
@@ -586,8 +653,22 @@ def summarize_factor_contracts(
         "states": dict(sorted(state_counter.items())),
         "visibility_classes": dict(sorted(visibility_counter.items())),
         "proxy_levels": dict(sorted(proxy_counter.items())),
+        "fixture_readiness": {
+            "total_factors": len(rows),
+            "lag_ready_count": lag_ready_count,
+            "lag_blocked_count": lag_blocked_count,
+            "visibility_ready_count": visibility_ready_count,
+            "visibility_blocked_count": visibility_blocked_count,
+            "point_in_time_ready_count": point_in_time_ready_count,
+            "point_in_time_blocked_count": point_in_time_blocked_count,
+            "strategy_candidate_total": strategy_candidate_total,
+            "strategy_candidate_ready_count": strategy_candidate_ready_count,
+            "degraded_count": degraded_count,
+            "max_lag_days": max_lag_days,
+        },
         "strategy_candidate_factor_ids": sorted(dict.fromkeys(strategy_candidate_factor_ids)),
         "point_in_time_blockers": point_in_time_blockers,
+        "lag_visibility_blockers": lag_visibility_blockers,
         "degraded_factor_ids": sorted(dict.fromkeys(degraded_factor_ids)),
         "sample_rows": sample_rows,
     }

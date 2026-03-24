@@ -1,0 +1,47 @@
+# `strategy replay / experiment` 的批量 symbol source 和 cohort recipe。
+# 默认先收一版最小合同：显式 symbols + watchlist 过滤，以及 gap / sample 的 recipe。
+
+batch_sources:
+  cn_liquid_core:
+    label: "A股核心流动性样本"
+    symbols:
+      - "600519"
+      - "300750"
+      - "000333"
+      - "601318"
+      - "600036"
+      - "002594"
+    notes:
+      - "默认用于多标的 replay / experiment 的最小同日 cohort 样本。"
+      - "只放 strategy v1 当前支持的 A 股普通股票。"
+
+  watchlist_cn_stock:
+    label: "Watchlist 中的 A股个股"
+    watchlist_filters:
+      asset_types: ["cn_stock"]
+      regions: ["CN"]
+    notes:
+      - "从 watchlist 中筛出当前 strategy v1 支持的 A 股普通股票。"
+      - "如果 watchlist 里没有 cn_stock，这个 source 会解析为空并直接报错。"
+
+cohort_recipes:
+  weekly_non_overlap:
+    label: "每周非重叠主样本"
+    asset_gap_days: 20
+    max_samples: 6
+    notes:
+      - "默认保持 20 个交易日主持有期内不重复进入同一标的。"
+
+  dense_watchlist:
+    label: "高频观察样本"
+    asset_gap_days: 10
+    max_samples: 8
+    notes:
+      - "更适合补样本供给和敏感性观察，不等于 non-overlap 主样本验证。"
+
+  monthly_deep:
+    label: "低频深样本"
+    asset_gap_days: 40
+    max_samples: 4
+    notes:
+      - "优先换更长 gap，减少相邻样本相关性。"

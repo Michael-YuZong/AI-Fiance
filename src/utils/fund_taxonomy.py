@@ -13,10 +13,30 @@ FUND_TAXONOMY_RULES = [
     (("电网", "电力", "储能", "特高压"), ("电网", ["AI算力", "电力需求", "电网设备"])),
     (("有色", "铜", "铝", "黄金股"), ("有色", ["铜铝", "顺周期"])),
     (("医药", "医疗", "创新药"), ("医药", ["医药", "老龄化"])),
+    (("农业", "农牧", "农林", "粮食", "粮油", "种业", "种植", "农化", "化肥", "农资", "粮食安全", "乡村振兴"), ("农业", ["粮食安全", "种业", "农化"])),
     (("消费", "食品", "饮料", "家电", "零售", "消费龙头"), ("消费", ["内需", "消费修复"])),
-    (("红利", "高股息", "股息", "银行", "公用事业"), ("高股息", ["高股息", "防守"])),
+    (("红利", "高股息", "股息", "公用事业"), ("高股息", ["高股息", "防守"])),
+    (("金融", "银行", "保险", "证券", "券商", "非银", "broker", "brokerage"), ("金融", ["券商", "银行", "资本市场"])),
     (("能源", "原油", "煤炭", "油气", "能化", "化工"), ("能源", ["原油", "能源安全", "通胀预期"])),
-    (("沪深300", "中证a500", "a500", "中证500", "上证50", "上证综指", "上证综合", "上证指数", "宽基"), ("宽基", ["宽基", "大盘蓝筹", "内需"])),
+    (
+        (
+            "沪深300",
+            "中证a500",
+            "a500",
+            "中证500",
+            "上证50",
+            "上证综指",
+            "上证综合",
+            "上证指数",
+            "恒生指数",
+            "恒生中国企业指数",
+            "国企指数",
+            "恒指",
+            "hang seng index",
+            "宽基",
+        ),
+        ("宽基", ["宽基", "大盘蓝筹", "内需"]),
+    ),
 ]
 
 OVERSEAS_KEYWORDS = ("nasdaq", "纳斯达克", "标普", "sp500", "s&p", "港股", "美股", "hong kong", "qdii", "海外")
@@ -36,11 +56,23 @@ def _theme_detection_text(text: str) -> str:
     return cleaned
 
 
-def infer_fund_sector(text: str, sector_hint: str = "") -> tuple[str, list[str]]:
-    lowered = _theme_detection_text(" ".join([str(sector_hint or ""), str(text or "")])).lower()
+def _match_taxonomy_rule(text: str) -> tuple[str, list[str]]:
+    lowered = _theme_detection_text(text).lower()
     for keywords, payload in FUND_TAXONOMY_RULES:
         if any(keyword.lower() in lowered for keyword in keywords):
             return payload[0], list(payload[1])
+    return "", []
+
+
+def infer_fund_sector(text: str, sector_hint: str = "") -> tuple[str, list[str]]:
+    sector, chain_nodes = _match_taxonomy_rule(str(text or ""))
+    if sector:
+        return sector, chain_nodes
+
+    sector, chain_nodes = _match_taxonomy_rule(str(sector_hint or ""))
+    if sector:
+        return sector, chain_nodes
+
     return "综合", ["主动管理", "组合配置"]
 
 

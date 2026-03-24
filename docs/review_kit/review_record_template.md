@@ -10,7 +10,9 @@
 - 审稿对象：[target.md](/absolute/path/to/target.md)
 - 适用 prompt：[external_xxx_reviewer.md](/absolute/path/to/prompt.md)
 - previous_round：[..._round1.md](/absolute/path/to/round1.md)
-- 审稿方式：`合同审 + rich prompt 审稿 + 零提示发散审`
+- 审稿方式：`Pass A 结构审 -> 修正 -> Pass B 发散审`
+- 结构审 prompt：[external_financial_structural_reviewer.md](/absolute/path/to/prompt.md)
+- 发散审 prompt：[external_financial_divergent_reviewer.md](/absolute/path/to/prompt.md)
 - review_target：`path/or/logical_target`
 - review_prompt：`path/to/prompt.md`
 
@@ -65,6 +67,8 @@
 
 - round：2
 - previous_round：1
+- 结构审执行者：`gpt-5.4 / reviewer_structural`
+- 发散审执行者：`gpt-5.4-mini / reviewer_divergent`
 - 状态：PASS / BLOCKED
 - 本轮新增 P0/P1：是 / 否
 - 上一轮 P0/P1 是否已关闭：是 / 否
@@ -91,4 +95,5 @@
 - `框架外问题` 不能省略
 - `零提示发散审` 不能省略
 - `建议沉淀` 不能省略
+- `结构审执行者 / 发散审执行者` 不能省略，且不能是同一个 reviewer / 子 agent
 - `收敛结论` 必须可被 parser 抽取

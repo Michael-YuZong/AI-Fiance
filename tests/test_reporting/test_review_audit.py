@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from src.reporting.review_lessons import active_lesson_ids
 from src.reporting.review_audit import build_review_audit, render_review_audit_markdown
 
 
 def _write_review(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
+
+
+def test_active_review_lessons_include_macro_vs_direct_catalyst_boundary() -> None:
+    assert "L039" in active_lesson_ids()
 
 
 def test_review_audit_flags_missing_solidification_for_actionable_findings(tmp_path: Path) -> None:
@@ -242,6 +247,192 @@ def test_review_audit_flags_pass_continue_conflict_and_renders_markdown(tmp_path
     markdown = render_review_audit_markdown(audit)
     assert "# External Review Audit" in markdown
     assert "| severity | category | series | round | title | file |" in markdown
+
+
+def test_review_audit_flags_single_round_pass_without_repair_loop(tmp_path: Path) -> None:
+    _write_review(
+        tmp_path / "single_pass_round1.md",
+        "\n".join(
+            [
+                "# Single pass",
+                "",
+                "- review_target：`docs/single.md`",
+                "- review_prompt：`docs/prompts/single.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P2`：解释链还没收口。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示再看，最先冒出来的问题仍然是解释链断裂。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- prompt / test",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "PASS 记录正文仍有 actionable finding" in titles
+    assert "单轮 PASS 缺少回修闭环" in titles
+    assert "主要问题还没进入下一轮闭环" in titles
+
+
+def test_review_audit_flags_missing_close_or_carry_between_rounds(tmp_path: Path) -> None:
+    _write_review(
+        tmp_path / "handoff_round1.md",
+        "\n".join(
+            [
+                "# Handoff",
+                "",
+                "- review_target：`docs/handoff.md`",
+                "- review_prompt：`docs/prompts/handoff.md`",
+                "",
+                "## 结论",
+                "",
+                "`hold`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P2`：证据链还不完整。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示再看，最明显的问题还是证据链薄。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- prompt / test",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：IN_REVIEW",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：不适用",
+                "- 本轮是否收敛：否",
+                "- 是否建议继续下一轮：是",
+            ]
+        ),
+    )
+    _write_review(
+        tmp_path / "handoff_round2.md",
+        "\n".join(
+            [
+                "# Handoff",
+                "",
+                "- review_target：`docs/handoff.md`",
+                "- review_prompt：`docs/prompts/handoff.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. 当前没有新的实质性问题。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：2",
+                "- previous_round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "上一轮问题没有在下一轮闭环登记" in titles
+
+
+def test_review_audit_flags_actionable_round_without_followup_round(tmp_path: Path) -> None:
+    _write_review(
+        tmp_path / "stalled_round1.md",
+        "\n".join(
+            [
+                "# Stalled",
+                "",
+                "- review_target：`docs/stalled.md`",
+                "- review_prompt：`docs/prompts/stalled.md`",
+                "",
+                "## 结论",
+                "",
+                "`hold`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P2`：证据链仍需补全。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示再看，最明显的问题仍是证据不够扎实。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- prompt / test",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：IN_REVIEW",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：不适用",
+                "- 本轮是否收敛：否",
+                "- 是否建议继续下一轮：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "主要问题还没进入下一轮闭环" in titles
 
 
 def test_review_audit_skips_legacy_round_notes(tmp_path: Path) -> None:
@@ -497,3 +688,101 @@ def test_review_audit_flags_briefing_manifest_missing_proxy_contract(tmp_path: P
     audit = build_review_audit(tmp_path)
     titles = {item["title"] for item in audit["findings"]}
     assert "manifest 缺少 proxy_contract" in titles
+
+
+def test_review_audit_flags_missing_split_review_roles(tmp_path: Path) -> None:
+    _write_review(
+        tmp_path / "demo_round1.md",
+        "\n".join(
+            [
+                "# Demo",
+                "",
+                "- review_target：`docs/demo.md`",
+                "- review_prompt：`docs/prompts/external_financial_structural_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "缺少分阶段外审执行者" in titles
+
+
+def test_review_audit_flags_same_split_review_role(tmp_path: Path) -> None:
+    _write_review(
+        tmp_path / "demo_round1.md",
+        "\n".join(
+            [
+                "# Demo",
+                "",
+                "- review_target：`docs/demo.md`",
+                "- review_prompt：`docs/prompts/external_financial_divergent_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 结构审执行者：gpt-5.4 / reviewer_shared",
+                "- 发散审执行者：gpt-5.4 / reviewer_shared",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "结构审与发散审使用了同一执行者" in titles

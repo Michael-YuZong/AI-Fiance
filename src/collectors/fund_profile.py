@@ -26,10 +26,27 @@ FUND_THEME_RULES = [
     (("电网", "电力", "储能", "特高压"), ("电网", ["AI算力", "电力需求", "电网设备"])),
     (("有色", "铜", "铝", "黄金股"), ("有色", ["铜铝", "顺周期"])),
     (("医药", "医疗", "创新药"), ("医药", ["医药", "老龄化"])),
+    (("农业", "农牧", "农林", "粮食", "粮油", "种业", "种植", "农化", "化肥", "农资", "粮食安全", "乡村振兴"), ("农业", ["粮食安全", "种业", "农化"])),
     (("消费", "食品", "饮料", "家电", "零售"), ("消费", ["内需", "消费修复"])),
     (("红利", "高股息", "股息", "银行", "公用事业"), ("高股息", ["高股息", "防守"])),
     (("能源", "原油", "煤炭", "油气"), ("能源", ["原油", "能源安全", "通胀预期"])),
-    (("沪深300", "中证a500", "中证500", "上证50", "上证综指", "上证综合", "上证指数"), ("宽基", ["宽基", "大盘蓝筹", "内需"])),
+    (
+        (
+            "沪深300",
+            "中证a500",
+            "中证500",
+            "上证50",
+            "上证综指",
+            "上证综合",
+            "上证指数",
+            "恒生指数",
+            "恒生中国企业指数",
+            "国企指数",
+            "恒指",
+            "hang seng index",
+        ),
+        ("宽基", ["宽基", "大盘蓝筹", "内需"]),
+    ),
 ]
 
 _PROCESS_SHARED_FRAME_CACHE: Dict[str, pd.DataFrame] = {}
@@ -321,6 +338,8 @@ class FundProfileCollector(BaseCollector):
         top_holdings = self._top_holdings(merged_holdings)
         top_industries = self._top_industries(industry_df)
         asset_mix = self._asset_mix(asset_mix_df)
+        if not asset_mix and not asset_mix_df.empty:
+            notes.append("基金资产配置口径异常，已降级移除，避免把坏数据当成仓位结论。")
         rating = self._rating_snapshot(rating_df, symbol)
         manager = self._manager_snapshot(ts_manager_df, manager_df, overview)
         company = self._company_snapshot(ts_company_df, overview)
@@ -645,6 +664,12 @@ class FundProfileCollector(BaseCollector):
                     "仓位占比": ratio,
                 }
             )
+        valid_ratios = [float(item["仓位占比"]) for item in result if item.get("仓位占比") is not None]
+        if any(ratio < 0 or ratio > 100 for ratio in valid_ratios):
+            return []
+        # 商品/联接产品可能因保证金或口径差异略高于 100%，但大幅超出通常是供应商坏数据。
+        if len(valid_ratios) >= 2 and sum(valid_ratios) > 120:
+            return []
         return result
 
     def _manager_snapshot(self, ts_frame: pd.DataFrame, ak_frame: pd.DataFrame, overview: Dict[str, Any]) -> Dict[str, Any]:

@@ -144,6 +144,8 @@ class BriefingRenderer:
         _append_block(lines, "1. 主线判断与行动")
         _append_subsection(lines, "1.1 今日主线", payload.get("headline_lines", []))
         _append_subsection(lines, "1.2 今天怎么做", payload.get("action_lines", []))
+        if payload.get("regime_reasoning_lines"):
+            _append_subsection(lines, "1.3 宏观判断依据", payload.get("regime_reasoning_lines", []))
 
         _append_block(lines, "2. 市场全景")
         _append_table_subsection(
@@ -196,7 +198,7 @@ class BriefingRenderer:
         _append_table_subsection(
             lines,
             "3.2 行业与主题跟踪（限2-4个方向）",
-            ["方向", "催化剂", "逻辑", "时间维度", "风险点"],
+            ["方向", "催化剂", "逻辑", "时间维度", "风险点", "信息环境"],
             payload.get("theme_tracking_rows", []),
         )
         for item in payload.get("theme_tracking_lines", []) or []:
@@ -223,6 +225,13 @@ class BriefingRenderer:
             lines.append("暂无。")
         _append_subsection(lines, "3.4 盘面与资金", payload.get("capital_flow_lines", []))
         _append_subsection(lines, "3.5 新闻覆盖与数据质量", payload.get("quality_lines", []))
+        if payload.get("evidence_rows"):
+            _append_table_subsection(
+                lines,
+                "3.6 证据时点与来源",
+                ["项目", "说明"],
+                payload.get("evidence_rows", []),
+            )
 
         _append_block(lines, "4. 今日验证点")
         _append_table_subsection(
@@ -301,7 +310,23 @@ class BriefingRenderer:
             lines.append(f"- {item}")
         _append_table_subsection(
             lines,
-            "2.3 风格与行业",
+            "2.3 核心指数信号",
+            ["指数", "最新", "涨跌幅", "均线排列", "周线MACD", "月线MACD", "量能", "结论"],
+            payload.get("index_signal_rows", []),
+        )
+        for item in payload.get("index_signal_lines", []) or []:
+            lines.append(f"- {item}")
+        _append_table_subsection(
+            lines,
+            "2.4 市场宽度与情绪",
+            ["信号", "当前值", "判断", "说明"],
+            payload.get("market_signal_rows", []),
+        )
+        for item in payload.get("market_signal_lines", []) or []:
+            lines.append(f"- {item}")
+        _append_table_subsection(
+            lines,
+            "2.5 风格与行业",
             ["维度", "今日强势", "今日弱势", "信号"],
             payload.get("style_rows", []),
         )
@@ -310,23 +335,31 @@ class BriefingRenderer:
             lines.extend(_table(["排名", "行业", "涨跌幅", "主要催化"], payload.get("industry_rows", [])))
         _append_table_subsection(
             lines,
-            "2.4 宏观资产",
+            "2.6 板块轮动",
+            ["层级", "领涨方向", "领跌方向", "轮动判断"],
+            payload.get("rotation_rows", []),
+        )
+        for item in payload.get("rotation_lines", []) or []:
+            lines.append(f"- {item}")
+        _append_table_subsection(
+            lines,
+            "2.7 宏观资产",
             ["资产", "最新价", "1日", "5日", "20日", "状态", "异常"],
             payload.get("macro_asset_rows", []),
         )
         _append_table_subsection(
             lines,
-            "2.5 隔夜外盘",
+            "2.8 隔夜外盘",
             ["市场", "指数", "收盘", "涨跌幅", "简评"],
             payload.get("overnight_rows", []),
         )
         _append_table_subsection(
             lines,
-            "2.6 跨市场观察哨",
+            "2.9 跨市场观察哨",
             ["标的", "最新价", "1日", "5日", "20日", "趋势", "信号", "简评"],
             payload.get("watchlist_rows", []),
         )
-        _append_proxy_contract_subsection(lines, "2.7 代理信号与限制", dict(payload.get("proxy_contract") or {}))
+        _append_proxy_contract_subsection(lines, "2.10 代理信号与限制", dict(payload.get("proxy_contract") or {}))
 
         _append_block(lines, "3. 资金与催化")
         _append_subsection(lines, "3.1 核心事件", payload.get("core_event_lines", []))
@@ -350,6 +383,8 @@ class BriefingRenderer:
         )
         for item in payload.get("a_share_watch_lines", []) or []:
             lines.append(f"- {item}")
+        if payload.get("a_share_watch_upgrade_lines"):
+            _append_subsection(lines, "4.2 升级条件", payload.get("a_share_watch_upgrade_lines", []))
 
         _append_block(lines, "5. 今日验证点")
         _append_table_subsection(

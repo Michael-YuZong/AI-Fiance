@@ -15,6 +15,15 @@ from src.collectors.base import BaseCollector
 from src.utils.config import resolve_project_path
 from src.utils.data import load_yaml
 
+GENERIC_HEADLINE_TITLE_KEYS = (
+    "global market headlines",
+    "breaking stock market news",
+    "market headlines",
+    "stock price & latest news",
+    "stock quote price and forecast",
+    "historical prices and data",
+)
+
 
 def _format_pct(value: float) -> str:
     return f"{value * 100:+.2f}%"
@@ -36,6 +45,28 @@ def _clean_title(title: str, source: str) -> str:
     if cleaned.lower() in {"bloomberg link", "bloomberg", "reuters"}:
         return ""
     return cleaned
+
+
+def _is_generic_headline_title(title: str) -> bool:
+    cleaned = str(title).strip().lower()
+    if not cleaned:
+        return True
+    return any(token in cleaned for token in GENERIC_HEADLINE_TITLE_KEYS)
+
+
+def _parse_news_timestamp(value: Any) -> Optional[datetime]:
+    if value in (None, ""):
+        return None
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    stamp = pd.Timestamp(parsed)
+    if stamp.tzinfo is not None:
+        try:
+            stamp = stamp.tz_convert("Asia/Shanghai").tz_localize(None)
+        except TypeError:
+            stamp = stamp.tz_localize(None)
+    return stamp.to_pydatetime()
 
 
 def _value(item: Any, key: str, default: Any = None) -> Any:
@@ -148,6 +179,7 @@ class NewsCollector(BaseCollector):
                         "link": str(getattr(entry, "link", "")).strip(),
                     }
                 )
+        live_items = self._filter_candidate_items(live_items, recent_days=14)
         live_items = self._rank_items(live_items, preferred_sources=preferred)
         selected_items = self._diversify_items(live_items, limit)
 
@@ -235,6 +267,7 @@ class NewsCollector(BaseCollector):
                     }
                 )
 
+        items = self._filter_candidate_items(items, recent_days=recent_days)
         ranked = self._rank_items(items, preferred, query_keywords=cleaned)
         return self._diversify_items(ranked, limit)
 
@@ -399,6 +432,28 @@ class NewsCollector(BaseCollector):
             return (-score, -relevance, len(item.get("title", "")), item.get("category", ""))
 
         return sorted(deduped, key=_score)
+
+    def _filter_candidate_items(
+        self,
+        items: Sequence[Dict[str, str]],
+        *,
+        recent_days: Optional[int] = None,
+        reference_time: Optional[datetime] = None,
+    ) -> List[Dict[str, str]]:
+        filtered: List[Dict[str, str]] = []
+        as_of = reference_time or datetime.now()
+        max_age_days = None if recent_days is None else max(int(recent_days), 1) + 1
+        for item in items:
+            title = str(item.get("title", "")).strip()
+            if not title or _is_generic_headline_title(title):
+                continue
+            published_at = _parse_news_timestamp(item.get("published_at"))
+            if published_at is not None and max_age_days is not None:
+                age_days = (as_of - published_at).total_seconds() / 86400.0
+                if age_days > max_age_days or age_days < -1:
+                    continue
+            filtered.append(dict(item))
+        return filtered
 
     def _diversify_items(self, items: Sequence[Dict[str, str]], limit: int) -> List[Dict[str, str]]:
         selected: List[Dict[str, str]] = []

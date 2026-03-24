@@ -9,9 +9,11 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery, summarize_pick_coverage
 from src.commands.pick_visuals import attach_visuals_to_analyses
-from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle, exported_bundle_lines
+from src.commands.final_runner import finalize_client_markdown
+from src.commands.report_guard import ensure_report_task_registered, exported_bundle_lines
 from src.commands.release_check import check_generic_client_report
 from src.output import ClientReportRenderer, OpportunityReportRenderer
+from src.output.opportunity_report import _dimension_summary_text
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.opportunity_engine import analyze_opportunity, build_market_context, discover_fund_opportunities
 from src.utils.fund_taxonomy import taxonomy_from_analysis, taxonomy_rows
@@ -111,9 +113,15 @@ def _fund_dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
         dimension = dict(analysis.get("dimensions", {}).get(key) or {})
         score = dimension.get("score")
         max_score = dimension.get("max_score", 100)
+        display_name = str(dimension.get("display_name", label))
         display = "—" if score is None else f"{score}/{max_score}"
-        reason = str(dimension.get("summary", "")).strip() or str(dimension.get("core_signal", "")).strip()
-        rows.append([str(dimension.get("display_name", label)), display, reason])
+        reason = _dimension_summary_text(key, dimension)
+        if key == "chips":
+            display_name = "筹码结构（辅助项）"
+            display = "辅助项"
+            if reason and "主排序不直接使用" not in reason:
+                reason = f"{reason} 当前主排序不直接使用这项。".strip()
+        rows.append([display_name, display, reason])
     return rows
 
 
@@ -398,7 +406,13 @@ def _detail_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def _payload_from_analyses(
+    analyses: Sequence[Dict[str, Any]],
+    selection_context: Dict[str, Any] | None = None,
+    *,
+    regime: Mapping[str, Any] | None = None,
+    day_theme: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
     if not analyses:
         raise ValueError("No fund analyses available")
     generated_at = str(analyses[0].get("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
@@ -432,12 +446,20 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context
         "name": winner.get("name"),
         "symbol": winner.get("symbol"),
         "asset_type": winner.get("asset_type"),
+        "generated_at": winner.get("generated_at"),
         "visuals": dict(winner.get("visuals") or {}),
         "reference_price": float(dict(winner.get("metrics") or {}).get("last_close") or 0.0),
         "trade_state": narrative.get("judgment", {}).get("state", "持有优于追高"),
         "positives": _winner_reason_lines(winner, defensive_mode),
         "dimension_rows": _fund_dimension_rows(winner),
+        "dimensions": dict(winner.get("dimensions") or {}),
         "action": dict(winner.get("action") or {}),
+        "provenance": dict(winner.get("provenance") or {}),
+        "intraday": dict(winner.get("intraday") or {}),
+        "metadata": dict(winner.get("metadata") or {}),
+        "history": winner.get("history"),
+        "benchmark_name": winner.get("benchmark_name"),
+        "benchmark_symbol": winner.get("benchmark_symbol"),
         "narrative": {"playbook": dict(narrative.get("playbook") or {})},
         "positioning_lines": [
             f"首次仓位按 `{winner.get('action', {}).get('position', '计划仓位的 1/3 - 1/2')}` 执行。",
@@ -465,6 +487,8 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context
         "winner": winner_payload,
         "alternatives": alternatives,
         "selection_context": dict(selection_context or {}),
+        "regime": dict(regime or {}),
+        "day_theme": dict(day_theme or {}),
     }
 
 
@@ -563,6 +587,7 @@ def main() -> None:
         coverage=payload.get("pick_coverage") or payload.get("data_coverage") or {},
         scan_pool=scan_pool,
         passed_pool=passed_pool,
+        winner=analyses[0] if analyses else None,
     )
     selection_context = _selection_context(
         discovery_mode=discovery_mode,
@@ -582,12 +607,46 @@ def main() -> None:
         delivery_tier=delivery_tier,
         proxy_contract=payload.get("proxy_contract") or {},
     )
-    report_payload = _payload_from_analyses(analyses, selection_context=selection_context)
+    report_payload = _payload_from_analyses(
+        analyses,
+        selection_context=selection_context,
+        regime=payload.get("regime") or {},
+        day_theme=payload.get("day_theme") or {},
+    )
+    delivery_tier = grade_pick_delivery(
+        report_type="fund_pick",
+        discovery_mode=discovery_mode,
+        coverage=payload.get("pick_coverage") or payload.get("data_coverage") or {},
+        scan_pool=scan_pool,
+        passed_pool=passed_pool,
+        winner=dict(report_payload.get("winner") or {}),
+    )
+    selection_context = _selection_context(
+        discovery_mode=discovery_mode,
+        scan_pool=scan_pool,
+        passed_pool=passed_pool,
+        theme_filter=theme_filter,
+        style_filter=style_filter,
+        manager_filter=manager_filter,
+        blind_spots=blind_spots,
+        coverage=payload.get("pick_coverage") or payload.get("data_coverage") or summarize_pick_coverage(analyses),
+        model_version=str(payload.get("model_version", "")),
+        baseline_snapshot_at=str(payload.get("baseline_snapshot_at", "")),
+        is_daily_baseline=bool(payload.get("is_daily_baseline")),
+        comparison_basis_at=str(payload.get("comparison_basis_at", "")),
+        comparison_basis_label=str(payload.get("comparison_basis_label", "")),
+        model_version_warning=str(payload.get("model_version_warning", "")),
+        delivery_tier=delivery_tier,
+        proxy_contract=payload.get("proxy_contract") or {},
+    )
+    report_payload["selection_context"] = selection_context
     markdown = ClientReportRenderer().render_fund_pick(report_payload)
     if not args.client_final:
         print(markdown)
         return
 
+    date_str = str(report_payload.get("generated_at", ""))[:10]
+    markdown_path = resolve_project_path(f"reports/scans/funds/final/fund_pick_{date_str}_client_final.md")
     detail_markdown = _detail_markdown(
         analyses,
         str(dict(report_payload.get("winner") or {}).get("symbol", "")),
@@ -595,34 +654,28 @@ def main() -> None:
     )
     factor_contract = summarize_factor_contracts_from_analyses(list(payload.get("coverage_analyses") or analyses), sample_limit=16)
     detail_path = _detail_output_path(str(report_payload.get("generated_at", "")))
-    detail_path.parent.mkdir(parents=True, exist_ok=True)
-    detail_path.write_text(detail_markdown, encoding="utf-8")
-    findings = check_generic_client_report(markdown, "fund_pick", source_text=detail_markdown)
-    date_str = str(report_payload.get("generated_at", ""))[:10]
-    try:
-        bundle = export_reviewed_markdown_bundle(
-            report_type="fund_pick",
-            markdown_text=markdown,
-            markdown_path=resolve_project_path(f"reports/scans/funds/final/fund_pick_{date_str}_client_final.md"),
-            release_findings=findings,
-            extra_manifest={
-                "candidates": list(candidates),
-                "winner": dict(report_payload.get("winner") or {}).get("symbol", ""),
-                "detail_source": str(detail_path),
-                "theme_filter": theme_filter,
-                "style_filter": style_filter,
-                "manager_filter": manager_filter,
-                "scan_pool": scan_pool,
-                "passed_pool": passed_pool,
-                "discovery_mode": discovery_mode,
-                    "delivery_tier": dict(delivery_tier),
-                    "data_coverage": dict(payload.get("pick_coverage") or {}),
-                    "factor_contract": factor_contract,
-                    "proxy_contract": dict(payload.get("proxy_contract") or {}),
-                },
-            )
-    except ReportGuardError as exc:
-        raise SystemExit(str(exc))
+    bundle = finalize_client_markdown(
+        report_type="fund_pick",
+        client_markdown=markdown,
+        markdown_path=markdown_path,
+        detail_markdown=detail_markdown,
+        detail_path=detail_path,
+        extra_manifest={
+            "candidates": list(candidates),
+            "winner": dict(report_payload.get("winner") or {}).get("symbol", ""),
+            "theme_filter": theme_filter,
+            "style_filter": style_filter,
+            "manager_filter": manager_filter,
+            "scan_pool": scan_pool,
+            "passed_pool": passed_pool,
+            "discovery_mode": discovery_mode,
+            "delivery_tier": dict(delivery_tier),
+            "data_coverage": dict(payload.get("pick_coverage") or {}),
+            "factor_contract": factor_contract,
+            "proxy_contract": dict(payload.get("proxy_contract") or {}),
+        },
+        release_checker=lambda markdown_text, source_text: check_generic_client_report(markdown_text, "fund_pick", source_text=source_text),
+    )
     print(markdown)
     for index, line in enumerate(exported_bundle_lines(bundle)):
         print(f"\n{line}" if index == 0 else line)

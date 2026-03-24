@@ -132,7 +132,7 @@ class SocialSentimentCollector:
 
         missing = [name for name, value in required.items() if value in (None, "", "nan")]
         limitations = [
-            "这是价格和量能行为推导出的情绪代理，不是雪球、东财或 Reddit 的真实发帖/阅读/评论抓取。",
+            "这是价格和量能行为推导出的情绪代理，不是雪球、东财或 Reddit 的真实发帖/阅读/评论抓取；刻度是 0-100，20 以下偏冷、50 附近中性、80 以上偏热。",
         ]
         if missing:
             limitations.append(f"当前缺少 `{ ' / '.join(missing) }` 输入，情绪判断更容易偏框架化。")

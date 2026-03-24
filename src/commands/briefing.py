@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import io
 import re
 import warnings
@@ -28,13 +29,15 @@ from src.collectors import (
     NewsCollector,
     SocialSentimentCollector,
 )
+from src.commands.final_runner import finalize_client_markdown
 from src.output.briefing import BriefingRenderer
 from src.output.client_report import ClientReportRenderer
-from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle
+from src.commands.report_guard import ensure_report_task_registered
 from src.commands.release_check import check_generic_client_report
 from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.horizon import get_horizon_contract
+from src.processors.market_analysis import build_market_analysis
 from src.processors.opportunity_engine import (
     discover_stock_opportunities,
     summarize_proxy_contracts,
@@ -297,11 +300,21 @@ def _collect_snapshots(config: Dict[str, Any], mode: str) -> tuple[List[Briefing
     snapshots: List[BriefingSnapshot] = []
     alerts: List[str] = []
     rows: List[List[str]] = []
+    snapshot_timeout_seconds = float(config.get("briefing_snapshot_timeout_seconds", 12))
 
     for item in load_watchlist():
         symbol = item["symbol"]
         try:
-            history = normalize_ohlcv_frame(fetch_asset_history(symbol, item["asset_type"], config))
+            history, history_warning = _timed_collect(
+                f"{symbol} watchlist 快照",
+                lambda: normalize_ohlcv_frame(fetch_asset_history(symbol, item["asset_type"], config)),
+                fallback=pd.DataFrame(),
+                timeout_seconds=snapshot_timeout_seconds,
+            )
+            if history_warning:
+                raise RuntimeError(history_warning)
+            if history.empty:
+                raise RuntimeError("未拿到可用历史行情")
             metrics = compute_history_metrics(history)
             technical = TechnicalAnalyzer(history).generate_scorecard(config.get("technical", {}))
             trend = _trend_label(technical)
@@ -401,10 +414,10 @@ def _briefing_a_share_watch_rows(
     config: Dict[str, Any],
     *,
     shared_context: Optional[Dict[str, Any]] = None,
-) -> tuple[List[List[str]], List[str], Dict[str, Any]]:
+) -> tuple[List[List[str]], List[str], Dict[str, Any], List[Dict[str, Any]]]:
     top_n = max(int(config.get("briefing_a_share_top_n", 5) or 5), 0)
     if top_n <= 0:
-        return [], ["当前已关闭 A 股全市场观察池。"], {"enabled": False, "mode": "disabled"}
+        return [], ["当前已关闭 A 股全市场观察池。"], {"enabled": False, "mode": "disabled"}, []
     try:
         shortlist_n = max(int(config.get("briefing_a_share_shortlist", max(top_n * 2, 8)) or max(top_n * 2, 8)), top_n)
         candidate_cap = max(int(config.get("briefing_a_share_max_candidates", max(top_n * 2 + 6, 16)) or max(top_n * 2 + 6, 16)), shortlist_n)
@@ -417,11 +430,11 @@ def _briefing_a_share_watch_rows(
             attach_signal_confidence=False,
         )
     except Exception as exc:  # noqa: BLE001
-        return [], [f"A 股全市场观察池暂不可用：{exc}"], {"enabled": True, "mode": "unavailable"}
+        return [], [f"A 股全市场观察池暂不可用：{exc}"], {"enabled": True, "mode": "unavailable"}, []
     analyses = list(payload.get("coverage_analyses") or [])
     top_items = list(payload.get("top") or [])[:top_n]
     if not analyses:
-        return [], ["A 股全市场观察池暂不可用：当前未拿到可用的全市场初筛池。"], {"enabled": True, "mode": "empty_pool"}
+        return [], ["A 股全市场观察池暂不可用：当前未拿到可用的全市场初筛池。"], {"enabled": True, "mode": "empty_pool"}, []
     rows: List[List[str]] = []
     sector_counter: Counter[str] = Counter()
     for index, item in enumerate(top_items, start=1):
@@ -473,7 +486,14 @@ def _briefing_a_share_watch_rows(
     }
     if blind_spots:
         meta["blind_spot"] = blind_spots[0]
-    return rows, lines[:4], meta
+    return rows, lines[:4], meta, top_items
+
+
+def _theme_information_environment(aligned: bool, horizon: str) -> str:
+    horizon_text = str(horizon).strip() or "观察期"
+    if aligned:
+        return f"当前更像直接催化和盘面方向基本一致，适合按 `{horizon_text}` 继续跟踪。"
+    return f"当前更多是背景储备和信息环境支持，适合按 `{horizon_text}` 保留观察资格，但不等于直接催化已兑现。"
 
 
 def _rotation_lines(snapshots: List[BriefingSnapshot]) -> List[str]:
@@ -751,6 +771,26 @@ def _news_report(
 
 def _collect_monitor_rows(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     return MarketMonitorCollector(config).collect()
+
+
+def _timed_collect(
+    label: str,
+    loader,
+    *,
+    fallback: Any,
+    timeout_seconds: float,
+) -> tuple[Any, str]:
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(loader)
+    try:
+        return future.result(timeout=timeout_seconds), ""
+    except FutureTimeoutError:
+        future.cancel()
+        return fallback, f"{label} 拉取超时（>{int(timeout_seconds)}s），本轮已按降级口径处理。"
+    except Exception:
+        return fallback, f"{label} 拉取失败，本轮已按降级口径处理。"
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _monitor_lines(rows: List[Dict[str, Any]]) -> List[str]:
@@ -2967,13 +3007,55 @@ def _theme_tracking_rows(
 
     rows: List[List[str]] = []
     seen: set[str] = set()
-    for direction, catalyst, logic, horizon, risk, _aligned in plans.get(theme, plans["macro_background"]):
+    for direction, catalyst, logic, horizon, risk, aligned in plans.get(theme, plans["macro_background"]):
         if direction in seen:
             continue
         seen.add(direction)
-        rows.append([direction, catalyst, logic, horizon, risk])
+        rows.append([direction, catalyst, logic, horizon, risk, _theme_information_environment(bool(aligned), horizon)])
         if len(rows) >= 4:
             break
+    return rows
+
+
+def _briefing_evidence_rows(
+    *,
+    generated_at: str,
+    narrative: Dict[str, Any],
+    regime_result: Dict[str, Any],
+    data_coverage: str,
+    missing_sources: str,
+    a_share_watch_meta: Dict[str, Any],
+    proxy_contract: Dict[str, Any],
+) -> List[List[str]]:
+    market_flow = dict(dict(proxy_contract or {}).get("market_flow") or {})
+    social = dict(dict(proxy_contract or {}).get("social_sentiment") or {})
+    regime_name = REGIME_LABELS.get(str(regime_result.get("current_regime", "")).strip(), str(regime_result.get("current_regime", "")).strip() or "未标注")
+    trading_label = str(narrative.get("label", "")).strip() or "未标注"
+    pool_size = int(a_share_watch_meta.get("pool_size") or 0)
+    complete_size = int(a_share_watch_meta.get("complete_analysis_size") or 0)
+    candidate_limit = int(a_share_watch_meta.get("candidate_limit") or 0)
+    rows = [
+        ["分析生成时间", generated_at or "—"],
+        ["中期背景 / 当天主线", f"{regime_name} / {trading_label}"],
+        ["数据覆盖", data_coverage or "未标注"],
+        ["缺失/降级", missing_sources or "无"],
+    ]
+    if pool_size or complete_size or candidate_limit:
+        rows.append(
+            [
+                "A股观察池来源",
+                f"Tushare 优先全市场初筛；初筛 `{pool_size}` 只，完整分析 `{complete_size}` 只，候选上限 `{candidate_limit}` 只。",
+            ]
+        )
+    if market_flow:
+        interpretation = str(market_flow.get("interpretation", "")).strip() or "当前没有形成稳定的市场风格代理结论。"
+        confidence = str(market_flow.get("confidence_label", "低")).strip() or "低"
+        rows.append(["市场风格代理", f"{interpretation}（置信度 `{confidence}`）"])
+    if social:
+        covered = int(social.get("covered", 0) or 0)
+        total = int(social.get("total", 0) or 0)
+        rows.append(["情绪代理覆盖", f"`{covered}/{total}` 只样本已生成情绪代理。"])
+    rows.append(["时点边界", "默认只使用生成时点前可见的宏观、新闻、观察池和缓存快照。"])
     return rows
 
 
@@ -3847,6 +3929,7 @@ def _build_evening_payload(
 
 def _build_market_payload(
     *,
+    config: Dict[str, Any],
     narrative: Dict[str, Any],
     china_macro: Dict[str, Any],
     regime_result: Dict[str, Any],
@@ -3863,13 +3946,16 @@ def _build_market_payload(
     a_share_watch_rows: List[List[str]],
     a_share_watch_lines: List[str],
     a_share_watch_meta: Dict[str, Any],
+    a_share_watch_candidates: List[Dict[str, Any]],
     data_coverage: str,
     missing_sources: str,
     macro_items: List[str],
     alerts: List[str],
     quality_lines: List[str],
     proxy_contract: Dict[str, Any],
+    evidence_rows: List[List[str]],
 ) -> Dict[str, Any]:
+    market_analysis = build_market_analysis(config, overview, pulse, drivers)
     domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
     style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
     industry_rows = _industry_rank_rows(drivers, narrative, news_report)
@@ -3879,7 +3965,8 @@ def _build_market_payload(
     capital_flow_lines = _capital_flow_lines(pulse, drivers, liquidity_lines, snapshots)
     verification_rows = _verification_rows_v4(snapshots, monitor_rows)
     headline_lines = (
-        _compact_headline_lines(narrative, china_macro, monitor_rows, pulse)
+        list(market_analysis.get("summary_lines", []))[:2]
+        + _compact_headline_lines(narrative, china_macro, monitor_rows, pulse)
         + _regime_explanation_lines(china_macro, regime_result, narrative)
         + _story_lines(news_report, monitor_rows, snapshots, narrative)
         + _impact_lines(snapshots, monitor_rows, regime_result)
@@ -3894,13 +3981,20 @@ def _build_market_payload(
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "data_coverage": data_coverage,
         "missing_sources": missing_sources,
+        "regime_reasoning_lines": list(regime_result.get("reasoning") or []),
         "headline_lines": headline_lines,
         "macro_items": macro_items,
         "action_lines": action_lines,
         "domestic_index_rows": domestic_index_rows,
         "domestic_market_lines": domestic_market_lines + _market_overview_lines(snapshots, regime_result),
+        "index_signal_rows": list(market_analysis.get("index_rows", [])),
+        "index_signal_lines": list(market_analysis.get("index_lines", [])),
+        "market_signal_rows": list(market_analysis.get("market_signal_rows", [])),
+        "market_signal_lines": list(market_analysis.get("market_signal_lines", [])),
         "style_rows": style_rows,
         "industry_rows": industry_rows,
+        "rotation_rows": list(market_analysis.get("rotation_rows", [])),
+        "rotation_lines": list(market_analysis.get("rotation_lines", [])),
         "macro_asset_rows": macro_asset_rows,
         "overnight_rows": overnight_rows,
         "watchlist_rows": watchlist_rows,
@@ -3911,10 +4005,15 @@ def _build_market_payload(
         "core_event_lines": _core_event_lines(news_report, _catalyst_rows(news_report, narrative)),
         "capital_flow_lines": capital_flow_lines,
         "quality_lines": quality_lines,
+        "evidence_rows": evidence_rows,
         "verification_rows": verification_rows,
         "alerts": alerts or ["当前没有触发额外强提醒，但市场风格切换仍需持续验证。"],
         "a_share_watch_meta": a_share_watch_meta,
+        "a_share_watch_candidates": a_share_watch_candidates,
+        "a_share_watch_upgrade_lines": [],
         "proxy_contract": proxy_contract,
+        "regime": regime_result,
+        "day_theme": narrative.get("label", ""),
     }
 
 
@@ -3985,6 +4084,7 @@ def main() -> None:
     ensure_report_task_registered("briefing")
     setup_logger("ERROR")
     config = load_config(args.config or None)
+    collector_timeout_seconds = float(config.get("briefing_collector_timeout_seconds", 15))
     china_macro = load_china_macro_snapshot(config)
     global_proxy = {}
     global_proxy_note = ""
@@ -4000,14 +4100,51 @@ def main() -> None:
 
     snapshots, alerts, watchlist_rows = _collect_snapshots(config, args.mode)
     proxy_contract = _briefing_proxy_contract(snapshots, config)
-    overview = MarketOverviewCollector(config).collect()
-    pulse = MarketPulseCollector(config).collect()
-    drivers = MarketDriversCollector(config).collect()
-    news_report = _news_report(snapshots, china_macro, global_proxy, config, args.news_source)
-    events = EventsCollector(config).collect(mode=args.mode)
+    collection_warnings: List[str] = []
+    overview, warning = _timed_collect(
+        "市场概览",
+        lambda: MarketOverviewCollector(config).collect(),
+        fallback={},
+        timeout_seconds=collector_timeout_seconds,
+    )
+    if warning:
+        collection_warnings.append(warning)
+    pulse, warning = _timed_collect(
+        "市场脉冲",
+        lambda: MarketPulseCollector(config).collect(),
+        fallback={},
+        timeout_seconds=collector_timeout_seconds,
+    )
+    if warning:
+        collection_warnings.append(warning)
+    drivers, warning = _timed_collect(
+        "市场驱动",
+        lambda: MarketDriversCollector(config).collect(),
+        fallback={},
+        timeout_seconds=collector_timeout_seconds,
+    )
+    if warning:
+        collection_warnings.append(warning)
+    news_report, warning = _timed_collect(
+        "新闻覆盖",
+        lambda: _news_report(snapshots, china_macro, global_proxy, config, args.news_source),
+        fallback={"items": [], "lines": []},
+        timeout_seconds=max(collector_timeout_seconds, 20),
+    )
+    if warning:
+        collection_warnings.append(warning)
+    events, warning = _timed_collect(
+        "事件日历",
+        lambda: EventsCollector(config).collect(mode=args.mode),
+        fallback=[],
+        timeout_seconds=collector_timeout_seconds,
+    )
+    if warning:
+        collection_warnings.append(warning)
     a_share_watch_rows: List[List[str]] = []
     a_share_watch_lines: List[str] = []
     a_share_watch_meta: Dict[str, Any] = {}
+    a_share_watch_candidates: List[Dict[str, Any]] = []
     if args.mode in {"daily", "weekly", "market"}:
         a_share_watch_context = _briefing_shared_market_context(
             config,
@@ -4020,7 +4157,7 @@ def main() -> None:
             pulse=pulse,
             events=events,
         )
-        a_share_watch_rows, a_share_watch_lines, a_share_watch_meta = _briefing_a_share_watch_rows(
+        a_share_watch_rows, a_share_watch_lines, a_share_watch_meta, a_share_watch_candidates = _briefing_a_share_watch_rows(
             config,
             shared_context=a_share_watch_context,
         )
@@ -4040,6 +4177,16 @@ def main() -> None:
         macro_items.append("当前更匹配的资产偏好: " + "、".join(effective_assets) + "。")
     if global_proxy_note:
         macro_items.append(global_proxy_note)
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    evidence_rows = _briefing_evidence_rows(
+        generated_at=generated_at,
+        narrative=narrative,
+        regime_result=regime_result,
+        data_coverage=data_coverage,
+        missing_sources=missing_sources,
+        a_share_watch_meta=a_share_watch_meta,
+        proxy_contract=proxy_contract,
+    )
 
     overnight_rows = _overnight_rows(overview)
     alerts = _monitor_alerts(monitor_rows) + list(alerts or [])
@@ -4059,6 +4206,7 @@ def main() -> None:
         rendered = BriefingRenderer().render_evening(payload)
     elif args.mode == "market":
         payload = _build_market_payload(
+            config=config,
             narrative=narrative,
             china_macro=china_macro,
             regime_result=regime_result,
@@ -4075,12 +4223,14 @@ def main() -> None:
             a_share_watch_rows=a_share_watch_rows,
             a_share_watch_lines=a_share_watch_lines,
             a_share_watch_meta=a_share_watch_meta,
+            a_share_watch_candidates=a_share_watch_candidates,
             data_coverage=data_coverage,
             missing_sources=missing_sources,
             macro_items=macro_items,
             alerts=alerts,
-            quality_lines=_quality_lines(news_report, anomaly_report, monitor_rows),
+            quality_lines=_quality_lines(news_report, anomaly_report, monitor_rows) + collection_warnings,
             proxy_contract=proxy_contract,
+            evidence_rows=evidence_rows,
         )
         rendered = BriefingRenderer().render_market(payload)
     else:
@@ -4094,7 +4244,7 @@ def main() -> None:
         theme_tracking_rows = _theme_tracking_rows(narrative, drivers)
         theme_tracking_lines = _theme_tracking_lines(narrative, theme_tracking_rows, args.mode)
         capital_flow_lines = _capital_flow_lines(pulse, drivers, liquidity_lines, snapshots)
-        quality_lines = _quality_lines(news_report, anomaly_report, monitor_rows)
+        quality_lines = _quality_lines(news_report, anomaly_report, monitor_rows) + collection_warnings
         verification_rows = _verification_rows_v4(snapshots, monitor_rows)
         portfolio_lines = _portfolio_lines(config)
         portfolio_table_rows = _portfolio_table_rows(config)
@@ -4102,12 +4252,16 @@ def main() -> None:
 
         payload = {
             "title": "每日晨报" if args.mode == "daily" else "每周周报",
-            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "generated_at": generated_at,
             "data_coverage": data_coverage,
             "missing_sources": missing_sources,
             "headline_lines": _compact_headline_lines(narrative, china_macro, monitor_rows, pulse)
             + _compact_validation_lines(narrative, monitor_rows, pulse),
             "macro_items": macro_items,
+            "regime_reasoning_lines": list(regime_result.get("reasoning") or []),
+            "regime": regime_result,
+            "day_theme": narrative.get("label", ""),
+            "evidence_rows": evidence_rows,
             "yesterday_review_rows": yesterday_rows,
             "yesterday_review_lines": yesterday_lines,
             "domestic_index_rows": domestic_index_rows,
@@ -4142,6 +4296,8 @@ def main() -> None:
             "action_lines": _action_lines(snapshots, narrative, monitor_rows),
             "charts": briefing_charts,
             "a_share_watch_meta": a_share_watch_meta,
+            "a_share_watch_candidates": a_share_watch_candidates,
+            "a_share_watch_upgrade_lines": [],
             "proxy_contract": proxy_contract,
         }
         rendered = BriefingRenderer().render(payload)
@@ -4154,22 +4310,20 @@ def main() -> None:
         client_markdown = ClientReportRenderer().render_briefing(payload)
         findings = check_generic_client_report(client_markdown, "briefing", source_text=rendered)
         output_path = resolve_project_path("reports/briefings/final") / f"{args.mode}_briefing_{str(payload.get('generated_at', ''))[:10]}_client_final.md"
-        try:
-            bundle = export_reviewed_markdown_bundle(
-                report_type="briefing",
-                markdown_text=client_markdown,
-                markdown_path=output_path,
-                release_findings=findings,
-                extra_manifest={
-                    "mode": args.mode,
-                    "detail_source": str(detail_path),
-                    "a_share_watch": payload.get("a_share_watch_meta", {}),
-                    "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
-                    "proxy_contract": dict(payload.get("proxy_contract") or {}),
-                },
-            )
-        except ReportGuardError as exc:
-            raise SystemExit(str(exc))
+        bundle = finalize_client_markdown(
+            report_type="briefing",
+            client_markdown=client_markdown,
+            markdown_path=output_path,
+            detail_markdown=rendered,
+            detail_path=detail_path,
+            extra_manifest={
+                "mode": args.mode,
+                "a_share_watch": payload.get("a_share_watch_meta", {}),
+                "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
+                "proxy_contract": dict(payload.get("proxy_contract") or {}),
+            },
+            release_checker=lambda markdown, source_text: check_generic_client_report(markdown, "briefing", source_text=source_text),
+        )
         print(client_markdown)
         from src.commands.report_guard import exported_bundle_lines
 
@@ -4179,22 +4333,20 @@ def main() -> None:
 
     findings = check_generic_client_report(rendered, "briefing")
     output_path = resolve_project_path("reports/briefings/final") / f"{args.mode}_briefing_{datetime.now().strftime('%Y-%m-%d')}_client_final.md"
-    try:
-        bundle = export_reviewed_markdown_bundle(
-            report_type="briefing",
-            markdown_text=rendered,
-            markdown_path=output_path,
-            release_findings=findings,
-            extra_manifest={
-                "mode": args.mode,
-                "detail_source": str(detail_path),
-                "a_share_watch": payload.get("a_share_watch_meta", {}),
-                "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
-                "proxy_contract": dict(payload.get("proxy_contract") or {}),
-            },
-        )
-    except ReportGuardError as exc:
-        raise SystemExit(str(exc))
+    bundle = finalize_client_markdown(
+        report_type="briefing",
+        client_markdown=rendered,
+        markdown_path=output_path,
+        detail_markdown=rendered,
+        detail_path=detail_path,
+        extra_manifest={
+            "mode": args.mode,
+            "a_share_watch": payload.get("a_share_watch_meta", {}),
+            "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
+            "proxy_contract": dict(payload.get("proxy_contract") or {}),
+        },
+        release_checker=lambda markdown, source_text: check_generic_client_report(markdown, "briefing", source_text=source_text),
+    )
     print(rendered)
     from src.commands.report_guard import exported_bundle_lines
 

@@ -9,9 +9,11 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery, summarize_pick_coverage
 from src.commands.pick_visuals import attach_visuals_to_analyses
-from src.commands.report_guard import ReportGuardError, ensure_report_task_registered, export_reviewed_markdown_bundle, exported_bundle_lines
+from src.commands.final_runner import finalize_client_markdown
+from src.commands.report_guard import ensure_report_task_registered, exported_bundle_lines
 from src.commands.release_check import check_generic_client_report
 from src.output import ClientReportRenderer, OpportunityReportRenderer
+from src.output.opportunity_report import _dimension_summary_text
 from src.output.client_report import _fund_profile_sections, _pick_horizon_profile
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.opportunity_engine import _client_safe_issue, analyze_opportunity, build_market_context, discover_opportunities
@@ -74,9 +76,15 @@ def _dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
         dimension = dict(analysis.get("dimensions", {}).get(key) or {})
         score = dimension.get("score")
         max_score = dimension.get("max_score", 100)
+        display_name = str(dimension.get("display_name", label))
         display = "—" if score is None else f"{score}/{max_score}"
-        reason = str(dimension.get("summary", "")).strip() or str(dimension.get("core_signal", "")).strip()
-        rows.append([str(dimension.get("display_name", label)), display, reason])
+        reason = _dimension_summary_text(key, dimension)
+        if key == "chips":
+            display_name = "筹码结构（辅助项）"
+            display = "辅助项"
+            if reason and "主排序不直接使用" not in reason:
+                reason = f"{reason} 当前主排序不直接使用这项。".strip()
+        rows.append([display_name, display, reason])
     return rows
 
 
@@ -483,7 +491,13 @@ def _detail_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def _payload_from_analyses(
+    analyses: Sequence[Dict[str, Any]],
+    selection_context: Dict[str, Any] | None = None,
+    *,
+    regime: Mapping[str, Any] | None = None,
+    day_theme: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
     if not analyses:
         raise ValueError("No ETF analyses available")
     ranked = sorted(analyses, key=_rank_key, reverse=True)
@@ -500,17 +514,27 @@ def _payload_from_analyses(analyses: Sequence[Dict[str, Any]], selection_context
     return {
         "generated_at": str(winner.get("generated_at", "")),
         "selection_context": dict(selection_context or {}),
+        "regime": dict(regime or {}),
+        "day_theme": dict(day_theme or {}),
         "recommendation_tracks": recommendation_tracks,
         "winner": {
             "name": winner.get("name"),
             "symbol": winner.get("symbol"),
             "asset_type": winner.get("asset_type"),
+            "generated_at": winner.get("generated_at"),
             "visuals": dict(winner.get("visuals") or {}),
             "reference_price": float(dict(winner.get("metrics") or {}).get("last_close") or 0.0),
             "trade_state": dict(winner.get("narrative") or {}).get("judgment", {}).get("state", "持有优于追高"),
             "positives": _winner_reason_lines(winner),
             "dimension_rows": _dimension_rows(winner),
+            "dimensions": dict(winner.get("dimensions") or {}),
             "action": dict(winner.get("action") or {}),
+            "provenance": dict(winner.get("provenance") or {}),
+            "intraday": dict(winner.get("intraday") or {}),
+            "metadata": dict(winner.get("metadata") or {}),
+            "history": winner.get("history"),
+            "benchmark_name": winner.get("benchmark_name"),
+            "benchmark_symbol": winner.get("benchmark_symbol"),
             "positioning_lines": _positioning_lines(winner),
             "evidence": evidence,
             "narrative": {"playbook": dict(dict(winner.get("narrative") or {}).get("playbook") or {})},
@@ -565,6 +589,7 @@ def main() -> None:
             coverage=payload.get("pick_coverage") or payload.get("data_coverage") or {},
             scan_pool=int(payload.get("scan_pool") or 0),
             passed_pool=int(payload.get("passed_pool") or 0),
+            winner=analyses[0] if analyses else None,
         )
         selection_context = _selection_context(
             discovery_mode=str(payload.get("discovery_mode", "")),
@@ -582,7 +607,37 @@ def main() -> None:
             delivery_tier=delivery_tier,
             proxy_contract=payload.get("proxy_contract") or {},
         )
-        client_payload = _payload_from_analyses(analyses, selection_context=selection_context)
+        client_payload = _payload_from_analyses(
+            analyses,
+            selection_context=selection_context,
+            regime=payload.get("regime") or {},
+            day_theme=payload.get("day_theme") or {},
+        )
+        delivery_tier = grade_pick_delivery(
+            report_type="etf_pick",
+            discovery_mode=str(payload.get("discovery_mode", "")),
+            coverage=payload.get("pick_coverage") or payload.get("data_coverage") or {},
+            scan_pool=int(payload.get("scan_pool") or 0),
+            passed_pool=int(payload.get("passed_pool") or 0),
+            winner=dict(client_payload.get("winner") or {}),
+        )
+        selection_context = _selection_context(
+            discovery_mode=str(payload.get("discovery_mode", "")),
+            scan_pool=int(payload.get("scan_pool") or 0),
+            passed_pool=int(payload.get("passed_pool") or 0),
+            theme_filter=args.theme.strip(),
+            blind_spots=payload.get("blind_spots") or [],
+            coverage=payload.get("pick_coverage") or payload.get("data_coverage") or summarize_pick_coverage(analyses),
+            model_version=str(payload.get("model_version", "")),
+            baseline_snapshot_at=str(payload.get("baseline_snapshot_at", "")),
+            is_daily_baseline=bool(payload.get("is_daily_baseline")),
+            comparison_basis_at=str(payload.get("comparison_basis_at", "")),
+            comparison_basis_label=str(payload.get("comparison_basis_label", "")),
+            model_version_warning=str(payload.get("model_version_warning", "")),
+            delivery_tier=delivery_tier,
+            proxy_contract=payload.get("proxy_contract") or {},
+        )
+        client_payload["selection_context"] = selection_context
         markdown = ClientReportRenderer().render_etf_pick(client_payload)
         if not args.client_final:
             print(markdown)
@@ -591,6 +646,7 @@ def main() -> None:
         date_str = str(client_payload.get("generated_at", ""))[:10]
         theme = args.theme.strip().replace("/", "_").replace(" ", "_")
         filename = f"etf_pick_{theme}_{date_str}_final.md" if theme else f"etf_pick_{date_str}_final.md"
+        markdown_path = resolve_project_path(f"reports/etf_picks/final/{filename}")
         detail_markdown = _detail_markdown(
             analyses,
             str(dict(client_payload.get("winner") or {}).get("symbol", "")),
@@ -598,30 +654,25 @@ def main() -> None:
         )
         factor_contract = summarize_factor_contracts_from_analyses(list(payload.get("coverage_analyses") or analyses), sample_limit=16)
         detail_path = _detail_output_path(str(client_payload.get("generated_at", "")), theme)
-        detail_path.parent.mkdir(parents=True, exist_ok=True)
-        detail_path.write_text(detail_markdown, encoding="utf-8")
-        findings = check_generic_client_report(markdown, "etf_pick", source_text=detail_markdown)
-        try:
-            bundle = export_reviewed_markdown_bundle(
-                report_type="etf_pick",
-                markdown_text=markdown,
-                markdown_path=resolve_project_path(f"reports/etf_picks/final/{filename}"),
-                release_findings=findings,
-                extra_manifest={
-                    "theme_filter": args.theme.strip(),
-                    "winner": dict(client_payload.get("winner") or {}).get("symbol", ""),
-                    "detail_source": str(detail_path),
-                    "scan_pool": int(payload.get("scan_pool") or 0),
-                    "passed_pool": int(payload.get("passed_pool") or 0),
-                    "discovery_mode": str(payload.get("discovery_mode", "")),
-                    "delivery_tier": dict(delivery_tier),
-                    "data_coverage": dict(payload.get("pick_coverage") or {}),
-                    "factor_contract": factor_contract,
-                    "proxy_contract": dict(payload.get("proxy_contract") or {}),
-                },
-            )
-        except ReportGuardError as exc:
-            raise SystemExit(str(exc))
+        bundle = finalize_client_markdown(
+            report_type="etf_pick",
+            client_markdown=markdown,
+            markdown_path=markdown_path,
+            detail_markdown=detail_markdown,
+            detail_path=detail_path,
+            extra_manifest={
+                "theme_filter": args.theme.strip(),
+                "winner": dict(client_payload.get("winner") or {}).get("symbol", ""),
+                "scan_pool": int(payload.get("scan_pool") or 0),
+                "passed_pool": int(payload.get("passed_pool") or 0),
+                "discovery_mode": str(payload.get("discovery_mode", "")),
+                "delivery_tier": dict(delivery_tier),
+                "data_coverage": dict(payload.get("pick_coverage") or {}),
+                "factor_contract": factor_contract,
+                "proxy_contract": dict(payload.get("proxy_contract") or {}),
+            },
+            release_checker=lambda markdown_text, source_text: check_generic_client_report(markdown_text, "etf_pick", source_text=source_text),
+        )
         print(markdown)
         for index, line in enumerate(exported_bundle_lines(bundle)):
             print(f"\n{line}" if index == 0 else line)

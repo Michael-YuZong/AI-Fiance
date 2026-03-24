@@ -5,6 +5,7 @@ import time
 
 import pandas as pd
 
+import src.collectors.base as base_module
 from src.collectors.base import BaseCollector
 
 
@@ -104,6 +105,24 @@ def test_cached_call_does_not_retry_known_parser_failure(tmp_path):
     assert calls["count"] == 1
 
 
+def test_cached_call_does_not_retry_length_mismatch_parser_failure(tmp_path):
+    collector = BaseCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}}, name="TestCollector")
+    calls = {"count": 0}
+
+    def broken_fetcher():  # noqa: ANN202
+        calls["count"] += 1
+        raise ValueError("Length mismatch: Expected axis has 0 elements, new values have 13 elements")
+
+    try:
+        collector.cached_call("demo:key", broken_fetcher, ttl_hours=0)
+    except ValueError as exc:
+        assert "Length mismatch" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Expected length mismatch failure to bubble up")
+
+    assert calls["count"] == 1
+
+
 def test_cached_call_does_not_retry_known_runtime_wrapper_failure(tmp_path):
     collector = BaseCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}}, name="TestCollector")
     calls = {"count": 0}
@@ -153,3 +172,36 @@ def test_base_collector_sets_no_proxy_for_domestic_data_domains(tmp_path, monkey
         assert ".jin10.com" in value
         assert ".tushare.pro" in value
         assert ".cninfo.com.cn" in value
+
+
+def test_tushare_pro_uses_configured_timeout(tmp_path, monkeypatch):
+    class _FakeTs:
+        def __init__(self) -> None:
+            self.token = None
+            self.timeout = None
+
+        def set_token(self, token):  # noqa: ANN001
+            self.token = token
+
+        def pro_api(self, timeout=30):  # noqa: ANN001
+            self.timeout = timeout
+            return object()
+
+    fake_ts = _FakeTs()
+    monkeypatch.setattr(base_module, "ts", fake_ts)
+    monkeypatch.setattr(base_module, "_tushare_api_instance", None)
+    monkeypatch.setattr(base_module, "_tushare_api_timeout", None)
+
+    collector = BaseCollector(
+        {
+            "storage": {"cache_dir": str(tmp_path)},
+            "api_keys": {"tushare": "demo-token"},
+            "tushare_timeout_seconds": 9,
+        },
+        name="TestCollector",
+    )
+
+    collector._tushare_pro()
+
+    assert fake_ts.token == "demo-token"
+    assert fake_ts.timeout == 9

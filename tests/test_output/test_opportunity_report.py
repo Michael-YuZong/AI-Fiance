@@ -143,11 +143,88 @@ def test_opportunity_renderer_scan_sections():
     assert "| 维度 | 判断 | 说明 |" in rendered
     assert "| 维度 | 得分 | 一句话判断 | 详情 |" in rendered
     assert "| 因子 | 当前值/信号 | 说明 | 得分 |" in rendered
+    assert "为什么还不升级" in rendered
+    assert "升级条件" in rendered
     assert "行情 as_of" in rendered
     assert "行情来源" in rendered
     assert "AKShare 日线回退" in rendered
     assert "催化证据 as_of" in rendered
     assert "时点边界" in rendered
+
+
+def test_opportunity_renderer_scan_hides_missing_perf_values_and_maps_check_status():
+    analysis = _sample_analysis("159698", "粮食ETF")
+    analysis["fund_profile"] = {
+        "overview": {
+            "基金简称": "粮食ETF",
+            "基金类型": "股票型 / 被动指数型",
+            "基金管理人": "鹏华基金",
+            "基金经理人": "陈龙",
+            "业绩比较基准": "国证粮食产业指数收益率",
+        },
+        "style": {
+            "summary": "这只基金更像在买`农业`方向的被动暴露，当前标签是 `农业主题 / 被动跟踪`。",
+            "tags": ["农业主题", "被动跟踪"],
+            "positioning": "这类基金更看跟踪标的暴露、跟踪误差和申赎效率，不以基金经理主观择时择股为核心。",
+            "selection": "核心不是基金经理主动选股，而是跟踪 `农业` 暴露及其对应基准。",
+            "consistency": "这类产品更重要的是跟踪误差、费率和标的暴露是否清晰，基金经理风格漂移不是核心变量。",
+            "benchmark_note": "国证粮食产业指数收益率",
+        },
+        "achievement": {
+            "近1月": {"return_pct": 2.7, "max_drawdown_pct": None, "peer_rank": "428/3956"},
+        },
+    }
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+    assert "nan%" not in rendered
+    assert "| 流动性 | 通过 | 日均成交 1.20 亿 |" in rendered
+    assert "| 估值极端 | 警示 | 价格位置代理分位 92% |" in rendered
+
+
+def test_opportunity_renderer_scan_rewrites_watch_headline_and_splits_catalyst_layers() -> None:
+    analysis = _sample_analysis("159698", "粮食ETF")
+    analysis["rating"] = {"rank": 0, "label": "无信号", "stars": "—", "warnings": []}
+    analysis["dimensions"]["technical"]["score"] = 28
+    analysis["dimensions"]["technical"]["summary"] = "技术结构仍偏弱，暂不支持激进介入。"
+    analysis["dimensions"]["catalyst"] = {
+        "score": 23,
+        "max_score": 100,
+        "summary": "催化不足，当前更像静态博弈。",
+        "core_signal": "相关头条 7 条 · 覆盖源 4 个",
+        "factors": [
+            {"name": "政策催化", "display_score": "0/30", "signal": "近 7 日未命中直接政策催化", "detail": "政策原文和一级媒体优先"},
+            {"name": "龙头公告/业绩", "display_score": "0/25", "signal": "未命中直接龙头公告", "detail": "优先看订单、扩产、回购、并购或超预期业绩"},
+            {"name": "产品/跟踪方向催化", "display_score": "12/12", "signal": "粮食ETF涨超1%", "detail": "当前命中跟踪基准 / 行业暴露"},
+            {"name": "研报/新闻密度", "display_score": "10/10", "signal": "相关头条 7 条", "detail": "个股直接提及的一级媒体头条密度"},
+            {"name": "新闻热度", "display_score": "10/10", "signal": "覆盖源 4 个", "detail": "从少量提及到多源同步，是热度拐点的代理"},
+        ],
+    }
+    analysis["dimensions"]["seasonality"] = {
+        "score": 19,
+        "max_score": 100,
+        "summary": "时间窗口不占优，更多靠主线和技术本身。",
+        "core_signal": "同月胜率 0%（3 年样本）",
+        "factors": [
+            {"name": "月度胜率", "display_score": "-15/25", "signal": "同月胜率 0%（3 年样本）", "detail": "样本 3 年（2024–2026）"},
+        ],
+    }
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+
+    assert "**— 中期逻辑未坏，短线暂无信号**" in rendered
+    assert "技术面 `28/100` 且催化面 `23/100`" in rendered
+    assert "| 直接催化 | 偏弱 |" in rendered
+    assert "| 舆情/信息环境 | 偏强 |" in rendered
+    assert "直接催化偏弱，舆情关注度尚可，因此当前更像静态博弈。" in rendered
+    assert "当前样本偏薄，只作辅助参考，不作为主结论依据。" in rendered
+
+
+def test_opportunity_renderer_backfills_cautions_when_narrative_is_too_short():
+    analysis = _sample_analysis("520840", "港股通恒生科技ETF")
+    analysis["narrative"]["cautions"] = ["短线动能还需要确认。"]
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+    section = rendered.split("## 现在不适合激进的理由", 1)[1].split("## 所处阶段", 1)[0]
+    assert section.count("- ") >= 2
 
 
 def test_opportunity_renderer_scan_visual_section():
@@ -191,7 +268,7 @@ def test_opportunity_renderer_scan_uses_dimension_display_names() -> None:
     rendered = OpportunityReportRenderer().render_scan(analysis)
 
     assert "| 产品质量/基本面代理 | 61/100 |" in rendered
-    assert "| 筹码结构（辅助项） | —/100 |" in rendered
+    assert "| 筹码结构（辅助项） | 辅助项 |" in rendered
 
 
 def test_opportunity_renderer_discovery_and_compare():

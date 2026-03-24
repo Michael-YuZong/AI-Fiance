@@ -74,7 +74,33 @@ def grade_pick_delivery(
     coverage: Mapping[str, Any] | None,
     scan_pool: int,
     passed_pool: int,
+    winner: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    def _observe_only_winner(payload: Mapping[str, Any] | None) -> bool:
+        item = dict(payload or {})
+        if not item:
+            return False
+        narrative = dict(item.get("narrative") or {})
+        judgment = dict(narrative.get("judgment") or {})
+        action = dict(item.get("action") or {})
+        tokens = " ".join(
+            str(value).strip()
+            for value in (
+                item.get("trade_state"),
+                judgment.get("state"),
+                judgment.get("direction"),
+                action.get("direction"),
+                action.get("position"),
+                action.get("entry"),
+                action.get("scaling_plan"),
+            )
+            if str(value).strip()
+        )
+        if not tokens:
+            return False
+        observe_markers = ("观察", "回避", "暂不出手", "等待", "持有优于追高", "先按观察仓")
+        return any(marker in tokens for marker in observe_markers)
+
     coverage_payload = dict(coverage or {})
     degraded = bool(coverage_payload.get("degraded"))
     total = int(coverage_payload.get("total") or 0)
@@ -116,6 +142,10 @@ def grade_pick_delivery(
         code = "degraded_observation"
         label = "降级观察稿"
         notes.append("新闻/事件覆盖存在降级，本次更适合作为观察优先对象，不宜当成强执行型推荐。")
+    elif report_type in {"etf_pick", "fund_pick"} and _observe_only_winner(winner):
+        code = "observe_priority_note"
+        label = "观察优先稿"
+        notes.append("当前排第一的标的仍是观察/持有优先口径，方向可以继续跟，但不应按正式申赎/交易推荐理解。")
     if summary_only:
         notes.append("当前覆盖率过低，本次只输出摘要观察稿，不展开完整动作模板。")
 

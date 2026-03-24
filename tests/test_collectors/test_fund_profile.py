@@ -34,6 +34,19 @@ def test_fund_profile_shared_tables_reuse_process_cache(monkeypatch):
     assert calls == {"manager": 1, "rating": 1}
 
 
+def test_build_standard_fund_taxonomy_identifies_agriculture_theme():
+    taxonomy = build_standard_fund_taxonomy(
+        name="粮食ETF",
+        fund_type="股票型 / 被动指数型",
+        benchmark="国证粮食产业指数收益率",
+        asset_type="cn_etf",
+    )
+
+    assert taxonomy["sector"] == "农业"
+    assert taxonomy["exposure_scope"] == "行业主题"
+    assert "农业方向" in taxonomy["labels"]
+
+
 def test_fund_profile_collects_holdings_and_manager_style(monkeypatch):
     collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
     monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005
@@ -398,6 +411,115 @@ def test_fund_profile_prefers_benchmark_theme_over_secondary_industries(monkeypa
     assert "电网主题" in profile["style"]["tags"]
 
 
+def test_fund_profile_recognizes_hang_seng_index_etf_as_broad_index(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_overview",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "基金简称": "恒生ETF易方达",
+                    "基金类型": "股票型 / 被动指数型",
+                    "基金管理人": "易方达基金",
+                    "基金经理人": "宋钊贤",
+                    "业绩比较基准": "恒生指数收益率(使用估值汇率折算)",
+                    "跟踪标的": "恒生指数",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_asset_allocation",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"资产类型": "股票", "仓位占比": 95.48},
+                {"资产类型": "现金", "仓位占比": 4.52},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_portfolio_hold",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"股票代码": "0005", "股票名称": "汇丰控股", "占净值比例": 8.0, "持股数": 1, "持仓市值": 1, "季度": "2025年4季度股票投资明细"},
+                {"股票代码": "0700", "股票名称": "腾讯控股", "占净值比例": 7.5, "持股数": 1, "持仓市值": 1, "季度": "2025年4季度股票投资明细"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_industry_allocation",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"行业类别": "非必需消费品", "占净值比例": 23.0, "市值": 1, "截止时间": "2025-12-31"},
+                {"行业类别": "金融业", "占净值比例": 21.0, "市值": 1, "截止时间": "2025-12-31"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_manager_directory", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+
+    profile = collector.collect_profile("513210", asset_type="cn_etf")
+    assert profile["style"]["sector"] == "宽基"
+    assert profile["style"]["taxonomy"]["sector"] == "宽基"
+    assert profile["style"]["taxonomy"]["exposure_scope"] == "跨境"
+    assert "宽基主题" in profile["style"]["tags"]
+
+
+def test_fund_profile_drops_invalid_asset_mix_and_marks_note(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "get_fund_basic", lambda market="O": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_overview",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "基金简称": "恒生ETF易方达",
+                    "基金类型": "股票型 / 被动指数型",
+                    "基金管理人": "易方达基金",
+                    "基金经理人": "宋钊贤",
+                    "业绩比较基准": "恒生指数收益率(使用估值汇率折算)",
+                    "跟踪标的": "恒生指数",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_asset_allocation",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"资产类型": "股票", "仓位占比": 95.48},
+                {"资产类型": "现金", "仓位占比": 88.85},
+                {"资产类型": "其他", "仓位占比": 1.05},
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_portfolio_hold", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_industry_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_manager_directory", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+
+    profile = collector.collect_profile("513210", asset_type="cn_etf")
+    assert profile["asset_allocation"] == []
+    assert any("资产配置口径异常" in item for item in profile["notes"])
+
+
 def test_fund_profile_backfills_overview_from_tushare_when_overview_empty(monkeypatch):
     collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
 
@@ -608,6 +730,21 @@ def test_standard_taxonomy_does_not_treat_etf_suffix_as_f_share_class() -> None:
 
     assert taxonomy["product_form"] == "ETF"
     assert taxonomy["share_class"] == "未分级"
+
+
+def test_standard_taxonomy_prefers_explicit_financial_theme_over_wrong_sector_hint() -> None:
+    taxonomy = build_standard_fund_taxonomy(
+        name="香港证券ETF易方达",
+        fund_type="股票型",
+        invest_type="被动指数型",
+        benchmark="中证香港证券投资主题指数收益率(使用估值汇率折算)",
+        asset_type="cn_etf",
+        sector_hint="科技",
+    )
+
+    assert taxonomy["sector"] == "金融"
+    assert taxonomy["exposure_scope"] == "行业主题"
+    assert "券商" in taxonomy["chain_nodes"]
 
 
 def test_fund_profile_uses_tushare_manager_company_dividend_and_holdings(monkeypatch):

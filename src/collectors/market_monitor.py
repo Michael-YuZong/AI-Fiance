@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import time
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -26,6 +27,7 @@ class MarketMonitorCollector(BaseCollector):
             self.config.get("market_monitors_file", "config/market_monitors.yaml")
         )
         self.max_stale_hours = float(self.config.get("market_monitor_max_stale_hours", 12))
+        self.fetch_timeout_seconds = float(self.config.get("market_monitor_fetch_timeout_seconds", 8))
 
     def collect(self) -> List[Dict[str, Any]]:
         if yf is None:
@@ -43,18 +45,24 @@ class MarketMonitorCollector(BaseCollector):
             if frame is None:
                 stale_frame = self._load_cache(cache_key, ttl_hours=2, allow_stale=True)
                 stale_age_hours = self._stale_cache_age_hours(cache_key)
+                refresh_issue = "实时刷新失败。"
                 try:
                     self.rate_limiter.wait()
-                    frame = self._execute_fetcher(
-                        yf.Ticker(symbol).history,
-                        period="3mo",
-                        interval="1d",
-                        auto_adjust=False,
-                    )
+                    frame = self._history_with_timeout(symbol)
                     if frame is None or getattr(frame, "empty", False):
                         raise ValueError(f"{self.name} returned empty result for {cache_key}")
                     self._save_cache(cache_key, frame)
                     source_status = "live"
+                except TimeoutError:
+                    refresh_issue = f"实时刷新超时（>{self.fetch_timeout_seconds:.0f}s）。"
+                    if (
+                        stale_frame is None
+                        or stale_age_hours is None
+                        or stale_age_hours > self.max_stale_hours
+                    ):
+                        continue
+                    frame = stale_frame
+                    source_status = "stale_cache"
                 except Exception:
                     if (
                         stale_frame is None
@@ -83,11 +91,28 @@ class MarketMonitorCollector(BaseCollector):
             if source_status == "stale_cache" and stale_age_hours is not None:
                 row["stale_age_hours"] = round(float(stale_age_hours), 1)
                 row["data_warning"] = (
-                    f"实时刷新失败，当前使用约 {stale_age_hours:.1f} 小时前的缓存；"
+                    f"{refresh_issue.rstrip('。')}，当前使用约 {stale_age_hours:.1f} 小时前的缓存；"
                     "不应把它当成严格实时数值。"
                 )
             rows.append(row)
         return rows
+
+    def _history_with_timeout(self, symbol: str) -> pd.DataFrame:
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(
+            self._execute_fetcher,
+            yf.Ticker(symbol).history,
+            period="3mo",
+            interval="1d",
+            auto_adjust=False,
+        )
+        try:
+            return future.result(timeout=self.fetch_timeout_seconds)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(f"{self.name} refresh timeout for {symbol}") from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _stale_cache_age_hours(self, cache_key: str) -> Optional[float]:
         cache_path = self._cache_path(cache_key)

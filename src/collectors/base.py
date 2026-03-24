@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover
     ts = None
 
 _tushare_api_instance: Any = None
+_tushare_api_timeout: float | None = None
 _tushare_rate_limiter = RateLimiter(min_interval_seconds=0.35)
 DIRECT_DATA_HOST_SUFFIXES = (
     ".eastmoney.com",
@@ -73,16 +74,18 @@ class BaseCollector:
 
     def _tushare_pro(self) -> Any:
         """Return a cached tushare pro_api instance, or None if unavailable."""
-        global _tushare_api_instance
+        global _tushare_api_instance, _tushare_api_timeout
         if ts is None:
             return None
-        if _tushare_api_instance is not None:
+        timeout_seconds = float(self.config.get("tushare_timeout_seconds", 12))
+        if _tushare_api_instance is not None and _tushare_api_timeout == timeout_seconds:
             return _tushare_api_instance
         token = (self.config.get("api_keys") or {}).get("tushare", "")
         if not token or token == "YOUR_TUSHARE_TOKEN":
             return None
         ts.set_token(token)
-        _tushare_api_instance = ts.pro_api()
+        _tushare_api_instance = ts.pro_api(timeout=timeout_seconds)
+        _tushare_api_timeout = timeout_seconds
         return _tushare_api_instance
 
     def _ts_call(self, api_name: str, **kwargs: Any) -> Any:
@@ -535,6 +538,7 @@ class BaseCollector:
             "'NoneType' object is not subscriptable",
             "exceptions must derive from BaseException",
             "Excel file format cannot be determined",
+            "Length mismatch",
             "CERTIFICATE_VERIFY_FAILED",
             "'data'",
             "Too Many Requests",

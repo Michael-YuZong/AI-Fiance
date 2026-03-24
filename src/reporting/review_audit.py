@@ -9,7 +9,13 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 from src.commands.report_guard import manifest_path_for
 from src.reporting.review_ledger import ReviewRecord, collect_review_records
-from src.reporting.review_record_utils import canonicalize_sections, split_sections
+from src.reporting.review_record_utils import (
+    bullet_block_items,
+    canonicalize_sections,
+    has_actionable_content,
+    parse_bullet_mapping,
+    split_sections,
+)
 
 _REQUIRED_ROUND_SECTIONS = (
     "结论",
@@ -46,27 +52,6 @@ class ReviewAuditFinding:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
-
-def _meaningful_lines(text: str) -> List[str]:
-    result: List[str] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line in {"`go`", "`hold`", "`blocked`", "无", "无新增阻塞项"}:
-            continue
-        result.append(line)
-    return result
-
-
-def _has_actionable_content(text: str) -> bool:
-    lines = _meaningful_lines(text)
-    if not lines:
-        return False
-    normalized = " ".join(lines)
-    empty_markers = ("无新增", "没有新的", "无新的", "不适用", "已满足")
-    return not any(marker in normalized for marker in empty_markers)
-
 
 def _solidification_categories(text: str) -> List[str]:
     lowered = text.lower()
@@ -152,6 +137,41 @@ def _audit_round_structure(record: ReviewRecord, sections: Mapping[str, str]) ->
     return findings
 
 
+def _audit_split_review_roles(record: ReviewRecord, sections: Mapping[str, str]) -> List[ReviewAuditFinding]:
+    findings: List[ReviewAuditFinding] = []
+    if record.round is None:
+        return findings
+    convergence = parse_bullet_mapping(sections.get("收敛结论", "").splitlines())
+    structural = str(convergence.get("结构审执行者", "")).strip()
+    divergent = str(convergence.get("发散审执行者", "")).strip()
+    if not structural or not divergent:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P1",
+                category="round_contract",
+                title="缺少分阶段外审执行者",
+                detail="收敛结论缺少 `结构审执行者` 或 `发散审执行者`，无法证明结构审和发散审已分离执行。",
+            )
+        )
+        return findings
+    if structural.casefold() == divergent.casefold():
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P1",
+                category="round_contract",
+                title="结构审与发散审使用了同一执行者",
+                detail="当前 review 记录里 `结构审执行者` 与 `发散审执行者` 相同，不满足双 reviewer / 双子 agent 外审合同。",
+            )
+        )
+    return findings
+
+
 def _audit_solidification(record: ReviewRecord, sections: Mapping[str, str]) -> List[ReviewAuditFinding]:
     findings: List[ReviewAuditFinding] = []
     if record.round is None:
@@ -159,7 +179,7 @@ def _audit_solidification(record: ReviewRecord, sections: Mapping[str, str]) -> 
     issues_text = sections.get("主要问题", "")
     divergent_text = sections.get("框架外问题", "")
     solidification_text = sections.get("建议沉淀", "")
-    needs_solidification = _has_actionable_content(issues_text) or _has_actionable_content(divergent_text)
+    needs_solidification = has_actionable_content(issues_text) or has_actionable_content(divergent_text)
     if needs_solidification and not solidification_text.strip():
         findings.append(
             ReviewAuditFinding(
@@ -190,7 +210,104 @@ def _audit_solidification(record: ReviewRecord, sections: Mapping[str, str]) -> 
     return findings
 
 
-def _audit_series_consistency(series_id: str, records: List[ReviewRecord]) -> List[ReviewAuditFinding]:
+def _round_has_actionable_findings(sections: Mapping[str, str]) -> bool:
+    return any(
+        has_actionable_content(sections.get(title, ""))
+        for title in ("主要问题", "框架外问题", "零提示发散审")
+    )
+
+
+def _round_requires_followup(sections: Mapping[str, str]) -> bool:
+    return any(
+        has_actionable_content(sections.get(title, ""))
+        for title in ("主要问题", "框架外问题")
+    )
+
+
+def _audit_round_handoff(
+    *,
+    series_id: str,
+    current: ReviewRecord,
+    next_record: ReviewRecord,
+    current_sections: Mapping[str, str],
+    next_sections: Mapping[str, str],
+) -> List[ReviewAuditFinding]:
+    findings: List[ReviewAuditFinding] = []
+    if not _round_requires_followup(current_sections):
+        return findings
+
+    convergence_text = next_sections.get("收敛结论", "")
+    carried_items = bullet_block_items(convergence_text, "carried_p0_p1")
+    closed_items = bullet_block_items(convergence_text, "closed_items")
+    if not carried_items and not closed_items:
+        findings.append(
+            ReviewAuditFinding(
+                path=next_record.path,
+                series_id=series_id,
+                round=next_record.round,
+                severity="P1",
+                category="series_consistency",
+                title="上一轮问题没有在下一轮闭环登记",
+                detail=(
+                    f"上一轮 `{current.path}` 仍有 actionable finding，"
+                    "但这一轮的 `carried_p0_p1 / closed_items` 都为空，无法确认问题是继续携带还是已关闭。"
+                ),
+            )
+        )
+    return findings
+
+
+def _audit_pass_convergence(series_id: str, latest: ReviewRecord, sections: Mapping[str, str]) -> List[ReviewAuditFinding]:
+    findings: List[ReviewAuditFinding] = []
+    if latest.status != "PASS":
+        return findings
+
+    if latest.converged and latest.converged != "是":
+        findings.append(
+            ReviewAuditFinding(
+                path=latest.path,
+                series_id=series_id,
+                round=latest.round,
+                severity="P1",
+                category="series_consistency",
+                title="PASS 记录没有显式收敛",
+                detail="最新记录已标为 PASS，但 `本轮是否收敛` 不是“是”。",
+            )
+        )
+
+    actionable = _round_has_actionable_findings(sections)
+    if actionable:
+        findings.append(
+            ReviewAuditFinding(
+                path=latest.path,
+                series_id=series_id,
+                round=latest.round,
+                severity="P1",
+                category="series_consistency",
+                title="PASS 记录正文仍有 actionable finding",
+                detail="最新记录已标为 PASS，但 `主要问题 / 框架外问题 / 零提示发散审` 里仍有需要回修的实质问题。",
+            )
+        )
+        if latest.round == 1:
+            findings.append(
+                ReviewAuditFinding(
+                    path=latest.path,
+                    series_id=series_id,
+                    round=latest.round,
+                    severity="P1",
+                    category="series_consistency",
+                    title="单轮 PASS 缺少回修闭环",
+                    detail="当前只有 round 1 就直接 PASS，但正文仍有 actionable finding，没有形成“修正 -> 再审”的闭环证据。",
+                )
+            )
+    return findings
+
+
+def _audit_series_consistency(
+    series_id: str,
+    records: List[ReviewRecord],
+    sections_by_path: Mapping[str, Mapping[str, str]],
+) -> List[ReviewAuditFinding]:
     findings: List[ReviewAuditFinding] = []
     if not records:
         return findings
@@ -257,6 +374,17 @@ def _audit_series_consistency(series_id: str, records: List[ReviewRecord]) -> Li
                     )
                 )
 
+        if index > 0:
+            findings.extend(
+                _audit_round_handoff(
+                    series_id=series_id,
+                    current=records[index - 1],
+                    next_record=record,
+                    current_sections=sections_by_path.get(records[index - 1].path, {}),
+                    next_sections=sections_by_path.get(record.path, {}),
+                )
+            )
+
     latest = records[-1]
     if latest.status == "PASS" and latest.recommend_continue == "是":
         findings.append(
@@ -282,6 +410,20 @@ def _audit_series_consistency(series_id: str, records: List[ReviewRecord]) -> Li
                 detail="最新状态仍为 BLOCKED / IN_REVIEW，但是否建议继续下一轮为“否”。",
             )
         )
+    latest_sections = sections_by_path.get(latest.path, {})
+    if _round_requires_followup(latest_sections):
+        findings.append(
+            ReviewAuditFinding(
+                path=latest.path,
+                series_id=series_id,
+                round=latest.round,
+                severity="P1",
+                category="series_consistency",
+                title="主要问题还没进入下一轮闭环",
+                detail="最新一轮的 `主要问题 / 框架外问题` 仍有实质问题，但当前序列停在这一轮，尚未看到下一轮回修记录。",
+            )
+        )
+    findings.extend(_audit_pass_convergence(series_id, latest, latest_sections))
     return findings
 
 
@@ -340,16 +482,19 @@ def build_review_audit(root: Path) -> Dict[str, Any]:
     audited_records = [record for record in records if record.protocol == "structured_round"]
     skipped_legacy_records = [record for record in records if record.protocol != "structured_round"]
     findings: List[ReviewAuditFinding] = []
+    sections_by_path: Dict[str, Mapping[str, str]] = {}
 
     for record in audited_records:
         sections = canonicalize_sections(split_sections(Path(record.path).read_text(encoding="utf-8")))
+        sections_by_path[record.path] = sections
         findings.extend(_audit_round_structure(record, sections))
+        findings.extend(_audit_split_review_roles(record, sections))
         findings.extend(_audit_solidification(record, sections))
         findings.extend(_audit_manifest_factor_contract(record))
         findings.extend(_audit_manifest_proxy_contract(record))
 
     for series_id, series_records in _records_by_series(audited_records).items():
-        findings.extend(_audit_series_consistency(series_id, series_records))
+        findings.extend(_audit_series_consistency(series_id, series_records, sections_by_path))
 
     severity_counts: Dict[str, int] = {}
     category_counts: Dict[str, int] = {}

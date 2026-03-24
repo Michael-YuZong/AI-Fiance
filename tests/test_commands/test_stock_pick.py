@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.commands.stock_pick import _run_market, build_parser, enrich_payload_with_score_history
+from src.commands.stock_pick import (
+    _internal_detail_stem,
+    _market_final_stem,
+    _run_market,
+    build_parser,
+    enrich_payload_with_score_history,
+)
 
 
 def _sample_payload(score: int, signal: str, generated_at: str) -> dict:
@@ -225,6 +231,11 @@ def test_build_parser_defaults_to_cn_market() -> None:
     args = parser.parse_args([])
 
     assert args.market == "cn"
+
+
+def test_sector_filtered_final_paths_keep_scope_in_filename() -> None:
+    assert _internal_detail_stem("cn", "2026-03-22 13:36:00", "黄金") == "stock_picks_cn_黄金_2026-03-22_internal_detail"
+    assert _market_final_stem("cn", "2026-03-22 13:36:00", "黄金 / 贵金属") == "stock_picks_cn_黄金_贵金属_2026-03-22_final"
 
 
 def test_run_market_reuses_shared_context(monkeypatch) -> None:

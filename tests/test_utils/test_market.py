@@ -228,3 +228,46 @@ def test_close_yfinance_runtime_caches_closes_known_peewee_managers(monkeypatch)
     assert isinstance(yf_cache._TzCacheManager._tz_cache, _Dummy)
     assert isinstance(yf_cache._CookieCacheManager._Cookie_cache, _Dummy)
     assert isinstance(yf_cache._ISINCacheManager._isin_cache, _Dummy)
+
+
+def test_market_regime_proxy_skips_timeout_ticker(monkeypatch):
+    calls: list[str] = []
+
+    def fake_history(symbol: str, **_kwargs):  # noqa: ANN001
+        calls.append(symbol)
+        if symbol == "^VIX":
+            raise TimeoutError("timeout")
+        return pd.DataFrame({"Close": [100.0, 102.0, 103.0]})
+
+    monkeypatch.setattr(market, "_ticker_history_with_timeout", fake_history)
+
+    result = market.market_regime_proxy()
+
+    assert "^VIX" in calls
+    assert "vix" not in result
+    assert result["dxy"] == pytest.approx(103.0)
+    assert "copper_gold_ratio" in result
+
+
+def test_ticker_history_with_timeout_raises_timeout(monkeypatch):
+    class _NeverDoneFuture:
+        def result(self, timeout=None):  # noqa: ANN001, ANN201
+            raise market.FutureTimeoutError()
+
+        def cancel(self) -> None:
+            return None
+
+    class _FakeExecutor:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            pass
+
+        def submit(self, fn, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN201
+            return _NeverDoneFuture()
+
+        def shutdown(self, wait=False, cancel_futures=False) -> None:  # noqa: ANN001
+            return None
+
+    monkeypatch.setattr(market, "ThreadPoolExecutor", _FakeExecutor)
+
+    with pytest.raises(TimeoutError, match="market_regime_proxy timeout for \\^VIX"):
+        market._ticker_history_with_timeout("^VIX")

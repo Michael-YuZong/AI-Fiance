@@ -37,6 +37,13 @@ def load_watchlist(path: Path = PROJECT_ROOT / "config" / "watchlist.yaml") -> L
     return list(payload.get("watchlist", []))
 
 
+def load_strategy_batches(path: Path = PROJECT_ROOT / "config" / "strategy_batches.yaml") -> Dict[str, Any]:
+    payload = load_yaml(path, default={"batch_sources": {}, "cohort_recipes": {}}) or {"batch_sources": {}, "cohort_recipes": {}}
+    payload.setdefault("batch_sources", {})
+    payload.setdefault("cohort_recipes", {})
+    return payload
+
+
 def load_asset_aliases(path: Path = PROJECT_ROOT / "config" / "asset_aliases.yaml") -> List[Dict[str, Any]]:
     payload = load_yaml(path, default={"aliases": []}) or {"aliases": []}
     return list(payload.get("aliases", []))

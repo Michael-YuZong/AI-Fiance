@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -561,6 +562,29 @@ def format_pct(value: float) -> str:
     return f"{value * 100:+.2f}%"
 
 
+def _ticker_history_with_timeout(
+    ticker: str,
+    *,
+    period: str = "3mo",
+    auto_adjust: bool = False,
+    timeout_seconds: float = 8.0,
+) -> pd.DataFrame:
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(
+        yf.Ticker(ticker).history,
+        period=period,
+        auto_adjust=auto_adjust,
+    )
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FutureTimeoutError as exc:
+        future.cancel()
+        raise TimeoutError(f"market_regime_proxy timeout for {ticker}") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+        close_yfinance_runtime_caches()
+
+
 def market_regime_proxy() -> Dict[str, Any]:
     tickers = {
         "vix": "^VIX",
@@ -571,7 +595,10 @@ def market_regime_proxy() -> Dict[str, Any]:
     }
     frames = {}
     for key, ticker in tickers.items():
-        frame = yf.Ticker(ticker).history(period="3mo", auto_adjust=False)
+        try:
+            frame = _ticker_history_with_timeout(ticker, period="3mo", auto_adjust=False)
+        except Exception:
+            continue
         if frame.empty:
             continue
         frames[key] = frame

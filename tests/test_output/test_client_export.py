@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 import src.output.client_export as client_export
-from src.output.client_export import _export_pdf, markdown_to_html
+from src.output.client_export import _export_pdf, export_markdown_bundle, markdown_to_html
 
 
 _PNG_BYTES = (
@@ -20,6 +20,18 @@ def test_markdown_to_html_renders_h4() -> None:
     assert "<h3>三级标题</h3>" in rendered
     assert "<h4>四级标题</h4>" in rendered
     assert "<p>正文</p>" in rendered
+
+
+def test_markdown_to_html_preserves_escaped_pipes_inside_table_cells() -> None:
+    markdown = (
+        "| 项目 | 说明 |\n"
+        "| --- | --- |\n"
+        "| 数据覆盖 | 中国宏观 \\| Watchlist 行情 \\| RSS新闻 |\n"
+    )
+    rendered = markdown_to_html(markdown, "demo")
+    assert "<table>" in rendered
+    assert "中国宏观 | Watchlist 行情 | RSS新闻" in rendered
+    assert rendered.count("<td>") == 2
 
 
 def test_markdown_to_html_renders_images(tmp_path: Path) -> None:
@@ -137,6 +149,23 @@ def test_export_pdf_returns_as_soon_as_pdf_is_stably_written(tmp_path: Path, mon
     assert fake_process.terminated is True
     assert fake_process.killed is False
     assert fake_process.poll_calls >= 3
+
+
+def test_export_markdown_bundle_rewrites_local_report_asset_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    reports_dir = tmp_path / "reports"
+    asset_dir = reports_dir / "assets"
+    asset_dir.mkdir(parents=True)
+    image_path = asset_dir / "demo.png"
+    image_path.write_bytes(_PNG_BYTES)
+    target = reports_dir / "etf_picks" / "final" / "demo.md"
+
+    monkeypatch.setattr(client_export, "_export_pdf", lambda markdown_text, html_path, pdf_path: pdf_path.write_bytes(b"%PDF-1.4 demo"))
+
+    bundle = export_markdown_bundle(f"![图表]({image_path})", target, allow_unreviewed_final=True)
+
+    markdown = bundle["markdown"].read_text(encoding="utf-8")
+    assert "../../assets/demo.png" in markdown
+    assert str(image_path) not in markdown
 
 
 def test_export_pdf_ignores_stale_existing_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
