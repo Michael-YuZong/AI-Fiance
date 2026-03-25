@@ -770,7 +770,21 @@ def _news_report(
 
 
 def _collect_monitor_rows(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    market_context_cfg = dict(config.get("market_context") or {})
+    if market_context_cfg.get("skip_market_monitor"):
+        return []
     return MarketMonitorCollector(config).collect()
+
+
+def _load_briefing_global_proxy(config: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
+    market_context_cfg = dict(config.get("market_context") or {})
+    if market_context_cfg.get("skip_global_proxy"):
+        return {}, "跨市场代理数据已按运行配置关闭，本次先按国内宏观与本地缓存生成。"
+    try:
+        with redirect_stderr(io.StringIO()):
+            return load_global_proxy_snapshot(), ""
+    except Exception:
+        return {}, "跨市场代理数据暂不可用，已回退到国内宏观与本地缓存。"
 
 
 def _timed_collect(
@@ -4086,14 +4100,7 @@ def main() -> None:
     config = load_config(args.config or None)
     collector_timeout_seconds = float(config.get("briefing_collector_timeout_seconds", 15))
     china_macro = load_china_macro_snapshot(config)
-    global_proxy = {}
-    global_proxy_note = ""
-    try:
-        with redirect_stderr(io.StringIO()):
-            global_proxy = load_global_proxy_snapshot()
-    except Exception:
-        global_proxy_note = "跨市场代理数据暂不可用，已回退到国内宏观与本地缓存。"
-
+    global_proxy, global_proxy_note = _load_briefing_global_proxy(config)
     monitor_rows = _collect_monitor_rows(config)
     regime_inputs = derive_regime_inputs(china_macro, global_proxy, monitor_rows)
     regime_result = RegimeDetector(regime_inputs).detect_regime()

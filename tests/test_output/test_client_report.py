@@ -1257,13 +1257,13 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     assert "## 正式动作阈值" in rendered
     assert "只要当前结论仍是 `观望偏多`，就不把它写成正式交易动作" in rendered
     assert "## 执行摘要" in rendered
-    assert "| 短线优先 | 能源化工ETF (159981)；当前更强的是催化、相对强弱和执行节奏，优势主要集中在接下来几个交易日到一两周内。 |" in rendered
-    assert "| 中线优先 | 红利ETF (510880)；更适合围绕一段完整主线分批拿，不只是看一两天波动。 |" in rendered
+    assert "| 观察优先 | 能源化工ETF (159981)；当前更强的是催化、相对强弱和执行节奏，优势主要集中在接下来几个交易日到一两周内。 |" in rendered
+    assert "| 补充观察 | 红利ETF (510880)；更适合围绕一段完整主线分批拿，不只是看一两天波动。 |" in rendered
     assert "| 当前建议 | 观望偏多 |" in rendered
     assert "| 交付等级 | 降级观察稿 |" in rendered
     assert "| 空仓怎么做 |" in rendered
     assert "| 持仓怎么做 |" in rendered
-    assert "如果按今天剩余交易时段的计划一定要给执行入口，我会分成两档：短线先看：`能源化工ETF`；中线先看：`红利ETF`" in rendered
+    assert "如果按今天剩余交易时段的计划先排观察顺序：观察优先：`能源化工ETF`；补充观察：`红利ETF`" in rendered
     assert "这份建议的适用时段：" in rendered
     assert "## 数据完整度" in rendered
     assert "## 交付等级" in rendered
@@ -1271,7 +1271,7 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     assert "真实社媒抓取" in rendered
     assert "降级观察稿" in rendered
     assert "## 当前分层建议" in rendered
-    assert "| 短线优先 | 能源化工ETF (159981) | 短线交易（3-10日） |" in rendered
+    assert "| 观察优先 | 能源化工ETF (159981) | 短线交易（3-10日） |" in rendered
     assert "## 为什么先看它" in rendered
     assert "## 为什么推荐它" not in rendered
     assert "## 升级条件" in rendered
@@ -1302,6 +1302,8 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     assert "经理画像" in rendered
     assert "朱金钰、亢豆" in rendered
     assert "### 基金公司补充" in rendered
+    assert "短线先看" not in rendered
+    assert "中线先看" not in rendered
 
 
 def test_render_etf_pick_explains_structured_coverage_before_zero_direct_news() -> None:
@@ -1592,10 +1594,10 @@ def test_render_etf_pick_explains_missing_alternatives() -> None:
         "notes": ["全市场 ETF 快照没有形成可交付候选，已回退到 ETF watchlist。"],
     }
     rendered = ClientReportRenderer().render_etf_pick(payload)
-    assert "如果按下一个交易日的计划只能先给一档，我先看：短线先看：`港股创新药ETF`" in rendered
+    assert "如果按下一个交易日的计划先排观察优先级：观察优先：`港股创新药ETF`" in rendered
     assert "## 升级条件" in rendered
     assert "## 当前只看什么" in rendered
-    assert "| 短线优先 | 港股创新药ETF (513120)；当前信号还没共振到足以支撑正式动作，先观察更稳妥。 |" in rendered
+    assert "| 观察优先 | 港股创新药ETF (513120)；当前信号还没共振到足以支撑正式动作，先观察更稳妥。 |" in rendered
     assert "| 触发买点条件 | 先等 MA20 向上拐头；触发前先别急着给精确买入价。 |" in rendered
     assert "关键盯盘价位" not in rendered
     assert "## 标准化分类" in rendered

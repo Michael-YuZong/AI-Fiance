@@ -259,6 +259,29 @@ def _pick_visual_lines(visuals: Optional[Mapping[str, str]], *, nested: bool = F
     return rewritten
 
 
+def _observe_pick_track_rows(track_rows: Sequence[Sequence[str]]) -> List[List[str]]:
+    labels = ("观察优先", "补充观察")
+    rewritten: List[List[str]] = []
+    for index, row in enumerate(track_rows):
+        current = list(row)
+        if not current:
+            continue
+        current[0] = labels[index] if index < len(labels) else f"观察 {index + 1}"
+        rewritten.append(current)
+    return rewritten
+
+
+def _observe_pick_track_summary(track_rows: Sequence[Sequence[str]]) -> str:
+    names: List[str] = []
+    for row in track_rows[:2]:
+        if len(row) < 2:
+            continue
+        label = str(row[0]).strip() or "观察"
+        target = str(row[1]).strip()
+        names.append(f"{label}：`{target.split(' (', 1)[0]}`")
+    return "；".join(names)
+
+
 def _signal_confidence_lines(analysis: Mapping[str, Any]) -> List[str]:
     confidence = dict(analysis.get("signal_confidence") or {})
     if not confidence:
@@ -4156,21 +4179,23 @@ class ClientReportRenderer:
         why_heading = "## 为什么先看它" if observe_only else "## 为什么推荐它"
         track_summary = _payload_track_summary_text(recommendation_tracks)
         track_rows = _payload_track_rows(recommendation_tracks)
+        display_track_rows = _observe_pick_track_rows(track_rows) if observe_only else track_rows
+        display_track_summary = _observe_pick_track_summary(display_track_rows) if observe_only else track_summary
         track_count = len(track_rows)
         if observe_only:
-            if track_summary:
+            if display_track_summary:
                 if track_count >= 2:
-                    lead_line = f"如果按{handoff.get('decision_scope', '今天的交易计划')}一定要给执行入口，我会分成两档：{track_summary}"
+                    lead_line = f"如果按{handoff.get('decision_scope', '今天的交易计划')}先排观察顺序：{display_track_summary}"
                 else:
-                    lead_line = f"如果按{handoff.get('decision_scope', '今天的交易计划')}只能先给一档，我先看：{track_summary}"
+                    lead_line = f"如果按{handoff.get('decision_scope', '今天的交易计划')}先排观察优先级：{display_track_summary}"
             else:
                 lead_line = f"如果按{handoff.get('decision_scope', '今天的交易计划')}先排一个观察优先的 ETF 对象，我先看：**`{winner.get('name', '')} ({winner.get('symbol', '')})`**"
         else:
-            if track_summary:
+            if display_track_summary:
                 if track_count >= 2:
-                    lead_line = f"如果按{handoff.get('decision_scope', '今天的交易计划')}先分层理解：{track_summary}"
+                    lead_line = f"如果按{handoff.get('decision_scope', '今天的交易计划')}先分层理解：{display_track_summary}"
                 else:
-                    lead_line = f"如果按{handoff.get('decision_scope', '今天的交易计划')}先看这一档：{track_summary}"
+                    lead_line = f"如果按{handoff.get('decision_scope', '今天的交易计划')}先看这一档：{display_track_summary}"
             else:
                 lead_line = f"如果按{handoff.get('decision_scope', '今天的交易计划')}只看一只 ETF，我给：**`{winner.get('name', '')} ({winner.get('symbol', '')})`**"
         summary_rows = list(
@@ -4184,12 +4209,12 @@ class ClientReportRenderer:
                 default_holder_text="已有仓位先按止损和主线节奏管理，不把当前判断直接当成继续追涨的理由。",
             )
         )
-        if track_rows:
+        if display_track_rows:
             summary_prefix_rows: List[List[str]] = []
-            if len(track_rows) >= 1:
-                summary_prefix_rows.append(["短线优先", f"{track_rows[0][1]}；{track_rows[0][3]}"])
-            if len(track_rows) >= 2:
-                summary_prefix_rows.append(["中线优先", f"{track_rows[1][1]}；{track_rows[1][3]}"])
+            if len(display_track_rows) >= 1:
+                summary_prefix_rows.append([display_track_rows[0][0], f"{display_track_rows[0][1]}；{display_track_rows[0][3]}"])
+            if len(display_track_rows) >= 2:
+                summary_prefix_rows.append([display_track_rows[1][0], f"{display_track_rows[1][1]}；{display_track_rows[1][3]}"])
             summary_rows = summary_prefix_rows + summary_rows
         title = "今日ETF观察" if observe_only else "今日ETF推荐"
         lines = [
@@ -4230,7 +4255,11 @@ class ClientReportRenderer:
                 *_summary_block_lines(
                     summary_rows,
                     heading="## 执行摘要",
-                    lead="这段只回答今天能不能动、空仓和持仓分别怎么做、仓位大概多大，以及短线中线先看谁。",
+                    lead=(
+                        "这段只回答今天能不能动、空仓和持仓分别怎么做、仓位大概多大，以及观察顺序怎么排。"
+                        if observe_only
+                        else "这段只回答今天能不能动、空仓和持仓分别怎么做、仓位大概多大，以及短线中线先看谁。"
+                    ),
                 ),
                 "",
             ]
@@ -4299,9 +4328,9 @@ class ClientReportRenderer:
         if regime_section:
             lines.extend(regime_section)
             lines.extend([""])
-        if track_rows:
+        if display_track_rows:
             lines.extend(["", "## 当前分层建议", ""])
-            lines.extend(_table(["层次", "标的", "更适合的周期", "为什么先看"], track_rows))
+            lines.extend(_table(["层次", "标的", "更适合的周期", "为什么先看"], display_track_rows))
         lines.extend(["", why_heading, ""])
         for item in winner.get("positives", [])[:4]:
             lines.append(f"- {item}")
@@ -4328,10 +4357,10 @@ class ClientReportRenderer:
                 default_reassessment="等覆盖率恢复和右侧确认共振后，再决定是否升级成完整交易稿。",
                 default_trigger="先等技术确认、催化覆盖和数据完整度一起改善，再决定要不要给买入区间。",
             )
-            if track_rows:
+            if display_track_rows:
                 summary_rows = [
-                    ["短线优先", f"{track_rows[0][1]}；{track_rows[0][3]}"] if len(track_rows) >= 1 else None,
-                    ["中线优先", f"{track_rows[1][1]}；{track_rows[1][3]}"] if len(track_rows) >= 2 else None,
+                    [display_track_rows[0][0], f"{display_track_rows[0][1]}；{display_track_rows[0][3]}"] if len(display_track_rows) >= 1 else None,
+                    [display_track_rows[1][0], f"{display_track_rows[1][1]}；{display_track_rows[1][3]}"] if len(display_track_rows) >= 2 else None,
                     *summary_rows,
                 ]
                 summary_rows = [row for row in summary_rows if row]
@@ -4413,12 +4442,12 @@ class ClientReportRenderer:
                     *_present_action_row("目标参考", winner.get("action", {}).get("target", "")),
                 ]
             )
-        if track_rows:
+        if display_track_rows:
             staged_rows: List[List[str]] = []
-            if len(track_rows) >= 1:
-                staged_rows.append(["短线优先", f"{track_rows[0][1]}；{track_rows[0][3]}"])
-            if len(track_rows) >= 2:
-                staged_rows.append(["中线优先", f"{track_rows[1][1]}；{track_rows[1][3]}"])
+            if len(display_track_rows) >= 1:
+                staged_rows.append([display_track_rows[0][0], f"{display_track_rows[0][1]}；{display_track_rows[0][3]}"])
+            if len(display_track_rows) >= 2:
+                staged_rows.append([display_track_rows[1][0], f"{display_track_rows[1][1]}；{display_track_rows[1][3]}"])
             etf_rows = staged_rows + etf_rows
         lines.extend(_table(["项目", "建议"], etf_rows))
         fund_sections = winner.get("fund_sections") or _fund_profile_sections(winner)

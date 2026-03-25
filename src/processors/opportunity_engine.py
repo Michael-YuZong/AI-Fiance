@@ -570,6 +570,8 @@ def _merge_metadata(
 def _collect_fund_profile(symbol: str, asset_type: str, config: Mapping[str, Any]) -> Dict[str, Any]:
     if not symbol:
         return {}
+    if bool(dict(config or {}).get("skip_fund_profile")):
+        return {}
     try:
         return FundProfileCollector(config).collect_profile(symbol, asset_type=asset_type)
     except Exception:

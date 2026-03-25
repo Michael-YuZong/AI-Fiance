@@ -15,7 +15,7 @@ from src.collectors.market_cn import ChinaMarketCollector
 from src.collectors.market_drivers import MarketDriversCollector
 from src.collectors.valuation import ValuationCollector
 from src.collectors.news import NewsCollector
-from src.processors.opportunity_engine import PoolItem, _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _company_forward_events, _correlation_to_watchlist, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _nearest_support_reference, _preferred_catalyst_sources, _rating_from_dimensions, _refresh_action_from_signal_confidence, _relative_strength_dimension, _risk_dimension, _seasonality_dimension, _signal_confidence_warning_line, _stock_name_tokens, _technical_dimension, analyze_opportunity, build_default_pool, build_fund_pool, build_market_context, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities, summarize_proxy_contracts_from_analyses
+from src.processors.opportunity_engine import PoolItem, _action_plan, _catalyst_dimension, _chips_dimension, _client_safe_issue, _collect_fund_profile, _company_forward_events, _correlation_to_watchlist, _direct_company_event_search_terms, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _nearest_support_reference, _preferred_catalyst_sources, _rating_from_dimensions, _refresh_action_from_signal_confidence, _relative_strength_dimension, _risk_dimension, _seasonality_dimension, _signal_confidence_warning_line, _stock_name_tokens, _technical_dimension, analyze_opportunity, build_default_pool, build_fund_pool, build_market_context, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities, summarize_proxy_contracts_from_analyses
 from src.processors.opportunity_engine import _asset_note
 from src.processors.horizon import build_analysis_horizon_profile
 from src.utils.market import compute_history_metrics
@@ -3710,6 +3710,23 @@ def test_build_market_context_can_skip_global_proxy_and_market_monitor(monkeypat
     assert context["monitor_rows"] == []
     assert any("全球代理数据已按运行配置关闭" in note for note in context["notes"])
     assert any("宏观资产监控已按运行配置关闭" in note for note in context["notes"])
+
+
+def test_collect_fund_profile_honors_skip_flag(monkeypatch):
+    called = {"value": False}
+
+    class _FakeFundProfileCollector:
+        def __init__(self, _config):
+            pass
+
+        def collect_profile(self, symbol, asset_type="cn_fund"):  # noqa: ANN001
+            called["value"] = True
+            return {"overview": {"基金简称": symbol, "资产类型": asset_type}}
+
+    monkeypatch.setattr("src.processors.opportunity_engine.FundProfileCollector", _FakeFundProfileCollector)
+
+    assert _collect_fund_profile("159981", "cn_etf", {"skip_fund_profile": True}) == {}
+    assert called["value"] is False
 
 
 def test_build_market_context_prefetches_independent_sections_in_parallel(monkeypatch):

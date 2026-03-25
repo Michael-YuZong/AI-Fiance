@@ -558,6 +558,34 @@ def _payload_from_analyses(
     }
 
 
+def _select_pick_analyses(payload: Mapping[str, Any], *, top_n: int) -> List[Dict[str, Any]]:
+    ranked = [dict(item) for item in list(payload.get("top") or []) if isinstance(item, Mapping)]
+    if ranked:
+        return ranked
+
+    coverage_rows = [dict(item) for item in list(payload.get("coverage_analyses") or []) if isinstance(item, Mapping)]
+    if not coverage_rows:
+        return []
+
+    observation_rows = [
+        item
+        for item in coverage_rows
+        if (
+            int(dict(item.get("rating") or {}).get("rank", 0) or 0) >= 0
+            and (
+                int(dict(dict(item.get("dimensions") or {}).get("fundamental") or {}).get("score", 0) or 0) >= 60
+                or int(dict(dict(item.get("dimensions") or {}).get("catalyst") or {}).get("score", 0) or 0) >= 50
+                or int(dict(dict(item.get("dimensions") or {}).get("risk") or {}).get("score", 0) or 0) >= 70
+                or "观察" in str(dict(dict(item.get("narrative") or {}).get("judgment") or {}).get("state", ""))
+                or "持有优于追高" in str(dict(dict(item.get("narrative") or {}).get("judgment") or {}).get("state", ""))
+            )
+        )
+    ]
+    selected = observation_rows or coverage_rows
+    selected.sort(key=_rank_key, reverse=True)
+    return selected[:top_n]
+
+
 def main() -> None:
     args = build_parser().parse_args()
     ensure_report_task_registered("etf_pick")
@@ -579,7 +607,7 @@ def main() -> None:
             model_changelog=MODEL_CHANGELOG,
             rank_key=_rank_key,
         )
-        analyses = list(payload.get("top") or [])
+        analyses = _select_pick_analyses(payload, top_n=max(args.top, 5))
         if not analyses:
             raise SystemExit("当前 ETF 推荐池没有可用候选，请稍后重试或放宽主题过滤。")
         attach_visuals_to_analyses(analyses[:3])

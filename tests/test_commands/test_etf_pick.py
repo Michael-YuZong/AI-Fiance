@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from src.commands.etf_pick import _payload_from_analyses, _watchlist_fallback_payload
+from src.commands.etf_pick import _payload_from_analyses, _select_pick_analyses, _watchlist_fallback_payload
 
 
 def _analysis(symbol: str, name: str, rank: int) -> dict:
@@ -186,3 +186,16 @@ def test_payload_from_analyses_keeps_provenance_fields_for_renderer() -> None:
     assert payload["winner"]["provenance"]["market_data_as_of"] == "2026-03-13"
     assert payload["winner"]["dimensions"]["relative_strength"]["benchmark_symbol"] == "510300"
     assert payload["winner"]["benchmark_symbol"] == "510300"
+
+
+def test_select_pick_analyses_falls_back_to_observation_candidates() -> None:
+    watch = _analysis("513120", "港股创新药ETF", 0)
+    watch["narrative"] = {"judgment": {"state": "观察为主"}}
+    watch["dimensions"]["fundamental"]["score"] = 68
+    weak = _analysis("159870", "化工ETF", 0)
+    weak["narrative"] = {"judgment": {"state": "无信号"}}
+    weak["dimensions"]["fundamental"]["score"] = 20
+
+    rows = _select_pick_analyses({"top": [], "coverage_analyses": [weak, watch]}, top_n=5)
+
+    assert [item["symbol"] for item in rows] == ["513120"]

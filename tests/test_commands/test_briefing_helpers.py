@@ -12,6 +12,7 @@ from src.commands.briefing import (
     _action_lines,
     _briefing_a_share_watch_rows,
     _briefing_evidence_rows,
+    _load_briefing_global_proxy,
     _briefing_shared_market_context,
     _build_market_payload,
     _briefing_internal_dir,
@@ -106,6 +107,30 @@ def test_monitor_alerts_disclose_missing_or_stale_macro_monitor_data() -> None:
     assert any("未能完成实时刷新" in item for item in _monitor_alerts([]))
     stale_alerts = _monitor_alerts([{"name": "布伦特原油", "data_warning": "实时刷新失败"}])
     assert any("布伦特原油" in item for item in stale_alerts)
+
+
+def test_collect_monitor_rows_honors_skip_flag(monkeypatch) -> None:
+    called = {"value": False}
+
+    class _FakeMonitorCollector:
+        def __init__(self, _config):
+            pass
+
+        def collect(self):
+            called["value"] = True
+            return [{"name": "布伦特原油"}]
+
+    monkeypatch.setattr("src.commands.briefing.MarketMonitorCollector", _FakeMonitorCollector)
+
+    assert briefing_module._collect_monitor_rows({"market_context": {"skip_market_monitor": True}}) == []
+    assert called["value"] is False
+
+
+def test_load_briefing_global_proxy_honors_skip_flag() -> None:
+    rows, note = _load_briefing_global_proxy({"market_context": {"skip_global_proxy": True}})
+
+    assert rows == {}
+    assert "已按运行配置关闭" in note
 
 
 def test_appendix_derivative_lines_do_not_render_fake_zero_vix() -> None:

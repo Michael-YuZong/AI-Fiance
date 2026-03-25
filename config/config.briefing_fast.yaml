@@ -1,0 +1,10 @@
+# Briefing fast profile for weak-network / cached-only reruns.
+news_feeds_file: config/news_feeds.empty.yaml
+news_topic_search_enabled: false
+
+briefing_snapshot_timeout_seconds: 8
+briefing_collector_timeout_seconds: 8
+
+market_context:
+  skip_global_proxy: true
+  skip_market_monitor: true

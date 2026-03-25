@@ -1,0 +1,11 @@
+# ETF pick profile for live reruns when cross-market proxy/monitor is unstable.
+# Keep the normal ETF discovery/news contract, but skip the slow proxy legs.
+
+market_context:
+  skip_global_proxy: true
+  skip_market_monitor: true
+
+opportunity:
+  analysis_workers: 1
+
+skip_fund_profile: true

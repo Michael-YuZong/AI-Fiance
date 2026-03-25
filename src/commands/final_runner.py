@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from src.commands.report_guard import ReportGuardError, export_reviewed_markdown_bundle, review_path_for
+from src.output.client_export import _rewrite_local_report_asset_paths
 from src.reporting.review_scaffold import ensure_external_review_scaffold, maybe_autoclose_external_review
 
 
@@ -31,6 +32,7 @@ def finalize_client_markdown(
     scaffold_generated_by: str = "",
 ) -> dict[str, Path]:
     written_detail = write_detail_markdown(detail_path, detail_markdown)
+    normalized_client_markdown = _rewrite_local_report_asset_paths(client_markdown, markdown_path.parent)
     review_path = review_path_for(markdown_path)
     scaffold_created = False
     if not review_path.exists():
@@ -52,11 +54,11 @@ def finalize_client_markdown(
             detail_source=written_detail,
             scaffold_generated_by=scaffold_generated_by,
         )
-    findings = list(release_checker(client_markdown, detail_markdown)) if release_checker else []
+    findings = list(release_checker(normalized_client_markdown, detail_markdown)) if release_checker else []
     try:
         return export_reviewed_markdown_bundle(
             report_type=report_type,
-            markdown_text=client_markdown,
+            markdown_text=normalized_client_markdown,
             markdown_path=markdown_path,
             release_findings=findings,
             extra_manifest={
