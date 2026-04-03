@@ -37,10 +37,11 @@ DETAILED_FINAL_MARKERS = {
     "stock_analysis": ("## 为什么这么判断", "## 硬检查", "## 分维度详解"),
     "briefing": ("## 为什么今天这么判断", "## 宏观领先指标", "## 数据完整度", "## 今天怎么做", "## 重点观察", "## 今日A股观察池"),
     "fund_pick": ("## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只基金为什么是这个分", "## 标准化分类", "## 为什么不是另外几只"),
-    "etf_pick": ("## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只ETF为什么是这个分", "## 标准化分类", "## 关键证据", "## 为什么不是另外几只"),
+    "etf_pick": ("## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只ETF为什么是这个分", "## 标准化分类", "## 基金画像", "## 关键证据", "## 为什么不是另外几只"),
     "scan": ("## 为什么这么判断", "## 硬检查", "## 分维度详解"),
     "retrospect": ("## 原始决策", "## 为什么当时会做这个决定", "## 后验路径", "## 复盘结论"),
 }
+_THEME_PLAYBOOK_ALIGNMENT_REPORT_TYPES = {"scan", "stock_analysis", "stock_pick", "etf_pick", "fund_pick", "briefing"}
 
 
 def _stock_pick_required_markers(markdown_text: str) -> tuple[Any, ...]:
@@ -51,6 +52,9 @@ def _stock_pick_required_markers(markdown_text: str) -> tuple[Any, ...]:
             "## 催化证据来源",
             "## 历史相似样本附注",
             ("## A股", "## 港股", "## 美股"),
+            "### 第二批：继续跟踪",
+            ("### 第二批：低门槛 / 观察替代", "### 第二批：低门槛 / 关联ETF"),
+            "## 代表样本复核卡",
             "升级条件",
             "关键盯盘价位",
         )
@@ -60,6 +64,8 @@ def _stock_pick_required_markers(markdown_text: str) -> tuple[Any, ...]:
 def _strategy_required_markers(markdown_text: str) -> tuple[Any, ...]:
     if "# Strategy Validation" in markdown_text:
         return (
+            "## 动作卡片",
+            "## 当前结论",
             "## 这套策略是什么",
             "## 这次到底看出来什么",
             "## 执行摘要",
@@ -69,6 +75,8 @@ def _strategy_required_markers(markdown_text: str) -> tuple[Any, ...]:
         )
     if "# Strategy Experiment" in markdown_text:
         return (
+            "## 动作卡片",
+            "## 当前结论",
             "## 这套策略是什么",
             "## 这次到底看出来什么",
             "## 执行摘要",
@@ -77,6 +85,8 @@ def _strategy_required_markers(markdown_text: str) -> tuple[Any, ...]:
             "## 变体对比",
         )
     return (
+        "## 动作卡片",
+        "## 当前结论",
         "## 这套策略是什么",
         "## 这次到底看出来什么",
         "## 执行摘要",
@@ -245,6 +255,178 @@ def ensure_detailed_final_content(report_type: str, markdown_text: str) -> None:
         )
 
 
+def _contains_any(text: str, needles: Sequence[str]) -> bool:
+    haystack = str(text or "")
+    return any(str(needle).strip() and str(needle) in haystack for needle in needles)
+
+
+def _section_text(markdown_text: str, heading: str) -> str:
+    lines = markdown_text.splitlines()
+    collecting = False
+    collected: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == heading:
+            collecting = True
+            continue
+        if collecting and stripped.startswith("## "):
+            break
+        if collecting:
+            collected.append(line)
+    return "\n".join(collected).strip()
+
+
+def _ensure_theme_playbook_alignment(report_type: str, markdown_text: str, extra_manifest: Mapping[str, Any] | None) -> None:
+    if report_type not in _THEME_PLAYBOOK_ALIGNMENT_REPORT_TYPES:
+        return
+    contract = dict((extra_manifest or {}).get("theme_playbook_contract") or {})
+    if not contract:
+        return
+    playbook_level = str(contract.get("playbook_level") or "").strip()
+    label = str(contract.get("label") or "").strip()
+    if playbook_level not in {"theme", "sector"} or not label:
+        raise ReportGuardError(
+            "theme_playbook_contract 不完整：缺少 `playbook_level` 或 `label`，无法校验正文里的主题边界。"
+        )
+    if playbook_level != "sector":
+        return
+    theme_match_status = str(contract.get("theme_match_status") or "").strip()
+    theme_match_candidates = [
+        str(item).strip()
+        for item in list(contract.get("theme_match_candidates") or [])
+        if str(item).strip()
+    ]
+    if theme_match_status == "ambiguous_conflict":
+        if not theme_match_candidates:
+            raise ReportGuardError(
+                "theme_playbook_contract 不完整：当前稿件标记为 `ambiguous_conflict`，但缺少 `theme_match_candidates`。"
+            )
+        boundary_markers = ("主题边界", "先按行业层", "行业层理解", "还在打架")
+        if not _contains_any(markdown_text, boundary_markers):
+            raise ReportGuardError(
+                "主题 playbook 合同错配：manifest 已标记当前稿件属于行业层冲突稿，但正文没有写出 `主题边界` 或行业层冲突提示。"
+            )
+    bridge_confidence = str(contract.get("subtheme_bridge_confidence") or "").strip()
+    bridge_top_label = str(contract.get("subtheme_bridge_top_label") or "").strip()
+    if bridge_confidence in {"high", "medium"}:
+        if not bridge_top_label:
+            raise ReportGuardError(
+                "theme_playbook_contract 不完整：行业层 bridge 已标成中高置信度，但缺少 `subtheme_bridge_top_label`。"
+            )
+        bridge_markers = ("细分观察", "优先留意", "更偏向", bridge_top_label)
+        if not _contains_any(markdown_text, bridge_markers):
+            raise ReportGuardError(
+                "主题 playbook 合同错配：manifest 已给出行业层下钻主线，但正文没有写出 `细分观察` 或对应的细分提示。"
+            )
+
+
+def _ensure_event_digest_alignment(report_type: str, markdown_text: str, extra_manifest: Mapping[str, Any] | None) -> None:
+    if report_type not in {"stock_pick", "stock_analysis", "briefing", "fund_pick", "etf_pick", "scan"}:
+        return
+    contract = dict((extra_manifest or {}).get("event_digest_contract") or {})
+    if not contract:
+        return
+    status = str(contract.get("status") or "").strip()
+    changed_what = str(contract.get("changed_what") or "").strip()
+    if status not in {"待补充", "待复核", "已消化"} or not changed_what:
+        raise ReportGuardError(
+            "event_digest_contract 不完整：缺少 `status` 或 `changed_what`，无法校验正文里的事件消化合同。"
+        )
+    event_section = _section_text(markdown_text, "## 事件消化")
+    if not event_section:
+        raise ReportGuardError(
+            "事件消化合同错配：manifest 已写入 event_digest_contract，但正文缺少 `## 事件消化`。"
+        )
+    if status not in event_section:
+        raise ReportGuardError(
+            f"事件消化合同错配：manifest 已标记事件状态 `{status}`，但正文 `事件消化` 没把这个状态写出来。"
+        )
+    if "这件事改变了什么" not in event_section:
+        raise ReportGuardError(
+            "事件消化合同错配：正文 `事件消化` 缺少“这件事改变了什么”，还停在事件罗列层。"
+        )
+    lead_layer = str(contract.get("lead_layer") or "").strip()
+    if lead_layer and lead_layer not in event_section:
+        raise ReportGuardError(
+            f"事件消化合同错配：manifest 已标记事件分层 `{lead_layer}`，但正文 `事件消化` 没显式写出这层。"
+        )
+    lead_detail = str(contract.get("lead_detail") or "").strip()
+    if lead_detail and lead_detail not in event_section:
+        raise ReportGuardError(
+            f"事件消化合同错配：manifest 已标记事件细分 `{lead_detail}`，但正文 `事件消化` 没把这层写出来。"
+        )
+    impact_summary = str(contract.get("impact_summary") or "").strip()
+    impact_line = next(
+        (line.strip() for line in event_section.splitlines() if line.strip().startswith("- 影响层与性质：")),
+        "",
+    )
+    if impact_summary and impact_summary not in impact_line:
+        raise ReportGuardError(
+            f"事件消化合同错配：manifest 已标记影响层 `{impact_summary}`，但正文 `事件消化` 没写清它影响的是哪一层。"
+        )
+    thesis_scope = str(contract.get("thesis_scope") or "").strip()
+    if thesis_scope and thesis_scope not in impact_line:
+        raise ReportGuardError(
+            f"事件消化合同错配：manifest 已标记事件性质 `{thesis_scope}`，但正文 `事件消化` 没写清它是 thesis 变化还是一次性噪音。"
+        )
+    importance_reason = str(contract.get("importance_reason") or "").strip()
+    if importance_reason and "优先级判断" not in event_section:
+        raise ReportGuardError(
+            "事件消化合同错配：manifest 已写入优先级判断，但正文 `事件消化` 没解释为什么该前置或先不升级。"
+        )
+
+
+def _ensure_what_changed_alignment(report_type: str, markdown_text: str, extra_manifest: Mapping[str, Any] | None) -> None:
+    if report_type not in {"stock_pick", "stock_analysis", "briefing", "fund_pick", "etf_pick", "scan"}:
+        return
+    contract = dict((extra_manifest or {}).get("what_changed_contract") or {})
+    if not contract:
+        return
+    previous_view = str(contract.get("previous_view") or "").strip()
+    change_summary = str(contract.get("change_summary") or "").strip()
+    conclusion_label = str(contract.get("conclusion_label") or "").strip()
+    state_trigger = str(contract.get("state_trigger") or "").strip()
+    state_summary = str(contract.get("state_summary") or "").strip()
+    current_event_understanding = str(contract.get("current_event_understanding") or "").strip()
+    if not previous_view or not change_summary or not conclusion_label:
+        raise ReportGuardError(
+            "what_changed_contract 不完整：缺少 `previous_view` / `change_summary` / `conclusion_label`，无法校验连续研究变化摘要。"
+        )
+    what_changed_section = _section_text(markdown_text, "## What Changed")
+    if not what_changed_section:
+        raise ReportGuardError(
+            "What Changed 合同错配：manifest 已写入 what_changed_contract，但正文缺少 `## What Changed`。"
+        )
+    if "上次怎么看" not in what_changed_section:
+        raise ReportGuardError(
+            "What Changed 合同错配：正文 `What Changed` 缺少“上次怎么看”。"
+        )
+    if "这次什么变了" not in what_changed_section:
+        raise ReportGuardError(
+            "What Changed 合同错配：正文 `What Changed` 缺少“这次什么变了”。"
+        )
+    if "结论变化" not in what_changed_section:
+        raise ReportGuardError(
+            "What Changed 合同错配：正文 `What Changed` 缺少“结论变化”。"
+        )
+    if current_event_understanding and "当前事件理解" not in what_changed_section:
+        raise ReportGuardError(
+            "What Changed 合同错配：manifest 已写入当前事件理解，但正文 `What Changed` 缺少“当前事件理解”。"
+        )
+    if conclusion_label not in what_changed_section:
+        raise ReportGuardError(
+            f"What Changed 合同错配：manifest 已标记结论变化 `{conclusion_label}`，但正文 `What Changed` 没写出来。"
+        )
+    if state_trigger and ("触发：" not in what_changed_section or state_trigger not in what_changed_section):
+        raise ReportGuardError(
+            f"What Changed 合同错配：manifest 已写入状态触发 `{state_trigger}`，但正文 `What Changed` 没解释这次为什么升级、削弱或待复核。"
+        )
+    if state_summary and ("状态解释" not in what_changed_section or state_summary not in what_changed_section):
+        raise ReportGuardError(
+            "What Changed 合同错配：manifest 已写入状态解释，但正文 `What Changed` 没把这次状态机原因落成完整解释。"
+        )
+
+
 def _write_manifest(
     *,
     report_type: str,
@@ -274,6 +456,109 @@ def _write_manifest(
     return manifest_path
 
 
+_CATALYST_WEB_REVIEW_DECISIONS = (
+    "已确认直接催化",
+    "只有主题级催化",
+    "未确认新增催化",
+    "原链路疑似漏抓",
+)
+
+
+def _ensure_completed_catalyst_web_review(extra_manifest: Mapping[str, Any] | None) -> None:
+    artifacts = dict((extra_manifest or {}).get("editor_artifacts") or {})
+    review_ref = str(artifacts.get("catalyst_web_review") or "").strip()
+    if not review_ref:
+        return
+    review_path = Path(review_ref)
+    if not review_path.exists():
+        raise ReportGuardError(
+            f"催化联网复核未完成：缺少 `{review_path}`。命中 `suspected_search_gap` 的正式稿，必须先补完 `catalyst_web_review.md`。"
+            "可先运行 `python -m src.commands.catalyst_review next --with-prompt` 捞出下一条待复核任务。"
+        )
+    review_text = review_path.read_text(encoding="utf-8")
+    if "当前没有命中 `待 AI 联网复核` 的条目。" in review_text:
+        return
+    if "### 复核结论" not in review_text:
+        raise ReportGuardError(
+            f"催化联网复核不合格：`{review_path}` 缺少 `### 复核结论`。"
+        )
+    if any(token in review_text for token in ("- 结论：待补", "\n- 待补\n")):
+        raise ReportGuardError(
+            f"催化联网复核尚未完成：`{review_path}` 仍是待补模板。先完成独立 agent 联网复核，再写 final。"
+            "可先运行 `python -m src.commands.catalyst_review next --with-prompt` 捞出下一条待复核任务。"
+        )
+    if not any(decision in review_text for decision in _CATALYST_WEB_REVIEW_DECISIONS):
+        raise ReportGuardError(
+            f"催化联网复核不合格：`{review_path}` 没有明确写出复核结论。"
+        )
+
+
+_BRIEFING_A_SHARE_SIGNAL_TOKENS = (
+    "A股热股前排：",
+    "A股行业走强：",
+    "A股概念领涨：",
+    "A股涨停集中：",
+    "A股强势股池：",
+)
+_HOMEPAGE_KEY_EVIDENCE_HEADINGS = ("### 关键新闻 / 关键证据", "## 关键证据", "## 今日情报看板")
+_GENERIC_MARKET_HEADLINE_PREFIXES = _BRIEFING_A_SHARE_SIGNAL_TOKENS + (
+    "A股主题活跃：",
+    "A股主题跟踪：",
+    "`市场情报`：",
+)
+
+
+def _ensure_briefing_market_snapshot_freshness(report_type: str, markdown_text: str, extra_manifest: Mapping[str, Any] | None) -> None:
+    if report_type != "briefing":
+        return
+    contract = dict((extra_manifest or {}).get("market_snapshot_contract") or {})
+    if not contract:
+        raise ReportGuardError("briefing 缺少 `market_snapshot_contract`，无法校验 A 股盘面快照 freshness。")
+    if not bool(contract.get("stale_detected")):
+        return
+    warning_line = str(contract.get("warning_line") or "").strip()
+    if warning_line and warning_line not in markdown_text:
+        raise ReportGuardError("briefing A股盘面快照已判定 stale，但客户稿未显式写出 freshness 降级提示。")
+    leaked = [token for token in _BRIEFING_A_SHARE_SIGNAL_TOKENS if token in markdown_text]
+    if leaked:
+        raise ReportGuardError(
+            "briefing A股盘面快照未通过 freshness 校验，但客户稿仍前置了盘面信号："
+            + " / ".join(leaked)
+        )
+
+
+def _ensure_top_signal_quality(report_type: str, markdown_text: str) -> None:
+    if report_type not in {"briefing", "etf_pick", "fund_pick", "scan", "stock_analysis", "stock_pick"}:
+        return
+    section = ""
+    for heading in _HOMEPAGE_KEY_EVIDENCE_HEADINGS:
+        section = _section_text(markdown_text, heading)
+        if section:
+            break
+    if not section:
+        return
+
+    items = [line.strip()[2:].strip() for line in section.splitlines() if line.strip().startswith("- ")]
+    if not items:
+        return
+    linked_items = [item for item in items if "http://" in item or "https://" in item]
+    signalful_items = [
+        item for item in items if ("信号：" in item or "信号类型：" in item) and ("结论：" in item or "主要影响：" in item)
+    ]
+    market_only_items = [item for item in items if item.startswith(_GENERIC_MARKET_HEADLINE_PREFIXES)]
+
+    if report_type == "briefing" and not linked_items:
+        raise ReportGuardError("briefing 首页 `关键新闻 / 关键证据` 没有任何可点击外部情报，当前更像盘面摘要而不是晨报情报板。")
+    if linked_items and not signalful_items:
+        raise ReportGuardError(
+            f"{report_type} 首页虽然前置了链接情报，但没有把 `信号/强弱/结论` 写清，仍然更像新闻堆砌。"
+        )
+    if market_only_items and len(market_only_items) == len(items):
+        raise ReportGuardError(
+            f"{report_type} 首页 `关键新闻 / 关键证据` 全被盘面句占满，当前是“盘面句顶替新闻位”，没有真正前置外部情报。"
+        )
+
+
 def export_reviewed_markdown_bundle(
     *,
     report_type: str,
@@ -286,7 +571,13 @@ def export_reviewed_markdown_bundle(
     findings = [str(item).strip() for item in (release_findings or []) if str(item).strip()]
     if findings:
         raise ReportGuardError("发布前一致性校验失败: " + "；".join(findings))
+    _ensure_completed_catalyst_web_review(extra_manifest)
     ensure_detailed_final_content(report_type, markdown_text)
+    _ensure_briefing_market_snapshot_freshness(report_type, markdown_text, extra_manifest)
+    _ensure_top_signal_quality(report_type, markdown_text)
+    _ensure_event_digest_alignment(report_type, markdown_text, extra_manifest)
+    _ensure_what_changed_alignment(report_type, markdown_text, extra_manifest)
+    _ensure_theme_playbook_alignment(report_type, markdown_text, extra_manifest)
 
     review_summary = load_review_summary(markdown_path)
     from src.output.client_export import export_markdown_bundle

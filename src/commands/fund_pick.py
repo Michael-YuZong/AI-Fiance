@@ -3,18 +3,36 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
 
 from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery, summarize_pick_coverage
 from src.commands.pick_visuals import attach_visuals_to_analyses
-from src.commands.final_runner import finalize_client_markdown
+from src.commands.final_runner import finalize_client_markdown, internal_sidecar_path
 from src.commands.report_guard import ensure_report_task_registered, exported_bundle_lines
 from src.commands.release_check import check_generic_client_report
 from src.output import ClientReportRenderer, OpportunityReportRenderer
+from src.output.catalyst_web_review import (
+    attach_catalyst_web_review_to_analysis,
+    build_catalyst_web_review_packet,
+    load_catalyst_web_review,
+    render_catalyst_web_review_prompt,
+    render_catalyst_web_review_scaffold,
+)
+from src.output.editor_payload import (
+    _attach_strategy_background_confidence,
+    build_fund_pick_editor_packet,
+    render_financial_editor_prompt,
+    summarize_theme_playbook_contract,
+    summarize_what_changed_contract,
+)
+from src.output.event_digest import summarize_event_digest_contract
 from src.output.opportunity_report import _dimension_summary_text
+from src.output.pick_ranking import portfolio_overlap_bonus, score_band, strategy_confidence_priority
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
+from src.processors.portfolio_actions import attach_portfolio_overlap_summaries
 from src.processors.opportunity_engine import analyze_opportunity, build_market_context, discover_fund_opportunities
 from src.utils.fund_taxonomy import taxonomy_from_analysis, taxonomy_rows
 from src.utils.config import load_config, resolve_project_path
@@ -36,6 +54,64 @@ MODEL_CHANGELOG = [
     "技术面新增 `量价/动量背离` 因子，按最近两组确认摆点检查 RSI / MACD / OBV 与价格是否出现顶/底背离。",
     "K 线形态从“单根 K”升级到“最近 1-3 根组合形态”，会识别吞没、星形、三兵三鸦等常见信号，并结合前序 5 日趋势过滤误报。",
 ]
+
+
+def _client_final_runtime_overrides(
+    config: Mapping[str, Any],
+    *,
+    client_final: bool,
+    explicit_config_path: str = "",
+) -> tuple[Dict[str, Any], List[str]]:
+    if not client_final or explicit_config_path.strip():
+        return deepcopy(dict(config or {})), []
+
+    effective = deepcopy(dict(config or {}))
+    notes: List[str] = []
+
+    market_context = dict(effective.get("market_context") or {})
+    proxy_changed = False
+    if not bool(market_context.get("skip_global_proxy")):
+        market_context["skip_global_proxy"] = True
+        proxy_changed = True
+    if not bool(market_context.get("skip_market_monitor")):
+        market_context["skip_market_monitor"] = True
+        proxy_changed = True
+    if not bool(market_context.get("skip_market_drivers")):
+        market_context["skip_market_drivers"] = True
+        proxy_changed = True
+    if proxy_changed:
+        effective["market_context"] = market_context
+        notes.append("为保证场外基金 `client-final` 可交付，本轮自动跳过跨市场代理、market monitor 与板块驱动慢链。")
+
+    opportunity = dict(effective.get("opportunity") or {})
+    current_workers = int(opportunity.get("analysis_workers", 4) or 4)
+    if current_workers > 2:
+        opportunity["analysis_workers"] = 2
+        notes.append("本轮 `client-final` 已自动收窄场外基金分析并发，优先保证正式稿稳定落盘。")
+    current_candidates = int(opportunity.get("fund_max_scan_candidates", 12) or 12)
+    if current_candidates > 10:
+        opportunity["fund_max_scan_candidates"] = 10
+        notes.append("本轮 `client-final` 已自动收窄场外基金候选池，优先分析更接近正式交付的高流动性样本。")
+    if opportunity:
+        effective["opportunity"] = opportunity
+
+    if bool(effective.get("news_topic_search_enabled", True)):
+        effective["news_topic_search_enabled"] = False
+        notes.append("本轮 `client-final` 已自动关闭场外基金主题新闻扩搜，优先使用结构化事件和已有本地证据。")
+    current_news_feeds = str(effective.get("news_feeds_file", "") or "").strip()
+    if current_news_feeds != "config/news_feeds.empty.yaml":
+        effective["news_feeds_file"] = "config/news_feeds.empty.yaml"
+        notes.append("本轮 `client-final` 已自动切到轻量新闻源配置，避免场外基金正式稿被全局新闻拉取慢链拖住。")
+    current_profile_timeout = float(effective.get("fund_profile_timeout_seconds", 10) or 10)
+    if "fund_profile_timeout_seconds" not in effective or current_profile_timeout > 10:
+        effective["fund_profile_timeout_seconds"] = 10
+        notes.append("本轮 `client-final` 已自动收紧基金画像慢链超时，超时后按缺失披露，不再无限等待。")
+    current_index_bundle_timeout = float(effective.get("index_topic_bundle_timeout_seconds", 10) or 10)
+    if "index_topic_bundle_timeout_seconds" not in effective or current_index_bundle_timeout > 10:
+        effective["index_topic_bundle_timeout_seconds"] = 10
+        notes.append("本轮 `client-final` 已自动收紧指数专题慢链超时，超时后按缺失披露，不再无限等待。")
+
+    return effective, notes
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -147,11 +223,15 @@ def _defensive_mode(analyses: Sequence[Dict[str, Any]]) -> bool:
     )
 
 
-def _rank_key(analysis: Mapping[str, Any], defensive_mode: bool) -> tuple[float, float, float, float]:
+def _rank_key(analysis: Mapping[str, Any], defensive_mode: bool) -> tuple[float, float, float, float, float, float]:
     item = dict(analysis)
+    rank_score = _rank_score(item, defensive_mode)
     return (
         float(int(item.get("rating", {}).get("rank", 0) or 0)),
-        _rank_score(item, defensive_mode),
+        float(score_band(rank_score)),
+        float(portfolio_overlap_bonus(item)),
+        rank_score,
+        3 - strategy_confidence_priority(item),
         _score_of(item, "risk"),
         _score_of(item, "catalyst"),
     )
@@ -447,6 +527,8 @@ def _payload_from_analyses(
         "symbol": winner.get("symbol"),
         "asset_type": winner.get("asset_type"),
         "generated_at": winner.get("generated_at"),
+        "strategy_background_confidence": dict(winner.get("strategy_background_confidence") or {}),
+        "portfolio_overlap_summary": dict(winner.get("portfolio_overlap_summary") or {}),
         "visuals": dict(winner.get("visuals") or {}),
         "reference_price": float(dict(winner.get("metrics") or {}).get("last_close") or 0.0),
         "trade_state": narrative.get("judgment", {}).get("state", "持有优于追高"),
@@ -507,7 +589,12 @@ def main() -> None:
     args = build_parser().parse_args()
     ensure_report_task_registered("fund_pick")
     setup_logger("ERROR")
-    config = load_config(args.config or None)
+    base_config = load_config(args.config or None)
+    config, runtime_notes = _client_final_runtime_overrides(
+        base_config,
+        client_final=bool(args.client_final),
+        explicit_config_path=str(args.config or ""),
+    )
     blind_spots: List[str] = []
     scan_pool = 0
     passed_pool = 0
@@ -534,11 +621,13 @@ def main() -> None:
             "data_coverage": summarize_pick_coverage(analyses),
         }
     else:
+        pool_size = max(int(args.pool_size), 5)
+        runtime_pool_cap = int(dict(config.get("opportunity") or {}).get("fund_max_scan_candidates", pool_size) or pool_size)
         payload = discover_fund_opportunities(
             config,
             top_n=max(int(args.top), 5),
             theme_filter=theme_filter,
-            max_candidates=max(int(args.pool_size), 5),
+            max_candidates=min(pool_size, runtime_pool_cap),
             style_filter=style_filter,
             manager_filter=manager_filter,
         )
@@ -565,6 +654,9 @@ def main() -> None:
                 "data_coverage": summarize_pick_coverage(analyses),
             }
 
+    if runtime_notes:
+        blind_spots = [*runtime_notes, *blind_spots]
+
     defensive_mode = _defensive_mode(analyses)
     payload = enrich_pick_payload_with_score_history(
         payload,
@@ -579,6 +671,12 @@ def main() -> None:
         model_changelog=MODEL_CHANGELOG,
         rank_key=lambda item: _rank_key(item, defensive_mode),
     )
+    payload["top"] = _attach_strategy_background_confidence(payload.get("top") or [])
+    payload["coverage_analyses"] = _attach_strategy_background_confidence(payload.get("coverage_analyses") or [])
+    payload["watch_positive"] = _attach_strategy_background_confidence(payload.get("watch_positive") or [])
+    payload["top"] = attach_portfolio_overlap_summaries(payload.get("top") or [], config)
+    payload["coverage_analyses"] = attach_portfolio_overlap_summaries(payload.get("coverage_analyses") or [], config)
+    payload["watch_positive"] = attach_portfolio_overlap_summaries(payload.get("watch_positive") or [], config)
     analyses = list(payload.get("top") or [])
     attach_visuals_to_analyses(analyses[:3])
     delivery_tier = grade_pick_delivery(
@@ -639,13 +737,25 @@ def main() -> None:
         delivery_tier=delivery_tier,
         proxy_contract=payload.get("proxy_contract") or {},
     )
+    date_str = str(report_payload.get("generated_at", ""))[:10]
+    detail_path = _detail_output_path(str(report_payload.get("generated_at", "")))
+    if args.client_final:
+        catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
+        review_lookup = load_catalyst_web_review(catalyst_review_path)
+        if review_lookup:
+            analyses = [attach_catalyst_web_review_to_analysis(item, review_lookup) for item in analyses]
+            report_payload = _payload_from_analyses(
+                analyses,
+                selection_context=selection_context,
+                regime=payload.get("regime") or {},
+                day_theme=payload.get("day_theme") or {},
+            )
     report_payload["selection_context"] = selection_context
     markdown = ClientReportRenderer().render_fund_pick(report_payload)
     if not args.client_final:
         print(markdown)
         return
 
-    date_str = str(report_payload.get("generated_at", ""))[:10]
     markdown_path = resolve_project_path(f"reports/scans/funds/final/fund_pick_{date_str}_client_final.md")
     detail_markdown = _detail_markdown(
         analyses,
@@ -653,7 +763,53 @@ def main() -> None:
         selection_context=selection_context,
     )
     factor_contract = summarize_factor_contracts_from_analyses(list(payload.get("coverage_analyses") or analyses), sample_limit=16)
-    detail_path = _detail_output_path(str(report_payload.get("generated_at", "")))
+    catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
+    editor_packet = build_fund_pick_editor_packet(report_payload)
+    editor_prompt = render_financial_editor_prompt(editor_packet)
+    catalyst_packet = build_catalyst_web_review_packet(
+        report_type="fund_pick",
+        subject=f"fund_pick {date_str}",
+        generated_at=str(report_payload.get("generated_at", "")),
+        analyses=list(payload.get("coverage_analyses") or analyses),
+    )
+    text_sidecars = {
+        "editor_prompt": (
+            internal_sidecar_path(detail_path, "editor_prompt.md"),
+            editor_prompt,
+        )
+    }
+    json_sidecars = {
+        "editor_payload": (
+            internal_sidecar_path(detail_path, "editor_payload.json"),
+            editor_packet,
+        )
+    }
+    if list(catalyst_packet.get("items") or []):
+        text_sidecars.update(
+            {
+                "catalyst_web_review_prompt": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review_prompt.md"),
+                    render_catalyst_web_review_prompt(catalyst_packet),
+                ),
+                "catalyst_web_review": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review.md"),
+                    render_catalyst_web_review_scaffold(catalyst_packet),
+                ),
+            }
+        )
+        json_sidecars.update(
+            {
+                "catalyst_web_review_payload": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review_payload.json"),
+                    catalyst_packet,
+                )
+            }
+        )
+    elif catalyst_review_path.exists():
+        text_sidecars["catalyst_web_review"] = (
+            catalyst_review_path,
+            catalyst_review_path.read_text(encoding="utf-8"),
+        )
     bundle = finalize_client_markdown(
         report_type="fund_pick",
         client_markdown=markdown,
@@ -673,8 +829,21 @@ def main() -> None:
             "data_coverage": dict(payload.get("pick_coverage") or {}),
             "factor_contract": factor_contract,
             "proxy_contract": dict(payload.get("proxy_contract") or {}),
+            "theme_playbook_contract": summarize_theme_playbook_contract(editor_packet.get("theme_playbook") or {}),
+            "event_digest_contract": summarize_event_digest_contract(editor_packet.get("event_digest") or {}),
+            "what_changed_contract": summarize_what_changed_contract(editor_packet.get("what_changed") or {}),
         },
-        release_checker=lambda markdown_text, source_text: check_generic_client_report(markdown_text, "fund_pick", source_text=source_text),
+        release_checker=lambda markdown_text, source_text: check_generic_client_report(
+            markdown_text,
+            "fund_pick",
+            source_text=source_text,
+            editor_theme_playbook=editor_packet.get("theme_playbook") or {},
+            editor_prompt_text=editor_prompt,
+            event_digest_contract=editor_packet.get("event_digest") or {},
+            what_changed_contract=editor_packet.get("what_changed") or {},
+        ),
+        text_sidecars=text_sidecars,
+        json_sidecars=json_sidecars,
     )
     print(markdown)
     for index, line in enumerate(exported_bundle_lines(bundle)):

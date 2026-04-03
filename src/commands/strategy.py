@@ -7,14 +7,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
 
+from src.commands.final_runner import finalize_client_markdown, internal_sidecar_path
 from src.commands.release_check import check_generic_client_report
 from src.commands.report_guard import (
     ReportGuardError,
     ensure_report_task_registered,
-    export_reviewed_markdown_bundle,
     exported_bundle_lines,
-    review_path_for,
 )
+from src.output.editor_payload import build_strategy_editor_packet, render_financial_editor_prompt
 from src.output.strategy_report import StrategyReportRenderer
 from src.processors.strategy import (
     STRATEGY_V1_ASSET_GAP_DAYS,
@@ -26,7 +26,6 @@ from src.processors.strategy import (
     generate_strategy_replay_predictions,
     validate_strategy_rows,
 )
-from src.reporting.review_scaffold import ensure_external_review_scaffold
 from src.storage.strategy import StrategyRepository
 from src.utils.config import detect_asset_type, load_config, resolve_project_path
 from src.utils.data import load_strategy_batches, load_watchlist
@@ -261,42 +260,38 @@ def _export_strategy_client_bundle(
     report_kind: str,
     subject: str,
     markdown_text: str,
+    payload: Mapping[str, Any],
     extra_manifest: Mapping[str, Any] | None = None,
 ) -> Dict[str, Path]:
     date_str = datetime.now().strftime("%Y-%m-%d")
     detail_path = _strategy_detail_output_path(report_kind, subject, date_str)
-    detail_path.parent.mkdir(parents=True, exist_ok=True)
-    detail_path.write_text(markdown_text, encoding="utf-8")
     markdown_path = _strategy_client_output_path(report_kind, subject, date_str)
-    review_path = review_path_for(markdown_path)
-    scaffold_created = False
-    if not review_path.exists():
-        ensure_external_review_scaffold(
-            review_path=review_path,
-            markdown_path=markdown_path,
-            report_type="strategy",
-            report_kind=report_kind,
-            detail_source=detail_path,
-        )
-        scaffold_created = True
-    findings = check_generic_client_report(markdown_text, "strategy", source_text=markdown_text)
-    manifest_extra = dict(extra_manifest or {})
-    manifest_extra["detail_source"] = str(detail_path)
-    manifest_extra["report_kind"] = report_kind
-    try:
-        return export_reviewed_markdown_bundle(
-            report_type="strategy",
-            markdown_text=markdown_text,
-            markdown_path=markdown_path,
-            release_findings=findings,
-            extra_manifest=manifest_extra,
-        )
-    except ReportGuardError as exc:
-        if scaffold_created:
-            raise ReportGuardError(
-                f"{exc}\n已生成外审模板：`{review_path}`。先完成 Pass A / Pass B，并把收敛结论更新到 PASS 后，再重跑同一命令。"
-            ) from exc
-        raise
+    editor_packet = build_strategy_editor_packet(payload, report_kind=report_kind, subject=subject)
+    return finalize_client_markdown(
+        report_type="strategy",
+        report_kind=report_kind,
+        client_markdown=markdown_text,
+        markdown_path=markdown_path,
+        detail_markdown=markdown_text,
+        detail_path=detail_path,
+        extra_manifest={
+            **dict(extra_manifest or {}),
+            "report_kind": report_kind,
+        },
+        release_checker=lambda markdown, source_text: check_generic_client_report(markdown, "strategy", source_text=source_text),
+        text_sidecars={
+            "editor_prompt": (
+                internal_sidecar_path(detail_path, "editor_prompt.md"),
+                render_financial_editor_prompt(editor_packet),
+            )
+        },
+        json_sidecars={
+            "editor_payload": (
+                internal_sidecar_path(detail_path, "editor_payload.json"),
+                editor_packet,
+            )
+        },
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -445,6 +440,7 @@ def main() -> None:
                 report_kind="validate",
                 subject=_strategy_validate_subject(args.symbol),
                 markdown_text=markdown,
+                payload=summary,
                 extra_manifest={
                     "symbol": str(args.symbol or ""),
                     "limit": int(args.limit),
@@ -518,6 +514,7 @@ def main() -> None:
                 report_kind="experiment",
                 subject=_strategy_experiment_subject(payload, effective_symbols),
                 markdown_text=markdown,
+                payload=payload,
                 extra_manifest={
                     "symbols": list(effective_symbols),
                     "symbol_count": len(effective_symbols),

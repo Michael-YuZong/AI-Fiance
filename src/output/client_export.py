@@ -17,67 +17,288 @@ from urllib.parse import unquote, urlparse
 
 
 _EDGE_BINARY = Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
-_HTML_STYLE = """
+_DEFAULT_REPORT_THEME = "terminal"
+_REPORT_THEME_STORAGE_KEY = "ai-finance-report-theme"
+_REPORT_THEME_PRESETS: Dict[str, tuple[str, Dict[str, str]]] = {
+    "terminal": (
+        "硬核终端",
+        {
+            "--page-bg": "#141922",
+            "--page-bg-2": "#1d2330",
+            "--panel-bg": "rgba(31, 38, 51, 0.96)",
+            "--panel-bg-strong": "rgba(24, 30, 42, 0.98)",
+            "--panel-soft": "rgba(38, 46, 62, 0.94)",
+            "--heading": "#eef6ff",
+            "--text": "#d6dde8",
+            "--text-soft": "#a4afbf",
+            "--muted": "#7e8ba0",
+            "--accent": "#59d0c2",
+            "--accent-strong": "#8ae8db",
+            "--accent-soft": "rgba(89, 208, 194, 0.18)",
+            "--accent-2": "#f4c56a",
+            "--link": "#8db7ff",
+            "--rule": "rgba(126, 139, 160, 0.2)",
+            "--rule-strong": "rgba(126, 139, 160, 0.34)",
+            "--row-stripe": "rgba(255, 255, 255, 0.025)",
+            "--code-bg": "rgba(89, 208, 194, 0.12)",
+            "--code-ink": "#a7fff4",
+            "--code-border": "rgba(89, 208, 194, 0.3)",
+            "--shadow": "rgba(0, 0, 0, 0.42)",
+            "--hero-glow": "rgba(89, 208, 194, 0.2)",
+            "--positive": "#4ec9b0",
+            "--negative": "#ff8f8f",
+            "--warning": "#f4c56a",
+            "--panel-radius": "22px",
+        },
+    ),
+    "abyss-gold": (
+        "深渊暗金",
+        {
+            "--page-bg": "#0f1013",
+            "--page-bg-2": "#181512",
+            "--panel-bg": "rgba(24, 22, 20, 0.96)",
+            "--panel-bg-strong": "rgba(20, 18, 17, 0.98)",
+            "--panel-soft": "rgba(34, 30, 26, 0.95)",
+            "--heading": "#f3e7ca",
+            "--text": "#cdc4b6",
+            "--text-soft": "#aba091",
+            "--muted": "#8f8579",
+            "--accent": "#c5a059",
+            "--accent-strong": "#f0d49a",
+            "--accent-soft": "rgba(197, 160, 89, 0.16)",
+            "--accent-2": "#4f7b6c",
+            "--link": "#d8c89f",
+            "--rule": "rgba(197, 160, 89, 0.16)",
+            "--rule-strong": "rgba(197, 160, 89, 0.3)",
+            "--row-stripe": "rgba(197, 160, 89, 0.04)",
+            "--code-bg": "rgba(197, 160, 89, 0.12)",
+            "--code-ink": "#f3d79f",
+            "--code-border": "rgba(197, 160, 89, 0.28)",
+            "--shadow": "rgba(0, 0, 0, 0.52)",
+            "--hero-glow": "rgba(197, 160, 89, 0.12)",
+            "--positive": "#5d947c",
+            "--negative": "#9b565b",
+            "--warning": "#c5a059",
+            "--panel-radius": "24px",
+        },
+    ),
+    "institutional": (
+        "机构终端",
+        {
+            "--page-bg": "#000000",
+            "--page-bg-2": "#07090c",
+            "--panel-bg": "rgba(6, 8, 11, 0.98)",
+            "--panel-bg-strong": "rgba(4, 5, 7, 0.99)",
+            "--panel-soft": "rgba(11, 15, 20, 0.97)",
+            "--heading": "#ffd65a",
+            "--text": "#d6dbe2",
+            "--text-soft": "#a4adb9",
+            "--muted": "#818b97",
+            "--accent": "#ffbf00",
+            "--accent-strong": "#ffe082",
+            "--accent-soft": "rgba(255, 191, 0, 0.14)",
+            "--accent-2": "#39ff14",
+            "--link": "#8fc5ff",
+            "--rule": "rgba(255, 255, 255, 0.07)",
+            "--rule-strong": "rgba(255, 191, 0, 0.22)",
+            "--row-stripe": "rgba(255, 255, 255, 0.015)",
+            "--code-bg": "rgba(255, 191, 0, 0.1)",
+            "--code-ink": "#ffe082",
+            "--code-border": "rgba(255, 191, 0, 0.2)",
+            "--shadow": "rgba(0, 0, 0, 0.58)",
+            "--hero-glow": "rgba(255, 191, 0, 0.08)",
+            "--positive": "#39ff14",
+            "--negative": "#ff6b6b",
+            "--warning": "#ffbf00",
+            "--panel-radius": "0px",
+        },
+    ),
+}
+
+
+def _normalize_report_theme(theme: str | None = None) -> str:
+    candidate = (theme or os.getenv("AI_FINANCE_REPORT_THEME") or _DEFAULT_REPORT_THEME).strip().lower()
+    if candidate not in _REPORT_THEME_PRESETS:
+        return _DEFAULT_REPORT_THEME
+    return candidate
+
+
+def _render_theme_css() -> str:
+    blocks: List[str] = []
+    for theme_name, (_, variables) in _REPORT_THEME_PRESETS.items():
+        lines = [f"body.theme-{theme_name} {{"]
+        for key, value in variables.items():
+            lines.append(f"  {key}: {value};")
+        lines.append("}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+_HTML_STYLE = (
+    """
 @page {
   size: A4;
   margin: 12mm 10mm 12mm 10mm;
 }
 
 :root {
-  --paper: #fffdf8;
-  --paper-soft: #fbf6ef;
-  --paper-strong: #f5ede1;
-  --ink: #1f2937;
-  --ink-soft: #4b5563;
-  --muted: #6b7280;
-  --accent: #a85d2f;
-  --accent-strong: #7c3f1b;
-  --accent-soft: #efd7c1;
-  --accent-wash: #fff3e7;
-  --rule: #dfd2c2;
-  --table-stripe: #fdf8f2;
-  --shadow: rgba(124, 63, 27, 0.08);
-  --highlight: #fff1bf;
+  color-scheme: dark;
 }
 
 html, body {
-  font-family: "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
-  color: var(--ink);
-  line-height: 1.62;
+  min-height: 100%;
+  font-family: "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  color: var(--text);
+  line-height: 1.68;
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   font-kerning: normal;
   text-size-adjust: 100%;
-  background: var(--paper);
+  font-variant-numeric: tabular-nums lining-nums;
 }
 
+"""
+    + _render_theme_css()
+    + """
+
 body {
-  max-width: 1000px;
+  max-width: 1080px;
   margin: 0 auto;
-  padding: 0;
+  padding: 14px 18px 28px 18px;
+  background:
+    radial-gradient(circle at top right, var(--hero-glow), transparent 38%),
+    linear-gradient(180deg, var(--page-bg), var(--page-bg-2));
 }
 
 main.markdown-body {
-  padding: 2mm 0 4mm 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 1mm 0 4mm 0;
+}
+
+.report-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin: 0 0 14px 0;
+  position: sticky;
+  top: 8px;
+  z-index: 5;
+}
+
+.report-theme-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px;
+  background: rgba(8, 10, 14, 0.72);
+  border: 1px solid var(--rule);
+  border-radius: calc(var(--panel-radius) * 0.7 + 4px);
+  box-shadow: 0 16px 32px -28px var(--shadow);
+  backdrop-filter: blur(10px);
+}
+
+.report-theme-switcher::before {
+  content: "Theme";
+  padding: 0 8px 0 4px;
+  color: var(--muted);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+
+.report-theme-button {
+  appearance: none;
+  border: 1px solid transparent;
+  padding: 7px 11px;
+  border-radius: calc(var(--panel-radius) * 0.5 + 4px);
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+
+.report-theme-button:hover,
+.report-theme-button:focus-visible {
+  background: var(--accent-soft);
+  border-color: var(--rule-strong);
+  color: var(--heading);
+  outline: none;
+}
+
+.report-theme-button.is-active {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), var(--accent-soft));
+  border-color: var(--rule-strong);
+  color: var(--accent-strong);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+section.report-hero,
+section.report-section {
+  position: relative;
+  overflow: hidden;
+  padding: 18px 20px 20px 20px;
+  background: linear-gradient(180deg, var(--panel-bg), var(--panel-bg-strong));
+  border: 1px solid var(--rule);
+  border-radius: var(--panel-radius);
+  box-shadow: 0 22px 36px -30px var(--shadow);
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+section.report-hero::after,
+section.report-section::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--rule-strong), transparent);
+  opacity: 0.88;
+}
+
+section.report-hero {
+  padding-top: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 28%),
+    linear-gradient(180deg, var(--panel-bg), var(--panel-bg-strong));
+}
+
+section.report-section > h2:first-child,
+section.report-hero > h1:first-child {
+  margin-top: 0;
 }
 
 h1, h2, h3, h4 {
-  font-family: "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC", serif;
-  color: #172033;
-  margin-top: 1.1em;
+  font-family: "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  color: var(--heading);
+  margin-top: 1.05em;
   margin-bottom: 0.45em;
   page-break-after: avoid;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
 }
 
 h1 {
-  font-size: 25px;
-  line-height: 1.28;
-  border-bottom: 2px solid var(--accent-soft);
-  padding-bottom: 10px;
-  margin-top: 0.1em;
-  margin-bottom: 0.75em;
+  position: relative;
+  font-size: 27px;
+  line-height: 1.24;
+  padding-bottom: 12px;
+  margin-bottom: 0.8em;
+}
+
+h1::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 112px;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), transparent);
 }
 
 h2 {
@@ -85,47 +306,44 @@ h2 {
   display: flex;
   align-items: center;
   gap: 10px;
-  border-left: 0;
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: linear-gradient(90deg, rgba(239, 215, 193, 0.42), rgba(239, 215, 193, 0.08));
-  box-shadow: inset 0 0 0 1px rgba(223, 210, 194, 0.7);
+  padding: 8px 0 10px 0;
+  border-bottom: 1px solid var(--rule);
 }
 
 h2::before {
   content: "";
-  width: 6px;
-  height: 1.8em;
+  width: 7px;
+  height: 1.7em;
   border-radius: 999px;
-  background: linear-gradient(180deg, var(--accent), var(--accent-soft));
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
   flex: 0 0 auto;
 }
 
 h3 {
-  font-size: 15px;
+  font-size: 14px;
   color: var(--accent-strong);
-  border-bottom: 1px dashed rgba(168, 93, 47, 0.28);
-  padding-bottom: 3px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--rule);
 }
 
 h4 {
   font-size: 13px;
-  color: var(--ink-soft);
-  margin-top: 0.9em;
-  margin-bottom: 0.3em;
+  color: var(--text-soft);
+  margin-top: 0.95em;
+  margin-bottom: 0.35em;
 }
 
-p, li, td, th, blockquote {
-  font-family: "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+p, li, blockquote {
+  font-family: "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
 }
 
-code, pre {
-  font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+table, th, td, code, pre {
+  font-family: "JetBrains Mono", "SFMono-Regular", "Menlo", "Consolas", "PingFang SC", "Microsoft YaHei", monospace;
 }
 
 p {
-  margin: 0.5em 0 0.8em;
-  color: var(--ink);
+  margin: 0.5em 0 0.85em;
+  color: var(--text);
   text-align: left;
   letter-spacing: 0.01em;
   word-break: break-word;
@@ -134,42 +352,41 @@ p {
 h2 + p,
 h2 + blockquote,
 h2 + ol,
-h2 + ul {
-  margin-top: 0.75em;
+h2 + ul,
+h2 + table {
+  margin-top: 0.9em;
 }
 
 strong {
   font-weight: 700;
   color: var(--accent-strong);
-  padding: 0 0.12em;
-  background: linear-gradient(180deg, transparent 58%, rgba(239, 215, 193, 0.85) 58%);
 }
 
 em {
   font-style: italic;
-  color: #765b2a;
+  color: var(--accent-2);
 }
 
 mark {
-  background: linear-gradient(180deg, rgba(255, 241, 191, 0.9), rgba(255, 241, 191, 0.9));
-  color: #4c330f;
-  padding: 0.02em 0.22em;
-  border-radius: 4px;
+  background: linear-gradient(180deg, var(--accent-soft), var(--accent-soft));
+  color: var(--heading);
+  padding: 0.06em 0.28em;
+  border-radius: 6px;
 }
 
 code {
-  background: #f7f0e7;
-  color: #8a461a;
-  padding: 0.12em 0.36em;
-  border-radius: 6px;
-  border: 1px solid rgba(223, 210, 194, 0.95);
+  background: var(--code-bg);
+  color: var(--code-ink);
+  padding: 0.14em 0.42em;
+  border-radius: calc(var(--panel-radius) * 0.4 + 2px);
+  border: 1px solid var(--code-border);
   font-size: 0.94em;
 }
 
 pre {
-  background: var(--paper-soft);
+  background: var(--panel-soft);
   border: 1px solid var(--rule);
-  border-radius: 10px;
+  border-radius: calc(var(--panel-radius) * 0.7 + 2px);
   padding: 10px 12px;
   overflow: hidden;
 }
@@ -193,19 +410,21 @@ figure.report-figure img {
   max-width: 100%;
   max-height: none;
   object-fit: contain;
-  border-radius: 8px;
-  box-shadow: 0 10px 24px -24px rgba(31, 41, 55, 0.35);
+  border-radius: calc(var(--panel-radius) * 0.75);
+  border: 1px solid var(--rule);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 30%);
+  box-shadow: 0 16px 30px -28px var(--shadow);
 }
 
 figure.report-figure figcaption {
-  margin-top: 4px;
+  margin-top: 6px;
   font-size: 11px;
   color: var(--muted);
 }
 
 h3 + figure.report-figure,
 h4 + figure.report-figure {
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
 section.report-figure-block {
@@ -223,40 +442,50 @@ section.report-figure-block > figure.report-figure {
 
 table {
   width: 100%;
-  border-collapse: collapse;
-  margin: 12px 0 16px 0;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 14px 0 18px 0;
   font-size: 12px;
-  box-shadow: inset 0 0 0 1px rgba(223, 210, 194, 0.8);
+  border: 1px solid var(--rule);
+  border-radius: calc(var(--panel-radius) * 0.72 + 2px);
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.012);
 }
 
 th, td {
-  border: 1px solid var(--rule);
-  padding: 7px 9px;
+  padding: 8px 10px;
   vertical-align: top;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
 }
 
-th {
-  background: linear-gradient(180deg, #f7f1e7, #f1e6d9);
-  font-weight: 600;
-  color: #3f3025;
+thead th {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), var(--accent-soft));
+  color: var(--heading);
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 tbody tr:nth-child(even) td {
-  background: var(--table-stripe);
+  background: var(--row-stripe);
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 blockquote {
-  margin: 12px 0;
-  padding: 10px 14px;
-  color: var(--ink-soft);
-  background: linear-gradient(180deg, #fff9f2, #faf4ec);
-  border-left: 5px solid var(--accent-soft);
-  border-radius: 10px;
-  box-shadow: 0 8px 18px -18px var(--shadow);
+  margin: 14px 0;
+  padding: 12px 16px;
+  color: var(--text-soft);
+  background: linear-gradient(180deg, var(--panel-soft), rgba(255, 255, 255, 0.01));
+  border-left: 4px solid var(--accent);
+  border-radius: calc(var(--panel-radius) * 0.75);
+  box-shadow: 0 12px 22px -24px var(--shadow);
 }
 
 ul, ol {
-  margin: 0.35em 0 1em;
+  margin: 0.4em 0 1em;
   padding-left: 0;
 }
 
@@ -279,6 +508,7 @@ ul > li::before {
   height: 6px;
   border-radius: 999px;
   background: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
 }
 
 ol {
@@ -290,19 +520,20 @@ ol > li {
   counter-increment: report-counter;
   position: relative;
   margin: 0 0 10px 0;
-  padding: 10px 12px 10px 46px;
-  background: linear-gradient(180deg, rgba(251, 246, 239, 0.92), rgba(255, 255, 255, 0.92));
-  border-left: 3px solid rgba(168, 93, 47, 0.32);
-  border-radius: 12px;
-  box-shadow: 0 10px 18px -20px var(--shadow);
+  padding: 12px 14px 12px 48px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015));
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: calc(var(--panel-radius) * 0.75 + 2px);
+  box-shadow: 0 12px 24px -24px var(--shadow);
 }
 
 ol > li::before {
   content: counter(report-counter) ".";
   position: absolute;
   left: 14px;
-  top: 10px;
-  font-family: "Avenir Next", "Helvetica Neue", "PingFang SC", sans-serif;
+  top: 11px;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
   font-weight: 700;
   color: var(--accent);
 }
@@ -313,8 +544,8 @@ li strong:first-child {
 }
 
 a {
-  color: #0f4c81;
-  text-decoration-color: rgba(15, 76, 129, 0.35);
+  color: var(--link);
+  text-decoration-color: rgba(141, 183, 255, 0.35);
 }
 
 hr {
@@ -324,12 +555,12 @@ hr {
 }
 
 details.report-details {
-  margin: 12px 0 16px 0;
+  margin: 14px 0 16px 0;
   padding: 0;
-  border: 1px solid rgba(223, 210, 194, 0.95);
-  border-radius: 12px;
-  background: linear-gradient(180deg, rgba(251, 246, 239, 0.92), rgba(255, 255, 255, 0.96));
-  box-shadow: 0 10px 18px -20px var(--shadow);
+  border: 1px solid var(--rule);
+  border-radius: calc(var(--panel-radius) * 0.75 + 4px);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.012));
+  box-shadow: 0 12px 22px -24px var(--shadow);
   overflow: hidden;
 }
 
@@ -337,11 +568,11 @@ details.report-details > summary {
   cursor: pointer;
   list-style: none;
   padding: 10px 14px;
-  font-family: "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC", serif;
-  font-size: 15px;
+  font-size: 14px;
+  font-weight: 600;
   color: var(--accent-strong);
-  background: linear-gradient(90deg, rgba(239, 215, 193, 0.38), rgba(239, 215, 193, 0.08));
-  border-bottom: 1px solid rgba(223, 210, 194, 0.9);
+  background: linear-gradient(90deg, var(--accent-soft), rgba(255, 255, 255, 0.01));
+  border-bottom: 1px solid var(--rule);
 }
 
 details.report-details > summary::-webkit-details-marker {
@@ -368,7 +599,99 @@ details.report-details > *:not(summary) {
 details.report-details > *:last-child {
   margin-bottom: 14px;
 }
+
+.report-page-break {
+  height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  break-before: page;
+  page-break-before: always;
+}
+
+@media screen {
+  .report-page-break {
+    display: none;
+  }
+}
+
+@media print {
+  body {
+    padding: 0;
+    background: var(--page-bg);
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .report-toolbar {
+    display: none;
+  }
+
+  section.report-hero,
+  section.report-section {
+    box-shadow: none;
+  }
+}
 """.strip()
+)
+_THEME_SWITCHER_SCRIPT = (
+    """
+<script>
+(() => {
+  const storageKey = "__STORAGE_KEY__";
+  const body = document.body;
+  if (!body) {
+    return;
+  }
+  const buttons = Array.from(document.querySelectorAll("[data-report-theme]"));
+  const supported = new Set(buttons.map((button) => button.getAttribute("data-report-theme")));
+  const applyTheme = (theme) => {
+    if (!supported.has(theme)) {
+      return;
+    }
+    Array.from(body.classList)
+      .filter((name) => name.startsWith("theme-"))
+      .forEach((name) => body.classList.remove(name));
+    body.classList.add(`theme-${theme}`);
+    body.dataset.reportTheme = theme;
+    buttons.forEach((button) => {
+      const active = button.getAttribute("data-report-theme") === theme;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+  };
+
+  const defaultTheme = body.dataset.defaultTheme || "__DEFAULT_THEME__";
+  let storedTheme = defaultTheme;
+  try {
+    storedTheme = localStorage.getItem(storageKey) || defaultTheme;
+  } catch (_error) {
+    storedTheme = defaultTheme;
+  }
+  if (!supported.has(storedTheme)) {
+    storedTheme = defaultTheme;
+  }
+  applyTheme(storedTheme);
+  buttons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const theme = button.getAttribute("data-report-theme");
+      if (!theme) {
+        return;
+      }
+      applyTheme(theme);
+      try {
+        localStorage.setItem(storageKey, theme);
+      } catch (_error) {
+        // Ignore storage failures in local file contexts.
+      }
+    });
+  });
+})();
+</script>
+"""
+    .replace("__STORAGE_KEY__", _REPORT_THEME_STORAGE_KEY)
+    .replace("__DEFAULT_THEME__", _DEFAULT_REPORT_THEME)
+)
 
 _IMAGE_LINE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
 
@@ -510,7 +833,61 @@ def _split_markdown_table_row(row: str) -> List[str]:
     return cells
 
 
+def _render_theme_switcher(active_theme: str) -> str:
+    buttons = []
+    for theme_name, (label, _) in _REPORT_THEME_PRESETS.items():
+        active = theme_name == active_theme
+        state_class = " is-active" if active else ""
+        buttons.append(
+            '<button type="button" '
+            f'class="report-theme-button{state_class}" '
+            f'data-report-theme="{html.escape(theme_name, quote=True)}" '
+            f'aria-pressed="{"true" if active else "false"}">'
+            f"{html.escape(label, quote=False)}"
+            "</button>"
+        )
+    return (
+        '<div class="report-toolbar">'
+        '<div class="report-theme-switcher" role="group" aria-label="报告主题切换">'
+        + "".join(buttons)
+        + "</div></div>"
+    )
+
+
+def _wrap_report_sections(parts: List[str]) -> str:
+    if not parts:
+        return ""
+
+    hero_parts: List[str] = []
+    sections: List[str] = []
+    current_section: List[str] = []
+
+    def _flush_section() -> None:
+        if current_section:
+            sections.append('<section class="report-section">' + "\n".join(current_section) + "</section>")
+            current_section.clear()
+
+    for part in parts:
+        if part.startswith("<h2>"):
+            _flush_section()
+            current_section.append(part)
+            continue
+        if current_section:
+            current_section.append(part)
+            continue
+        hero_parts.append(part)
+
+    _flush_section()
+
+    wrapped: List[str] = []
+    if hero_parts:
+        wrapped.append('<section class="report-hero">' + "\n".join(hero_parts) + "</section>")
+    wrapped.extend(sections)
+    return "\n".join(wrapped)
+
+
 def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None = None) -> str:
+    theme_name = _normalize_report_theme()
     lines = markdown_text.splitlines()
     parts: List[str] = []
     index = 0
@@ -626,13 +1003,18 @@ def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None 
                 or probe.startswith("- ")
                 or re.match(r"\d+\.\s+", probe)
                 or probe == "---"
+                or probe == "<details>"
+                or probe == "</details>"
+                or (probe.startswith("<summary>") and probe.endswith("</summary>"))
+                or _IMAGE_LINE_RE.match(probe) is not None
             ):
                 break
             block.append(probe)
             index += 1
         parts.append(f"<p>{_format_inline(' '.join(block), source_dir)}</p>")
 
-    body = "\n".join(parts)
+    body = _wrap_report_sections(parts)
+    toolbar = _render_theme_switcher(theme_name)
     return (
         "<!doctype html>\n"
         '<html lang="zh-CN">\n'
@@ -644,10 +1026,13 @@ def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None 
         f"{_HTML_STYLE}\n"
         "</style>\n"
         "</head>\n"
-        "<body>\n"
+        f'<body class="report-body theme-{html.escape(theme_name, quote=True)}" '
+        f'data-default-theme="{html.escape(theme_name, quote=True)}">\n'
+        f"{toolbar}\n"
         '<main class="markdown-body">\n'
         f"{body}\n"
         "</main>\n"
+        f"{_THEME_SWITCHER_SCRIPT}\n"
         "</body>\n"
         "</html>\n"
     )

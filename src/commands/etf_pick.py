@@ -4,19 +4,47 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import deepcopy
 from pathlib import Path
+import re
+import threading
 from typing import Any, Dict, List, Mapping, Sequence
 
 from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery, summarize_pick_coverage
 from src.commands.pick_visuals import attach_visuals_to_analyses
-from src.commands.final_runner import finalize_client_markdown
+from src.commands.final_runner import finalize_client_markdown, internal_sidecar_path
 from src.commands.report_guard import ensure_report_task_registered, exported_bundle_lines
 from src.commands.release_check import check_generic_client_report
+from src.collectors.fund_profile import FundProfileCollector
+from src.collectors.news import NewsCollector
 from src.output import ClientReportRenderer, OpportunityReportRenderer
+from src.output.catalyst_web_review import (
+    attach_catalyst_web_review_to_analysis,
+    build_catalyst_web_review_packet,
+    load_catalyst_web_review,
+    render_catalyst_web_review_prompt,
+    render_catalyst_web_review_scaffold,
+)
+from src.output.editor_payload import (
+    _attach_strategy_background_confidence,
+    build_etf_pick_editor_packet,
+    render_financial_editor_prompt,
+    summarize_theme_playbook_contract,
+    summarize_what_changed_contract,
+)
+from src.output.event_digest import summarize_event_digest_contract
 from src.output.opportunity_report import _dimension_summary_text
 from src.output.client_report import _fund_profile_sections, _pick_horizon_profile
+from src.output.pick_ranking import portfolio_overlap_bonus, score_band, strategy_confidence_priority
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
-from src.processors.opportunity_engine import _client_safe_issue, analyze_opportunity, build_market_context, discover_opportunities
+from src.processors.portfolio_actions import attach_portfolio_overlap_summaries
+from src.processors.opportunity_engine import (
+    _client_safe_issue,
+    analyze_opportunity,
+    build_market_context,
+    discover_opportunities,
+    refresh_etf_analysis_report_fields,
+)
 from src.utils.fund_taxonomy import taxonomy_from_analysis, taxonomy_rows
 from src.utils.config import load_config, resolve_project_path
 from src.utils.data import load_watchlist
@@ -32,6 +60,116 @@ MODEL_CHANGELOG = [
     "技术面新增 `量价/动量背离` 因子，按最近两组确认摆点检查 RSI / MACD / OBV 与价格是否出现顶/底背离。",
     "K 线形态从“单根 K”升级到“最近 1-3 根组合形态”，会识别吞没、星形、三兵三鸦等常见信号，并结合前序 5 日趋势过滤误报。",
 ]
+
+_ETF_THEME_NOISE_TOKENS = (
+    "ETF",
+    "联接",
+    "基金",
+    "指数",
+    "主题",
+    "行业",
+    "A股",
+    "中证",
+    "国证",
+    "上证",
+    "深证",
+    "申万",
+    "科创板",
+    "创业板",
+)
+_ETF_THEME_EXPANSION_HINTS = (
+    (("半导体", "芯片"), ["AI算力", "晶圆厂", "设备材料", "capex"]),
+    (("算力", "AI"), ["数据中心", "服务器", "GPU", "capex"]),
+    (("光模块", "光通信"), ["AI算力", "数据中心", "800G", "CPO"]),
+)
+_LOW_SIGNAL_ETF_NEWS_TOKENS = (
+    "净值",
+    "开盘",
+    "收盘",
+    "重仓股",
+    "成交额",
+    "换手率",
+    "净申购",
+    "净流入",
+    "净流出",
+    "半日净申购",
+    "半日成交额",
+    "资金逆势加码",
+    "涨超",
+    "跌超",
+    "开盘涨",
+    "开盘跌",
+    "涨0.00%",
+    "跌0.00%",
+    "涨幅",
+    "跌幅",
+    "溢价",
+    "折价",
+    "费率",
+    "规模",
+    "份额",
+)
+_QUOTE_NOISE_ETF_NEWS_TOKENS = (
+    "净值",
+    "开盘",
+    "收盘",
+    "重仓股",
+    "涨0.00%",
+    "跌0.00%",
+)
+_GENERIC_MARKET_ETF_NEWS_TOKENS = (
+    "市场回暖",
+    "回暖信号",
+    "关注三个方向",
+    "关注三条主线",
+    "关注三大方向",
+    "四月份关注",
+    "四月关注",
+    "布局三个方向",
+    "布局三条主线",
+    "风格切换",
+    "市场风格",
+    "三大方向",
+)
+_GENERIC_MARKET_ETF_NEWS_SOURCES = (
+    "财富号",
+)
+_THEME_CATALYST_TOKENS = (
+    "AI",
+    "人工智能",
+    "算力",
+    "半导体",
+    "芯片",
+    "晶圆",
+    "设备",
+    "材料",
+    "capex",
+    "扩产",
+    "订单",
+    "中标",
+    "政策",
+    "补贴",
+    "关税",
+    "国产替代",
+    "景气",
+    "需求",
+    "库存",
+    "价格",
+    "出货",
+    "服务器",
+    "数据中心",
+    "量产",
+    "制程",
+    "制程升级",
+    "晶圆厂",
+    "资本开支",
+    "扩产",
+    "投产",
+    "产能",
+    "设备支出",
+    "供需",
+    "半导体设备",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -88,8 +226,461 @@ def _dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
     return rows
 
 
-def _rank_score(analysis: Dict[str, Any]) -> float:
+def _market_event_rows(analysis: Mapping[str, Any]) -> List[List[str]]:
+    rows = [list(row) for row in list(analysis.get("market_event_rows") or []) if isinstance(row, (list, tuple)) and row]
+    if rows:
+        return rows
+    relative_strength = dict(dict(analysis.get("dimensions") or {}).get("relative_strength") or {})
+    summary = str(relative_strength.get("summary", "")).strip()
+    match = re.search(r"板块涨跌幅\s*([+-]?\d+(?:\.\d+)?)%", summary)
+    if match is None:
+        return []
+    move_value = float(match.group(1))
+    metadata = dict(analysis.get("metadata") or {})
+    board_name = str(metadata.get("sector", "")).strip() or str(analysis.get("name", "")).strip()
+    if not board_name:
+        return []
+    strength = "高" if move_value >= 3 else ("中" if move_value >= 1 else "低")
+    conclusion = (
+        f"偏利多，先把 `{board_name}` 当盘面共振线索，继续看价格和成交能否扩散。"
+        if move_value >= 0
+        else f"偏谨慎，先看 `{board_name}` 是否继续走弱，不把它直接当成动作催化。"
+    )
+    return [
+        [
+            str(analysis.get("generated_at", ""))[:10],
+            f"主题/盘面跟踪：{board_name}（板块涨跌幅 {move_value:+.2f}%）",
+            "相对强弱/盘面",
+            strength,
+            board_name,
+            "",
+            "盘面共振",
+            conclusion,
+        ]
+    ]
+
+
+def _timed_value(loader, *, fallback: Any, timeout_seconds: float) -> Any:
+    result: Dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            result["value"] = loader()
+        except BaseException:
+            result["value"] = fallback
+
+    worker = threading.Thread(target=_runner, name="etf_pick_news_backfill", daemon=True)
+    worker.start()
+    worker.join(timeout_seconds)
+    if worker.is_alive():
+        return fallback
+    return result.get("value", fallback)
+
+
+def _etf_theme_terms(analysis: Mapping[str, Any]) -> List[str]:
+    metadata = dict(analysis.get("metadata") or {})
+    values = [
+        metadata.get("tracked_index_name"),
+        metadata.get("index_framework_label"),
+        dict(metadata.get("index_topic_bundle") or {}).get("index_snapshot", {}).get("index_name"),
+        analysis.get("benchmark_name"),
+        analysis.get("name"),
+    ]
+    raw_terms: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        normalized = text
+        for token in _ETF_THEME_NOISE_TOKENS:
+            normalized = normalized.replace(token, " ")
+        normalized = re.sub(r"[()/,_\-]+", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if normalized and normalized not in raw_terms:
+            raw_terms.append(normalized)
+    for node in list(metadata.get("chain_nodes") or []):
+        text = str(node or "").strip()
+        if text and text not in raw_terms:
+            raw_terms.append(text)
+    return [item for item in raw_terms if len(item) >= 2][:6]
+
+
+def _etf_theme_expansion_terms(analysis: Mapping[str, Any]) -> List[str]:
+    theme_terms = _etf_theme_terms(analysis)
+    expansions: List[str] = []
+    joined = " ".join(theme_terms)
+    for triggers, hints in _ETF_THEME_EXPANSION_HINTS:
+        if any(token in joined for token in triggers):
+            for hint in hints:
+                if hint not in expansions:
+                    expansions.append(hint)
+    return expansions[:4]
+
+
+def _is_low_value_etf_news_item(item: Mapping[str, Any], analysis: Mapping[str, Any]) -> bool:
+    title = str(dict(item or {}).get("title") or "").strip()
+    if not title:
+        return False
+    if not any(token in title for token in ("ETF", "基金", "联接")):
+        return False
+    if any(token in title for token in _QUOTE_NOISE_ETF_NEWS_TOKENS):
+        return True
+    if not any(token in title for token in _LOW_SIGNAL_ETF_NEWS_TOKENS):
+        return False
+    return True
+
+
+def _theme_specific_terms(analysis: Mapping[str, Any]) -> List[str]:
+    metadata = dict(analysis.get("metadata") or {})
+    terms: List[str] = []
+    raw_terms = [
+        *_etf_theme_terms(analysis),
+        *_etf_theme_expansion_terms(analysis),
+        str(metadata.get("tracked_index_name") or "").strip(),
+        str(metadata.get("industry_framework_label") or "").strip(),
+        str(metadata.get("index_top_constituent_name") or "").strip(),
+        *[str(item).strip() for item in list(metadata.get("chain_nodes") or [])],
+    ]
+    for raw in raw_terms:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        for part in re.split(r"[\s/,_()\-]+", text):
+            cleaned = part.strip()
+            if len(cleaned) < 2 or cleaned in {"综合", "科技", "信息技术"}:
+                continue
+            if cleaned not in terms:
+                terms.append(cleaned)
+    return terms[:16]
+
+
+def _is_generic_market_etf_news_item(item: Mapping[str, Any], analysis: Mapping[str, Any]) -> bool:
+    row = dict(item or {})
+    title = str(row.get("title") or "").strip()
+    if not title:
+        return False
+    source = str(row.get("source") or "").strip()
+    generic_title = any(token in title for token in _GENERIC_MARKET_ETF_NEWS_TOKENS)
+    generic_source = any(token in source for token in _GENERIC_MARKET_ETF_NEWS_SOURCES)
+    if not generic_title and not generic_source:
+        return False
+    if any(term in title for term in _theme_specific_terms(analysis)):
+        return False
+    if sum(1 for token in _THEME_CATALYST_TOKENS if token in title) >= 2:
+        return False
+    return True
+
+
+def _curate_etf_news_items(items: Sequence[Mapping[str, Any]], analysis: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    curated: List[Dict[str, Any]] = []
+    for item in list(items or []):
+        row = dict(item or {})
+        if _is_low_value_etf_news_item(row, analysis):
+            continue
+        if _is_generic_market_etf_news_item(row, analysis):
+            continue
+        curated.append(row)
+    return curated
+
+
+def _etf_news_query_groups(analysis: Mapping[str, Any]) -> List[List[str]]:
+    metadata = dict(analysis.get("metadata") or {})
+    fund_profile = dict(analysis.get("fund_profile") or {})
+    name = str(analysis.get("name") or metadata.get("name") or "").strip()
+    clean_name = name.replace("ETF", "").replace("联接", "").replace("基金", "").strip() or name
+    analysis_benchmark_name = str(analysis.get("benchmark_name") or "").strip()
+    tracked_index_name = str(
+        metadata.get("tracked_index_name")
+        or metadata.get("benchmark")
+        or metadata.get("index_framework_label")
+        or dict(metadata.get("index_topic_bundle") or {}).get("index_snapshot", {}).get("index_name")
+        or metadata.get("benchmark_name")
+        or metadata.get("index_name")
+        or (
+            analysis_benchmark_name
+            if analysis_benchmark_name and not analysis_benchmark_name.endswith("ETF")
+            else ""
+        )
+        or ""
+    ).strip()
+    sector = str(metadata.get("sector") or metadata.get("category") or "").strip()
+    industry_framework = str(metadata.get("industry_framework_label") or "").strip()
+    index_top_constituent = str(metadata.get("index_top_constituent_name") or "").strip()
+    chain_nodes = [str(item).strip() for item in list(metadata.get("chain_nodes") or []) if str(item).strip()]
+    holding_names = [
+        str(item.get("股票名称", "")).strip()
+        for item in list(fund_profile.get("top_holdings") or [])[:3]
+        if str(item.get("股票名称", "")).strip()
+    ]
+    theme_terms = _etf_theme_terms(analysis)
+    expansion_terms = _etf_theme_expansion_terms(analysis)
+    primary_theme = theme_terms[0] if theme_terms else ""
+
+    groups: List[List[str]] = []
+    seen: set[tuple[str, ...]] = set()
+
+    def _add_group(*terms: str) -> None:
+        cleaned = tuple(term.strip() for term in terms if str(term).strip())
+        if not cleaned or cleaned in seen:
+            return
+        seen.add(cleaned)
+        groups.append(list(cleaned))
+
+    if tracked_index_name:
+        _add_group(tracked_index_name, primary_theme or clean_name)
+    if primary_theme:
+        _add_group(primary_theme, tracked_index_name or industry_framework or clean_name)
+    for hint in expansion_terms[:3]:
+        if primary_theme:
+            _add_group(primary_theme, hint)
+        elif tracked_index_name:
+            _add_group(tracked_index_name, hint)
+    if industry_framework:
+        _add_group(industry_framework, tracked_index_name or primary_theme or clean_name)
+    if primary_theme and sector not in {"综合", "科技", "信息技术"}:
+        _add_group(primary_theme, sector)
+    if clean_name:
+        _add_group(clean_name, primary_theme or sector)
+    if sector and sector not in {"综合", "科技", "信息技术"}:
+        _add_group(f"{sector} A股", primary_theme or sector)
+    if index_top_constituent:
+        _add_group(index_top_constituent, tracked_index_name or primary_theme or clean_name)
+    for holding_name in holding_names[:2]:
+        _add_group(holding_name, tracked_index_name or primary_theme or sector or clean_name)
+    for node in chain_nodes[:3]:
+        _add_group(node, tracked_index_name or clean_name or name)
+    return groups[:8]
+
+
+def _backfill_etf_news_report(
+    analysis: Mapping[str, Any],
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    existing = dict(analysis.get("news_report") or {})
+    current_items = _curate_etf_news_items(list(existing.get("items") or []), analysis)
+    if current_items != list(existing.get("items") or []):
+        existing["items"] = current_items
+    linked_items = [item for item in current_items if str(dict(item).get("link") or "").strip()]
+    if len(linked_items) >= 2 or (len(current_items) >= 3 and len(linked_items) >= 1):
+        existing["lines"] = [str(dict(item).get("title", "")).strip() for item in current_items[:4] if str(dict(item).get("title", "")).strip()]
+        existing["source_list"] = sorted({str(dict(item).get("source", "")).strip() for item in current_items if str(dict(item).get("source", "")).strip()})
+        return existing
+
+    query_groups = _etf_news_query_groups(analysis)
+    if not query_groups:
+        return existing
+
+    def _loader() -> Dict[str, Any]:
+        preferred_sources = ["财联社", "证券时报", "上海证券报", "中国证券报", "Reuters", "Bloomberg"]
+        active_query_groups = list(query_groups[:4])
+        collector_config = deepcopy(dict(config or {}))
+        collector_config["news_topic_search_enabled"] = True
+        collector_config.setdefault("news_feeds_file", "config/news_feeds.briefing_light.yaml")
+        collector = NewsCollector(collector_config)
+        merged = list(current_items)
+        query_terms = [item for group in active_query_groups for item in group]
+        notes: List[str] = []
+
+        try:
+            tushare_hits = collector.get_market_intelligence(query_terms, limit=6, recent_days=7)
+        except Exception:
+            tushare_hits = []
+        if tushare_hits:
+            merged.extend(tushare_hits)
+            notes.append("已按 Tushare 市场情报补充。")
+
+        try:
+            search_hits = collector.search_by_keyword_groups(
+                active_query_groups,
+                preferred_sources=preferred_sources,
+                limit=6,
+                recent_days=5,
+            )
+        except Exception:
+            search_hits = []
+        if search_hits:
+            merged.extend(search_hits)
+            notes.append("已按 ETF 名称/指数/主题搜索补充。")
+
+        merged = _curate_etf_news_items(merged, analysis)
+
+        ranked = collector._rank_items(
+            collector._filter_candidate_items(merged, recent_days=7),
+            preferred_sources=preferred_sources + ["Tushare"],
+            query_keywords=query_terms,
+        )
+        selected = collector._diversify_items(ranked, 6)
+        if not selected:
+            return existing
+        return {
+            "mode": "live",
+            "items": selected,
+            "all_items": ranked,
+            "lines": collector._live_lines(selected),
+            "source_list": sorted(collector._present_sources(selected)),
+            "note": "ETF 外部情报已按名称/指数/主题/成分线索回填。" + "".join(notes),
+        }
+
+    return dict(
+        _timed_value(
+            _loader,
+            fallback=existing,
+            timeout_seconds=float(dict(config or {}).get("etf_news_backfill_timeout_seconds", 8) or 8),
+        )
+    )
+
+
+def _hydrate_selected_etf_profiles(
+    analyses: Sequence[Mapping[str, Any]],
+    *,
+    config: Mapping[str, Any] | None = None,
+    limit: int = 3,
+    context: Mapping[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
+    hydrated: List[Dict[str, Any]] = []
+    collector = FundProfileCollector(config or {})
+    max_items = max(int(limit or 0), 0)
+    full_reanalysis_limit = max(int(dict(config or {}).get("etf_full_reanalysis_limit", 0) or 0), 0)
+    full_reanalysis_context: Dict[str, Any] | None = dict(context or {}) if context else None
+    full_reanalysis_config = dict(config or {})
+    full_reanalysis_config["skip_fund_profile"] = False
+    full_reanalysis_config["etf_fund_profile_mode"] = "full"
+    for index, raw in enumerate(list(analyses or [])):
+        updated = dict(raw)
+        if index < max_items:
+            symbol = str(updated.get("symbol") or "").strip()
+            if symbol:
+                try:
+                    profile = collector.collect_profile(symbol, asset_type="cn_etf", profile_mode="full")
+                except Exception:
+                    profile = {}
+                if profile:
+                    updated["fund_profile"] = profile
+                    if index < full_reanalysis_limit:
+                        if full_reanalysis_context is None:
+                            full_reanalysis_context = build_market_context(full_reanalysis_config, relevant_asset_types=["cn_etf", "futures"])
+                        metadata = dict(updated.get("metadata") or {})
+                        try:
+                            rerun = analyze_opportunity(
+                                symbol,
+                                "cn_etf",
+                                full_reanalysis_config,
+                                context={**dict(full_reanalysis_context), "config": dict(full_reanalysis_config), "runtime_caches": {}},
+                                metadata_override={
+                                    "name": str(metadata.get("name") or updated.get("name") or symbol),
+                                    "sector": str(metadata.get("sector") or "综合"),
+                                    "chain_nodes": list(metadata.get("chain_nodes") or []),
+                                    "region": str(metadata.get("region") or "CN"),
+                                    "in_watchlist": bool(metadata.get("in_watchlist")),
+                                },
+                            )
+                        except Exception:
+                            rerun = {}
+                        if rerun:
+                            updated = {**updated, **rerun}
+                            updated["fund_profile"] = dict(updated.get("fund_profile") or profile)
+                        else:
+                            updated = refresh_etf_analysis_report_fields(updated, config=full_reanalysis_config)
+                    else:
+                        updated = refresh_etf_analysis_report_fields(updated, config=full_reanalysis_config)
+        hydrated.append(updated)
+    return hydrated
+
+
+def _etf_structure_rank_bonus(analysis: Mapping[str, Any]) -> float:
+    asset_type = str(analysis.get("asset_type", "")).strip()
+    if asset_type not in {"cn_etf", "cn_fund"}:
+        return 0.0
+    metadata = dict(analysis.get("metadata") or {})
+    bonus = 0.0
+    if str(metadata.get("index_framework_label", "")).strip() or str(analysis.get("benchmark_name", "")).strip():
+        bonus += 1.5
+    if str(metadata.get("industry_framework_label", "")).strip():
+        bonus += 0.8
+    if metadata.get("index_top_weight_sum") not in (None, "", []):
+        bonus += 1.0
+    if str(metadata.get("index_top_constituent_name", "")).strip():
+        bonus += 0.7
+    return bonus
+
+
+def _etf_share_flow_rank_bonus(analysis: Mapping[str, Any]) -> float:
+    asset_type = str(analysis.get("asset_type", "")).strip()
+    if asset_type not in {"cn_etf", "cn_fund"}:
+        return 0.0
+    metadata = dict(analysis.get("metadata") or {})
+    try:
+        share_value = float(metadata.get("etf_share_change"))
+    except (TypeError, ValueError):
+        share_value = None
+    try:
+        share_pct = float(metadata.get("etf_share_change_pct"))
+    except (TypeError, ValueError):
+        share_pct = None
+    if share_value is None and share_pct is None:
+        return 0.0
+    if (share_value is not None and share_value >= 5) or (share_pct is not None and share_pct >= 3):
+        return 3.0
+    if (share_value is not None and share_value > 0) or (share_pct is not None and share_pct > 0):
+        return 1.8
+    if (share_value is not None and share_value <= -5) or (share_pct is not None and share_pct <= -3):
+        return -2.0
+    if share_value is not None and share_value < 0:
+        return -1.0
+    return 0.0
+
+
+def _etf_share_snapshot_note(analysis: Mapping[str, Any]) -> str:
+    asset_type = str(analysis.get("asset_type", "")).strip()
+    if asset_type not in {"cn_etf", "cn_fund"}:
+        return ""
+    metadata = dict(analysis.get("metadata") or {})
+    fund_profile = dict(analysis.get("fund_profile") or {})
+    etf_snapshot = dict(fund_profile.get("etf_snapshot") or {})
+    share_as_of = str(etf_snapshot.get("share_as_of", metadata.get("share_as_of", ""))).strip()
+    if not share_as_of:
+        return ""
+
+    try:
+        share_value = float(etf_snapshot.get("etf_share_change", metadata.get("etf_share_change")))
+    except (TypeError, ValueError):
+        share_value = None
+    try:
+        share_pct = float(etf_snapshot.get("etf_share_change_pct", metadata.get("etf_share_change_pct")))
+    except (TypeError, ValueError):
+        share_pct = None
+    if share_value is not None or share_pct is not None:
+        return ""
+
+    total_share_source = "total_share_yi" if etf_snapshot.get("total_share_yi") not in (None, "") else "total_share"
+    total_share_value = etf_snapshot.get("total_share_yi", etf_snapshot.get("total_share"))
+    try:
+        total_share_value = float(total_share_value)
+    except (TypeError, ValueError):
+        total_share_value = None
+    if total_share_value is None:
+        return ""
+    name = str(analysis.get("name", "—")).strip() or "—"
+    symbol = str(analysis.get("symbol", "—")).strip() or "—"
+    display_share = total_share_value if total_share_source == "total_share_yi" else total_share_value / 10000.0
     return (
+        f"`{name} ({symbol})` 份额快照仍只有单日口径：截至 `{share_as_of}` 总份额约 `{display_share:.2f} 亿份`；"
+        "先按观察处理，不把申赎方向写死。"
+    )
+
+
+def _etf_share_snapshot_notes(analyses: Sequence[Mapping[str, Any]]) -> List[str]:
+    notes: List[str] = []
+    for item in analyses:
+        note = _etf_share_snapshot_note(item)
+        if note and note not in notes:
+            notes.append(note)
+    return notes
+
+
+def _rank_score(analysis: Dict[str, Any]) -> float:
+    base_score = (
         _score_of(analysis, "technical") * 0.22
         + _score_of(analysis, "fundamental") * 0.18
         + _score_of(analysis, "catalyst") * 0.18
@@ -97,20 +688,202 @@ def _rank_score(analysis: Dict[str, Any]) -> float:
         + _score_of(analysis, "risk") * 0.12
         + _score_of(analysis, "macro") * 0.08
     )
+    return base_score + _etf_structure_rank_bonus(analysis) + _etf_share_flow_rank_bonus(analysis)
 
 
-def _rank_key(analysis: Mapping[str, Any]) -> tuple[float, float, float, float]:
+def _rank_key(analysis: Mapping[str, Any]) -> tuple[float, float, float, float, float, float]:
+    rank_score = _rank_score(dict(analysis))
     return (
+        0.0 if bool(analysis.get("history_fallback_mode")) else 1.0,
         float(int(analysis.get("rating", {}).get("rank", 0) or 0)),
-        _rank_score(dict(analysis)),
+        float(score_band(rank_score)),
+        float(portfolio_overlap_bonus(analysis)),
+        rank_score,
+        3 - strategy_confidence_priority(analysis),
         _score_of(dict(analysis), "relative_strength"),
         _score_of(dict(analysis), "catalyst"),
     )
 
 
+def _etf_structure_reason_lines(analysis: Mapping[str, Any]) -> List[str]:
+    asset_type = str(analysis.get("asset_type", "")).strip()
+    if asset_type not in {"cn_etf", "cn_fund"}:
+        return []
+    metadata = dict(analysis.get("metadata") or {})
+    fund_profile = dict(analysis.get("fund_profile") or {})
+    etf_snapshot = dict(fund_profile.get("etf_snapshot") or {})
+    fund_factor_snapshot = dict(fund_profile.get("fund_factor_snapshot") or {})
+    reasons: List[str] = []
+
+    index_name = str(
+        metadata.get("index_framework_label")
+        or metadata.get("tracked_index_name")
+        or metadata.get("benchmark_name")
+        or metadata.get("index_name")
+        or etf_snapshot.get("index_name")
+        or analysis.get("benchmark_name")
+        or ""
+    ).strip()
+    industry_label = str(metadata.get("industry_framework_label", "")).strip()
+    top_constituent = str(metadata.get("index_top_constituent_name", "")).strip() or str(metadata.get("index_top_constituent_symbol", "")).strip()
+    top_weight_sum = metadata.get("index_top_weight_sum")
+    if index_name:
+        if top_weight_sum not in (None, "", []):
+            try:
+                weight_value = float(top_weight_sum)
+                reasons.append(
+                    f"跟踪指数 `{index_name}` 的结构已经清楚，前排权重合计约 `{weight_value:.1f}%`"
+                    + (f"，核心成分先看 `{top_constituent}`。" if top_constituent else "。")
+                )
+            except (TypeError, ValueError):
+                reasons.append(f"跟踪指数 `{index_name}` 已有标准指数框架，先按指数暴露理解这只 ETF。")
+        else:
+            reasons.append(f"跟踪指数 `{index_name}` 已有标准指数框架，先按指数暴露理解这只 ETF。")
+    if industry_label:
+        reasons.append(f"行业框架当前更接近 `{industry_label}`，不再只靠泛主题词猜主线。")
+
+    try:
+        share_value = float(etf_snapshot.get("etf_share_change", metadata.get("etf_share_change")))
+    except (TypeError, ValueError):
+        share_value = None
+    try:
+        share_pct = float(etf_snapshot.get("etf_share_change_pct", metadata.get("etf_share_change_pct")))
+    except (TypeError, ValueError):
+        share_pct = None
+    share_as_of = str(etf_snapshot.get("share_as_of", metadata.get("share_as_of", ""))).strip()
+    if share_value is not None:
+        pct_text = f"（{share_pct:+.2f}%）" if share_pct is not None else ""
+        if share_value > 0:
+            reasons.append(f"份额最近净创设 `{share_value:+.2f} 亿份`{pct_text}，说明有场外申购在配合。")
+        elif share_value < 0:
+            reasons.append(f"份额最近净赎回 `{share_value:+.2f} 亿份`{pct_text}，价格变化还没完全得到份额流入确认。")
+        else:
+            reasons.append("份额最近基本持平，当前更多看指数主线和价格确认。")
+        if share_as_of:
+            reasons[-1] = f"{reasons[-1]} 口径日期 `{share_as_of}`。"
+    else:
+        total_share_yi = etf_snapshot.get("total_share_yi")
+        try:
+            total_share_yi_value = float(total_share_yi)
+        except (TypeError, ValueError):
+            total_share_yi_value = None
+        if total_share_yi_value is not None and share_as_of:
+            reasons.append(
+                f"份额快照已接上：截至 `{share_as_of}` 总份额约 `{total_share_yi_value:.2f} 亿份`；"
+                "当前缺前一日快照，先不把申赎方向写死。"
+            )
+
+    factor_trend = str(fund_factor_snapshot.get("trend_label", "")).strip()
+    if factor_trend:
+        factor_line = f"场内基金技术因子显示 `{factor_trend}`"
+        factor_momentum = str(fund_factor_snapshot.get("momentum_label", "")).strip()
+        factor_date = str(fund_factor_snapshot.get("latest_date", "") or fund_factor_snapshot.get("trade_date", "")).strip()
+        if factor_momentum:
+            factor_line += f" / `{factor_momentum}`"
+        if factor_date:
+            factor_line += f"，口径日期 `{factor_date}`。"
+        else:
+            factor_line += "。"
+        reasons.append(factor_line)
+    return reasons[:3]
+
+
+def _etf_fusion_reason_line(analysis: Mapping[str, Any]) -> str:
+    asset_type = str(analysis.get("asset_type", "")).strip()
+    if asset_type not in {"cn_etf", "cn_fund"}:
+        return ""
+
+    metadata = dict(analysis.get("metadata") or {})
+    fund_profile = dict(analysis.get("fund_profile") or {})
+    etf_snapshot = dict(fund_profile.get("etf_snapshot") or {})
+    index_name = str(
+        metadata.get("index_framework_label")
+        or metadata.get("tracked_index_name")
+        or metadata.get("benchmark_name")
+        or metadata.get("index_name")
+        or etf_snapshot.get("index_name")
+        or analysis.get("benchmark_name")
+        or ""
+    ).strip()
+    if not index_name:
+        return ""
+
+    try:
+        share_value = float(etf_snapshot.get("etf_share_change", metadata.get("etf_share_change")))
+    except (TypeError, ValueError):
+        share_value = None
+    try:
+        share_pct = float(etf_snapshot.get("etf_share_change_pct", metadata.get("etf_share_change_pct")))
+    except (TypeError, ValueError):
+        share_pct = None
+    share_as_of = str(etf_snapshot.get("share_as_of", metadata.get("share_as_of", ""))).strip()
+    total_share_yi = etf_snapshot.get("total_share_yi")
+
+    share_status = ""
+    share_fragment = ""
+    if share_value is not None:
+        pct_text = f"（{share_pct:+.2f}%）" if share_pct is not None else ""
+        if share_value > 0:
+            share_status = "positive"
+            share_fragment = f"份额最近净创设 `{share_value:+.2f} 亿份`{pct_text}"
+        elif share_value < 0:
+            share_status = "negative"
+            share_fragment = f"份额最近净赎回 `{share_value:+.2f} 亿份`{pct_text}"
+        else:
+            share_status = "flat"
+            share_fragment = "份额最近基本持平"
+    else:
+        try:
+            total_share_yi_value = float(total_share_yi)
+        except (TypeError, ValueError):
+            total_share_yi_value = None
+        if total_share_yi_value is not None and share_as_of:
+            share_status = "single_day"
+            share_fragment = f"份额端目前只到 `{share_as_of}` 单日快照"
+
+    news_report = dict(analysis.get("news_report") or {})
+    linked_news = [
+        item
+        for item in list(news_report.get("items") or [])
+        if str(dict(item).get("link") or "").strip()
+    ]
+    catalyst = dict(dict(analysis.get("dimensions") or {}).get("catalyst") or {})
+    coverage = dict(catalyst.get("coverage") or {})
+    intel_status = "thin"
+    intel_fragment = "外部情报仍偏薄"
+    if linked_news:
+        intel_status = "linked"
+        intel_fragment = f"外部情报已接上 `{len(linked_news)}` 条可点击线索"
+    elif list(news_report.get("items") or []) or list(catalyst.get("theme_news") or []) or list(catalyst.get("evidence") or []):
+        intel_status = "tracked"
+        intel_fragment = "外部情报已有跟踪，但还不够硬"
+    elif coverage.get("degraded") or coverage.get("fallback_applied"):
+        intel_fragment = "外部情报当前仍偏薄"
+
+    if share_status == "positive" and intel_status == "linked":
+        return f"这次先看它，不只是指数壳：`{index_name}` 的跟踪框架已经清楚，{share_fragment}，{intel_fragment}，产品层和情报层开始同向。"
+    if share_status == "positive":
+        return f"这次先看它，核心还是产品层确认：`{index_name}` 的跟踪框架已经清楚，{share_fragment}；{intel_fragment}，先不把它直接写成强催化升级。"
+    if share_status == "single_day" and intel_status == "linked":
+        return f"这次先看它，先按 `{index_name}` 的跟踪框架和外部情报理解；{share_fragment}，当前先不把申赎方向写死。"
+    if share_status == "single_day":
+        return f"这次先看它，更多是因为 `{index_name}` 的跟踪框架已经清楚；{share_fragment}，{intel_fragment}。"
+    if share_status == "negative":
+        if intel_status == "linked":
+            return f"这次还保留它，主要因为 `{index_name}` 的跟踪框架清楚且 {intel_fragment}；但 {share_fragment}，所以当前先按观察顺位理解。"
+        return f"这次还保留它，主要因为 `{index_name}` 的跟踪框架清楚；但 {share_fragment}，{intel_fragment}，当前更像观察顺位而不是强确认。"
+    if intel_status in {"linked", "tracked"}:
+        return f"这次先看它，主要是 `{index_name}` 的跟踪框架清楚，且 {intel_fragment}。"
+    return ""
+
+
 def _winner_reason_lines(analysis: Dict[str, Any]) -> List[str]:
     narrative = dict(analysis.get("narrative") or {})
     reasons: List[str] = []
+    fusion_line = _etf_fusion_reason_line(analysis)
+    if fusion_line:
+        reasons.append(fusion_line)
+    reasons.extend(_etf_structure_reason_lines(analysis))
     reasons.extend(str(item).strip() for item in (narrative.get("positives") or []) if str(item).strip())
     horizon = dict(dict(analysis.get("action") or {}).get("horizon") or {})
     if horizon.get("fit_reason"):
@@ -139,6 +912,18 @@ def _winner_reason_lines(analysis: Dict[str, Any]) -> List[str]:
 def _alternative_cautions(analysis: Dict[str, Any]) -> List[str]:
     narrative = dict(analysis.get("narrative") or {})
     cautions = [str(item).strip() for item in (narrative.get("cautions") or []) if str(item).strip()]
+    metadata = dict(analysis.get("metadata") or {})
+    try:
+        share_value = float(metadata.get("etf_share_change"))
+    except (TypeError, ValueError):
+        share_value = None
+    try:
+        share_pct = float(metadata.get("etf_share_change_pct"))
+    except (TypeError, ValueError):
+        share_pct = None
+    if share_value is not None and share_value < 0:
+        pct_text = f"（{share_pct:+.2f}%）" if share_pct is not None else ""
+        cautions.append(f"份额最近净赎回 `{share_value:+.2f} 亿份`{pct_text}，当前主线还没得到场外申购确认。")
     horizon = dict(dict(analysis.get("action") or {}).get("horizon") or {})
     if horizon.get("misfit_reason"):
         cautions.append(f"周期上更像 `{horizon.get('label', '观察期')}`：{horizon.get('misfit_reason')}")
@@ -307,6 +1092,89 @@ def _detail_output_path(generated_at: str, theme: str) -> Path:
     return base / f"etf_pick_{date_str}_internal_detail.md"
 
 
+def _client_final_runtime_overrides(
+    config: Mapping[str, Any],
+    *,
+    client_final: bool,
+    explicit_config_path: str = "",
+) -> tuple[Dict[str, Any], List[str]]:
+    if not client_final or explicit_config_path.strip():
+        return deepcopy(dict(config or {})), []
+
+    effective = deepcopy(dict(config or {}))
+    notes: List[str] = []
+
+    market_context = dict(effective.get("market_context") or {})
+    proxy_changed = False
+    if not bool(market_context.get("skip_global_proxy")):
+        market_context["skip_global_proxy"] = True
+        proxy_changed = True
+    if not bool(market_context.get("skip_market_monitor")):
+        market_context["skip_market_monitor"] = True
+        proxy_changed = True
+    if proxy_changed:
+        effective["market_context"] = market_context
+        notes.append("为保证 ETF `client-final` 可交付，本轮自动跳过跨市场代理与 market monitor 慢链。")
+
+    opportunity = dict(effective.get("opportunity") or {})
+    current_workers = int(opportunity.get("analysis_workers", 4) or 4)
+    if current_workers > 2:
+        opportunity["analysis_workers"] = 2
+        notes.append("本轮 `client-final` 已自动收窄 ETF 分析并发，优先保证正式稿稳定落盘。")
+    current_candidates = int(opportunity.get("max_scan_candidates", 30) or 30)
+    if current_candidates > 12:
+        opportunity["max_scan_candidates"] = 12
+        notes.append("本轮 `client-final` 已自动收窄 ETF 候选池，优先分析更接近正式交付的高流动性样本。")
+    if opportunity:
+        effective["opportunity"] = opportunity
+
+    if effective.get("skip_fund_profile") is not False:
+        effective["skip_fund_profile"] = False
+        notes.append("本轮 `client-final` 已保留 ETF 专用基金画像链，正式稿会显式带出跟踪指数、份额规模和持仓画像。")
+
+    if not bool(effective.get("news_topic_search_enabled", False)):
+        effective["news_topic_search_enabled"] = True
+        notes.append("本轮 `client-final` 保留受控 ETF 主题情报回填，优先补可点击外部事件流，不再只拿盘面句顶替新闻位。")
+    current_news_feeds = str(effective.get("news_feeds_file", "") or "").strip()
+    if current_news_feeds != "config/news_feeds.briefing_light.yaml":
+        effective["news_feeds_file"] = "config/news_feeds.briefing_light.yaml"
+        notes.append("本轮 `client-final` 已自动切到轻量非空新闻源配置，优先保留少量可链接情报，不再把 ETF 正式稿新闻完全关空。")
+    if str(effective.get("etf_fund_profile_mode", "") or "").strip().lower() != "light":
+        effective["etf_fund_profile_mode"] = "light"
+        notes.append("本轮 `client-final` 已切到 ETF 轻量候选画像，先用 ETF 专用结构链做排序，再只对入围样本补全完整画像。")
+    effective.setdefault("etf_news_backfill_timeout_seconds", 12)
+    effective.setdefault("news_topic_query_cap", 4)
+
+    return effective, notes
+
+
+def _etf_discovery_runtime_overrides(config: Mapping[str, Any]) -> tuple[Dict[str, Any], List[str]]:
+    effective = deepcopy(dict(config or {}))
+    notes: List[str] = []
+
+    if effective.get("skip_fund_profile") is not False:
+        effective["skip_fund_profile"] = False
+        notes.append("本轮 ETF discovery 已恢复轻量基金画像链，避免预筛阶段丢失跟踪指数代码。")
+
+    current_profile_mode = str(effective.get("etf_fund_profile_mode", "") or "").strip().lower()
+    if not current_profile_mode:
+        effective["etf_fund_profile_mode"] = "light"
+        notes.append("本轮 ETF discovery 默认启用 `light` 画像，先拿指数代码/跟踪框架，再对入围样本补全 full 画像。")
+
+    if bool(effective.get("news_topic_search_enabled", False)):
+        effective["news_topic_search_enabled"] = False
+        notes.append("本轮 ETF discovery 先按结构链排序，不在全候选阶段逐只跑主题扩搜；入围样本仍会在成稿阶段补外部情报。")
+
+    effective.setdefault("etf_full_reanalysis_limit", 1)
+
+    return effective, notes
+
+
+def _is_correlation_only_exclusion(analysis: Mapping[str, Any]) -> bool:
+    reasons = [str(item).strip() for item in list(analysis.get("exclusion_reasons") or []) if str(item).strip()]
+    return bool(reasons) and all("相关性过高" in item for item in reasons)
+
+
 def _watchlist_fallback_payload(
     config: Mapping[str, Any],
     *,
@@ -358,6 +1226,10 @@ def _watchlist_fallback_payload(
                     blind_spots.append(_client_safe_issue(f"{item['symbol']} ({item.get('name', item['symbol'])}) 扫描失败", exc))
                     continue
                 if analysis["excluded"]:
+                    if not _is_correlation_only_exclusion(analysis):
+                        continue
+                    passed += 1
+                    coverage_analyses.append(analysis)
                     continue
                 passed += 1
                 coverage_analyses.append(analysis)
@@ -383,11 +1255,18 @@ def _watchlist_fallback_payload(
                 blind_spots.append(_client_safe_issue(f"{item['symbol']} ({item.get('name', item['symbol'])}) 扫描失败", exc))
                 continue
             if analysis["excluded"]:
+                if not _is_correlation_only_exclusion(analysis):
+                    continue
+                passed += 1
+                coverage_analyses.append(analysis)
                 continue
             passed += 1
             coverage_analyses.append(analysis)
             if analysis["rating"]["rank"] > 0:
                 analyses.append(analysis)
+    if coverage_analyses and not analyses:
+        if not any("主题内候选彼此高相关" in item for item in blind_spots):
+            blind_spots.append("主题内候选彼此高相关，本轮保留观察稿而不直接输出正式推荐。")
     analyses.sort(key=_rank_key, reverse=True)
     return {
         "generated_at": str(analyses[0].get("generated_at", "")) if analyses else "",
@@ -430,8 +1309,11 @@ def _detail_markdown(
     alternatives = [item for item in ranked if str(item.get("symbol", "")) != str(winner_symbol)]
     generated_at = str(winner.get("generated_at", ""))[:10]
     selection = dict(selection_context or {})
+    observe_only = bool(selection.get("delivery_observe_only"))
+    heading = "今日ETF观察内部详细稿" if observe_only else "今日ETF推荐内部详细稿"
+    winner_label = "观察优先对象" if observe_only else "中选标的"
     lines = [
-        f"# 今日ETF推荐内部详细稿 | {generated_at}",
+        f"# {heading} | {generated_at}",
         "",
         f"- 交付等级: `{selection.get('delivery_tier_label', '未标注')}`",
         f"- 发现方式: `{selection.get('discovery_mode_label', '未标注')}`",
@@ -464,8 +1346,8 @@ def _detail_markdown(
             "",
             "## 中选说明",
             "",
-            f"- 中选标的：`{winner.get('name', '—')} ({winner.get('symbol', '—')})`。",
-            f"- 中选依据：当前候选里评级与综合排序分最优，且客户稿引用的维度分数将直接对齐这份详细稿。",
+            f"- {winner_label}：`{winner.get('name', '—')} ({winner.get('symbol', '—')})`。",
+            f"- 选择依据：当前排在候选首位，且客户稿引用的维度分数与动作边界将直接对齐这份详细稿。",
         ]
     )
     if winner.get("score_changes"):
@@ -486,8 +1368,11 @@ def _detail_markdown(
             text = str(item).strip()
             if text:
                 lines.append(f"- {text}")
-    lines.extend(["", "## 中选标的详细分析", ""])
-    lines.append(OpportunityReportRenderer().render_scan(dict(winner)).rstrip())
+    lines.extend(["", "## 详细分析", ""])
+    winner_payload = dict(winner)
+    winner_payload["delivery_observe_only"] = observe_only
+    winner_payload["delivery_notes"] = list(selection.get("delivery_notes", []) or [])
+    lines.append(OpportunityReportRenderer().render_scan(winner_payload).rstrip())
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -497,6 +1382,7 @@ def _payload_from_analyses(
     *,
     regime: Mapping[str, Any] | None = None,
     day_theme: Mapping[str, Any] | None = None,
+    config: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     if not analyses:
         raise ValueError("No ETF analyses available")
@@ -504,16 +1390,34 @@ def _payload_from_analyses(
     winner = ranked[0]
     alternatives = ranked[1:3]
     recommendation_tracks = _recommendation_tracks(ranked)
-    evidence = list(dict(winner.get("dimensions", {}).get("catalyst") or {}).get("evidence") or [])
-    if not evidence:
+    catalyst = dict(dict(winner.get("dimensions", {}).get("catalyst") or {}))
+    evidence = list(catalyst.get("evidence") or [])
+    theme_news = list(catalyst.get("theme_news") or [])
+    news_report = dict(winner.get("news_report") or {})
+    if config:
+        news_report = _backfill_etf_news_report(winner, config=config)
+    market_event_rows = _market_event_rows(winner)
+    share_snapshot_notes = _etf_share_snapshot_notes(ranked)
+    if not evidence and not theme_news and not list(news_report.get("items") or []) and not market_event_rows:
         coverage = dict(dict(winner.get("dimensions", {}).get("catalyst") or {}).get("coverage") or {})
-        summary = "当前没有抓到高置信直连证据，催化判断更多依赖结构化事件或行业映射。"
+        summary = "当前可前置的一手情报有限，判断更多参考结构化事件和行业线索。"
         if coverage.get("fallback_applied"):
-            summary = "当前实时新闻覆盖不足，本次催化分已按最近一次有效信号做衰减回退，不把临时缺数误当成利空。"
-        evidence = [{"title": summary, "source": "内部覆盖率摘要"}]
+            summary = "当前实时情报覆盖不足，本次催化分已按最近一次有效信号做衰减回退，不把临时缺数误读成利空。"
+        evidence = [{"title": summary, "source": "覆盖率摘要"}]
+    winner_for_delivery = dict(winner)
+    winner_for_delivery["news_report"] = news_report
+    winner_for_delivery["market_event_rows"] = market_event_rows
+    selection_context_payload = dict(selection_context or {})
+    if share_snapshot_notes:
+        merged_notes: List[str] = []
+        for note in [*list(selection_context_payload.get("delivery_notes") or []), *share_snapshot_notes]:
+            text = str(note).strip()
+            if text and text not in merged_notes:
+                merged_notes.append(text)
+        selection_context_payload["delivery_notes"] = merged_notes
     return {
         "generated_at": str(winner.get("generated_at", "")),
-        "selection_context": dict(selection_context or {}),
+        "selection_context": selection_context_payload,
         "regime": dict(regime or {}),
         "day_theme": dict(day_theme or {}),
         "recommendation_tracks": recommendation_tracks,
@@ -522,11 +1426,13 @@ def _payload_from_analyses(
             "symbol": winner.get("symbol"),
             "asset_type": winner.get("asset_type"),
             "generated_at": winner.get("generated_at"),
+            "strategy_background_confidence": dict(winner.get("strategy_background_confidence") or {}),
+            "portfolio_overlap_summary": dict(winner.get("portfolio_overlap_summary") or {}),
             "visuals": dict(winner.get("visuals") or {}),
             "reference_price": float(dict(winner.get("metrics") or {}).get("last_close") or 0.0),
             "trade_state": dict(winner.get("narrative") or {}).get("judgment", {}).get("state", "持有优于追高"),
-            "positives": _winner_reason_lines(winner),
-            "dimension_rows": _dimension_rows(winner),
+            "positives": _winner_reason_lines(winner_for_delivery),
+            "dimension_rows": _dimension_rows(winner_for_delivery),
             "dimensions": dict(winner.get("dimensions") or {}),
             "action": dict(winner.get("action") or {}),
             "provenance": dict(winner.get("provenance") or {}),
@@ -537,8 +1443,10 @@ def _payload_from_analyses(
             "benchmark_symbol": winner.get("benchmark_symbol"),
             "positioning_lines": _positioning_lines(winner),
             "evidence": evidence,
+            "news_report": news_report,
+            "market_event_rows": market_event_rows,
             "narrative": {"playbook": dict(dict(winner.get("narrative") or {}).get("playbook") or {})},
-            "fund_sections": _fund_profile_sections(winner),
+            "fund_sections": _fund_profile_sections(winner_for_delivery),
             "taxonomy_rows": taxonomy_rows(taxonomy_from_analysis(winner)),
             "taxonomy_summary": str(taxonomy_from_analysis(winner).get("summary", "")),
             "score_changes": list(winner.get("score_changes") or []),
@@ -561,7 +1469,8 @@ def _payload_from_analyses(
 def _select_pick_analyses(payload: Mapping[str, Any], *, top_n: int) -> List[Dict[str, Any]]:
     ranked = [dict(item) for item in list(payload.get("top") or []) if isinstance(item, Mapping)]
     if ranked:
-        return ranked
+        ranked.sort(key=_rank_key, reverse=True)
+        return ranked[:top_n]
 
     coverage_rows = [dict(item) for item in list(payload.get("coverage_analyses") or []) if isinstance(item, Mapping)]
     if not coverage_rows:
@@ -586,18 +1495,53 @@ def _select_pick_analyses(payload: Mapping[str, Any], *, top_n: int) -> List[Dic
     return selected[:top_n]
 
 
+def _promote_observation_candidates(
+    payload: Mapping[str, Any],
+    *,
+    top_n: int,
+    reason: str,
+) -> Dict[str, Any]:
+    selected = _select_pick_analyses(payload, top_n=top_n)
+    if not selected:
+        return dict(payload)
+    promoted = dict(payload)
+    promoted["top"] = selected
+    blind_spots = [str(item).strip() for item in list(promoted.get("blind_spots") or []) if str(item).strip()]
+    if reason not in blind_spots:
+        blind_spots.append(reason)
+    promoted["blind_spots"] = blind_spots
+    return promoted
+
+
 def main() -> None:
     args = build_parser().parse_args()
     ensure_report_task_registered("etf_pick")
     setup_logger("ERROR")
-    config = load_config(args.config or None)
+    base_config = load_config(args.config or None)
+    config, runtime_override_notes = _client_final_runtime_overrides(
+        base_config,
+        client_final=bool(args.client_final),
+        explicit_config_path=args.config,
+    )
+    config, discovery_override_notes = _etf_discovery_runtime_overrides(config)
+    runtime_override_notes = [*runtime_override_notes, *[note for note in discovery_override_notes if note not in runtime_override_notes]]
     try:
         payload = discover_opportunities(config, top_n=max(args.top, 5), theme_filter=args.theme.strip())
+        payload = _promote_observation_candidates(
+            payload,
+            top_n=max(args.top, 5),
+            reason="全市场 ETF 扫描未形成正向入围，本次改按观察级候选继续排序，不再直接丢掉已有覆盖样本。",
+        )
         if not list(payload.get("top") or []):
             payload = _watchlist_fallback_payload(
                 config,
                 top_n=max(args.top, 5),
                 theme_filter=args.theme.strip(),
+            )
+            payload = _promote_observation_candidates(
+                payload,
+                top_n=max(args.top, 5),
+                reason="watchlist 回退样本未形成正向入围，本次改按观察级候选继续排序。",
             )
         payload = enrich_pick_payload_with_score_history(
             payload,
@@ -607,9 +1551,31 @@ def main() -> None:
             model_changelog=MODEL_CHANGELOG,
             rank_key=_rank_key,
         )
+        if runtime_override_notes:
+            blind_spots = [str(item).strip() for item in list(payload.get("blind_spots") or []) if str(item).strip()]
+            merged_notes: List[str] = []
+            for note in runtime_override_notes:
+                if note and note not in merged_notes:
+                    merged_notes.append(note)
+            for item in blind_spots:
+                if item and item not in merged_notes:
+                    merged_notes.append(item)
+            payload["blind_spots"] = merged_notes
+        payload["top"] = _attach_strategy_background_confidence(payload.get("top") or [])
+        payload["coverage_analyses"] = _attach_strategy_background_confidence(payload.get("coverage_analyses") or [])
+        payload["watch_positive"] = _attach_strategy_background_confidence(payload.get("watch_positive") or [])
+        payload["top"] = attach_portfolio_overlap_summaries(payload.get("top") or [], config)
+        payload["coverage_analyses"] = attach_portfolio_overlap_summaries(payload.get("coverage_analyses") or [], config)
+        payload["watch_positive"] = attach_portfolio_overlap_summaries(payload.get("watch_positive") or [], config)
         analyses = _select_pick_analyses(payload, top_n=max(args.top, 5))
         if not analyses:
             raise SystemExit("当前 ETF 推荐池没有可用候选，请稍后重试或放宽主题过滤。")
+        analyses = _hydrate_selected_etf_profiles(
+            analyses,
+            config=config,
+            limit=max(1, min(args.top, 2)),
+            context=payload.get("runtime_context"),
+        )
         attach_visuals_to_analyses(analyses[:3])
         delivery_tier = grade_pick_delivery(
             report_type="etf_pick",
@@ -640,6 +1606,7 @@ def main() -> None:
             selection_context=selection_context,
             regime=payload.get("regime") or {},
             day_theme=payload.get("day_theme") or {},
+            config=config,
         )
         delivery_tier = grade_pick_delivery(
             report_type="etf_pick",
@@ -665,14 +1632,27 @@ def main() -> None:
             delivery_tier=delivery_tier,
             proxy_contract=payload.get("proxy_contract") or {},
         )
+        date_str = str(client_payload.get("generated_at", ""))[:10]
+        theme = args.theme.strip().replace("/", "_").replace(" ", "_")
+        detail_path = _detail_output_path(str(client_payload.get("generated_at", "")), theme)
+        if args.client_final:
+            catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
+            review_lookup = load_catalyst_web_review(catalyst_review_path)
+            if review_lookup:
+                analyses = [attach_catalyst_web_review_to_analysis(item, review_lookup) for item in analyses]
+                client_payload = _payload_from_analyses(
+                    analyses,
+                    selection_context=selection_context,
+                    regime=payload.get("regime") or {},
+                    day_theme=payload.get("day_theme") or {},
+                    config=config,
+                )
         client_payload["selection_context"] = selection_context
         markdown = ClientReportRenderer().render_etf_pick(client_payload)
         if not args.client_final:
             print(markdown)
             return
 
-        date_str = str(client_payload.get("generated_at", ""))[:10]
-        theme = args.theme.strip().replace("/", "_").replace(" ", "_")
         filename = f"etf_pick_{theme}_{date_str}_final.md" if theme else f"etf_pick_{date_str}_final.md"
         markdown_path = resolve_project_path(f"reports/etf_picks/final/{filename}")
         detail_markdown = _detail_markdown(
@@ -681,7 +1661,53 @@ def main() -> None:
             selection_context=selection_context,
         )
         factor_contract = summarize_factor_contracts_from_analyses(list(payload.get("coverage_analyses") or analyses), sample_limit=16)
-        detail_path = _detail_output_path(str(client_payload.get("generated_at", "")), theme)
+        catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
+        editor_packet = build_etf_pick_editor_packet(client_payload)
+        editor_prompt = render_financial_editor_prompt(editor_packet)
+        catalyst_packet = build_catalyst_web_review_packet(
+            report_type="etf_pick",
+            subject=f"etf_pick {date_str}",
+            generated_at=str(client_payload.get("generated_at", "")),
+            analyses=list(payload.get("coverage_analyses") or analyses),
+        )
+        text_sidecars = {
+            "editor_prompt": (
+                internal_sidecar_path(detail_path, "editor_prompt.md"),
+                editor_prompt,
+            )
+        }
+        json_sidecars = {
+            "editor_payload": (
+                internal_sidecar_path(detail_path, "editor_payload.json"),
+                editor_packet,
+            )
+        }
+        if list(catalyst_packet.get("items") or []):
+            text_sidecars.update(
+                {
+                    "catalyst_web_review_prompt": (
+                        internal_sidecar_path(detail_path, "catalyst_web_review_prompt.md"),
+                        render_catalyst_web_review_prompt(catalyst_packet),
+                    ),
+                    "catalyst_web_review": (
+                        internal_sidecar_path(detail_path, "catalyst_web_review.md"),
+                        render_catalyst_web_review_scaffold(catalyst_packet),
+                    ),
+                }
+            )
+            json_sidecars.update(
+                {
+                    "catalyst_web_review_payload": (
+                        internal_sidecar_path(detail_path, "catalyst_web_review_payload.json"),
+                        catalyst_packet,
+                )
+            }
+        )
+        elif catalyst_review_path.exists():
+            text_sidecars["catalyst_web_review"] = (
+                catalyst_review_path,
+                catalyst_review_path.read_text(encoding="utf-8"),
+            )
         bundle = finalize_client_markdown(
             report_type="etf_pick",
             client_markdown=markdown,
@@ -695,11 +1721,24 @@ def main() -> None:
                 "passed_pool": int(payload.get("passed_pool") or 0),
                 "discovery_mode": str(payload.get("discovery_mode", "")),
                 "delivery_tier": dict(delivery_tier),
-                "data_coverage": dict(payload.get("pick_coverage") or {}),
-                "factor_contract": factor_contract,
-                "proxy_contract": dict(payload.get("proxy_contract") or {}),
-            },
-            release_checker=lambda markdown_text, source_text: check_generic_client_report(markdown_text, "etf_pick", source_text=source_text),
+            "data_coverage": dict(payload.get("pick_coverage") or {}),
+            "factor_contract": factor_contract,
+            "proxy_contract": dict(payload.get("proxy_contract") or {}),
+            "theme_playbook_contract": summarize_theme_playbook_contract(editor_packet.get("theme_playbook") or {}),
+            "event_digest_contract": summarize_event_digest_contract(editor_packet.get("event_digest") or {}),
+            "what_changed_contract": summarize_what_changed_contract(editor_packet.get("what_changed") or {}),
+        },
+        release_checker=lambda markdown_text, source_text: check_generic_client_report(
+            markdown_text,
+            "etf_pick",
+            source_text=source_text,
+            editor_theme_playbook=editor_packet.get("theme_playbook") or {},
+            editor_prompt_text=editor_prompt,
+            event_digest_contract=editor_packet.get("event_digest") or {},
+            what_changed_contract=editor_packet.get("what_changed") or {},
+        ),
+            text_sidecars=text_sidecars,
+            json_sidecars=json_sidecars,
         )
         print(markdown)
         for index, line in enumerate(exported_bundle_lines(bundle)):

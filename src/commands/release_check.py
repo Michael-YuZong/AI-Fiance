@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Mapping, Tuple
 
 from src.reporting.review_lessons import format_lesson_finding
 from src.utils.config import resolve_project_path
@@ -113,6 +113,18 @@ GENERIC_EVIDENCE_TITLE_KEYS = (
     "historical prices and data",
 )
 
+HOMEPAGE_KEY_EVIDENCE_HEADINGS = ("### 关键新闻 / 关键证据", "## 关键证据", "## 今日情报看板")
+GENERIC_MARKET_SIGNAL_PREFIXES = (
+    "A股涨停集中：",
+    "A股概念领涨：",
+    "A股行业走强：",
+    "A股热股前排：",
+    "A股强势股池：",
+    "A股主题活跃：",
+    "A股主题跟踪：",
+    "`市场情报`：",
+)
+
 REGIME_LABEL_TOKENS = ("recovery", "stagflation", "deflation", "overheating")
 REGIME_BASIS_TOKENS = ("PMI", "PPI", "CPI", "信用脉冲", "M1-M2", "社融", "美元", "新订单", "政策")
 
@@ -122,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("report_type", choices=["stock_pick", "stock_analysis", "briefing", "fund_pick", "etf_pick", "scan", "retrospect", "strategy"], help="Report type to validate")
     parser.add_argument("--client", required=True, help="Path to client-facing Markdown")
     parser.add_argument("--source", default="", help="Path to source/detail Markdown")
+    parser.add_argument("--editor-prompt", default="", help="Optional path to editor_prompt.md for sidecar-vs-final consistency checks")
     return parser
 
 
@@ -169,6 +182,11 @@ def _section_exists(text: str, heading: str) -> bool:
     return any(line.strip() == heading for line in text.splitlines())
 
 
+def _contains_any(text: str, needles: Tuple[str, ...]) -> bool:
+    haystack = str(text or "")
+    return any(str(needle) and str(needle) in haystack for needle in needles)
+
+
 def _pick_reason_heading(report_type: str, text: str) -> str:
     options = {
         "fund_pick": ("## 为什么先看它", "## 为什么推荐它"),
@@ -213,6 +231,14 @@ def _section_items(text: str, heading: str) -> List[str]:
     return items
 
 
+def _section_items_any(text: str, headings: Tuple[str, ...]) -> List[str]:
+    for heading in headings:
+        items = _section_items(text, heading)
+        if items:
+            return items
+    return []
+
+
 def _explanation_bullets(text: str) -> List[str]:
     bullets: List[str] = []
     for line in text.splitlines():
@@ -224,6 +250,365 @@ def _explanation_bullets(text: str) -> List[str]:
             continue
         bullets.append(body)
     return bullets
+
+
+def _section_text(text: str, heading: str) -> str:
+    lines = text.splitlines()
+    collecting = False
+    collected: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == heading:
+            collecting = True
+            continue
+        if collecting and stripped.startswith("### "):
+            break
+        if collecting and stripped.startswith("## "):
+            break
+        if collecting:
+            collected.append(line)
+    return "\n".join(collected).strip()
+
+
+def _text_without_section(text: str, heading: str) -> str:
+    lines = text.splitlines()
+    collecting = False
+    kept: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == heading:
+            collecting = True
+            continue
+        if collecting and stripped.startswith("## "):
+            collecting = False
+        if not collecting:
+            kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _homepage_v2_findings(client_text: str, report_type: str) -> List[str]:
+    findings: List[str] = []
+    requires_homepage = report_type in {"etf_pick", "fund_pick", "stock_pick", "stock_analysis", "briefing", "scan"}
+    if "## 首页判断" not in client_text:
+        if requires_homepage:
+            findings.append(format_lesson_finding("L002", f"[P1] {report_type} 客户稿缺少首页判断：首页主叙事没有真正进入正式稿正文。"))
+        return findings
+    required = (
+        "### 宏观面",
+        "### 板块 / 主题认知",
+        "### 情绪与热度",
+        "### 微观面",
+        "### 动作建议与结论",
+    )
+    for heading in required:
+        if heading not in client_text:
+            findings.append(format_lesson_finding("L002", f"[P2] {report_type} 首页判断缺少章节: {heading}"))
+    theme_section = _section_text(client_text, "### 板块 / 主题认知")
+    if theme_section:
+        weak_tokens = ("配置价值", "方向没坏", "模板", "更适合理解为")
+        if sum(1 for token in weak_tokens if token in theme_section) >= 2 and len(theme_section) < 80:
+            findings.append(format_lesson_finding("L040", f"[P2] {report_type} 首页“板块 / 主题认知”仍偏模板化，没有明显写出这个主题到底在交易什么。"))
+    sentiment_section = _section_text(client_text, "### 情绪与热度")
+    if sentiment_section and any(token in sentiment_section for token in ("直接催化", "已经兑现", "已经形成买点")):
+        findings.append(format_lesson_finding("L040", f"[P1] {report_type} 首页把“情绪与热度”写成了直接催化或已兑现买点。"))
+    return findings
+
+
+def _theme_playbook_surface_findings(
+    client_text: str,
+    report_type: str,
+    editor_theme_playbook: Mapping[str, Any] | None = None,
+) -> List[str]:
+    findings: List[str] = []
+    if report_type not in {"stock_pick", "stock_analysis", "briefing", "fund_pick", "etf_pick", "scan"}:
+        return findings
+    theme_section = _section_text(client_text, "### 板块 / 主题认知")
+    micro_section = _section_text(client_text, "### 微观面")
+    body_text = _text_without_section(client_text, "## 首页判断")
+    homepage_text = "\n".join(part for part in (theme_section, micro_section) if part).strip()
+    if not homepage_text:
+        return findings
+    conflict_markers = ("还在打架", "硬写成单一细主题")
+    has_conflict_signal = _contains_any(homepage_text, conflict_markers) or (
+        "行业层" in homepage_text and "细主题" in homepage_text
+    )
+    if has_conflict_signal and "主题边界" not in client_text:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 首页已经写出行业层冲突/退回边界，但正文没有显式落 `主题边界`，主题合同在首页和正文之间断了。",
+            )
+        )
+    bridge_markers = ("可优先留意", "更偏向", "细分线", "下钻方向")
+    has_bridge_signal = _contains_any(homepage_text, bridge_markers)
+    if has_bridge_signal and "细分观察" not in client_text:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 首页已经给出 sector bridge / 细分观察线索，但正文没有显式落 `细分观察`，读者会只看到首页谨慎、正文却缺少对应边界。",
+            )
+        )
+    playbook = dict(editor_theme_playbook or {})
+    playbook_level = str(playbook.get("playbook_level") or "").strip()
+    playbook_label = str(playbook.get("label") or "").strip()
+    if playbook_level == "theme" and playbook_label and theme_section and playbook_label not in theme_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P2] {report_type} 的 editor_payload 已明确命中 `{playbook_label}`，但首页 `板块 / 主题认知` 没把这条主题显式写出来。",
+            )
+        )
+    if playbook_level != "sector":
+        return findings
+    theme_match_status = str(playbook.get("theme_match_status") or "").strip()
+    theme_match_candidates = tuple(
+        str(item).strip()
+        for item in list(playbook.get("theme_match_candidates") or [])
+        if str(item).strip()
+    )
+    if theme_match_status == "ambiguous_conflict" and "主题边界" in client_text and theme_match_candidates:
+        if not _contains_any(body_text, theme_match_candidates):
+            findings.append(
+                format_lesson_finding(
+                    "L002",
+                    f"[P2] {report_type} 的 editor_payload 已标记 `ambiguous_conflict`，但正文 `主题边界` 没写出具体冲突候选。",
+                )
+            )
+    bridge_confidence = str(playbook.get("subtheme_bridge_confidence") or "").strip()
+    bridge_top_label = str(playbook.get("subtheme_bridge_top_label") or "").strip()
+    if bridge_confidence in {"high", "medium"} and "细分观察" in client_text and bridge_top_label and bridge_top_label not in body_text:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P2] {report_type} 的 editor_payload 已给出下钻主线 `{bridge_top_label}`，但正文 `细分观察` 没把这条细分线写出来。",
+            )
+        )
+    return findings
+
+
+def _editor_prompt_theme_contract(prompt_text: str) -> Dict[str, Any]:
+    items = _section_items(prompt_text, "## Theme Playbook")
+    if not items:
+        return {}
+    mapping: Dict[str, str] = {}
+    for item in items:
+        if "：" not in item:
+            continue
+        key, value = item.split("：", 1)
+        mapping[key.strip()] = value.strip()
+    if not mapping:
+        return {}
+    candidates = tuple(part.strip() for part in mapping.get("易混主题候选", "").split("/") if part.strip())
+    bridge_labels = tuple(part.strip() for part in mapping.get("行业层下钻方向", "").split("/") if part.strip())
+    signal_line = mapping.get("当前下钻线索", "")
+    top_signal_label = ""
+    if signal_line:
+        first_chunk = signal_line.split("/", 1)[0].strip()
+        top_signal_label = first_chunk.split("<-", 1)[0].strip()
+    if not top_signal_label and bridge_labels:
+        top_signal_label = bridge_labels[0]
+    return {
+        "label": mapping.get("主题", ""),
+        "theme_match_status": mapping.get("主题匹配状态", ""),
+        "theme_match_candidates": candidates,
+        "bridge_confidence": mapping.get("行业层下钻置信度", ""),
+        "bridge_labels": bridge_labels,
+        "bridge_top_label": top_signal_label,
+    }
+
+
+def _editor_prompt_theme_findings(client_text: str, report_type: str, editor_prompt_text: str = "") -> List[str]:
+    findings: List[str] = []
+    if report_type not in {"stock_pick", "stock_analysis", "briefing", "fund_pick", "etf_pick", "scan"}:
+        return findings
+    contract = _editor_prompt_theme_contract(editor_prompt_text)
+    if not contract:
+        return findings
+    body_text = _text_without_section(client_text, "## 首页判断")
+    candidates = tuple(str(item).strip() for item in contract.get("theme_match_candidates", ()) if str(item).strip())
+    if (
+        str(contract.get("theme_match_status") or "").strip() == "ambiguous_conflict"
+        and "主题边界" in client_text
+        and candidates
+        and not _contains_any(body_text, candidates)
+    ):
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P2] {report_type} 的 editor_prompt 已要求保留冲突候选，但正文 `主题边界` 没把这些具体主题写出来。",
+            )
+        )
+    bridge_confidence = str(contract.get("bridge_confidence") or "").strip()
+    bridge_top_label = str(contract.get("bridge_top_label") or "").strip()
+    if bridge_confidence in {"high", "medium"} and "细分观察" in client_text and bridge_top_label and bridge_top_label not in body_text:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P2] {report_type} 的 editor_prompt 已给出下钻主线 `{bridge_top_label}`，但正文 `细分观察` 没把它写出来。",
+            )
+        )
+    return findings
+
+
+def _event_digest_surface_findings(
+    client_text: str,
+    report_type: str,
+    event_digest_contract: Mapping[str, Any] | None = None,
+) -> List[str]:
+    findings: List[str] = []
+    if report_type not in {"stock_pick", "stock_analysis", "briefing", "fund_pick", "etf_pick", "scan"}:
+        return findings
+    contract = dict(event_digest_contract or {})
+    status = str(contract.get("status") or "").strip()
+    changed_what = str(contract.get("changed_what") or "").strip()
+    if not status and not changed_what:
+        return findings
+    event_section = _section_text(client_text, "## 事件消化")
+    if not event_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 客户稿缺少 `## 事件消化`，事件状态和“这件事改变了什么”没有正式落到正文。",
+            )
+        )
+        return findings
+    if status and status not in event_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 的 event_digest_contract 已标记 `{status}`，但正文 `事件消化` 没把这个状态写出来。",
+            )
+        )
+    if "这件事改变了什么" not in event_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 的 `事件消化` 缺少“这件事改变了什么”，还停在事件罗列层。",
+            )
+        )
+    lead_layer = str(contract.get("lead_layer") or "").strip()
+    if lead_layer and lead_layer not in event_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P2] {report_type} 的 event_digest_contract 已标记 `{lead_layer}`，但正文 `事件消化` 没显式写出事件分层。",
+            )
+        )
+    lead_detail = str(contract.get("lead_detail") or "").strip()
+    if lead_detail and lead_detail not in event_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P2] {report_type} 的 event_digest_contract 已标记 `{lead_detail}`，但正文 `事件消化` 没把事件细分写出来。",
+            )
+        )
+    impact_summary = str(contract.get("impact_summary") or "").strip()
+    impact_line = next(
+        (line.strip() for line in event_section.splitlines() if line.strip().startswith("- 影响层与性质：")),
+        "",
+    )
+    if impact_summary and impact_summary not in impact_line:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P2] {report_type} 的 event_digest_contract 已标记影响层 `{impact_summary}`，但正文 `事件消化` 没写清它影响的是哪一层。",
+            )
+        )
+    thesis_scope = str(contract.get("thesis_scope") or "").strip()
+    if thesis_scope and thesis_scope not in impact_line:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P2] {report_type} 的 event_digest_contract 已标记事件性质 `{thesis_scope}`，但正文 `事件消化` 没写清它是 thesis 变化还是一次性噪音。",
+            )
+        )
+    importance_reason = str(contract.get("importance_reason") or "").strip()
+    if importance_reason and "优先级判断" not in event_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P2] {report_type} 的 event_digest_contract 已写入优先级判断，但正文 `事件消化` 没解释为什么该前置或先不升级。",
+            )
+        )
+    return findings
+
+
+def _what_changed_surface_findings(
+    client_text: str,
+    report_type: str,
+    what_changed_contract: Mapping[str, Any] | None = None,
+) -> List[str]:
+    findings: List[str] = []
+    if report_type not in {"stock_pick", "stock_analysis", "briefing", "fund_pick", "etf_pick", "scan"}:
+        return findings
+    contract = dict(what_changed_contract or {})
+    previous_view = str(contract.get("previous_view") or "").strip()
+    change_summary = str(contract.get("change_summary") or "").strip()
+    conclusion_label = str(contract.get("conclusion_label") or "").strip()
+    state_trigger = str(contract.get("state_trigger") or "").strip()
+    state_summary = str(contract.get("state_summary") or "").strip()
+    current_event_understanding = str(contract.get("current_event_understanding") or "").strip()
+    if not previous_view and not change_summary and not conclusion_label:
+        return findings
+    what_changed_section = _section_text(client_text, "## What Changed")
+    if not what_changed_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 客户稿缺少 `## What Changed`，没有正式回答上次怎么看、这次什么变了、结论有没有变化。",
+            )
+        )
+        return findings
+    if "上次怎么看" not in what_changed_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 的 `What Changed` 缺少“上次怎么看”，连续研究还没落到正文。",
+            )
+        )
+    if "这次什么变了" not in what_changed_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 的 `What Changed` 缺少“这次什么变了”，还不能快速回答研究变化点。",
+            )
+        )
+    if "结论变化" not in what_changed_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 的 `What Changed` 缺少“结论变化”，升级/降级还没正式落到正文。",
+            )
+        )
+    if current_event_understanding and "当前事件理解" not in what_changed_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 的 what_changed_contract 已写入当前事件理解，但正文 `What Changed` 没把这层研究理解落出来。",
+            )
+        )
+    if conclusion_label and conclusion_label not in what_changed_section:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 的 what_changed_contract 已标记 `{conclusion_label}`，但正文 `What Changed` 没把这个结论变化写出来。",
+            )
+        )
+    if state_trigger and ("触发：" not in what_changed_section or state_trigger not in what_changed_section):
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 的 what_changed_contract 已写入状态触发 `{state_trigger}`，但正文 `What Changed` 没解释这次为什么升级、削弱或待复核。",
+            )
+        )
+    if state_summary and ("状态解释" not in what_changed_section or state_summary not in what_changed_section):
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                f"[P1] {report_type} 的 what_changed_contract 已写入状态解释，但正文 `What Changed` 没把这次状态机原因落成完整解释。",
+            )
+        )
+    return findings
 
 
 def _normalize_duplicate_text(text: str) -> str:
@@ -312,6 +697,35 @@ def _stock_pick_observe_density_findings(text: str) -> List[str]:
     return findings
 
 
+def _stock_pick_feature_retention_findings(text: str) -> List[str]:
+    findings: List[str] = []
+    observe_only = "| 报告定位 | 观察稿 |" in text or "当前没有达到正式动作阈值的个股" in text
+    if not observe_only:
+        return findings
+    if "### 第二批：继续跟踪" not in text:
+        findings.append(
+            format_lesson_finding(
+                "L041",
+                "[P1] stock_pick 观察稿丢了 `第二批：继续跟踪`，任何开发改动都不应把旧的观察层信息密度静默吞掉。",
+            )
+        )
+    if not any(marker in text for marker in ("### 第二批：低门槛 / 观察替代", "### 第二批：低门槛 / 关联ETF")):
+        findings.append(
+            format_lesson_finding(
+                "L041",
+                "[P1] stock_pick 观察稿丢了 `第二批：低门槛 / 观察替代` 或 `第二批：低门槛 / 关联ETF`，任何开发改动都不应把低门槛跟踪层静默吞掉。",
+            )
+        )
+    if "## 代表样本复核卡" not in text:
+        findings.append(
+            format_lesson_finding(
+                "L041",
+                "[P1] stock_pick 观察稿丢了 `代表样本复核卡`，任何开发改动都不应把代表样本复核层静默吞掉。",
+            )
+        )
+    return findings
+
+
 def _fund_profile_findings(text: str) -> List[str]:
     findings: List[str] = []
     lines = text.splitlines()
@@ -351,6 +765,54 @@ def _fund_holdings_readability_findings(text: str, report_type: str) -> List[str
                 findings.append(format_lesson_finding("L005", f"[P2] {report_type} 的持仓表仍有名称空白，客户稿可读性不足：{code}"))
                 return findings
         return findings
+    return findings
+
+
+def _source_feature_retention_findings(client_text: str, source_text: str, report_type: str) -> List[str]:
+    findings: List[str] = []
+    if not source_text:
+        return findings
+    if report_type != "scan":
+        return findings
+    feature_markers = (
+        ("## 基金画像", "基金画像"),
+        ("### 资产配置", "资产配置"),
+        (("### 前十大持仓", "### 前五大持仓"), "持仓展开"),
+        ("### 行业暴露", "行业暴露"),
+        ("## 基金经理风格分析", "基金经理风格分析"),
+    )
+    for marker, label in feature_markers:
+        if isinstance(marker, tuple):
+            source_has = any(option in source_text for option in marker)
+            client_has = any(option in client_text for option in marker)
+        else:
+            source_has = marker in source_text
+            client_has = marker in client_text
+        if source_has and not client_has:
+            findings.append(
+                format_lesson_finding(
+                    "L041",
+                    f"[P1] {report_type} 客户稿丢了 `{label}` 这类旧有高价值功能块；任何开发改动都不应把已存在的有效模块静默吞掉。",
+                )
+            )
+    return findings
+
+
+def _pick_fund_profile_feature_retention_findings(client_text: str, source_text: str, report_type: str) -> List[str]:
+    findings: List[str] = []
+    if report_type != "etf_pick" or not source_text:
+        return findings
+    feature_markers = (
+        ("场内基金技术状态", "场内基金技术状态"),
+    )
+    for marker, label in feature_markers:
+        if marker in source_text and marker not in client_text:
+            findings.append(
+                format_lesson_finding(
+                    "L041",
+                    f"[P1] {report_type} 客户稿丢了 `{label}` 这类 ETF 产品层技术状态字段；任何开发改动都不应把已下沉的新主链功能静默吞掉。",
+                )
+            )
     return findings
 
 
@@ -708,12 +1170,12 @@ def _briefing_source_consistency_findings(client_text: str, source_text: str) ->
     client_why = _bullets_in_section(client_text, "## 为什么今天这么判断")
     client_actions = _bullets_in_section(client_text, "## 今天怎么做")
     source_headlines = _section_items(source_text, "### 1.1 今日主线")
-    source_actions = _section_items(source_text, "### 1.2 今天怎么做")
+    source_actions = _section_items_any(source_text, ("### 1.2 今天怎么做", "### 1.2 周末怎么跟踪"))
     if not source_headlines:
         findings.append("[P1] briefing 详细稿缺少“1.1 今日主线”内容，无法做源稿一致性校验")
         return findings
     if not source_actions:
-        findings.append("[P1] briefing 详细稿缺少“1.2 今天怎么做”内容，无法做源稿一致性校验")
+        findings.append("[P1] briefing 详细稿缺少“1.2 今天怎么做/周末怎么跟踪”内容，无法做源稿一致性校验")
         return findings
     normalized_headlines = {_normalize_briefing_consistency_line(item) for item in source_headlines}
     normalized_actions = {_normalize_briefing_consistency_line(item) for item in source_actions}
@@ -964,7 +1426,15 @@ def _source_stock_dimensions(text: str) -> Dict[str, Dict[str, str]]:
     return payload
 
 
-def check_stock_pick_client_report(client_text: str, source_text: str) -> List[str]:
+def check_stock_pick_client_report(
+    client_text: str,
+    source_text: str,
+    *,
+    editor_theme_playbook: Mapping[str, Any] | None = None,
+    editor_prompt_text: str = "",
+    event_digest_contract: Mapping[str, Any] | None = None,
+    what_changed_contract: Mapping[str, Any] | None = None,
+) -> List[str]:
     findings: List[str] = []
 
     for phrase in BANNED_CLIENT_PHRASES:
@@ -998,6 +1468,7 @@ def check_stock_pick_client_report(client_text: str, source_text: str) -> List[s
             findings.append(format_lesson_finding("L030", "[P2] 个股成稿引用了历史相似样本，但没有展示样本质量判断"))
     findings.extend(_observe_only_packaging_findings(client_text, "stock_pick"))
     findings.extend(_stock_pick_observe_density_findings(client_text))
+    findings.extend(_stock_pick_feature_retention_findings(client_text))
     findings.extend(_duplicate_explanation_findings(client_text, max_repeat=2))
     findings.extend(_duplicate_operation_findings(client_text, max_repeat=2, scope="客户稿"))
     findings.extend(_duplicate_operation_findings(source_text, max_repeat=2, scope="详细稿"))
@@ -1005,6 +1476,10 @@ def check_stock_pick_client_report(client_text: str, source_text: str) -> List[s
     findings.extend(_evidence_quality_findings(client_text, "stock_pick"))
     findings.extend(_stock_section_structure_findings(client_text))
     findings.extend(_stock_section_identity_findings(client_text, source_text))
+    findings.extend(_theme_playbook_surface_findings(client_text, "stock_pick", editor_theme_playbook))
+    findings.extend(_editor_prompt_theme_findings(client_text, "stock_pick", editor_prompt_text))
+    findings.extend(_event_digest_surface_findings(client_text, "stock_pick", event_digest_contract))
+    findings.extend(_what_changed_surface_findings(client_text, "stock_pick", what_changed_contract))
     if len(_explanation_bullets(client_text)) < 8:
         findings.append(format_lesson_finding("L002", "[P2] 客户稿解释性不足：实质性解释条目太少"))
     findings.extend(_intraday_claim_findings(client_text))
@@ -1058,7 +1533,16 @@ def check_stock_pick_client_report(client_text: str, source_text: str) -> List[s
     return findings
 
 
-def check_generic_client_report(client_text: str, report_type: str, source_text: str = "") -> List[str]:
+def check_generic_client_report(
+    client_text: str,
+    report_type: str,
+    source_text: str = "",
+    *,
+    editor_theme_playbook: Mapping[str, Any] | None = None,
+    editor_prompt_text: str = "",
+    event_digest_contract: Mapping[str, Any] | None = None,
+    what_changed_contract: Mapping[str, Any] | None = None,
+) -> List[str]:
     findings: List[str] = []
     for phrase in BANNED_CLIENT_PHRASES:
         if phrase in client_text:
@@ -1082,16 +1566,27 @@ def check_generic_client_report(client_text: str, report_type: str, source_text:
     findings.extend(_intraday_claim_findings(client_text))
     findings.extend(_execution_safety_findings(client_text, report_type))
     findings.extend(_evidence_quality_findings(client_text, report_type))
+    findings.extend(_top_signal_quality_findings(client_text, report_type))
     findings.extend(_regime_basis_findings(client_text, report_type))
+    findings.extend(_homepage_v2_findings(client_text, report_type))
+    findings.extend(_theme_playbook_surface_findings(client_text, report_type, editor_theme_playbook))
+    findings.extend(_editor_prompt_theme_findings(client_text, report_type, editor_prompt_text))
+    findings.extend(_event_digest_surface_findings(client_text, report_type, event_digest_contract))
+    findings.extend(_what_changed_surface_findings(client_text, report_type, what_changed_contract))
+
+    scan_observe_only = (
+        report_type == "scan"
+        and ("当前更适合按 `观察为主`" in client_text or "观察名单里" in client_text or "当前建议仍是 `回避`" in client_text)
+    )
 
     required_headings = {
         "briefing": ["## 执行摘要", "## 为什么今天这么判断", "## 宏观判断依据", "## 宏观领先指标", "## 数据完整度", "## 证据时点与来源", "## 今天怎么做", "## 重点观察", "## 今日A股观察池", "## A股观察池升级条件"],
         "fund_pick": ["## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只基金为什么是这个分", "## 标准化分类"],
         "etf_pick": ["## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只ETF为什么是这个分", "## 标准化分类", "## 关键证据"],
-        "scan": ["## 为什么这么判断", "## 当前更合适的动作"],
+        "scan": ["## 为什么这么判断"] if scan_observe_only else ["## 为什么这么判断", "## 当前更合适的动作"],
         "stock_analysis": ["## 为什么这么判断", "## 当前更合适的动作"],
         "retrospect": ["## 原始决策", "## 为什么当时会做这个决定", "## 后验路径", "## 复盘结论"],
-        "strategy": ["## 这套策略是什么", "## 这次到底看出来什么", "## 执行摘要"],
+        "strategy": ["## 动作卡片", "## 当前结论", "## 这套策略是什么", "## 这次到底看出来什么", "## 执行摘要"],
     }.get(report_type, [])
     for heading in required_headings:
         if isinstance(heading, tuple):
@@ -1202,8 +1697,10 @@ def check_generic_client_report(client_text: str, report_type: str, source_text:
                 findings.append(format_lesson_finding("L001", f"[P1] strategy 客户稿仍暴露内部流程词: {term}"))
         if "| 项目 | 结论 |" not in client_text:
             findings.append(format_lesson_finding("L002", "[P2] strategy 客户稿缺少结构化执行摘要表：应先把当前判断、主要问题和下一步前置写清。"))
+        if "当前动作：" not in client_text:
+            findings.append(format_lesson_finding("L002", "[P2] strategy 客户稿缺少动作卡片里的“当前动作”句，首屏还不够像可读成稿。"))
         if strategy_kind == "validation":
-            for heading in ("## 这套策略是什么", "## 这次到底看出来什么", "## 总体结果", "## Rollback Gate"):
+            for heading in ("## 动作卡片", "## 当前结论", "## 这套策略是什么", "## 这次到底看出来什么", "## 总体结果", "## Rollback Gate"):
                 if heading not in client_text:
                     findings.append(format_lesson_finding("L002", f"[P2] strategy validate 客户稿缺少解释性章节: {heading}"))
             if "hit rate:" not in client_text or "平均超额收益" not in client_text:
@@ -1211,7 +1708,7 @@ def check_generic_client_report(client_text: str, report_type: str, source_text:
             if not any(token in client_text for token in ("## Out-Of-Sample Validation", "## Chronological Cohorts", "## Cross-Sectional Validation")):
                 findings.append(format_lesson_finding("L002", "[P2] strategy validate 客户稿缺少样本稳定性章节：至少要交代 OOS / cohort / cross-sectional 之一。"))
         elif strategy_kind == "experiment":
-            for heading in ("## 这套策略是什么", "## 这次到底看出来什么", "## Promotion Gate", "## Rollback Gate", "## 变体对比"):
+            for heading in ("## 动作卡片", "## 当前结论", "## 这套策略是什么", "## 这次到底看出来什么", "## Promotion Gate", "## Rollback Gate", "## 变体对比"):
                 if heading not in client_text:
                     findings.append(format_lesson_finding("L002", f"[P2] strategy experiment 客户稿缺少解释性章节: {heading}"))
             if "| variant |" not in client_text:
@@ -1229,10 +1726,12 @@ def check_generic_client_report(client_text: str, report_type: str, source_text:
     if source_text:
         if report_type in {"scan", "stock_analysis"}:
             findings.extend(_analysis_source_consistency_findings(client_text, source_text, report_type))
+            findings.extend(_source_feature_retention_findings(client_text, source_text, report_type))
         elif report_type == "fund_pick":
             findings.extend(_pick_source_consistency_findings(client_text, source_text, report_type, "## 这只基金为什么是这个分"))
         elif report_type == "etf_pick":
             findings.extend(_pick_source_consistency_findings(client_text, source_text, report_type, "## 这只ETF为什么是这个分"))
+            findings.extend(_pick_fund_profile_feature_retention_findings(client_text, source_text, report_type))
         elif report_type == "briefing":
             findings.extend(_briefing_source_consistency_findings(client_text, source_text))
         elif report_type == "retrospect":
@@ -1297,6 +1796,44 @@ def _evidence_quality_findings(text: str, report_type: str) -> List[str]:
     return findings
 
 
+def _top_signal_quality_findings(text: str, report_type: str) -> List[str]:
+    if report_type not in {"briefing", "etf_pick", "fund_pick", "scan", "stock_analysis", "stock_pick"}:
+        return []
+    findings: List[str] = []
+    items = _section_items_any(text, HOMEPAGE_KEY_EVIDENCE_HEADINGS)
+    if not items:
+        return findings
+
+    linked_items = [item for item in items if "http://" in item or "https://" in item]
+    signalful_items = [
+        item for item in items if ("信号：" in item or "信号类型：" in item) and ("结论：" in item or "主要影响：" in item)
+    ]
+    market_only_items = [item for item in items if item.startswith(GENERIC_MARKET_SIGNAL_PREFIXES)]
+
+    if report_type == "briefing" and not linked_items:
+        findings.append(
+            format_lesson_finding(
+                "L037",
+                "[P1] briefing 首页 `关键新闻 / 关键证据` 没有任何可点击外部情报，当前更像盘面摘要，不像可核验的晨报情报板。",
+            )
+        )
+    if linked_items and not signalful_items:
+        findings.append(
+            format_lesson_finding(
+                "L037",
+                f"[P1] {report_type} 首页虽然前置了链接情报，但没有把 `信号/强弱/结论` 写清，仍然更像新闻堆砌而不是研究判断。",
+            )
+        )
+    if market_only_items and len(market_only_items) == len(items):
+        findings.append(
+            format_lesson_finding(
+                "L037",
+                f"[P1] {report_type} 首页 `关键新闻 / 关键证据` 全被盘面句占满，当前是“盘面句顶替新闻位”，没有真正前置外部情报。",
+            )
+        )
+    return findings
+
+
 def _regime_basis_findings(text: str, report_type: str) -> List[str]:
     findings: List[str] = []
     if report_type not in {"stock_pick", "etf_pick"}:
@@ -1318,12 +1855,13 @@ def main() -> None:
     args = build_parser().parse_args()
     client_text = _read(args.client)
     source_text = _read(args.source) if args.source else ""
+    editor_prompt_text = _read(args.editor_prompt) if args.editor_prompt else ""
     if args.report_type == "stock_pick":
         if not args.source:
             raise SystemExit("stock_pick 一致性校验必须提供 --source")
-        findings = check_stock_pick_client_report(client_text, source_text)
+        findings = check_stock_pick_client_report(client_text, source_text, editor_prompt_text=editor_prompt_text)
     else:
-        findings = check_generic_client_report(client_text, args.report_type, source_text=source_text)
+        findings = check_generic_client_report(client_text, args.report_type, source_text=source_text, editor_prompt_text=editor_prompt_text)
     if findings:
         print("发布前一致性校验未通过：")
         for item in findings:

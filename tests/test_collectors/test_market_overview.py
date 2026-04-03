@@ -32,6 +32,16 @@ def test_market_overview_breadth_prefers_tushare(monkeypatch, tmp_path):
     assert breadth["turnover"] == 0.06
 
 
+def test_market_overview_breadth_returns_empty_without_tushare_fallback(monkeypatch, tmp_path):
+    collector = MarketOverviewCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_latest_open_trade_date", lambda *args, **kwargs: "20260310")
+    monkeypatch.setattr(collector, "_ts_call", lambda api_name, **kwargs: pd.DataFrame() if api_name == "daily" else pd.DataFrame())
+
+    breadth = collector._collect_breadth()
+
+    assert breadth == {}
+
+
 def test_market_overview_domestic_indices_try_sh_before_sz_for_000_prefix(monkeypatch, tmp_path):
     collector = MarketOverviewCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
 
@@ -53,20 +63,46 @@ def test_market_overview_domestic_indices_try_sh_before_sz_for_000_prefix(monkey
     assert rows[0]["latest"] == 10.0
 
 
-def test_market_overview_global_indices_prefer_stale_cache(monkeypatch, tmp_path):
+def test_market_overview_domestic_indices_return_empty_without_tushare_rows(monkeypatch, tmp_path):
     collector = MarketOverviewCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
-    collector._save_cache("market_overview:global:^GSPC:v1", pd.DataFrame([{"Close": [5000, 5050]}]))
+    monkeypatch.setattr(
+        collector,
+        "_index_topic_collector",
+        lambda: type("FakeIndexTopic", (), {"get_domestic_overview_rows": staticmethod(lambda indices: [])})(),
+    )
 
-    calls = []
+    rows = collector._collect_domestic([{"symbol": "000300", "name": "沪深300"}])
 
-    def fake_cached_call(cache_key, fetcher, *args, **kwargs):  # noqa: ANN001
-        calls.append({"cache_key": cache_key, "prefer_stale": kwargs.get("prefer_stale")})
-        return pd.DataFrame({"Close": [5000.0, 5050.0]})
+    assert rows == []
 
-    monkeypatch.setattr(collector, "cached_call", fake_cached_call)
+
+def test_market_overview_global_indices_use_index_topic_mainline(monkeypatch, tmp_path):
+    collector = MarketOverviewCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(
+        collector,
+        "_index_topic_collector",
+        lambda: type(
+            "FakeIndexTopic",
+            (),
+            {
+                "get_global_overview_rows": staticmethod(
+                    lambda indices: [
+                        {
+                            "market": "美股",
+                            "name": "标普500",
+                            "symbol": "^GSPC",
+                            "latest": 5050.0,
+                            "change_pct": 0.01,
+                            "source": "tushare.index_global",
+                        }
+                    ]
+                )
+            },
+        )(),
+    )
 
     rows = collector._collect_global([{"symbol": "^GSPC", "market": "美股", "name": "标普500"}])
 
     assert len(rows) == 1
     assert rows[0]["symbol"] == "^GSPC"
-    assert calls[0]["prefer_stale"] is True
+    assert rows[0]["source"] == "tushare.index_global"

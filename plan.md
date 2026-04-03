@@ -1,123 +1,92 @@
 # AI-Finance 路线图
 
-这份文件只保留路线图总览和当前优先级。
+这份文件只保留路线图总览。
 
-如果任务只涉及单个命令，先看 [docs/context_map.md](./docs/context_map.md)；如果任务只涉及 `strategy`，直接看 [docs/plans/strategy.md](./docs/plans/strategy.md)。
+如果任务只是改单个 command / renderer，先看 [docs/context_map.md](./docs/context_map.md)。如果任务只涉及 `strategy`，直接看 [docs/plans/strategy.md](./docs/plans/strategy.md)。
 
 ## 北极星
 
-目标不是“功能越来越多”，而是让系统对真实投资问题形成完整闭环：
+目标不是“功能越来越多”，而是形成研究闭环：
 
-1. 识别问题
-2. 拉取当时可见证据
-3. 形成研究判断
-4. 映射到组合和风险预算
-5. 产出可交付结果
-6. 接入外审
-7. 进入监控、复盘、归因和策略学习
-
-## 当前阶段表
-
-| 阶段 | 主题 | 当前状态 | 下一步 |
-| --- | --- | --- | --- |
-| A | `research` 入口化 | 已完成主版本 | 保持和 pick / portfolio 合同同步 |
-| B | 代理信号升级 | 已完成第一轮 | 继续扩到更多 final / audit |
-| C | `policy` 升级 | 部分完成 | 深挖扫描版、表格重 PDF/OFD 和 taxonomy |
-| D | 组合构建与风险预算 | 已完成 v1 | 往更多推荐链路扩 |
-| E | 时点正确性与证据溯源 | 已完成 v1 | 补 fixtures 和更严格 point-in-time 覆盖 |
-| F | 评分校准、归因、自学习 | 已完成 v1 | 深化 setup bucket 和长期学习闭环 |
-| G | 执行成本与可成交性 | 已完成 v1 | 扩到更多 pick / release 场景 |
-| H | 调度与运营闭环 | 仍是 v1 | 做持久化 run history、失败可见性、运维状态 |
-| I | `strategy` 研究层 | 已完成第一版闭环 | 做 fixture + governance，再扩横截面验证 |
-| J | 强因子工程 | 已完成 v1 收口 | 进入维护；剩余 point-in-time / lag / calibration 归入 E / F / I |
-| K | 外审能力扩展 | 已启动 v1 | 扩证据、时点、回归和归因专项审计 |
+1. 拉取当时可见证据
+2. 形成研究判断
+3. 映射到推荐、组合和风险
+4. 产出可交付结果
+5. 接入外审
+6. 进入监控、复盘和校准
 
 ## 当前主线
 
-### 1. `strategy` fixture + governance
+### P0 数据源升级主线
 
-已实现：
+1. `10000 分 Tushare phase 2：补剩余缺口 + 退已覆盖旧链`
+   这条主线已经从“先把高价值接口接进来”，进入“把剩余缺口补齐，并把已被覆盖的旧 AKShare 主链退掉”的阶段。
 
-- `predict`
-- `list`
-- `replay`
-- `validate`
-- `attribute`
-- `experiment`
+   当前已基本落地：
+   - 股票主链：`ths_index / ths_daily / ths_hot / ths_member`
+   - 股票风险与筹码：`st / stk_high_shock / stk_alert / cyq_perf / cyq_chips`
+   - 指数/行业标准链：`index_basic / index_daily / index_dailybasic / index_weight / idx_factor_pro / index_global / 申万/中信行业框架 / index_weekly / index_monthly`
+   - ETF 非实时研究链：`etf_basic / etf_index / etf_share_size / fund_daily / fund_adj / fund_factor_pro`
 
-当前下一步：
+   当前下一步：
+   - 把 `index_weekly / index_monthly` 的周/月线写法、来源披露和最终收口统一
+   - 已被 Tushare 覆盖的 `AKShare` 主路径继续系统性退场，不再长期双轨混跑
+   - 可见性、最终收口和 client-safe 披露统一
+   - 把“10000 分已解锁、但还没纳入当前主计划”的第二阶段 backlog 正式排期：
+     - `daily_info / sz_daily_info`
+     - `stk_factor_pro`
+     - `stk_surv`
+     - `stk_ah_comparison`
+     - `fx_basic / fx_daily`
+     - `fund_sales_ratio`
+     - `cb_basic / cb_daily / cb_factor_pro`
+     - `sge_basic / sge_daily`
 
-- 更长窗口和更多日期上的 promotion calibration / external review
+   原则不是“多接几个接口”，而是：
+   - 优先把剩余接口真正下沉到 `briefing / scan / stock_analysis / stock_pick / etf_pick / fund_pick / risk`
+   - 新主链接稳后，顺手退掉被覆盖的旧实现，不保留两套长期平行低质量路径
+   - 每接一层都明确 `source / as_of / fallback / point-in-time / client-safe disclosure`
 
-详细合同见 [docs/plans/strategy.md](./docs/plans/strategy.md)。
+   专项路线见 [docs/plans/tushare_10000.md](./docs/plans/tushare_10000.md)。
 
-### 2. `policy` v2
+### P1 持续研究主线
 
-主方向：
+1. `事件消化与研究理解`
+   把财报 / 公告 / 政策 / 交易所 / IR / 媒体报道这类情报，从“抓到”推进到“解释改变了什么”。
+2. `研究记忆与 thesis ledger`
+   让系统稳定回答“上次怎么看、这次什么变了、观点是否升级/降级”。
+3. `连续跟踪与监控`
+   继续补观察名单、事件日历、复查队列、旧稿状态和 thesis 触发器。
+4. `strategy` 下沉为后台置信度层
+   把历史验证状态、退化提醒和排序置信度继续压进 `pick / analysis / briefing / portfolio`。
+5. `组合联动与置信度收敛`
+   继续把单篇判断映射到主题重复度、风格暴露、建议冲突和组合优先级。
 
-- 更稳的长文 / 扫描件抽取
-- 更细的 taxonomy
-- 更强的事实 / 推断 / 待确认分层
+### P2 平台级主线
 
-### 3. proxy signals 收口
+1. `policy` v2
+2. proxy signals repo-wide 收口
+3. `scheduler` v2
+4. 校准与学习
+5. 外审能力扩展
 
-继续把 `social_sentiment / global_flow` 的：
+## 阶段快照
 
-- confidence
-- limitation
-- downgrade impact
+| 主题 | 当前状态 | 下一步 |
+| --- | --- | --- |
+| 推荐 / 分析主链 | 成熟 | 继续退已覆盖的 AKShare 旧链，收口 `index_weekly / index_monthly` 的周/月线写法、披露和最终可见性，并把第二阶段 Tushare backlog 纳入正式排期 |
+| editor / theme playbook | v1 收口 | 继续扩大主题卡和首页表达稳定性 |
+| `strategy` | 第一版闭环 | 继续做更长窗口 calibration 和后台下沉 |
+| 强因子工程 | v1 收口 | 进入维护，剩余问题并回 `strategy / calibration` |
+| `policy` | 部分完成 | 强化抽取、表格和 taxonomy |
+| `scheduler` | v1 | 做持久化和运维可见性 |
 
-统一传到：
+## 当前不追求什么
 
-- pick 输出
-- final manifest
-- `review_audit`
-- 更多需要 point-in-time 披露的回溯链路
-
-### 4. `scheduler` v2
-
-补基础设施而不是再加新任务类型：
-
-- run history
-- failure visibility
-- durable state
-
-### 5. 外审能力扩展
-
-外审默认要同时过：
-
-1. 合同审
-2. 发散审
-3. round-based 收敛
-4. finding 固化到 prompt / rule / test / backlog 至少一层
-
-主线继续围绕：
-
-- evidence audit
-- point-in-time audit
-- regression diff audit
-- experiment statistics audit
-- attribution audit
-
-### 6. 校准与学习
-
-当前重点不是继续堆新因子，而是：
-
-- setup bucket 复盘
-- 因子阈值再校准
-- 长期月度学习闭环
-
-### 已收口专题：强因子工程
-
-阶段 J 已按 `v1 已收口` 管理，不再作为主开发主线。
-
-剩余长尾迁移如下：
-
-- `J-4 EPS 修正` 的可靠 point-in-time 源接入 -> 阶段 E / I
-- `J-2 政策事件窗` 的 lag / visibility fixture -> 阶段 E / I
-- setup / breadth / 质量阈值再校准 -> 阶段 F
-
-详细合同见 [docs/plans/strong_factors.md](./docs/plans/strong_factors.md)。
+- 不默认扩新报告品类
+- 不把 `strategy` 做成独立大产品
+- 不把 proxy 信号包装成原始全量 feed
+- 不为了产出 final 而削弱 `release_check / report_guard`
 
 ## 默认快路径
 
@@ -134,11 +103,11 @@
 
 详细规则见 [docs/process/feature_fast_loop.md](./docs/process/feature_fast_loop.md)。
 
-## 详细文档入口
+## 详细信息去哪看
 
-- 默认任务读法：[docs/context_map.md](./docs/context_map.md)
-- 当前状态与 backlog：[docs/status_snapshot.md](./docs/status_snapshot.md)
+- 当前成熟度与 backlog：[docs/status_snapshot.md](./docs/status_snapshot.md)
+- 默认读法：[docs/context_map.md](./docs/context_map.md)
 - YAML 地图：[config/README.md](./config/README.md)
 - `strategy` 专题：[docs/plans/strategy.md](./docs/plans/strategy.md)
 - 强因子专题：[docs/plans/strong_factors.md](./docs/plans/strong_factors.md)
-- 详细变更归档：[docs/history/2026-03.md](./docs/history/2026-03.md)
+- 详细历史：[docs/history/2026-04.md](./docs/history/2026-04.md)、[docs/history/2026-03.md](./docs/history/2026-03.md)

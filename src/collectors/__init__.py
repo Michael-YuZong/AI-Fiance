@@ -5,6 +5,8 @@ from .commodity import CommodityCollector
 from .events import EventsCollector
 from .fund_profile import FundProfileCollector
 from .global_flow import GlobalFlowCollector
+from .industry_index import IndustryIndexCollector
+from .index_topic import IndexTopicCollector
 from .macro_cn import ChinaMacroCollector
 from .macro_us import USMacroCollector
 from .market_cn import ChinaMarketCollector
@@ -35,5 +37,7 @@ __all__ = [
     "NewsCollector",
     "SocialSentimentCollector",
     "GlobalFlowCollector",
+    "IndustryIndexCollector",
+    "IndexTopicCollector",
     "ValuationCollector",
 ]

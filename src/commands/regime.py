@@ -22,7 +22,7 @@ def main() -> None:
     args = build_parser().parse_args()
     config = load_config(args.config or None)
     china_macro = load_china_macro_snapshot(config)
-    global_proxy = load_global_proxy_snapshot()
+    global_proxy = load_global_proxy_snapshot(config)
     regime_inputs = derive_regime_inputs(china_macro, global_proxy)
     detector = RegimeDetector(regime_inputs)
     result = detector.detect_regime()

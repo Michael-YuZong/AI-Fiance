@@ -111,6 +111,14 @@
   `validate / experiment` 成稿现在会固定先给 `这套策略是什么 / 这次到底看出来什么 / 执行摘要` 三段；
   先解释它是不是具体策略、这份报告到底在回答什么、现在能不能用/能不能切换，再往下展开 gate、fixture 和样本细节；
   `report_guard / release_check` 也已把这三段收成正式合同，避免报告重新退回只剩治理词和表格。
+- `strategy headline verdict` v1
+  `validate / experiment` 现在会再前置一层 `当前结论`；
+  直接把 `当前状态 / 可用性或切换建议 / 一句话 / 最关键原因 / 最实际动作` 压成第一张表；
+  这样用户不需要先读完整个 strategy 定义和 gate，第一屏就能知道“现在到底能不能用”。
+- `strategy action card` v1
+  `validate / experiment` 现在会在最前面新增 `动作卡片`；
+  用 blockquote 卡片直接写出大标题 verdict，例如 `观察中｜暂不可用`、`先别谈切换｜不可切换`；
+  首屏还会固定给 `当前动作`，把下一步从后文表格里提到最前面。
 
 还没完成：
 

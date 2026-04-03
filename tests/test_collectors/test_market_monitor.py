@@ -9,7 +9,7 @@ from src.collectors.market_monitor import MarketMonitorCollector
 
 
 def test_market_monitor_skips_overly_stale_cache_on_refresh_failure(monkeypatch) -> None:
-    collector = MarketMonitorCollector({"market_monitor_max_stale_hours": 12})
+    collector = MarketMonitorCollector({"market_monitor_max_stale_hours": 12, "enable_market_monitor_runtime": True})
     stale_frame = pd.DataFrame({"Close": [80.0, 82.0, 86.0]})
 
     monkeypatch.setattr(
@@ -31,7 +31,7 @@ def test_market_monitor_skips_overly_stale_cache_on_refresh_failure(monkeypatch)
 
 
 def test_market_monitor_recent_stale_cache_keeps_disclosure(monkeypatch) -> None:
-    collector = MarketMonitorCollector({"market_monitor_max_stale_hours": 12})
+    collector = MarketMonitorCollector({"market_monitor_max_stale_hours": 12, "enable_market_monitor_runtime": True})
     stale_frame = pd.DataFrame({"Close": [80.0, 82.0, 86.0]})
 
     monkeypatch.setattr(
@@ -58,7 +58,13 @@ def test_market_monitor_recent_stale_cache_keeps_disclosure(monkeypatch) -> None
 
 
 def test_market_monitor_timeout_falls_back_to_recent_stale_cache(monkeypatch) -> None:
-    collector = MarketMonitorCollector({"market_monitor_max_stale_hours": 12, "market_monitor_fetch_timeout_seconds": 1})
+    collector = MarketMonitorCollector(
+        {
+            "market_monitor_max_stale_hours": 12,
+            "market_monitor_fetch_timeout_seconds": 1,
+            "enable_market_monitor_runtime": True,
+        }
+    )
     stale_frame = pd.DataFrame({"Close": [80.0, 82.0, 86.0]})
 
     monkeypatch.setattr(
@@ -81,3 +87,9 @@ def test_market_monitor_timeout_falls_back_to_recent_stale_cache(monkeypatch) ->
     assert len(rows) == 1
     assert rows[0]["source_status"] == "stale_cache"
     assert "实时刷新超时" in rows[0]["data_warning"]
+
+
+def test_market_monitor_disabled_by_default_returns_empty() -> None:
+    collector = MarketMonitorCollector({})
+
+    assert collector.collect() == []

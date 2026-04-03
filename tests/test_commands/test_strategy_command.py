@@ -292,6 +292,17 @@ def test_strategy_validate_main_renders_summary(monkeypatch, capsys) -> None:
 def test_strategy_validate_main_exports_client_final(monkeypatch, capsys, tmp_path: Path) -> None:
     called = {}
 
+    def _fake_finalize_client_markdown(**kwargs):
+        release_checker = kwargs.get("release_checker")
+        if release_checker:
+            release_checker(kwargs["client_markdown"], kwargs["detail_markdown"])
+        called["bundle_kwargs"] = kwargs
+        return {
+            "markdown": Path(kwargs["markdown_path"]),
+            "html": Path(kwargs["markdown_path"]).with_suffix(".html"),
+            "pdf": Path(kwargs["markdown_path"]).with_suffix(".pdf"),
+        }
+
     class _Repo:
         def list_predictions(self, **kwargs):
             return [{"prediction_id": "pred_1", "symbol": "600519"}]
@@ -346,19 +357,10 @@ def test_strategy_validate_main_exports_client_final(monkeypatch, capsys, tmp_pa
     )
     monkeypatch.setattr(
         strategy_module,
-        "export_reviewed_markdown_bundle",
-        lambda **kwargs: called.update({"bundle_kwargs": kwargs}) or {
-            "markdown": Path(kwargs["markdown_path"]),
-            "html": Path(kwargs["markdown_path"]).with_suffix(".html"),
-            "pdf": Path(kwargs["markdown_path"]).with_suffix(".pdf"),
-        },
+        "finalize_client_markdown",
+        _fake_finalize_client_markdown,
     )
     monkeypatch.setattr(strategy_module, "resolve_project_path", lambda value: tmp_path / value)
-    monkeypatch.setattr(
-        strategy_module,
-        "review_path_for",
-        lambda markdown_path: tmp_path / "reports/reviews/strategy/validate/final" / f"{Path(markdown_path).stem}__external_review.md",
-    )
     monkeypatch.setattr(sys, "argv", ["strategy", "validate", "--symbol", "600519", "--client-final"])
 
     strategy_module.main()
@@ -368,9 +370,12 @@ def test_strategy_validate_main_exports_client_final(monkeypatch, capsys, tmp_pa
     assert called["checked_type"] == "strategy"
     assert called["bundle_kwargs"]["report_type"] == "strategy"
     assert called["bundle_kwargs"]["markdown_path"].name.startswith("strategy_validate_600519_")
-    assert "detail_source" in called["bundle_kwargs"]["extra_manifest"]
+    assert called["bundle_kwargs"]["text_sidecars"]["editor_prompt"][0].name.endswith("editor_prompt.md")
+    assert called["bundle_kwargs"]["json_sidecars"]["editor_payload"][0].name.endswith("editor_payload.json")
     assert "正式成稿" in called["checked_markdown"]
     assert "已回写账本" not in called["checked_markdown"]
+    assert "## 动作卡片" in called["checked_markdown"]
+    assert "## 当前结论" in called["checked_markdown"]
     assert "## 这套策略是什么" in called["checked_markdown"]
     assert "## 这次到底看出来什么" in called["checked_markdown"]
     assert "[client pdf]" in captured.out
@@ -453,6 +458,17 @@ def test_strategy_experiment_main_renders_summary(monkeypatch, capsys) -> None:
 def test_strategy_experiment_main_exports_client_final(monkeypatch, capsys, tmp_path: Path) -> None:
     called = {}
 
+    def _fake_finalize_client_markdown(**kwargs):
+        release_checker = kwargs.get("release_checker")
+        if release_checker:
+            release_checker(kwargs["client_markdown"], kwargs["detail_markdown"])
+        called["bundle_kwargs"] = kwargs
+        return {
+            "markdown": Path(kwargs["markdown_path"]),
+            "html": Path(kwargs["markdown_path"]).with_suffix(".html"),
+            "pdf": Path(kwargs["markdown_path"]).with_suffix(".pdf"),
+        }
+
     monkeypatch.setattr(strategy_module, "load_config", lambda _path=None: {})
     monkeypatch.setattr(
         strategy_module,
@@ -490,19 +506,10 @@ def test_strategy_experiment_main_exports_client_final(monkeypatch, capsys, tmp_
     )
     monkeypatch.setattr(
         strategy_module,
-        "export_reviewed_markdown_bundle",
-        lambda **kwargs: called.update({"bundle_kwargs": kwargs}) or {
-            "markdown": Path(kwargs["markdown_path"]),
-            "html": Path(kwargs["markdown_path"]).with_suffix(".html"),
-            "pdf": Path(kwargs["markdown_path"]).with_suffix(".pdf"),
-        },
+        "finalize_client_markdown",
+        _fake_finalize_client_markdown,
     )
     monkeypatch.setattr(strategy_module, "resolve_project_path", lambda value: tmp_path / value)
-    monkeypatch.setattr(
-        strategy_module,
-        "review_path_for",
-        lambda markdown_path: tmp_path / "reports/reviews/strategy/experiment/final" / f"{Path(markdown_path).stem}__external_review.md",
-    )
     monkeypatch.setattr(sys, "argv", ["strategy", "experiment", "600519", "--variants", "baseline,momentum_tilt", "--client-final"])
 
     strategy_module.main()
@@ -513,6 +520,10 @@ def test_strategy_experiment_main_exports_client_final(monkeypatch, capsys, tmp_
     assert called["bundle_kwargs"]["report_type"] == "strategy"
     assert called["bundle_kwargs"]["markdown_path"].name.startswith("strategy_experiment_600519_")
     assert called["bundle_kwargs"]["extra_manifest"]["variants"] == ["baseline", "momentum_tilt"]
+    assert called["bundle_kwargs"]["text_sidecars"]["editor_prompt"][0].name.endswith("editor_prompt.md")
+    assert called["bundle_kwargs"]["json_sidecars"]["editor_payload"][0].name.endswith("editor_payload.json")
+    assert "## 动作卡片" in called["checked_markdown"]
+    assert "## 当前结论" in called["checked_markdown"]
     assert "## 这套策略是什么" in called["checked_markdown"]
     assert "## 这次到底看出来什么" in called["checked_markdown"]
     assert "[client pdf]" in captured.out
@@ -554,25 +565,24 @@ def test_strategy_validate_main_scaffolds_review_when_missing(monkeypatch, tmp_p
     )
     monkeypatch.setattr(strategy_module, "StrategyRepository", lambda: _Repo())
     monkeypatch.setattr(strategy_module, "check_generic_client_report", lambda markdown, report_type, source_text="": [])
-    monkeypatch.setattr(
-        strategy_module,
-        "export_reviewed_markdown_bundle",
-        lambda **kwargs: (_ for _ in ()).throw(  # pragma: no cover - controlled failure branch
-            strategy_module.ReportGuardError("外部评审尚未通过")
-        ),
-    )
     monkeypatch.setattr(strategy_module, "resolve_project_path", lambda value: tmp_path / value)
+    review_path = tmp_path / "reports/reviews/strategy/validate/final/strategy_validate_600519_2026-03-23_client_final__external_review.md"
+
+    def _fake_finalize_client_markdown(**kwargs):
+        review_path.parent.mkdir(parents=True, exist_ok=True)
+        review_path.write_text("pending_structural_reviewer", encoding="utf-8")
+        raise SystemExit("已生成外审模板")
+
     monkeypatch.setattr(
         strategy_module,
-        "review_path_for",
-        lambda markdown_path: tmp_path / "reports/reviews/strategy/validate/final" / f"{Path(markdown_path).stem}__external_review.md",
+        "finalize_client_markdown",
+        _fake_finalize_client_markdown,
     )
     monkeypatch.setattr(sys, "argv", ["strategy", "validate", "--symbol", "600519", "--client-final"])
 
     with pytest.raises(SystemExit, match="已生成外审模板"):
         strategy_module.main()
 
-    review_path = tmp_path / "reports/reviews/strategy/validate/final/strategy_validate_600519_2026-03-23_client_final__external_review.md"
     assert review_path.exists()
     assert "pending_structural_reviewer" in review_path.read_text(encoding="utf-8")
 

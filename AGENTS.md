@@ -1,5 +1,17 @@
 # AI-Finance Agent Handoff
 
+这份文件只保留：
+
+1. 默认读法
+2. 共享工作规则
+3. 当前主线与成熟度
+4. 常用命令 / guardrail
+
+逐日变更记录不再堆在这里；详细 history 统一放到：
+
+- [docs/history/2026-04.md](./docs/history/2026-04.md)
+- [docs/history/2026-03.md](./docs/history/2026-03.md)
+
 ## Default Read Order
 
 不要一开工就扫完整个仓库。
@@ -14,10 +26,11 @@
 只有任务相关时再继续读：
 
 - 配置问题：看 [config/README.md](./config/README.md)
+- `Tushare 10000 分` 接口升级：看 [docs/plans/tushare_10000.md](./docs/plans/tushare_10000.md)
 - `strategy`：看 [docs/plans/strategy.md](./docs/plans/strategy.md)
 - 强因子维护：看 [docs/plans/strong_factors.md](./docs/plans/strong_factors.md)
-- 更完整的当前状态：看 [docs/status_snapshot.md](./docs/status_snapshot.md)
-- 更细历史变化：看 [docs/history/2026-03.md](./docs/history/2026-03.md)
+- 当前状态：看 [docs/status_snapshot.md](./docs/status_snapshot.md)
+- 更细历史变化：先看 [docs/history/2026-04.md](./docs/history/2026-04.md)，再看 [docs/history/2026-03.md](./docs/history/2026-03.md)
 - 外审规则或 prompt：先看 [docs/prompts/README.md](./docs/prompts/README.md)
 
 ## Repo Identity
@@ -44,6 +57,37 @@
    新功能先按 [docs/process/feature_fast_loop.md](./docs/process/feature_fast_loop.md) 做 `patch-level -> family-level -> stage-level` 分层推进，不要每个小 patch 都重跑 today final 和外审。
 8. 成稿任务不要停在“缺外审文件”
    只要当前任务会产出 `final / client_final` 或可独立交付的研究型 Markdown，就不要只汇报“没有 external review”；应继续补 review 记录并推进到收敛，除非被真实外部依赖或用户明确暂停阻断。
+9. 热点主题 `催化 0 分` 先排除漏抓
+   如果当前是 `live` 模式，但热点主题 / 高讨论度方向出现 `直连新闻 0 条`、`coverage.diagnosis = suspected_search_gap` 或明显不符合常识的 `0` 结果，默认先按“待 AI 联网复核”处理，不要直接写成零催化或利空。
+10. 对外优先用“情报”口径
+   财报 / 公告 / 政策 / 交易所 / IR / 媒体报道都属于情报；“新闻”只是其中一种来源。底层类名可暂保留，但用户可见说明、首页和摘要应优先写“情报链 / 情报属性 / 关键情报”。
+11. 连续可收口问题默认一次性收完
+   如果同一 command / processor / renderer / helper 家族里还有相邻、低风险、下一步已明确的收口项，默认继续一起修完、补测试并做真实 spot check，不要每修一个小点就停下来再问；只有在合同取舍明显、用户体验 tradeoff 大、或真实外部依赖阻塞时才暂停确认。
+12. `fresh but empty` 也算坏合同
+   对 `briefing / market_drivers / market_pulse` 这类盘面情报源，`frame` 为空时不能继续标成 fresh；应显式降成缺失/阻塞，并让下游走合成主题信号或其他降级路径。
+13. 任何开发都不能静默丢功能
+   不只是接口升级；任何开发改动默认都要检查同家族成熟稿有没有把旧的高价值块吞掉。至少对 `stock_pick observe-only`、`ETF/基金画像`、`持仓/行业暴露` 这类已形成价值的模块，补 `release_check / report_guard / 回归测试` 中的保功能门禁。只有在明确决定重构或下掉某块功能、并同步更新文档、门禁和测试时，才允许移除。
+
+## Editor Stage Rules
+
+对研究型成稿，默认顺序是：
+
+1. 结构化底稿 / 规则版成稿
+2. `editor_payload / editor_prompt`
+3. 独立 `editor subagent`
+4. `Pass A 结构审`
+5. `Pass B 发散审`
+6. `final`
+
+执行要求：
+
+- `editor` 默认由独立 subagent 执行，不要由主作者在同一上下文里顺手二改。
+- `editor subagent` 只能改正文表达和首页判断层，不能补新事实、不能改推荐等级、不能把观察稿写成推荐稿。
+- 结构审和发散审必须审的是 editor 改后的版本，不是规则版底稿。
+- 当前协作环境里，`subagent` 是默认主路径；API/key 调用只作为脱离当前会话自动化运行时的后备。
+- 如果命令已经能产出 `editor_payload.json + editor_prompt.md`，后续接手 agent 默认优先复用这两个侧车，而不是从 final Markdown 反推首页逻辑。
+- 如果 `催化面` 被标成 `suspected_search_gap / 待 AI 联网复核`，优先读取 `catalyst_web_review_payload.json + catalyst_web_review_prompt.md + catalyst_web_review.md`，由独立 agent 做联网复核。
+- 如果正式稿 sidecar 已落 `catalyst_web_review.md`，它就不是可选附件；在 `待补` 模板未被独立 agent 填完前，`report_guard` 应直接拦 final。
 
 ## Progressive Disclosure Rules
 
@@ -95,101 +139,62 @@
 
 ## Current Priority Backlog
 
-1. `strategy` fixtures and governance
-   已有 `predict / list / replay / validate / attribute / experiment`；`benchmark fixture`、`lag / visibility fixture`、`overlap fixture`、`promotion / rollback gate`、`out-of-sample / chronological cohort validate`、`cross-sectional validate`、`multi-symbol replay / experiment`、`config-driven batch symbol source / cohort recipe` 已补成结构化合同，下一步是更长窗口上的 promotion calibration / external review。
-2. `policy` v2
+1. `Tushare 10000 分` 数据源升级与旧接口替换
+   优先把新解锁的高价值接口接进 mature 主链，并替换旧的低配或不稳定路径。股票链 `ths_member / st / stk_high_shock / stk_alert / cyq_perf / cyq_chips / 个股资金流向 / 两融 / 龙虎榜-竞价-涨跌停边界 / broker_recommend / e互动` 已打通到 `scan / stock_analysis / stock_pick / briefing`；ETF 链 `etf_basic / etf_index / etf_share_size / fund_factor_pro / idx_factor_pro` 也已进入主路径。接下来默认优先做被覆盖旧链的系统性退场、`index_weekly / index_monthly` 这类已接 helper 的成熟消费，以及第二阶段 backlog（`daily_info / sz_daily_info / stk_factor_pro / stk_surv / stk_ah_comparison / fx_basic / fx_daily / fund_sales_ratio / cb_basic / cb_daily / cb_factor_pro / sge_basic / sge_daily`）的正式排期。专项路线见 [docs/plans/tushare_10000.md](./docs/plans/tushare_10000.md)。
+2. 事件消化与研究理解
+   把财报 / 公告 / 政策 / 交易所 / IR / 媒体报道这类情报从“抓到”推进到“解释”；优先补事件分层、重要性排序、共享解释层，以及 `财报摘要 / 公告类型 / 政策影响层 + impact_summary + thesis_scope` 的正式合同。
+3. 研究记忆与 thesis ledger
+   让系统能持续写清“上次为什么看、这次什么变了、观点是否升级/降级”，不再每篇都像从零开始。
+4. `strategy` 下沉为后台置信度层
+   当前不是继续扩独立报告存在感，而是把它压成 `pick / analysis` 背后的历史验证状态、退化提醒和排序置信度。
+5. 连续跟踪与监控
+   做观察名单、触发器命中、事件日历、旧稿复查和 thesis 变更提醒，把“点状出稿”推进成“连续研究”。
+6. 组合联动与研究置信度收敛
+   继续把单篇判断映射到主题重复度、风格暴露、建议冲突和组合优先级。
+7. `policy` v2
    继续提升扫描版、表格重 PDF/OFD 的抽取和 taxonomy。
-3. Proxy signals
-   把代理置信度、覆盖、限制和降级影响继续统一到更多 final / manifest / audit。
-4. `scheduler` v2
-   做持久化 run history、失败可见性和运维状态。
-5. 校准与学习
-   深化 setup bucket、归因、长期月度学习闭环。
-6. 外审能力扩展
-   在现有 `review_ledger / review_audit` 上继续扩 evidence / point-in-time / regression / attribution 审计。
-7. 强因子进入维护
-   阶段 J 按 `v1 已收口` 管理，剩余 point-in-time / lag / calibration 归入其他 backlog。
+8. proxy signals repo-wide 收口
+9. `scheduler` v2
+10. 校准与学习
+11. 外审能力扩展
+12. 强因子维护模式
 
-## Recent Changes Summary
+## Recent Contract Summary
 
-- 2026-03-24
-  `stock_analysis` 的种业个股外审把一个共享边界正式收口：以后做 A 股单标的发散审，必须显式拆开 `宏观背景 / 主题逻辑 / 个股直接催化 / 正式动作触发` 四层，不能再把宏观晨报或行业早报冒充成 `龙头公告/业绩` 或个股级直接催化；对应 lesson 和 prompt 已更新，processor 侧也已锁住只有命中个股级 leader items 才能给 `龙头公告/业绩` 加分。
-- 2026-03-23
-  `scan / stock_analysis / stock_pick / etf_pick / fund_pick / briefing` 的 `client-final` 导出链已开始走共享 final runner：现在统一复用 `detail 写盘 -> release_check -> review guard -> markdown/html/pdf/manifest 导出` 这套编排，不再让各命令各写一套 `export_reviewed_markdown_bundle` 流程；后续继续收 timeout、review scaffold 和 artifact logging 时，只需要改共享层。
-- 2026-03-23
-  共享 final runner 现在也会处理 review scaffold / auto-close：缺 `__external_review.md` 时会先自动补首轮 scaffold；如果现有 review 正文三段都已无 actionable finding、只是还没形成 round-based PASS 闭环，会自动归档当前 round 并补一轮 `PASS` 收敛记录，减少正式稿继续卡在 review 文本细节上。
-- 2026-03-23
-  `Tushare` 已补成 repo 级超时合同：`BaseCollector._tushare_pro()` 现在会按 `tushare_timeout_seconds` 统一初始化客户端超时，避免只有 `briefing` 外层做线程超时兜底。同时 client HTML 表格已修正 markdown 转义 `\|` 的解析，`证据时点与来源` 里的 `数据覆盖` 不会再被错误拆成多列。
-- 2026-03-23
-  `strategy validate / experiment` 的正式稿现在会固定前置 `这套策略是什么 / 这次到底看出来什么 / 执行摘要`：先解释它是不是具体策略、这份报告到底在回答什么、现在能不能用/能不能切换，再往下展开 fixture、gate 和样本细节；`report_guard / release_check` 也已把这三段收成正式合同。
-- 2026-03-23
-  `strategy validate / experiment` 现在已接入正式 `client-final` 交付链：命令层承认 `--client-final`，会走 `report_guard / release_check / client_export` 产出 `markdown + html + pdf + release_manifest`；正式成稿当前只承认这两类，不把 `predict / replay / attribute` 包装成对外交付稿。若缺 `__external_review.md`，命令会先自动在 `reports/reviews/strategy/...` 下生成首轮 BLOCKED scaffold，再要求补齐双 reviewer 外审。
-- 2026-03-23
-  `etf_pick / fund_pick` 的正式交付口径继续收紧：如果排第一的标的本身仍是 `观察 / 暂不出手 / 持有优于追高`，交付层现在会直接退成 `观察优先稿`，不会再把 `推荐` 标题和 `观察` 动作混写；`做多` 这类方向偏向也会和 `当前建议` 分开写，避免出现 `做多；观察为主` 这种误导动作。
-- 2026-03-23
-  `ETF / 基金` pick 的 `筹码结构` 已明确降成展示层 `辅助项`，不再在客户稿里渲染成会干扰判断的硬分数；release_check 和外审 prompt 也会把“辅助项硬打分”“本机绝对图片路径”“持仓名称空白”“模板句重复过多”当成正式阻塞或高优先级 finding。
-- 2026-03-22
-  `strategy` 的 `predict / replay / validate / attribute / experiment` 输出已补成更像研究稿的结构：现在顶部会固定给 `执行摘要`，先把“当前判断、这意味着什么、最主要问题、下一步”讲清楚，再往下展开 fixture、表格和账本细节，不再一上来就是偏调试口径的 ledger dump。
-- 2026-03-22
-  `strategy` 已补上第一版 `config-driven batch symbol source / cohort recipe`：`replay / experiment` 现在支持直接从 `config/strategy_batches.yaml` 读取 batch source 和 cohort recipe；命令层已承认 `--batch-source / --cohort-recipe`，也支持不手输 symbols 直接跑多标的批次；summary 会显式展示 `Batch Source / Cohort Recipe`，而 replay row 里的 `asset_reentry_gap_days` 也会真实回写，不再只是 CLI 表面参数。
-- 2026-03-22
-  `strategy` 已补上第一版 `overlap fixture`：`predict / replay / validate / experiment` 现在会显式披露样本窗口、required gap 和 primary window overlap；如果 replay 样本彼此重叠，会把这层边界写进 summary / notes，并给出 `overlap_fixture_blocked` 标记，不再只剩 `overlap_policy` 这条静态字符串。
-- 2026-03-22
-  `strategy` 已补上第一版 `lag / visibility fixture`：`predict` 现在会把因子层的 `lag / visibility / point-in-time` 就绪状态汇总成独立 fixture 并显式展示；如果可用的 point-in-time strategy candidate 因子为 0，会直接退回 `no_prediction`。`replay / validate / experiment` 也会带出这层 fixture，但对当前 `price-only replay` 会明确标记为 `not_applicable`。
-- 2026-03-22
-  `scan` 观察型成稿现在会把“方向没坏但还不能动”的信息前置写清：`无信号` 这类标题在中期逻辑仍在时会自动软化成 `中期逻辑未坏，短线暂无信号`，`当前判断` 会多写一行 `为什么还不升级` 和 `升级条件`，`催化面` 也会拆成 `直接催化 / 舆情环境` 两层，不再把纯热度误写成已经形成直接催化；`季节/日历` 样本很薄时会显式降成辅助参考口径。
-- 2026-03-22
-  上面这套观察型口径现在已经下沉到 `stock_pick / etf_pick / fund_pick`：ETF/基金 pick 的 `dimension_rows` 不再各写各的旧摘要，而是复用共享的维度 summary；观察稿会显式写 `为什么还不升级 / 升级条件`；个股观察稿和代表样本 appendix 的 `催化拆解` 也开始固定先拆 `直接催化 / 舆情环境` 两层。
-- 2026-03-22
-  外审 prompt 现在要求像投研机构一样补一轮 `逐段/逐节审稿`：不只做 checklist 和框架外发散，还要按成稿顺序逐段判断“这段在解决什么问题、有没有真的解决、是否被后文表格推翻”。同时把 `ETF/基金 标签-基准-持仓一致性`、`观察稿升级触发器`、`nan/检查符号误导` 固化成长期审稿 lesson。
-- 2026-03-22
-  `scan / stock_pick / etf_pick / fund_pick` 的客户稿开头现在统一补了高密度 `执行摘要 / 今日动作摘要`：会先给 `当前建议 / 置信度 / 适用周期 / 空仓怎么做 / 持仓怎么做 / 首次仓位 / 主要利好利空`，不再把动作、仓位和风险拆散到后文多个章节里。
-- 2026-03-22
-  `scan` 的港股科技 ETF 分析链路已补齐三条硬合同：`宏观敏感度` 现在按自身满分做 summary 阈值，不再把 `30/40` 误写成逆风；命中精确基准但缺 PE 时，不再回退到不相干主题指数，而是优先保留精确基准并在可用时回填 `前五大重仓加权PE`；验证点里的 `关键支撑` 现在只允许取低于现价的真实支撑位，避免把上方均线误写成支撑。
-- 2026-03-21
-  `stock_pick / scan / stock_analysis` 现在会显式写出 `相对强弱基准`；同时 `历史相似样本` 在 `95%区间` 明显跨过中性线或样本质量偏弱时，会自动退成附注口径，不再默认占用完整验证篇幅。
-- 2026-03-21
-  `stock_pick` 的催化面不再把 `高管/股东净减持` 这类负面结构化事件误记成正向结构化催化；这类事件现在只允许作为负面/谨慎信号处理。
-- 2026-03-21
-  `stock_pick / scan / stock_analysis` 的催化面已补成 `A股个股` 的行业/主题差异化权重矩阵：通用行业画像现在会按 `科技 / 军工 / 能源 / 高股息 / 医药 / 消费` 重配催化子项上限，`半导体 / 电网 / 黄金 / 有色` 这类主题画像还能再做细分覆盖；当前仍明确不扩到港美股。
-- 2026-03-21
-  `stock_pick` 客户稿如果当天没有任何达到动作阈值的候选，现在会显式退成观察稿，不再继续输出 `推荐 / 核心主线 / 低门槛可执行` 这类容易把观察名单伪装成交易建议的包装。
-- 2026-03-21
-  `briefing market` 已补成结构化大盘分析：现在会固定分析 `上证指数 / 中证核心(沪深300) / 创业板指`，显式给出 `均线排列`、`周线/月线 MACD`、`市场宽度`、`成交量能`、`情绪极端` 和 `板块轮动`，不再只停留在概览表和零散行业描述。
-- 2026-03-21
-  `stock_pick / etf_pick` 的前置候选池不再是单纯按成交额 `head()` 截断；现在会在同样的候选上限内按行业保广度，减少单一热门方向把候选池挤满。
-- 2026-03-21
-  研究型 `final` 如果只卡在缺 `__external_review.md`，主执行者现在应继续把预期路径上的外审记录补齐，而不是停在“缺文件”汇报。
-- 2026-03-22
-  主执行者对用户的默认交付口径进一步收紧：用户明确要看 `final` 时，不要把“缺 `__external_review.md`”当成对用户可见结果；默认动作是先补外审、收敛、再只给正式 `final`。如果这轮先跑的是 sector/theme 过滤稿，`final / internal` 文件名也必须保留过滤范围，不能覆盖通用全市场成稿路径。
-- 2026-03-22
-  `stock_pick` 的无动作观察稿已切到更紧凑的成稿合同：默认不再保留完整代表样本 appendix，而是改成 `观察触发器` 清单，直接前置 `为什么继续看 / 主要卡点 / 升级条件 / 关键盯盘价位`。如果是 `--sector` 过滤稿，客户稿也会显式说明“这是主题内相对排序，不是跨主题分散候选池”。
-- 2026-03-22
-  正式 `final` 的外审工作流不再允许把 `结构审 + 发散审` 混成同一个 reviewer pass。现在 prompt 路由已经拆成 `Pass A: external_financial_structural_reviewer` 和 `Pass B: external_financial_divergent_reviewer`，review 记录与 `report_guard / review_audit` 也会显式要求写出 `结构审执行者 / 发散审执行者`，且两者不能是同一个 reviewer / 子 agent。
-- 2026-03-22
-  `stock_pick` 的观察稿现在进一步把“正式动作阈值”写成贴近真实分层逻辑的解释：先说明什么情况下能从 `观察为主` 升到 `看好但暂不推荐`，再说明即使分层接近放行，只要动作栏仍是 `暂不出手 / 观察为主 / 先按观察仓`，也还不算正式动作票。
-- 2026-03-22
-  `etf_pick / fund_pick` 的观察稿也开始复用同一套“桥接句 + 正式动作阈值 + 结构化覆盖优先解释”合同：现在会先讲“方向还在，但还不是正式动作”，再把 `交付等级 / 当前结论 / 数据完整度` 如何共同决定是否可执行写清。
-- 2026-03-22
-  `strategy` 已补上第一版 `promotion / rollback gate`：`experiment` 现在会正式产出结构化 `promotion_gate`，区分 `blocked / stay_on_baseline / queue_for_next_stage`；`validate / experiment` 也都会显式给出 `rollback_gate`，区分 `blocked / hold / watchlist / rollback_candidate`，不再只给统计表和口头边界。
-- 2026-03-22
-  `strategy` 已补上第一版 `out-of-sample / chronological cohort validate`：`validate` 现在会固定切出 `development / holdout` 的 out-of-sample 对比，并显式给出 `blocked / stable / watchlist`；同时也会拆 `earliest / middle / latest` cohort，比对 latest 是否相对 earliest 退化。`experiment` 的 `promotion_gate` 也开始正式承认 variant 的 out-of-sample 状态，不再只看 aggregate 均值。
-- 2026-03-22
-  `strategy` 已补上第一版 `cross-sectional validate`：`validate` 现在会在同日多标的 cohort 足够时，显式计算 seed score 与 realized excess return 的横截面 rank correlation，以及高分组相对低分组的 spread；如果账本里还没有足够的同日多标的 cohort，会明确标记为 `blocked`，不再把单标的结果包装成横截面 rank 证明。
-- 2026-03-22
-  `strategy` 已补上第一版 `multi-symbol replay / experiment`：`replay` 现在可以一次生成多标的样本供给，并显式展示 `Symbol Coverage` 和 `Same-Day Cohorts`；`experiment` 也已经扩到多标的 cohort，`promotion_gate` 会同时承认 `out-of-sample` 和 `cross-sectional` 状态，不再只看单标的 aggregate 平均值。
-- 2026-03-21
-  `strategy` 的 `benchmark fixture` 已补成第一版结构化合同，`predict / replay / validate / experiment` 都能明确披露 benchmark 窗口、overlap、as_of 对齐和未来验证窗 readiness。
-- 2026-03-21
-  `briefing / research / retrospect` 已开始显式承认 `proxy_contract`，不会再把代理说明散落在不同段落里。
-- 2026-03-21
-  `stock_pick / etf_pick / fund_pick` 的客户稿和 final manifest 已开始正式带出 `proxy_contract`。
+这里只保留会影响默认开发判断的短摘要；逐日 log 已移到 history 文档。
 
-更细的日级变更记录见 [docs/history/2026-03.md](./docs/history/2026-03.md)。
+- 2026-04-01：情报链 v1 已收口到 mature 主链，`briefing / scan / stock_analysis / stock_pick / etf_pick / fund_pick` 都已统一到 client-safe 口径与多条相关情报合同。
+- 2026-04-01：`briefing` 已转成“情报总台”写法，优先广覆盖、多外链、多源情报，不再只靠单条 lead item。
+- 2026-04-01：`briefing` 的主情报顺序已进一步收紧为 `A股盘面/热股/观察池 > 外部新闻补充`；盘面行默认带 `信号类型 / 强弱 / 结论`，`briefing_light` 也改成国内盘面优先，避免 Reuters/Bloomberg 宏观标题继续挤掉 A 股热点。
+- 2026-04-01：`briefing / market_drivers / market_pulse` 已补第一版 freshness 合同：`industry_spot / concept_spot / hot_rank / zt_pool / strong_pool / dt_pool` 现在都会显式带 `as_of / latest_date / is_fresh`，`briefing` 只会把 fresh same-day 的 A 股盘面快照前置成“今日信号”；这类高速盘面源也已禁用抓取失败后的 stale cache 回退，避免旧盘面冒充今天结论。
+- 2026-04-01：上面这条 freshness 合同又继续收紧到“同日快盘面不复用缓存”：`industry_spot / concept_spot / hot_rank / zt_pool / strong_pool / dt_pool` 在当天默认 live fetch，不再复用盘中缓存冒充收盘后盘面；`briefing` 的 `_timed_collect` 也改成 daemon-thread timeout，避免超时降级后后台线程继续拖住 `client-final`。
+- 2026-04-01：用户把 Tushare 升到 `10000` 分后，`briefing / market_drivers` 已改成真实优先走 `ths_index + ths_daily` 的同花顺主题/行业盘面，不再默认把 `AKShare board spot` 当主链；`ths_hot` 也不再错误按 `market=A / trade_date` 调空结果，而是改成“全量拉取 -> 过滤 A 股 -> 取最新交易日 + 最新时点”的热股快照。
+- 2026-04-03：`10000` 分升级仍是 repo 级优先主线；股票专题已基本收口，ETF 主链的 `etf_share_size / fund_factor_pro / idx_factor_pro` 也已进入共享 collector + processor + renderer + guard 路径，`etf_pick / scan / compare` 已能同时写出 `跟踪指数 + 份额变化 + 场内基金技术状态 + 外部情报状态`。默认下一步优先做已被覆盖旧链的系统性退场，以及 `index_weekly / index_monthly` 的成熟消费。
+- 2026-04-02：股票链已把 `broker_recommend` 接进共享 collector，并下沉到 `scan / stock_analysis / stock_pick / briefing` 的 `卖方共识热度 / 卖方一致预期过热 / 推荐理由 / 风险提示 / 观察点`；历史月份名单现在显式按 `stale` 披露，不会再伪装成 fresh 共识升温。
+- 2026-04-02：股票链已把 `上证e互动 / 深证互动易` 接进共享 `news` collector，并下沉到 `scan / stock_analysis / stock_pick / briefing` 的 `结构化事件 / 关键证据 / 事件消化 / What Changed`；即使全局新闻走 `proxy/empty`，个股级 `e互动` 也会继续拉取，但只按“补充证据”处理，不会冒充正式公告或 same-day fresh 强催化。
+- 2026-04-01：ETF 链已开始切到 ETF 专用合同：`fund_profile` 现在会补 `etf_snapshot`，显式带 `跟踪指数 / 指数代码 / 交易所 / ETF类型 / 最新份额规模`；`scan` 与 `etf_pick` 的客户稿也已把 `基金画像 / ETF专用信息 / 持仓 / 行业暴露` 作为保功能门禁的一部分，不允许后续开发静默吞掉。
+- 2026-04-03：ETF phase 2 的 `fund_factor_pro` 已接进共享 `fund_profile` collector，并下沉到 `opportunity_engine / etf_pick / scan / client_report / opportunity_report`；客户稿里的 `场内基金技术状态` 现在会显式写出 `趋势/动能 + 日期`，`release_check` 也已补保功能门禁，后续改动不能再把这块静默吞掉。
+- 2026-04-03：ETF phase 2 的剩余缺口也已收口：`etf_share_size` 默认会拉近 7 个开盘日做两点变化，`etf_pick` 的“为什么先看它”和 `compare` 的 `ETF产品层对比` 会把 `跟踪指数 + 份额变化 + 外部情报状态` 一起写出来；`config/config.etf_pick_fast.yaml` 也改成默认保留 `light fund_profile`，不再把 ETF 产品层静默关掉。
+- 2026-04-03：`briefing / stock_pick` 的正式稿现已把 `broker_recommend` 抬到可见证据层；`e互动` 能力也已接进主链，但只在当天真实命中 IR 证据时才允许写进 final，不要为了“展示新功能”硬塞假条目。
+- 2026-04-03：`stock_analysis` 的 PDF 首屏布局已补分页：首页判断层与 `## 一句话结论` 之间默认强制打印分页，避免 PDF 首页把执行摘要挤成一团。
+- 2026-04-03：`briefing / market_event_rows` 的盘面标签已补正负过滤：负涨幅行业和概念不再被写成 `走强 / 领涨`，共享层会按 `承压` 处理。
+- 2026-04-03：`Tushare 10000 分` 计划已补出第二阶段 backlog：`daily_info / sz_daily_info / stk_factor_pro / stk_surv / stk_ah_comparison / fx_basic / fx_daily / fund_sales_ratio / cb_basic / cb_daily / cb_factor_pro / sge_basic / sge_daily` 当前都属于“已解锁、未接、也未排期”的下一批候选接口。
+- 2026-04-01：`briefing --client-final` 现在默认关闭 query-group 搜索回填，优先用 `Tushare market intelligence + 广覆盖 RSS` 完成情报补齐，避免晨报正式稿再次被搜索慢链拖住。
+- 2026-04-01：`briefing` 这套 `signal_type / signal_strength / signal_conclusion` 现已下沉到共享 `event_digest`；`scan / stock_analysis / stock_pick / etf_pick / fund_pick` 的首页 `关键新闻 / 关键证据`、正文 `事件消化` 和证据行都会显式写出“这条情报是什么、强弱如何、当前偏什么结论”，不再只贴标题。
+- 2026-04-01：`stock_pick` observe-only 信息密度已补回，重新保留 `第二批`、`低门槛继续跟踪`、`代表样本复核卡`。
+- 2026-04-02：股票链第一批 `ths_member + st / stk_high_shock / stk_alert` 已接进共享 collector 合同，并下沉到 `scan / stock_analysis / stock_pick / briefing`；这批字段默认都带 `source / as_of / fallback / disclosure`，权限失败/空表/频控时按缺失处理，不再把空结果写成 fresh 命中或“已通过”。
+- 2026-04-02：股票链第二批 `cyq_perf / cyq_chips` 已接进共享筹码快照合同，并下沉到 `scan / stock_analysis / stock_pick / briefing`；如果最新可用筹码日期不是当前交易日，就必须显式标成 `stale / 非当期`，不能把旧筹码写成当天资金确认或 fresh 命中。
+- 2026-04-02：股票链第三批已把 `moneyflow / margin_detail / top_list / top_inst / stk_auction / stk_limit / limit_list_d` 接进共享 collector 合同，并通过 `ths_member + moneyflow_ind_ths / moneyflow_cnt_ths` 做个股主题资金流代理；`scan / stock_analysis / stock_pick / briefing` 现在都会真实消费 `个股资金承接 / 两融拥挤 / 龙虎榜-竞价-涨跌停边界`，把它写进排序、推荐理由、风险提示、关键证据和事件消化。
+- 2026-04-02：上面这批股票 P1 数据默认都带 `source / as_of / latest_date / fallback / disclosure`；权限失败、空表、频控或非当期明细会显式降成 `缺失 / stale / 观察`，不再把旧两融、旧资金流或空的打板专题写成当天 fresh 命中。
+- 2026-04-02：指数/行业标准链第一批已接进共享 `industry_index` collector：`market_drivers.industry_spot` 现在优先走 `申万行业指数 -> 中信行业指数 -> ths 行业盘面 -> AKShare board`，不再让 `AKShare board spot` 充当默认行业主链；`scan / stock_analysis / stock_pick / etf_pick / briefing` 也开始直接消费 `申万/中信行业框架`，不再主要靠 `sector / chain_nodes / 板块名字符串` 模糊匹配。
+- 2026-04-02：指数专题主链第二批已接进共享 `index_topic` collector：`index_basic / index_dailybasic / index_weight / index_daily / idx_factor_pro / index_global` 现在会统一进入 `valuation / market_cn / market_overview`，并继续下沉到 `scan / stock_analysis / stock_pick / etf_pick / briefing`；这批路径默认都带 `source / as_of / is_fresh / fallback / disclosure`，不再把 `AKShare` 或 `yfinance` 写成默认指数主链。
+- 2026-03-31：`scan / etf_pick / fund_pick / stock_analysis / stock_pick` 的内部 miss 诊断语已从客户稿清掉，空情报窗口统一改成 client-safe 表达。
+- 2026-03-29：连续研究主线已从“有状态”推进到“有队列 / 有复查动作 / 有 What Changed / 有 thesis_state.v1”。
+- 2026-03-28：`strategy` 多标的 validate / experiment 已真实落到正式稿，但当前定位仍是后台置信度层，而不是独立大产品。
 
 ## Strategy Status
 
-`strategy` 现在已经有第一版闭环：
+`strategy` 当前已有第一版闭环：
 
 - `predict`
 - `list`
@@ -202,7 +207,7 @@
 
 - 只做 A 股高流动性普通股票
 - 主目标固定为 `20d_excess_return_vs_csi800_rank`
-- replay / experiment 已支持 multi-symbol cohort 供给，但仍不是全市场截面策略引擎
+- replay / experiment 已支持 multi-symbol cohort，但仍不是全市场截面策略引擎
 - experiment 只比较预定义 challenger，不允许直接反哺生产链路
 
 详细合同见 [docs/plans/strategy.md](./docs/plans/strategy.md)。
@@ -218,11 +223,6 @@
   - 合同审
   - 发散审
   - round-based 收敛
-- 只有满足收敛条件才允许停：
-  - 连续两轮无新增 P0/P1
-  - 上一轮阻塞项已关闭或降级
-  - 没有新的实质性发散问题
-  - 合理 finding 已经沉淀到 prompt / 规则 / tests / backlog 至少一层
 
 常用 prompt：
 
@@ -231,9 +231,6 @@
 - 通用收敛循环：`docs/prompts/external_review_convergence_loop.md`
 - `strategy` 计划专项：`docs/prompts/external_strategy_plan_reviewer.md`
 - 强因子计划专项：`docs/prompts/external_factor_plan_reviewer.md`
-- 可迁移 kit：`docs/review_kit/README.md`
-- ledger/index：`python -m src.commands.review_ledger`
-- governance audit：`python -m src.commands.review_audit`
 
 ## What To Run
 
@@ -274,4 +271,6 @@ pytest tests/test_storage/test_strategy_storage.py tests/test_commands/test_stra
 - 当前状态细节：[docs/status_snapshot.md](./docs/status_snapshot.md)
 - 路线图总览：[plan.md](./plan.md)
 - `strategy` 专题：[docs/plans/strategy.md](./docs/plans/strategy.md)
-- 详细变更归档：[docs/history/2026-03.md](./docs/history/2026-03.md)
+- 详细变更归档：
+  - [docs/history/2026-04.md](./docs/history/2026-04.md)
+  - [docs/history/2026-03.md](./docs/history/2026-03.md)

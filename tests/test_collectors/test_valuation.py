@@ -9,36 +9,47 @@ from src.collectors.valuation import ValuationCollector
 
 def test_valuation_index_weight_uses_index_code_candidates(monkeypatch, tmp_path):
     collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
-
-    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame:
-        assert api_name == "index_weight"
-        if kwargs.get("index_code") == "000300.SH":
-            return pd.DataFrame(
-                [
-                    {"trade_date": "20260310", "con_code": "600519.SH", "weight": 5.0, "con_name": "贵州茅台"},
-                    {"trade_date": "20260310", "con_code": "300750.SZ", "weight": 4.0, "con_name": "宁德时代"},
-                ]
-            )
-        return pd.DataFrame()
-
-    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    monkeypatch.setattr(
+        collector,
+        "_index_topic_collector",
+        lambda: type(
+            "FakeIndexTopic",
+            (),
+            {
+                "get_cn_index_constituent_weights": staticmethod(
+                    lambda index_code, top_n=10: pd.DataFrame(
+                        [
+                            {"symbol": "600519", "name": "贵州茅台", "weight": 5.0},
+                            {"symbol": "300750", "name": "宁德时代", "weight": 4.0},
+                        ]
+                    )
+                )
+            },
+        )(),
+    )
     frame = collector.get_cn_index_constituent_weights("000300", top_n=2)
     assert list(frame["symbol"]) == ["600519", "300750"]
 
 
 def test_valuation_index_snapshot_prefers_specific_theme_proxy_over_generic_keyword(monkeypatch, tmp_path):
     collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
-    frame = pd.DataFrame(
-        [
-            {"指数简称": "创科技", "指数代码": "399276", "PE滚动": 35.5},
-            {"指数简称": "人工智能精选", "指数代码": "980087", "PE滚动": 71.6},
-            {"指数简称": "创业板人工智能", "指数代码": "970070", "PE滚动": 69.1},
-        ]
+    monkeypatch.setattr(
+        collector,
+        "_index_topic_collector",
+        lambda: type(
+            "FakeIndexTopic",
+            (),
+            {
+                "get_cn_index_snapshot": staticmethod(
+                    lambda keywords: {
+                        "index_name": "人工智能精选",
+                        "display_label": "指数估值代理",
+                        "match_note": "指数主链未直接命中精确基准，当前使用最接近的主题指数代理。",
+                    }
+                )
+            },
+        )(),
     )
-
-    monkeypatch.setattr(collector, "cached_call", lambda *args, **kwargs: frame)
-    monkeypatch.setattr(collector, "_require_ak", lambda: type("AKClient", (), {"index_all_cni": object()})())
-
     snapshot = collector.get_cn_index_snapshot(["中证人工智能主题指数", "人工智能", "科技"])
     assert snapshot is not None
     assert snapshot["index_name"] == "人工智能精选"
@@ -48,24 +59,60 @@ def test_valuation_index_snapshot_prefers_specific_theme_proxy_over_generic_keyw
 
 def test_valuation_index_snapshot_keeps_exact_benchmark_without_pe_instead_of_wrong_theme_proxy(monkeypatch, tmp_path):
     collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
-    ValuationCollector._CN_INDEX_MASTER_FRAME = None
-    frame = pd.DataFrame(
-        [
-            {"指数简称": "港股通科技", "指数代码": "987008", "PE滚动": None},
-            {"指数简称": "人工智能精选", "指数代码": "980087", "PE滚动": 71.6},
-        ]
+    monkeypatch.setattr(
+        collector,
+        "_index_topic_collector",
+        lambda: type(
+            "FakeIndexTopic",
+            (),
+            {
+                "get_cn_index_snapshot": staticmethod(
+                    lambda keywords: {
+                        "index_name": "港股通科技",
+                        "match_quality": "exact_no_pe",
+                        "display_label": "真实指数估值",
+                        "match_note": "指数主链已命中基准指数，但当前缺少可用滚动PE。",
+                    }
+                )
+            },
+        )(),
     )
-
-    monkeypatch.setattr(collector, "cached_call", lambda *args, **kwargs: frame)
-    monkeypatch.setattr(collector, "_require_ak", lambda: type("AKClient", (), {"index_all_cni": object()})())
-
     snapshot = collector.get_cn_index_snapshot(["恒生港股通科技主题指数", "港股通科技", "科技"])
     assert snapshot is not None
     assert snapshot["index_name"] == "港股通科技"
     assert snapshot["match_quality"] == "exact_no_pe"
     assert snapshot["display_label"] == "真实指数估值"
     assert "缺少可用滚动PE" in snapshot["match_note"]
-    ValuationCollector._CN_INDEX_MASTER_FRAME = None
+
+
+def test_valuation_index_snapshot_blocks_wrong_theme_proxy_for_broad_benchmark(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(
+        collector,
+        "_index_topic_collector",
+        lambda: type(
+            "FakeIndexTopic",
+            (),
+            {
+                "get_cn_index_snapshot": staticmethod(
+                    lambda keywords: {
+                        "index_name": "中证A500指数",
+                        "match_quality": "benchmark_no_proxy",
+                        "display_label": "真实指数估值",
+                        "pe_ttm": None,
+                        "match_note": "指数主链未直接命中 `中证A500指数`；为避免错配，不再回退到其他主题指数代理。",
+                    }
+                )
+            },
+        )(),
+    )
+    snapshot = collector.get_cn_index_snapshot(["中证A500指数", "中证A500", "宽基"])
+
+    assert snapshot is not None
+    assert snapshot["index_name"] == "中证A500指数"
+    assert snapshot["match_quality"] == "benchmark_no_proxy"
+    assert snapshot["pe_ttm"] is None
+    assert "不再回退到其他主题指数代理" in snapshot["match_note"]
 
 
 def test_weighted_market_financial_proxies_uses_harmonic_pe(monkeypatch, tmp_path):
@@ -119,28 +166,28 @@ def test_weighted_stock_financial_proxies_include_harmonic_pe(monkeypatch, tmp_p
 
 def test_valuation_index_snapshot_reuses_process_index_master_frame(monkeypatch, tmp_path):
     collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
-    ValuationCollector._CN_INDEX_MASTER_FRAME = None
-    frame = pd.DataFrame(
-        [
-            {"指数简称": "中证光模块", "指数代码": "931160", "PE滚动": 42.5},
-        ]
-    )
     calls = {"count": 0}
+    fake_snapshot = {
+        "index_name": "中证光模块",
+        "pe_ttm": 42.5,
+    }
 
-    def fake_cached_call(*args, **kwargs):  # noqa: ANN001
+    def fake_get_cn_index_snapshot(keywords):  # noqa: ANN001
         calls["count"] += 1
-        return frame
+        return dict(fake_snapshot)
 
-    monkeypatch.setattr(collector, "cached_call", fake_cached_call)
-    monkeypatch.setattr(collector, "_require_ak", lambda: type("AKClient", (), {"index_all_cni": object()})())
+    monkeypatch.setattr(
+        collector,
+        "_index_topic_collector",
+        lambda: type("FakeIndexTopic", (), {"get_cn_index_snapshot": staticmethod(fake_get_cn_index_snapshot)})(),
+    )
 
     first = collector.get_cn_index_snapshot(["光模块"])
     second = collector.get_cn_index_snapshot(["光模块"])
 
     assert first is not None
     assert second is not None
-    assert calls["count"] == 1
-    ValuationCollector._CN_INDEX_MASTER_FRAME = None
+    assert calls["count"] == 2
 
 
 def test_valuation_etf_nav_resolves_tushare_fund_code(monkeypatch, tmp_path):
@@ -158,6 +205,49 @@ def test_valuation_etf_nav_resolves_tushare_fund_code(monkeypatch, tmp_path):
     frame = collector.get_cn_etf_nav_history("510300", days=30)
     assert not frame.empty
     assert str(frame.iloc[-1]["end_date"].date()) == "2026-03-10"
+
+
+def test_valuation_etf_nav_returns_empty_without_akshare_fallback(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame:
+        if api_name == "fund_basic":
+            return pd.DataFrame([{"ts_code": "510300.SH", "name": "沪深300ETF华泰柏瑞"}])
+        if api_name == "fund_nav":
+            assert kwargs.get("ts_code") == "510300.SH"
+            return pd.DataFrame()
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    monkeypatch.setattr(collector, "_require_ak", lambda: (_ for _ in ()).throw(AssertionError("AKShare ETF NAV fallback should not be used")))
+
+    frame = collector.get_cn_etf_nav_history("510300", days=30)
+    assert frame.empty is True
+
+
+def test_valuation_etf_scale_uses_tushare_share_size_without_akshare_fallback(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda lookback_days=21, exchange="SSE": ["20260328", "20260331"])  # noqa: ARG005
+
+    def fake_snapshot(**kwargs: object) -> pd.DataFrame:
+        assert kwargs.get("ts_code") == "510300.SH"
+        assert kwargs.get("start_date") == "20260328"
+        assert kwargs.get("end_date") == "20260331"
+        return pd.DataFrame(
+            [
+                {"ts_code": "510300.SH", "trade_date": "20260331", "total_share": 3_091_998.74, "total_size": 3_818_927.64, "exchange": "SSE"},
+                {"ts_code": "510300.SH", "trade_date": "20260328", "total_share": 3_060_100.00, "total_size": 3_800_000.00, "exchange": "SSE"},
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_etf_share_size_snapshot", fake_snapshot)
+    monkeypatch.setattr(collector, "_require_ak", lambda: (_ for _ in ()).throw(AssertionError("AKShare ETF scale fallback should not be used")))
+
+    snapshot = collector.get_cn_etf_scale("510300")
+    assert snapshot is not None
+    assert snapshot["trade_date"] == "2026-03-31"
+    assert snapshot["total_share"] == 3_091_998.74
+    assert snapshot["total_size"] == 3_818_927.64
 
 
 def test_cn_stock_financial_proxy_merges_daily_basic_into_fina_indicator(monkeypatch, tmp_path):
@@ -185,6 +275,26 @@ def test_cn_stock_financial_proxy_merges_daily_basic_into_fina_indicator(monkeyp
     assert result["roe"] == 15.0
     assert result["pe_ttm"] == 24.5
     assert result["pb"] == 3.1
+
+
+def test_cn_stock_financial_proxy_returns_daily_basic_without_akshare_fallback(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_tushare_stock_financial", lambda symbol: {})  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "_ts_daily_basic_for_stock",
+        lambda symbol: {  # noqa: ARG005
+            "pe_ttm": 24.5,
+            "pb": 3.1,
+            "ps_ttm": 2.8,
+        },
+    )
+    monkeypatch.setattr(collector, "_require_ak", lambda: (_ for _ in ()).throw(AssertionError("AKShare stock financial fallback should not be used")))
+
+    result = collector.get_cn_stock_financial_proxy("300750")
+    assert result["pe_ttm"] == 24.5
+    assert result["pb"] == 3.1
+    assert result["ps_ttm"] == 2.8
 
 
 def test_valuation_disclosure_date_normalizes_dates(monkeypatch, tmp_path):
@@ -278,3 +388,157 @@ def test_valuation_top_holders_and_pledge_normalize_fields(monkeypatch, tmp_path
     assert float_holder_rows[0]["hold_float_ratio"] == 2.3
     assert pledge_stat_rows[0]["pledge_ratio"] == 6.2
     assert pledge_detail_rows[0]["h_total_ratio"] == 50.0
+
+
+def test_cn_stock_chip_snapshot_aggregates_cyq_perf_and_cyq_chips(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda lookback_days=14, exchange="SSE": ["20260331", "20260401"])  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "_ts_cyq_perf_snapshot",
+        lambda ts_code="", start_date="", end_date="": pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "ts_code": "300308.SZ",
+                    "trade_date": "20260401",
+                    "cost_15pct": 92.0,
+                    "cost_50pct": 100.0,
+                    "cost_85pct": 109.0,
+                    "weight_avg": 101.0,
+                    "winner_rate": 0.72,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "_ts_cyq_chips_snapshot",
+        lambda ts_code="", trade_date="": pd.DataFrame(  # noqa: ARG005
+            [
+                {"ts_code": "300308.SZ", "trade_date": "20260401", "price": 99.0, "percent": 18.0},
+                {"ts_code": "300308.SZ", "trade_date": "20260401", "price": 104.0, "percent": 22.0},
+                {"ts_code": "300308.SZ", "trade_date": "20260401", "price": 111.0, "percent": 31.0},
+            ]
+        ),
+    )
+
+    snapshot = collector.get_cn_stock_chip_snapshot("300308", as_of="2026-04-01", current_price=106.0)
+
+    assert snapshot["status"] == "matched"
+    assert snapshot["diagnosis"] == "live"
+    assert snapshot["is_fresh"] is True
+    assert snapshot["source"] == "tushare.cyq_perf+tushare.cyq_chips"
+    assert snapshot["fallback"] == "none"
+    assert snapshot["winner_rate_pct"] == 72.0
+    assert snapshot["weight_avg"] == 101.0
+    assert snapshot["cost_50pct"] == 100.0
+    assert snapshot["peak_price"] == 111.0
+    assert snapshot["components"]["cyq_perf"]["status"] == "matched"
+    assert snapshot["components"]["cyq_chips"]["status"] == "matched"
+
+
+def test_cn_stock_chip_snapshot_prefers_near_window_before_broad_fallback(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda lookback_days=14, exchange="SSE": ["20260331", "20260401"])  # noqa: ARG005
+    calls: list[tuple[str, str]] = []
+
+    def _perf(ts_code="", start_date="", end_date=""):  # noqa: ARG001
+        calls.append((start_date, end_date))
+        if len(calls) == 1:
+            return pd.DataFrame()
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "300308.SZ",
+                    "trade_date": "20260401",
+                    "cost_15pct": 92.0,
+                    "cost_50pct": 100.0,
+                    "cost_85pct": 109.0,
+                    "weight_avg": 101.0,
+                    "winner_rate": 0.72,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_cyq_perf_snapshot", _perf)
+    monkeypatch.setattr(
+        collector,
+        "_ts_cyq_chips_snapshot",
+        lambda ts_code="", trade_date="": pd.DataFrame(  # noqa: ARG005
+            [
+                {"ts_code": "300308.SZ", "trade_date": "20260401", "price": 99.0, "percent": 18.0},
+                {"ts_code": "300308.SZ", "trade_date": "20260401", "price": 104.0, "percent": 22.0},
+            ]
+        ),
+    )
+
+    snapshot = collector.get_cn_stock_chip_snapshot("300308", as_of="2026-04-01", current_price=106.0)
+
+    assert snapshot["status"] == "matched"
+    assert len(calls) == 2
+    assert calls[0] == ("20260322", "20260401")
+    assert calls[1] == ("20260101", "20260401")
+
+
+def test_cn_stock_chip_snapshot_permission_block_does_not_fake_fresh_hit(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda lookback_days=14, exchange="SSE": ["20260401"])  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "_ts_cyq_perf_snapshot",
+        lambda ts_code="", start_date="", end_date="": (_ for _ in ()).throw(RuntimeError("抱歉，积分不足，无权限访问")),  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        collector,
+        "_ts_cyq_chips_snapshot",
+        lambda ts_code="", trade_date="": pd.DataFrame(),  # noqa: ARG005
+    )
+
+    snapshot = collector.get_cn_stock_chip_snapshot("300308", as_of="2026-04-01", current_price=106.0)
+
+    assert snapshot["status"] == "blocked"
+    assert snapshot["diagnosis"] == "permission_blocked"
+    assert snapshot["is_fresh"] is False
+    assert "未授权或积分不足" in snapshot["detail"]
+    assert snapshot["components"]["cyq_perf"]["status"] == "blocked"
+    assert snapshot["components"]["cyq_chips"]["status"] == "empty"
+
+
+def test_cn_stock_chip_snapshot_stale_match_is_not_fresh(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda lookback_days=14, exchange="SSE": ["20260320", "20260401"])  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "_ts_cyq_perf_snapshot",
+        lambda ts_code="", start_date="", end_date="": pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "ts_code": "300308.SZ",
+                    "trade_date": "20260320",
+                    "cost_15pct": 92.0,
+                    "cost_50pct": 100.0,
+                    "cost_85pct": 109.0,
+                    "weight_avg": 101.0,
+                    "winner_rate": 0.72,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "_ts_cyq_chips_snapshot",
+        lambda ts_code="", trade_date="": pd.DataFrame(  # noqa: ARG005
+            [
+                {"ts_code": "300308.SZ", "trade_date": "20260320", "price": 99.0, "percent": 18.0},
+                {"ts_code": "300308.SZ", "trade_date": "20260320", "price": 104.0, "percent": 22.0},
+            ]
+        ),
+    )
+
+    snapshot = collector.get_cn_stock_chip_snapshot("300308", as_of="2026-04-01", current_price=106.0)
+
+    assert snapshot["status"] == "matched"
+    assert snapshot["diagnosis"] == "stale"
+    assert snapshot["latest_date"] == "2026-03-20"
+    assert snapshot["is_fresh"] is False
+    assert "不按 fresh 命中处理" in snapshot["detail"]

@@ -1,0 +1,35 @@
+# Lightweight but non-empty news feeds profile for briefing client-final.
+# Goal: preserve a small set of linkable external intelligence items without
+# dragging briefing into the full news crawl path.
+
+preferences:
+  preferred_sources:
+    - "财联社"
+    - "证券时报"
+    - "Reuters"
+    - "Bloomberg"
+  max_items_per_feed: 1
+
+feeds:
+  - category: "china_market_domestic"
+    name: "财联社 A股快讯"
+    source: "财联社"
+    must_include: true
+    url: "https://news.google.com/rss/search?q=site:cls.cn+A股+市场+快讯+when:1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+  - category: "china_market_domestic"
+    name: "证券时报 盘面"
+    source: "证券时报"
+    must_include: true
+    url: "https://news.google.com/rss/search?q=site:stcn.com+A股+盘面+when:1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+  - category: "china_macro_domestic"
+    name: "财联社 宏观政策"
+    source: "财联社"
+    url: "https://news.google.com/rss/search?q=site:cls.cn+宏观+政策+央行+when:2d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+  - category: "geopolitics"
+    name: "Reuters Geopolitics"
+    source: "Reuters"
+    url: "https://news.google.com/rss/search?q=site:reuters.com+geopolitics+market+when:1d&hl=en-US&gl=US&ceid=US:en"
+  - category: "ai"
+    name: "Reuters AI"
+    source: "Reuters"
+    url: "https://news.google.com/rss/search?q=site:reuters.com+OpenAI+Anthropic+DeepSeek+AI+model+when:3d&hl=en-US&gl=US&ceid=US:en"

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 from collections import OrderedDict
+from datetime import datetime
 import io
+from pathlib import Path
 import re
 import warnings
 from contextlib import redirect_stderr
@@ -24,8 +26,14 @@ from src.collectors import (
     NewsCollector,
     SocialSentimentCollector,
 )
-from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot
-from src.processors.opportunity_engine import _today_theme, summarize_proxy_contracts
+from src.output.event_digest import build_event_digest, summarize_event_digest_contract
+from src.processors.context import (
+    derive_regime_inputs,
+    global_proxy_runtime_enabled,
+    load_china_macro_snapshot,
+    load_global_proxy_snapshot,
+)
+from src.processors.opportunity_engine import _today_theme, analyze_opportunity, build_market_context, summarize_proxy_contracts
 from src.processors.portfolio_actions import build_trade_plan
 from src.processors.policy_engine import PolicyEngine
 from src.processors.provenance import history_as_of
@@ -34,8 +42,13 @@ from src.processors.risk import RiskAnalyzer
 from src.processors.risk_support import build_portfolio_risk_context, find_stress_scenario, load_stress_scenarios, resolve_stress_scenario
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.storage.portfolio import PortfolioRepository
-from src.storage.thesis import ThesisRepository
-from src.utils.config import detect_asset_type, load_config
+from src.storage.thesis import (
+    ThesisRepository,
+    compare_event_digest_snapshots,
+    summarize_review_queue_history_lines,
+    summarize_thesis_state_snapshot,
+)
+from src.utils.config import detect_asset_type, load_config, resolve_project_path
 from src.utils.data import load_watchlist, load_yaml
 from src.utils.logger import setup_logger
 from src.utils.market import compute_history_metrics, fetch_asset_history
@@ -72,6 +85,10 @@ def _dedupe_lines(items: Iterable[str], *, max_items: int | None = None) -> List
         if max_items is not None and len(deduped) >= max_items:
             break
     return deduped
+
+
+def _safe_text(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def _contains_policy_keywords(question: str) -> bool:
@@ -246,13 +263,17 @@ def _top_correlation_lines(analyzer: RiskAnalyzer) -> List[str]:
 
 def _regime_lines(config: Dict[str, Any]) -> List[str]:
     china_macro = load_china_macro_snapshot(config)
-    try:
-        with redirect_stderr(io.StringIO()):
-            global_proxy = load_global_proxy_snapshot()
-        note = ""
-    except Exception:
+    if not global_proxy_runtime_enabled(config):
         global_proxy = {}
-        note = "跨市场代理数据暂不可用，已回退到国内宏观视角。"
+        note = "跨市场代理数据默认关闭，当前只按国内宏观视角解释。"
+    else:
+        try:
+            with redirect_stderr(io.StringIO()):
+                global_proxy = load_global_proxy_snapshot(config)
+            note = ""
+        except Exception:
+            global_proxy = {}
+            note = "跨市场代理数据暂不可用，已回退到国内宏观视角。"
     regime_inputs = derive_regime_inputs(china_macro, global_proxy)
     result = RegimeDetector(regime_inputs).detect_regime()
     lines = [
@@ -914,6 +935,215 @@ def _asset_next_step_lines(snapshot: Mapping[str, Any]) -> List[str]:
     ]
 
 
+def _current_asset_event_digest_payload(symbol: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    asset_type = detect_asset_type(symbol, config)
+    context = build_market_context(config, relevant_asset_types=[asset_type, "cn_etf", "futures"])
+    analysis = analyze_opportunity(symbol, asset_type, config, context=context, today_mode=False)
+    digest = summarize_event_digest_contract(build_event_digest(analysis))
+    status = _safe_text(digest.get("status")) or "待补充"
+    lead_layer = _safe_text(digest.get("lead_layer")) or "新闻"
+    lead_detail = _safe_text(digest.get("lead_detail"))
+    importance = _safe_text(digest.get("importance"))
+    importance_reason = _safe_text(digest.get("importance_reason"))
+    impact_summary = _safe_text(digest.get("impact_summary"))
+    thesis_scope = _safe_text(digest.get("thesis_scope"))
+    changed_what = _safe_text(digest.get("changed_what"))
+    generated_at = _safe_text(analysis.get("generated_at"))
+    payload = {
+        "contract": digest,
+        "evidence_lines": [],
+        "provenance_lines": [
+            (
+                f"[事件消化] 当前事件快照 as_of `{generated_at or '—'}`；来源 `research 内部临时 scan`，"
+                "只用于和 thesis ledger 比较，不替代正式成稿。"
+            )
+        ],
+        "risk_lines": [],
+    }
+    if changed_what:
+        payload["evidence_lines"].append(f"[事件消化] 当前 `{status}` / `{lead_layer}`：{changed_what}")
+    if lead_detail or importance or impact_summary or thesis_scope or importance_reason:
+        detail_parts = []
+        if lead_detail:
+            detail_parts.append(f"事件细分 `{lead_detail}`")
+        if importance:
+            detail_parts.append(f"当前优先级 `{importance}`")
+        if impact_summary:
+            detail_parts.append(f"更直接影响 `{impact_summary}`")
+        if thesis_scope:
+            detail_parts.append(f"当前更像 `{thesis_scope}`")
+        if importance_reason:
+            detail_parts.append(f"优先级判断：{importance_reason}")
+        payload["evidence_lines"].append("[事件消化] " + "；".join(detail_parts) + "。")
+    if status == "待复核":
+        payload["risk_lines"].append("当前事件消化仍是 `待复核`，旧催化先别当成已经验证。")
+    elif status == "待补充":
+        payload["risk_lines"].append("当前事件层仍偏补证据，别把主题热度直接当成 thesis 已升级。")
+    if thesis_scope == "待确认":
+        payload["risk_lines"].append("当前事件更像 `待确认`，能解释边界，但还不能直接当 thesis 已改写。")
+    elif thesis_scope == "一次性噪音":
+        payload["risk_lines"].append("当前事件更像 `一次性噪音`，别把短线波动直接上升为 thesis 变化。")
+    return payload
+
+
+def _thesis_event_memory_payload(
+    *,
+    symbol: str,
+    thesis_repo: ThesisRepository,
+    current_event_digest: Mapping[str, Any] | None,
+    source: str = "research",
+    recorded_at: str = "",
+) -> Dict[str, List[str]]:
+    thesis = dict(thesis_repo.get(symbol) or {})
+    if not thesis:
+        return {}
+
+    memory_lines: List[str] = []
+    provenance_lines: List[str] = []
+    risk_lines: List[str] = []
+    action_lines: List[str] = []
+
+    reason_parts: List[str] = []
+    core_assumption = _safe_text(thesis.get("core_assumption") or thesis.get("core_hypothesis"))
+    validation_metric = _safe_text(thesis.get("validation_metric"))
+    holding_period = _safe_text(thesis.get("holding_period"))
+    if core_assumption:
+        reason_parts.append(f"`{core_assumption}`")
+    if validation_metric:
+        reason_parts.append(f"验证指标看 `{validation_metric}`")
+    if holding_period:
+        reason_parts.append(f"预期周期 `{holding_period}`")
+    if reason_parts:
+        memory_lines.append(f"上次为什么看：{'；'.join(reason_parts)}。")
+
+    review_queue = dict(thesis_repo.load_review_queue() or {})
+    review_history = dict(dict(review_queue.get("history") or {}).get(symbol) or {})
+
+    previous_snapshot = dict(thesis.get("event_digest_snapshot") or {})
+    previous_status = _safe_text(previous_snapshot.get("status"))
+    previous_layer = _safe_text(previous_snapshot.get("lead_layer"))
+    previous_detail = _safe_text(previous_snapshot.get("lead_detail"))
+    previous_importance = _safe_text(previous_snapshot.get("importance"))
+    previous_title = _safe_text(previous_snapshot.get("lead_title"))
+    previous_impact_summary = _safe_text(previous_snapshot.get("impact_summary"))
+    previous_thesis_scope = _safe_text(previous_snapshot.get("thesis_scope"))
+    previous_importance_reason = _safe_text(previous_snapshot.get("importance_reason"))
+    if previous_status or previous_layer or previous_title:
+        previous_line = f"上次事件快照：`{previous_status or '待补充'}` / `{previous_layer or '新闻'}`"
+        if previous_title:
+            previous_line += f" / {previous_title}"
+        memory_lines.append(previous_line + "。")
+    if previous_detail or previous_importance or previous_impact_summary or previous_thesis_scope or previous_importance_reason:
+        previous_detail_parts = []
+        if previous_detail:
+            previous_detail_parts.append(previous_detail)
+        if previous_importance:
+            previous_detail_parts.append(f"事件优先级 `{previous_importance}`")
+        if previous_impact_summary:
+            previous_detail_parts.append(f"更直接影响 `{previous_impact_summary}`")
+        if previous_thesis_scope:
+            previous_detail_parts.append(f"当前更像 `{previous_thesis_scope}`")
+        if previous_importance_reason:
+            previous_detail_parts.append(f"优先级判断：{previous_importance_reason}")
+        memory_lines.append(f"上次事件细分：{'；'.join(previous_detail_parts)}。")
+
+    current_snapshot = dict(current_event_digest or {})
+    if current_snapshot:
+        recorded = thesis_repo.record_event_digest(
+            symbol,
+            current_snapshot,
+            source=source,
+            recorded_at=recorded_at,
+        )
+        delta = dict(recorded.get("delta") or compare_event_digest_snapshots(previous_snapshot, current_snapshot))
+        delta_summary = _safe_text(delta.get("summary"))
+        if delta_summary:
+            memory_lines.append(f"这次什么变了：{delta_summary}")
+        state_transition = dict(recorded.get("state_transition") or {})
+        thesis_state = _safe_text(state_transition.get("state"))
+        thesis_state_trigger = _safe_text(state_transition.get("trigger"))
+        thesis_state_summary = _safe_text(state_transition.get("summary"))
+        if thesis_state:
+            state_line = f"thesis 状态：`{thesis_state}`"
+            if thesis_state_trigger:
+                state_line += f"；触发：{thesis_state_trigger}"
+            if thesis_state_summary:
+                state_line += f"；{thesis_state_summary}"
+            memory_lines.append(state_line)
+
+        changed_what = _safe_text(current_snapshot.get("changed_what"))
+        if changed_what:
+            memory_lines.append(f"当前事件解释：{changed_what}")
+        current_detail = _safe_text(current_snapshot.get("lead_detail"))
+        current_importance = _safe_text(current_snapshot.get("importance"))
+        current_impact_summary = _safe_text(current_snapshot.get("impact_summary"))
+        current_thesis_scope = _safe_text(current_snapshot.get("thesis_scope"))
+        current_importance_reason = _safe_text(current_snapshot.get("importance_reason"))
+        if current_detail or current_importance or current_impact_summary or current_thesis_scope or current_importance_reason:
+            current_detail_parts = []
+            if current_detail:
+                current_detail_parts.append(current_detail)
+            if current_importance:
+                current_detail_parts.append(f"事件优先级 `{current_importance}`")
+            if current_impact_summary:
+                current_detail_parts.append(f"更直接影响 `{current_impact_summary}`")
+            if current_thesis_scope:
+                current_detail_parts.append(f"当前更像 `{current_thesis_scope}`")
+            if current_importance_reason:
+                current_detail_parts.append(f"优先级判断：{current_importance_reason}")
+            memory_lines.append(f"这次事件细分：{'；'.join(current_detail_parts)}。")
+
+        next_step = _safe_text(current_snapshot.get("next_step"))
+        if next_step:
+            action_lines.append(f"thesis ledger 视角下，下一步先{next_step.rstrip('。')}。")
+
+        recorded_snapshot = dict(recorded.get("snapshot") or {})
+        recorded_at_text = _safe_text(recorded_snapshot.get("recorded_at")) or _safe_text(thesis.get("event_digest_updated_at")) or recorded_at
+        if recorded_at_text:
+            provenance_lines.append(f"[thesis ledger] 事件快照已写回 thesis，记录时间 `{recorded_at_text}`。")
+        ledger_size = recorded.get("ledger_size")
+        if ledger_size:
+            provenance_lines.append(f"[thesis ledger] 当前累计 `{ledger_size}` 条事件记忆，可继续比较 thesis 是否被改写。")
+
+        status = _safe_text(current_snapshot.get("status"))
+        if status == "待复核":
+            risk_lines.append("这次事件边界已经退回 `待复核`，原 thesis 先不要按旧催化继续加确定性。")
+    elif previous_snapshot:
+        memory_lines.append("这次还没拿到新的事件快照，当前先沿用上次 thesis 事件边界。")
+        state_memory = summarize_thesis_state_snapshot(thesis)
+        thesis_state = _safe_text(state_memory.get("state"))
+        if thesis_state:
+            state_line = f"thesis 状态：`{thesis_state}`"
+            if _safe_text(state_memory.get("trigger")):
+                state_line += f"；触发：{_safe_text(state_memory.get('trigger'))}"
+            if _safe_text(state_memory.get("summary")):
+                state_line += f"；{_safe_text(state_memory.get('summary'))}"
+            memory_lines.append(state_line)
+        action_lines.append("若要比较“这次到底变了什么”，先补一次 scan 或事件消化快照。")
+
+    if review_history:
+        history_lines = summarize_review_queue_history_lines(review_history)
+        for line in history_lines:
+            if line.startswith(("最近正式稿状态:", "正式稿跟进说明:", "最近复查动作:", "最近复查结果:", "最近复查时间:")):
+                memory_lines.append(line)
+        followup = dict(review_history.get("report_followup") or {})
+        followup_status = _safe_text(followup.get("status"))
+        followup_reason = _safe_text(followup.get("reason"))
+        if followup_status in {"待更新正式稿", "已有复查稿，暂无正式稿"}:
+            action_lines.append("旧正式稿当前不能直接沿用；下一步先补新的 final / client-final，把这次复查结果正式回写。")
+        elif followup_status == "需复查":
+            action_lines.append("旧正式稿仍挂着待复查状态，当前先别把上次 final 当成最新结论。")
+        elif followup_reason and followup_status == "已复核":
+            provenance_lines.append(f"[正式稿跟进] {followup_reason}")
+
+    return {
+        "memory_lines": memory_lines,
+        "provenance_lines": provenance_lines,
+        "risk_lines": risk_lines,
+        "action_lines": action_lines,
+    }
+
+
 def _trade_plan_focus(question: str) -> Dict[str, bool]:
     ask_position = any(
         keyword in question
@@ -1213,6 +1443,7 @@ def _render_research_markdown(
     provenance_lines: List[str],
     risk_lines: List[str],
     action_lines: List[str],
+    thesis_memory_lines: List[str] | None = None,
 ) -> str:
     lines = [
         "# 研究回答",
@@ -1229,6 +1460,12 @@ def _render_research_markdown(
     proxy_lines = _render_research_proxy_section(proxy_contract)
     if proxy_lines:
         lines.extend(["", *proxy_lines])
+
+    thesis_lines = [item for item in list(thesis_memory_lines or []) if _safe_text(item)]
+    if thesis_lines:
+        lines.extend(["", "## 研究记忆 / Thesis Ledger"])
+        for item in thesis_lines:
+            lines.append(f"- {item}")
 
     lines.extend(["", "## 证据"])
     for item in evidence_lines or ["当前没有拿到足够证据，建议先缩小问题范围或指定标的。"]:
@@ -1248,12 +1485,151 @@ def _render_research_markdown(
     return "\n".join(lines)
 
 
+def _research_review_output_path(symbol: str, question: str, recorded_at: str = "") -> Path:
+    safe_symbol = str(symbol).replace("/", "_").replace(" ", "_")
+    question_text = _safe_text(question)
+    topic = "bootstrap" if "值得继续跟踪" in question_text else "review"
+    stamp = _safe_text(recorded_at) or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    date_key = stamp.replace(":", "").replace(" ", "_")[:17] or datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    return resolve_project_path("reports/research/internal") / f"research_{safe_symbol}_{topic}_{date_key}.md"
+
+
+def run_research_review(
+    symbol: str,
+    *,
+    question: str = "这次什么变了",
+    config_path: str = "",
+    thesis_repo: ThesisRepository | None = None,
+    recorded_at: str = "",
+) -> Dict[str, Any]:
+    config = load_config(config_path or None)
+    setup_logger("ERROR")
+    thesis_repo = thesis_repo or ThesisRepository()
+    intent = ResearchIntent("asset_thesis", "标的研究 / 交易问题", False, False, False)
+    question_text = f"{symbol} {question}".strip()
+    stamp = _safe_text(recorded_at) or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    evidence_groups: "OrderedDict[str, List[str]]" = OrderedDict(
+        [("market", []), ("regime", []), ("flow", []), ("snapshot", []), ("risk", []), ("policy", [])]
+    )
+    provenance_groups: "OrderedDict[str, List[str]]" = OrderedDict(
+        [("market", []), ("snapshot", []), ("risk", []), ("policy", [])]
+    )
+    risk_lines: List[str] = []
+    action_lines: List[str] = []
+    thesis_memory_lines: List[str] = []
+    proxy_contract: Dict[str, Any] = {}
+    snapshots: List[Dict[str, Any]] = []
+
+    try:
+        snapshot = _symbol_snapshot(symbol, config)
+        snapshots.append(snapshot)
+        evidence_groups["snapshot"].extend(f"[行情/技术] {item}" for item in snapshot["evidence_lines"])
+        evidence_groups["snapshot"].extend(list(snapshot.get("scenario_lines") or []))
+        provenance_groups["snapshot"].extend(list(snapshot.get("provenance_lines") or []))
+        risk_lines.extend(list(snapshot.get("risks") or []))
+    except Exception as exc:
+        risk_lines.append(f"{symbol}: 数据拉取失败，当前先回退到 thesis / 事件复核。{exc}")
+
+    thesis_record = thesis_repo.get(symbol)
+    event_digest_payload: Dict[str, Any] = {}
+    try:
+        event_digest_payload = _current_asset_event_digest_payload(symbol, config)
+        evidence_groups["snapshot"].extend(list(event_digest_payload.get("evidence_lines") or []))
+        provenance_groups["snapshot"].extend(list(event_digest_payload.get("provenance_lines") or []))
+        risk_lines.extend(list(event_digest_payload.get("risk_lines") or []))
+        if thesis_record:
+            memory_payload = _thesis_event_memory_payload(
+                symbol=symbol,
+                thesis_repo=thesis_repo,
+                current_event_digest=event_digest_payload.get("contract") or {},
+                source="research_review",
+                recorded_at=stamp,
+            )
+            thesis_memory_lines = list(memory_payload.get("memory_lines") or [])
+            provenance_groups["snapshot"].extend(list(memory_payload.get("provenance_lines") or []))
+            risk_lines.extend(list(memory_payload.get("risk_lines") or []))
+            action_lines.extend(list(memory_payload.get("action_lines") or []))
+        else:
+            action_lines.append(
+                f"`{symbol}` 还没有 thesis 记录；如果你准备持续跟踪，先用 `portfolio thesis set` 补上核心假设。"
+            )
+    except Exception as exc:
+        if thesis_record:
+            memory_payload = _thesis_event_memory_payload(
+                symbol=symbol,
+                thesis_repo=thesis_repo,
+                current_event_digest={},
+            )
+            thesis_memory_lines = list(memory_payload.get("memory_lines") or [])
+            provenance_groups["snapshot"].extend(list(memory_payload.get("provenance_lines") or []))
+            risk_lines.extend(list(memory_payload.get("risk_lines") or []))
+            action_lines.extend(list(memory_payload.get("action_lines") or []))
+        risk_lines.append(f"{symbol}: thesis 事件快照刷新失败，当前先沿用上次记忆。{exc}")
+        provenance_groups["snapshot"].append(
+            f"[事件消化] `{symbol}` 当前没拉到新的事件快照，research review 先回退到上次记录。"
+        )
+
+    evidence_lines = _pick_evidence_lines(intent, evidence_groups)
+    provenance_lines = _pick_evidence_lines(intent, provenance_groups, limit=5)
+
+    direct_answer_lines: List[str] = []
+    delta_line = next((item for item in thesis_memory_lines if item.startswith("这次什么变了：")), "")
+    if delta_line:
+        direct_answer_lines.append(delta_line.replace("这次什么变了：", "", 1).strip())
+    if not direct_answer_lines:
+        event_line = next((str(item).strip() for item in list(event_digest_payload.get("evidence_lines") or []) if str(item).strip()), "")
+        if event_line:
+            direct_answer_lines.append(event_line.replace("[事件消化] ", "", 1))
+    if not direct_answer_lines and snapshots:
+        direct_answer_lines.append(f"{symbol}: {snapshots[0]['answer']}")
+    if not direct_answer_lines:
+        direct_answer_lines.append(f"{symbol}: 当前先按 thesis review 补事件边界和下一步研究动作。")
+
+    if snapshots:
+        action_lines.extend(_asset_next_step_lines(snapshots[0]))
+        action_lines.append(f"如果你要看更完整的逻辑、风险和执行框架，再跑 `{symbol}` 对应的 `scan`。")
+    if not action_lines:
+        action_lines.append("如果要把这次复查落成下一步动作，先补 scan 或 thesis。")
+
+    evidence_lines = _dedupe_lines(evidence_lines, max_items=6)
+    provenance_lines = _dedupe_lines(provenance_lines, max_items=5)
+    risk_lines = _dedupe_lines(risk_lines, max_items=6)
+    action_lines = _dedupe_lines(action_lines, max_items=5)
+    direct_answer_lines = _dedupe_lines(direct_answer_lines, max_items=3)
+    markdown = _render_research_markdown(
+        question=question_text,
+        intent=intent,
+        symbols=[symbol],
+        direct_answer_lines=direct_answer_lines,
+        proxy_contract=proxy_contract,
+        evidence_lines=evidence_lines,
+        provenance_lines=provenance_lines,
+        risk_lines=risk_lines,
+        action_lines=action_lines,
+        thesis_memory_lines=thesis_memory_lines,
+    )
+    artifact_path = _research_review_output_path(symbol, question, stamp)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(markdown, encoding="utf-8")
+    return {
+        "symbol": symbol,
+        "question": question_text,
+        "artifact_path": str(artifact_path),
+        "markdown": markdown,
+        "summary": direct_answer_lines[0] if direct_answer_lines else "",
+        "event_digest": dict(event_digest_payload.get("contract") or {}),
+        "thesis_memory_lines": thesis_memory_lines,
+    }
+
+
 def main() -> None:
     args = build_parser().parse_args()
     setup_logger("ERROR")
     config = load_config(args.config or None)
     question = " ".join(args.question).strip()
     repo = PortfolioRepository()
+    thesis_repo = ThesisRepository()
     holdings = repo.list_holdings()
     watchlist = load_watchlist()
     candidate_symbols = [item["symbol"] for item in watchlist] + [item["symbol"] for item in holdings]
@@ -1274,6 +1650,7 @@ def main() -> None:
     flow_lines: List[str] = []
     contextual_answer_lines: List[str] = []
     prefer_contextual_for_asset = False
+    thesis_memory_lines: List[str] = []
 
     if regime_lines:
         evidence_groups["regime"].extend(f"[宏观] {item}" for item in regime_lines)
@@ -1315,6 +1692,41 @@ def main() -> None:
             provenance_groups["risk"].extend(list(trade_payload.get("provenance_lines") or []))
             risk_lines.extend(list(trade_payload.get("risk_lines") or []))
             action_lines.extend(list(trade_payload.get("action_lines") or []))
+
+        lead_symbol = str(snapshots[0].get("symbol") or (symbols[0] if symbols else ""))
+        if lead_symbol:
+            thesis_record = thesis_repo.get(lead_symbol)
+            if thesis_record:
+                try:
+                    event_digest_payload = _current_asset_event_digest_payload(lead_symbol, config)
+                    evidence_groups["snapshot"].extend(list(event_digest_payload.get("evidence_lines") or []))
+                    provenance_groups["snapshot"].extend(list(event_digest_payload.get("provenance_lines") or []))
+                    risk_lines.extend(list(event_digest_payload.get("risk_lines") or []))
+                    memory_payload = _thesis_event_memory_payload(
+                        symbol=lead_symbol,
+                        thesis_repo=thesis_repo,
+                        current_event_digest=event_digest_payload.get("contract") or {},
+                        source="research",
+                        recorded_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                except Exception as exc:
+                    memory_payload = _thesis_event_memory_payload(
+                        symbol=lead_symbol,
+                        thesis_repo=thesis_repo,
+                        current_event_digest={},
+                    )
+                    risk_lines.append(f"{lead_symbol}: thesis 事件快照刷新失败，当前先沿用上次记忆。{exc}")
+                    provenance_groups["snapshot"].append(
+                        f"[事件消化] `{lead_symbol}` 当前没拉到新的事件快照，thesis ledger 先回退到上次记录。"
+                    )
+                thesis_memory_lines = list(memory_payload.get("memory_lines") or [])
+                provenance_groups["snapshot"].extend(list(memory_payload.get("provenance_lines") or []))
+                risk_lines.extend(list(memory_payload.get("risk_lines") or []))
+                action_lines.extend(list(memory_payload.get("action_lines") or []))
+            else:
+                action_lines.append(
+                    f"`{lead_symbol}` 还没有 thesis 记录；如果你准备持续跟踪，先用 `portfolio thesis set` 补上核心假设。"
+                )
 
     if intent.needs_flow and symbols:
         flow_payload = _flow_and_sentiment_payload(symbols, config)
@@ -1429,6 +1841,7 @@ def main() -> None:
             provenance_lines=provenance_lines,
             risk_lines=risk_lines,
             action_lines=action_lines,
+            thesis_memory_lines=thesis_memory_lines,
         )
     )
 

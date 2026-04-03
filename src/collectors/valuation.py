@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, Optional, Sequence
 import pandas as pd
 
 from .base import BaseCollector
+from .index_topic import IndexTopicCollector
 
 try:
     import akshare as ak
@@ -25,58 +26,19 @@ except ImportError:  # pragma: no cover
     bs = None
 
 
-GENERIC_INDEX_KEYWORDS = {
-    "科技",
-    "成长",
-    "价值",
-    "红利",
-    "消费",
-    "医药",
-    "金融",
-    "地产",
-    "周期",
-    "制造",
-    "材料",
-}
-
-
-def _normalize_index_label(value: str) -> str:
-    text = str(value).strip().lower()
-    for token in ("收益率", "价格指数", "指数", " ", "\t", "\n", "*", "×", "+", "/", "-", "（", "）", "(", ")", "·"):
-        text = text.replace(token, "")
-    return text
-
-
-def _keyword_specificity(value: str) -> int:
-    normalized = _normalize_index_label(value)
-    if not normalized:
-        return 0
-    return 1 if normalized in GENERIC_INDEX_KEYWORDS else len(normalized)
-
-
 class ValuationCollector(BaseCollector):
     """Collect ETF scale, index valuation snapshots, and financial proxies.
 
-    Tushare 优先（daily_basic / fina_indicator / index_weight），AKShare 兜底。
+    Tushare 优先（daily_basic / fina_indicator / index_topic 主链），AKShare 仅保留未覆盖侧路。
     """
-
-    _CN_INDEX_MASTER_FRAME: pd.DataFrame | None = None
 
     def _require_ak(self):
         if ak is None:
             raise RuntimeError("akshare is not installed")
         return ak
 
-    def _cn_index_master_frame(self) -> pd.DataFrame:
-        cached = self.__class__._CN_INDEX_MASTER_FRAME
-        if cached is not None and not cached.empty:
-            return cached
-        client = self._require_ak()
-        frame = self.cached_call("valuation:index_all_cni", client.index_all_cni, ttl_hours=12)
-        if frame is None:
-            frame = pd.DataFrame()
-        self.__class__._CN_INDEX_MASTER_FRAME = frame
-        return frame
+    def _index_topic_collector(self) -> IndexTopicCollector:
+        return IndexTopicCollector(self.config)
 
     # ── ETF NAV ──────────────────────────────────────────────
 
@@ -100,207 +62,66 @@ class ValuationCollector(BaseCollector):
                     return filtered
         except Exception:
             pass
+        return pd.DataFrame()
 
-        # AKShare fallback
-        client = self._require_ak()
-        return self.cached_call(
-            f"valuation:nav:{symbol}:{start_date}:{end_date}",
-            client.fund_etf_fund_info_em,
-            fund=symbol,
+    def get_cn_etf_scale(self, symbol: str) -> Optional[dict]:
+        """ETF 份额/规模快照。Tushare etf_share_size 优先。"""
+        ts_code = self._resolve_tushare_etf_code(symbol, preferred_markets=("E", "O", "L"))
+        recent_open_dates = self._recent_open_trade_dates(lookback_days=21)
+        trade_date = ""
+        start_date = ""
+        end_date = ""
+        if recent_open_dates:
+            end_date = recent_open_dates[-1]
+            start_date = recent_open_dates[max(len(recent_open_dates) - 7, 0)]
+        else:
+            trade_date = self._latest_open_trade_date()
+
+        raw = self._ts_etf_share_size_snapshot(
+            ts_code=ts_code,
+            trade_date=trade_date,
             start_date=start_date,
             end_date=end_date,
         )
+        if raw is None or getattr(raw, "empty", False):
+            return None
 
-    def get_cn_etf_scale(self, symbol: str) -> Optional[dict]:
-        client = self._require_ak()
-        date = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-        candidates = []
-        try:
-            candidates.append(self.cached_call(f"valuation:scale:sse:{date}", client.fund_etf_scale_sse, date=date))
-        except Exception:
-            pass
-        try:
-            candidates.append(self.cached_call("valuation:scale:szse", client.fund_etf_scale_szse))
-        except Exception:
-            pass
-        for frame in candidates:
-            code_column = "基金代码" if "基金代码" in frame.columns else None
-            if code_column is None:
-                continue
-            filtered = frame[frame[code_column].astype(str) == str(symbol)]
-            if not filtered.empty:
-                return filtered.iloc[0].to_dict()
-        return None
+        frame = raw.copy()
+        if "ts_code" in frame.columns:
+            frame = frame[frame["ts_code"].astype(str) == ts_code]
+        if frame.empty:
+            return None
+        if "trade_date" in frame.columns:
+            frame["trade_date"] = frame["trade_date"].map(self._normalize_date_text)
+            frame = frame.sort_values("trade_date", ascending=False, na_position="last")
+        latest = frame.iloc[0].to_dict()
+        for column in ("total_share", "total_size", "nav", "close"):
+            if column in latest:
+                latest[column] = pd.to_numeric(pd.Series([latest.get(column)]), errors="coerce").iloc[0]
+        return latest
 
     # ── 指数估值快照 ─────────────────────────────────────────
 
     def get_cn_index_snapshot(self, keywords: Sequence[str]) -> Optional[Dict[str, Any]]:
         """Find a CSI/CNI index valuation snapshot by keyword heuristics."""
-        cleaned = [str(item).strip() for item in keywords if str(item).strip()]
-        if not cleaned:
-            return None
-        normalized_keywords = [(_normalize_index_label(item), index, _keyword_specificity(item), item) for index, item in enumerate(cleaned)]
-        frame = self._cn_index_master_frame()
-        if frame is None or frame.empty:
-            return None
-        if "指数简称" not in frame.columns or "指数代码" not in frame.columns:
-            return None
-
-        ranked_exact: list[tuple[tuple[int, int, int, int, int], Dict[str, Any]]] = []
-        ranked_proxy: list[tuple[tuple[int, int, int, int, int], Dict[str, Any]]] = []
-        exact_without_pe: list[tuple[tuple[int, int, int, int, int], Dict[str, Any]]] = []
-        for _, row in frame.iterrows():
-            name = str(row.get("指数简称", "")).strip()
-            code = str(row.get("指数代码", "")).strip()
-            if not name or not code:
-                continue
-            lowered = name.lower()
-            normalized_name = _normalize_index_label(name)
-            matched_keywords = [raw for normalized, _, _, raw in normalized_keywords if normalized and (normalized == normalized_name or normalized in normalized_name or raw.lower() in lowered)]
-            if not matched_keywords:
-                continue
-            pe_value = pd.to_numeric(pd.Series([row.get("PE滚动")]), errors="coerce").iloc[0]
-            has_pe = not pd.isna(pe_value)
-            exact_match = any(_normalize_index_label(keyword) == normalized_name for keyword in matched_keywords)
-            specificities = [_keyword_specificity(keyword) for keyword in matched_keywords]
-            best_specificity = max(specificities) if specificities else 0
-            total_specificity = sum(specificities)
-            keyword_index = min(index for normalized, index, _, raw in normalized_keywords if raw in matched_keywords)
-            penalty = 0
-            if "港股" in name or "港币" in name or "人民币" in name:
-                penalty += 2
-            if name.endswith("R"):
-                penalty += 1
-            candidate = {
-                "index_code": code,
-                "index_name": name,
-                "pe_ttm": None if pd.isna(pe_value) else float(pe_value),
-                "matched_keywords": matched_keywords,
-                "match_quality": "exact" if exact_match else "theme_proxy",
-                "display_label": "真实指数估值" if exact_match else "指数估值代理",
-            }
-            rank_key = (-best_specificity, -total_specificity, keyword_index, penalty, len(name))
-            if exact_match and has_pe:
-                ranked_exact.append((rank_key, candidate))
-            elif exact_match:
-                exact_without_pe.append((rank_key, candidate))
-            elif has_pe:
-                ranked_proxy.append((rank_key, candidate))
-
-        if exact_without_pe:
-            exact_without_pe.sort(key=lambda item: item[0])
-            selected = exact_without_pe[0][1]
-            selected["match_quality"] = "exact_no_pe"
-            selected["display_label"] = "真实指数估值"
-            if ranked_proxy:
-                ranked_proxy.sort(key=lambda item: item[0])
-                selected["fallback_proxy_name"] = ranked_proxy[0][1]["index_name"]
-                selected["match_note"] = (
-                    f"估值库已命中 `{selected['index_name']}`，但当前缺少可用滚动PE；"
-                    "为避免错配，不再回退到其他主题指数代理。"
-                )
-            else:
-                selected["match_note"] = "估值库已命中基准指数，但当前缺少可用滚动PE。"
-            return selected
-        if ranked_exact:
-            ranked_exact.sort(key=lambda item: item[0])
-            selected = ranked_exact[0][1]
-            selected["match_note"] = "估值库已匹配到与目标基准高度一致的指数名称。"
-            return selected
-        if ranked_proxy:
-            ranked_proxy.sort(key=lambda item: item[0])
-            selected = ranked_proxy[0][1]
-            selected["match_note"] = "估值库未直接命中精确基准，当前使用最接近的主题指数代理。"
-            return selected
-        return None
+        return self._index_topic_collector().get_cn_index_snapshot(keywords)
 
     def get_cn_index_value_history(self, index_code: str) -> pd.DataFrame:
         """Fetch CSI/CNI index valuation history."""
-        client = self._require_ak()
-        fetcher = getattr(client, "stock_zh_index_value_csindex", None)
-        if not callable(fetcher):
-            raise RuntimeError("AKShare function not available: stock_zh_index_value_csindex")
-        return self.cached_call(
-            f"valuation:index_value:{index_code}",
-            fetcher,
-            symbol=index_code,
-            ttl_hours=12,
-        )
+        return self._index_topic_collector().get_cn_index_value_history(index_code)
 
     # ── 指数成分权重 ─────────────────────────────────────────
 
     def get_cn_index_constituent_weights(self, index_code: str, top_n: int = 10) -> pd.DataFrame:
         """Fetch the latest index constituent weights. Tushare index_weight 优先。"""
-        # ── Tushare (primary) ──
-        try:
-            frame = self._ts_index_weight(index_code, top_n)
-            if frame is not None and not frame.empty:
-                return frame
-        except Exception:
-            pass
-
-        # ── AKShare (fallback) ──
-        client = self._require_ak()
-        fetcher = getattr(client, "index_stock_cons_weight_csindex", None)
-        if not callable(fetcher):
-            raise RuntimeError("AKShare function not available: index_stock_cons_weight_csindex")
-        frame = self.cached_call(
-            f"valuation:index_constituents:{index_code}",
-            fetcher,
-            symbol=index_code,
-            ttl_hours=24,
-        )
-        code_col = self._first_existing_column(frame, ("成分券代码", "样本代码", "证券代码", "股票代码"))
-        name_col = self._first_existing_column(frame, ("成分券名称", "样本简称", "证券名称", "股票名称"))
-        weight_col = self._first_existing_column(frame, ("权重", "权重(%)", "weight"))
-        if not code_col or not weight_col:
-            raise ValueError("Index constituent weight frame missing required columns")
-        normalized = frame.copy()
-        normalized["symbol"] = normalized[code_col].astype(str).str.extract(r"(\d{6})", expand=False).fillna("")
-        normalized["name"] = normalized[name_col].astype(str) if name_col else normalized["symbol"]
-        normalized["weight"] = pd.to_numeric(normalized[weight_col], errors="coerce")
-        normalized = normalized.dropna(subset=["weight"])
-        normalized = normalized[normalized["symbol"] != ""].sort_values("weight", ascending=False)
-        if top_n > 0:
-            normalized = normalized.head(top_n)
-        return normalized[["symbol", "name", "weight"]].reset_index(drop=True)
-
-    def _ts_index_weight(self, index_code: str, top_n: int) -> pd.DataFrame | None:
-        """Tushare index_weight — 指数成分权重。"""
-        for ts_code in self._ts_index_code_candidates(index_code):
-            cache_key = f"valuation:ts_index_weight:{ts_code}"
-            cached = self._load_cache(cache_key, ttl_hours=24)
-            if cached is not None:
-                return cached
-
-            raw = self._ts_call("index_weight", index_code=ts_code)
-            if raw is None or raw.empty:
-                continue
-
-            # 取最新一期
-            if "trade_date" in raw.columns:
-                latest_date = raw["trade_date"].max()
-                raw = raw[raw["trade_date"] == latest_date]
-
-            frame = pd.DataFrame({
-                "symbol": raw["con_code"].apply(self._from_ts_code),
-                "name": raw.get("con_name", raw["con_code"].apply(self._from_ts_code)),
-                "weight": pd.to_numeric(raw["weight"], errors="coerce"),
-            })
-            frame = frame.dropna(subset=["weight"]).sort_values("weight", ascending=False)
-            if top_n > 0:
-                frame = frame.head(top_n)
-            result = frame.reset_index(drop=True)
-            self._save_cache(cache_key, result)
-            return result
-        return None
+        return self._index_topic_collector().get_cn_index_constituent_weights(index_code, top_n=top_n)
 
     # ── 个股财务代理指标 ─────────────────────────────────────
 
     def get_cn_stock_financial_proxy(self, symbol: str) -> Dict[str, Any]:
         """Fetch the latest single-stock financial proxy metrics.
 
-        Tushare fina_indicator 优先 → AKShare THS/EM 兜底。
+        Tushare fina_indicator 优先，daily_basic 只补充基础估值字段。
         """
         # ── Tushare daily_basic (补充 PE/PB) ──
         try:
@@ -317,45 +138,6 @@ class ValuationCollector(BaseCollector):
                 return merged
         except Exception:
             pass
-
-        # ── AKShare THS/EM (fallback) ──
-        if ak is not None:
-            fetchers: list[tuple[str, Any, Dict[str, Any]]] = []
-            abstract_fetcher = getattr(ak, "stock_financial_abstract_new_ths", None)
-            if callable(abstract_fetcher):
-                fetchers.append(
-                    (
-                        f"valuation:stock_financial:ths:{symbol}",
-                        abstract_fetcher,
-                        {"symbol": symbol, "indicator": "按报告期"},
-                    )
-                )
-            indicator_fetcher = getattr(ak, "stock_financial_analysis_indicator_em", None)
-            if callable(indicator_fetcher):
-                fetchers.append(
-                    (
-                        f"valuation:stock_financial:em:{symbol}",
-                        indicator_fetcher,
-                        {"symbol": self._eastmoney_symbol(symbol), "indicator": "按报告期"},
-                    )
-                )
-
-            last_error: Optional[Exception] = None
-            for cache_key, fetcher, kwargs in fetchers:
-                try:
-                    frame = self.cached_call(cache_key, fetcher, ttl_hours=24, **kwargs)
-                    parsed = self._parse_stock_financial_frame(frame)
-                    if parsed:
-                        # 合并 daily_basic 的 PE/PB
-                        if basic:
-                            parsed.setdefault("pe_ttm", basic.get("pe_ttm"))
-                            parsed.setdefault("pb", basic.get("pb"))
-                            parsed.setdefault("ps_ttm", basic.get("ps_ttm"))
-                            parsed.setdefault("dv_ratio", basic.get("dv_ratio"))
-                            parsed.setdefault("total_mv", basic.get("total_mv"))
-                        return parsed
-                except Exception as exc:
-                    last_error = exc
 
         # 如果只有 daily_basic 有数据
         if basic:
@@ -706,6 +488,306 @@ class ValuationCollector(BaseCollector):
         records = frame.reset_index(drop=True).to_dict("records")
         self._save_cache(cache_key, records)
         return records
+
+    def _normalize_cyq_perf_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        columns = [
+            "ts_code",
+            "trade_date",
+            "his_low",
+            "his_high",
+            "cost_5pct",
+            "cost_15pct",
+            "cost_50pct",
+            "cost_85pct",
+            "cost_95pct",
+            "weight_avg",
+            "winner_rate",
+        ]
+        if frame is None:
+            return pd.DataFrame(columns=columns)
+        if frame.empty:
+            return pd.DataFrame(columns=columns)
+        working = frame.copy()
+        if "ts_code" not in working.columns or "trade_date" not in working.columns:
+            return pd.DataFrame(columns=columns)
+        normalized = pd.DataFrame(
+            {
+                "ts_code": working["ts_code"].astype(str),
+                "trade_date": working["trade_date"].map(self._normalize_date_text),
+            }
+        )
+        for column in columns[2:]:
+            normalized[column] = pd.to_numeric(working.get(column), errors="coerce")
+        normalized = normalized.dropna(subset=["trade_date"]).sort_values("trade_date").reset_index(drop=True)
+        return normalized
+
+    def _normalize_cyq_chips_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        columns = ["ts_code", "trade_date", "price", "percent"]
+        if frame is None:
+            return pd.DataFrame(columns=columns)
+        if frame.empty:
+            return pd.DataFrame(columns=columns)
+        working = frame.copy()
+        if "ts_code" not in working.columns or "trade_date" not in working.columns:
+            return pd.DataFrame(columns=columns)
+        normalized = pd.DataFrame(
+            {
+                "ts_code": working["ts_code"].astype(str),
+                "trade_date": working["trade_date"].map(self._normalize_date_text),
+                "price": pd.to_numeric(working.get("price"), errors="coerce"),
+                "percent": pd.to_numeric(working.get("percent"), errors="coerce"),
+            }
+        )
+        normalized = normalized.dropna(subset=["trade_date", "price", "percent"]).sort_values(
+            ["trade_date", "percent", "price"],
+            ascending=[False, False, True],
+        ).reset_index(drop=True)
+        return normalized
+
+    @staticmethod
+    def _coerce_float(value: Any) -> float | None:
+        numeric = pd.to_numeric(pd.Series([value]), errors="coerce").dropna()
+        if numeric.empty:
+            return None
+        return float(numeric.iloc[0])
+
+    @staticmethod
+    def _normalize_cyq_percent(value: Any) -> float | None:
+        percent = ValuationCollector._coerce_float(value)
+        if percent is None:
+            return None
+        if abs(percent) <= 1.0:
+            percent *= 100.0
+        return percent
+
+    def get_cn_stock_chip_snapshot(
+        self,
+        symbol: str,
+        *,
+        as_of: str = "",
+        lookback_days: int = 90,
+        current_price: float | None = None,
+    ) -> Dict[str, Any]:
+        """Unified Tushare-first stock chip snapshot for cyq_perf / cyq_chips."""
+        cleaned_symbol = str(symbol).strip()
+        ts_code = self._to_ts_code(cleaned_symbol)
+        as_of_ts = pd.Timestamp(as_of or datetime.now().strftime("%Y-%m-%d")).normalize()
+        as_of_text = f"{as_of_ts.strftime('%Y-%m-%d')} 00:00:00"
+        latest_trade_date = ""
+        for trade_date in reversed(self._recent_open_trade_dates(lookback_days=max(int(lookback_days), 20))):
+            normalized = self._normalize_date_text(trade_date)
+            if normalized and normalized <= as_of_ts.strftime("%Y-%m-%d"):
+                latest_trade_date = trade_date
+                break
+        if not latest_trade_date:
+            latest_trade_date = as_of_ts.strftime("%Y%m%d")
+        latest_trade_text = self._normalize_date_text(latest_trade_date)
+        window_start = (as_of_ts - timedelta(days=max(int(lookback_days), 30))).strftime("%Y%m%d")
+        window_end = latest_trade_date
+        latest_trade_ts = pd.Timestamp(latest_trade_text) if latest_trade_text else as_of_ts
+        near_start = (latest_trade_ts - timedelta(days=10)).strftime("%Y%m%d")
+
+        perf_error: BaseException | None = None
+        try:
+            # We only consume the latest chip-performance row, so prefer a narrow
+            # recent window first. Fall back to the broader lookback only when the
+            # near window is empty, keeping the output contract unchanged while
+            # reducing first-run latency for multi-symbol scans.
+            perf_raw = self._ts_cyq_perf_snapshot(ts_code=ts_code, start_date=near_start, end_date=window_end)
+            if perf_raw is None or getattr(perf_raw, "empty", False):
+                perf_raw = self._ts_cyq_perf_snapshot(ts_code=ts_code, start_date=window_start, end_date=window_end)
+        except Exception as exc:  # noqa: BLE001
+            perf_raw = None
+            perf_error = exc
+        perf_frame = self._normalize_cyq_perf_frame(perf_raw)
+        perf_frame = perf_frame[perf_frame["ts_code"] == ts_code].reset_index(drop=True)
+        perf_diagnosis = "live"
+        if perf_error is not None:
+            perf_diagnosis = self._tushare_failure_diagnosis(perf_error)
+        elif perf_raw is None:
+            perf_diagnosis = "unavailable"
+        elif perf_frame.empty:
+            perf_diagnosis = "empty"
+
+        perf_row = perf_frame.iloc[-1].to_dict() if not perf_frame.empty else {}
+        chip_trade_date = str(perf_row.get("trade_date", "")).replace("-", "") or latest_trade_date
+
+        chips_error: BaseException | None = None
+        try:
+            chips_raw = self._ts_cyq_chips_snapshot(ts_code=ts_code, trade_date=chip_trade_date)
+        except Exception as exc:  # noqa: BLE001
+            chips_raw = None
+            chips_error = exc
+        chips_frame = self._normalize_cyq_chips_frame(chips_raw)
+        chips_frame = chips_frame[chips_frame["ts_code"] == ts_code].reset_index(drop=True)
+        chips_diagnosis = "live"
+        if chips_error is not None:
+            chips_diagnosis = self._tushare_failure_diagnosis(chips_error)
+        elif chips_raw is None:
+            chips_diagnosis = "unavailable"
+        elif chips_frame.empty:
+            chips_diagnosis = "empty"
+
+        perf_trade_text = str(perf_row.get("trade_date", "")).strip()
+        winner_rate_pct = self._normalize_cyq_percent(perf_row.get("winner_rate"))
+        avg_cost = self._coerce_float(perf_row.get("weight_avg"))
+        cost_15pct = self._coerce_float(perf_row.get("cost_15pct"))
+        cost_50pct = self._coerce_float(perf_row.get("cost_50pct"))
+        cost_85pct = self._coerce_float(perf_row.get("cost_85pct"))
+        current_price_value = self._coerce_float(current_price)
+
+        chips_latest = chips_frame[chips_frame["trade_date"] == perf_trade_text].copy() if perf_trade_text else chips_frame.copy()
+        if chips_latest.empty and not chips_frame.empty:
+            latest_distribution_date = str(chips_frame["trade_date"].max()).strip()
+            chips_latest = chips_frame[chips_frame["trade_date"] == latest_distribution_date].copy()
+        distribution_trade_text = str(chips_latest["trade_date"].iloc[0]).strip() if not chips_latest.empty else ""
+        chips_latest = chips_latest.sort_values(["percent", "price"], ascending=[False, True]).reset_index(drop=True)
+
+        peak_price = None
+        peak_percent = None
+        above_price_pct = None
+        near_price_pct = None
+        if not chips_latest.empty:
+            peak_row = chips_latest.iloc[0]
+            peak_price = float(peak_row["price"])
+            peak_percent = float(peak_row["percent"])
+            if current_price_value and current_price_value > 0:
+                above_price_pct = float(chips_latest.loc[chips_latest["price"] > current_price_value, "percent"].sum())
+                near_price_pct = float(
+                    chips_latest.loc[(chips_latest["price"] / current_price_value - 1.0).abs() <= 0.03, "percent"].sum()
+                )
+
+        blocked_diagnoses = {"permission_blocked", "rate_limited", "network_error", "fetch_error", "unavailable"}
+        if perf_row or not chips_latest.empty:
+            status = "matched"
+        elif perf_diagnosis in blocked_diagnoses or chips_diagnosis in blocked_diagnoses:
+            status = "blocked"
+        else:
+            status = "empty"
+
+        matched_dates = [date for date in (perf_trade_text, distribution_trade_text) if date]
+        latest_date = max(matched_dates, default=latest_trade_text)
+        is_fresh = status == "matched" and latest_date == latest_trade_text
+        if status == "matched" and is_fresh:
+            diagnosis = "live"
+        elif status == "matched":
+            diagnosis = "stale"
+        elif perf_diagnosis in blocked_diagnoses:
+            diagnosis = perf_diagnosis
+        elif chips_diagnosis in blocked_diagnoses:
+            diagnosis = chips_diagnosis
+        else:
+            diagnosis = "empty"
+        price_vs_avg = (current_price_value / avg_cost - 1.0) if current_price_value and avg_cost else None
+
+        if status == "matched" and not is_fresh:
+            detail = (
+                f"最新可用筹码日期停在 {latest_date}，当前不按 fresh 命中处理；"
+                "先只保留缺口披露，不把旧筹码直接写成今天的资金确认。"
+            )
+        elif status == "matched" and current_price_value and avg_cost:
+            above_text = f"，上方套牢盘约 {above_price_pct:.1f}%" if above_price_pct is not None else ""
+            if above_price_pct is not None and above_price_pct >= 60:
+                detail = f"现价 {current_price_value:.2f} 元仍低于加权平均成本 {avg_cost:.2f} 元{above_text}，筹码压力偏重。"
+            elif winner_rate_pct is not None and winner_rate_pct >= 65 and price_vs_avg >= 0:
+                detail = f"现价 {current_price_value:.2f} 元高于加权平均成本 {avg_cost:.2f} 元 {price_vs_avg:.1%}{above_text}，多数筹码已进入盈利区。"
+            elif near_price_pct is not None and near_price_pct >= 30:
+                detail = f"现价 {current_price_value:.2f} 元附近筹码约 {near_price_pct:.1f}%，主筹码开始在现价附近换手。"
+            else:
+                detail = f"现价 {current_price_value:.2f} 元相对加权平均成本 {avg_cost:.2f} 元约 {price_vs_avg:+.1%}{above_text}，筹码分布仍在拉锯。"
+        elif status == "matched" and avg_cost:
+            winner_text = f" / 胜率 {winner_rate_pct:.1f}%" if winner_rate_pct is not None else ""
+            detail = f"最新加权平均成本约 {avg_cost:.2f} 元{winner_text}，需结合现价判断筹码承压位置。"
+        elif status == "empty":
+            detail = "Tushare cyq_perf / cyq_chips 当前未返回可用筹码数据。"
+        else:
+            blocked = perf_diagnosis if perf_diagnosis in blocked_diagnoses else chips_diagnosis
+            detail = self._blocked_disclosure(blocked, source="Tushare cyq_perf / cyq_chips")
+
+        return {
+            "symbol": cleaned_symbol,
+            "ts_code": ts_code,
+            "as_of": as_of_text,
+            "latest_date": latest_date,
+            "is_fresh": is_fresh,
+            "source": "tushare.cyq_perf+tushare.cyq_chips",
+            "fallback": "none",
+            "diagnosis": diagnosis,
+            "disclosure": "Tushare cyq_perf / cyq_chips 用于刻画平均成本、胜率和成本密集区；权限失败、空表或频控时只按缺失处理，不把空结果写成筹码轻松。",  # noqa: E501
+            "status": status,
+            "detail": detail,
+            "current_price": current_price_value,
+            "winner_rate_pct": winner_rate_pct,
+            "weight_avg": avg_cost,
+            "cost_15pct": cost_15pct,
+            "cost_50pct": cost_50pct,
+            "cost_85pct": cost_85pct,
+            "price_vs_weight_avg_pct": price_vs_avg,
+            "above_price_pct": above_price_pct,
+            "near_price_pct": near_price_pct,
+            "peak_price": peak_price,
+            "peak_percent": peak_percent,
+            "components": {
+                "cyq_perf": {
+                    "source": "tushare.cyq_perf",
+                    "as_of": perf_trade_text or latest_trade_text,
+                    "fallback": "none",
+                    "diagnosis": perf_diagnosis,
+                    "disclosure": (
+                        "Tushare cyq_perf 已命中最新筹码胜率和平均成本快照。"
+                        if perf_row
+                        else (
+                            "Tushare cyq_perf 当前未返回该股票的筹码快照。"
+                            if perf_diagnosis == "empty"
+                            else self._blocked_disclosure(perf_diagnosis, source="Tushare cyq_perf")
+                        )
+                    ),
+                    "status": "matched" if perf_row else "empty" if perf_diagnosis == "empty" else "blocked",
+                    "detail": (
+                        (
+                            f"最新胜率 {winner_rate_pct:.1f}% / 加权平均成本 {avg_cost:.2f} 元"
+                            if winner_rate_pct is not None and avg_cost is not None
+                            else f"最新加权平均成本 {avg_cost:.2f} 元"
+                            if avg_cost is not None
+                            else f"最新胜率 {winner_rate_pct:.1f}%"
+                            if winner_rate_pct is not None
+                            else "当前未拿到可用筹码胜率/平均成本快照"
+                        )
+                        if perf_row
+                        else "当前未拿到可用筹码胜率/平均成本快照"
+                    ),
+                    "item": perf_row,
+                },
+                "cyq_chips": {
+                    "source": "tushare.cyq_chips",
+                    "as_of": distribution_trade_text or latest_trade_text,
+                    "fallback": "none",
+                    "diagnosis": chips_diagnosis,
+                    "disclosure": (
+                        "Tushare cyq_chips 已命中最新成本分布。"
+                        if not chips_latest.empty
+                        else (
+                            "Tushare cyq_chips 当前未返回该股票的筹码分布。"
+                            if chips_diagnosis == "empty"
+                            else self._blocked_disclosure(chips_diagnosis, source="Tushare cyq_chips")
+                        )
+                    ),
+                    "status": "matched" if not chips_latest.empty else "empty" if chips_diagnosis == "empty" else "blocked",
+                    "detail": (
+                        (
+                            f"主筹码密集区 {peak_price:.2f} 元 / 单价位占比 {peak_percent:.1f}% / 现价附近筹码 {near_price_pct:.1f}%"
+                            if peak_price is not None and peak_percent is not None and near_price_pct is not None
+                            else f"主筹码密集区 {peak_price:.2f} 元 / 单价位占比 {peak_percent:.1f}%"
+                            if peak_price is not None and peak_percent is not None
+                            else "当前未拿到可用成本分布"
+                        )
+                        if not chips_latest.empty
+                        else "当前未拿到可用成本分布"
+                    ),
+                    "items": chips_latest.head(10).to_dict("records"),
+                },
+            },
+        }
 
     # ── 指数聚合财务 ─────────────────────────────────────────
 

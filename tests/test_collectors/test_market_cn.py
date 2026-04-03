@@ -3,92 +3,49 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from src.collectors.market_cn import ChinaMarketCollector
 
 
-class _FakeTicker:
-    def __init__(self, symbol: str) -> None:
-        self.symbol = symbol
-
-    def history(self, **_: object) -> pd.DataFrame:
-        return pd.DataFrame(
-            {
-                "Open": [1.0, 1.1],
-                "High": [1.1, 1.2],
-                "Low": [0.9, 1.0],
-                "Close": [1.05, 1.15],
-                "Volume": [1000, 1200],
-            }
-        )
-
-
-class _FakeYFinance:
-    def Ticker(self, symbol: str) -> _FakeTicker:  # noqa: N802
-        return _FakeTicker(symbol)
-
-
-def test_market_cn_falls_back_to_yahoo_when_ak_unavailable(monkeypatch):
-    collector = ChinaMarketCollector(
-        {
-            "storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0},
-            "market": {"enable_yahoo_fallback_for_cn_etf": True},
-        }
-    )
-    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(RuntimeError("ak failed")))
-    monkeypatch.setattr("src.collectors.market_cn.yf", _FakeYFinance())
-    frame = collector.get_etf_daily("512400")
-    assert not frame.empty
-    assert frame.attrs["history_source"] == "yahoo"
-    assert frame.attrs["history_source_label"] == "Yahoo Finance 日线回退"
-
-
-def test_market_cn_stock_does_not_fall_back_to_yahoo_unless_enabled(monkeypatch):
+def test_market_cn_stock_daily_returns_empty_when_tushare_is_missing(monkeypatch):
     collector = ChinaMarketCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
     monkeypatch.setattr(collector, "_ts_stock_daily", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ts failed")))
-    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(RuntimeError("ak failed")))
-    monkeypatch.setattr("src.collectors.market_cn.yf", _FakeYFinance())
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare stock daily should not be used")))
 
-    try:
-        collector.get_stock_daily("300750")
-    except RuntimeError as exc:
-        assert str(exc) == "ak failed"
-    else:  # pragma: no cover - defensive
-        raise AssertionError("expected get_stock_daily to stop before Yahoo fallback")
+    frame = collector.get_stock_daily("300750")
+    assert frame.empty is True
 
 
-def test_market_cn_maps_exchange_suffix():
-    collector = ChinaMarketCollector({})
-    assert collector._yahoo_symbol("512400") == "512400.SS"
-    assert collector._yahoo_symbol("159980") == "159980.SZ"
-
-
-def test_market_cn_normalizes_open_fund_nav(monkeypatch):
+def test_market_cn_stock_industry_prefers_tushare_stock_basic(monkeypatch):
     collector = ChinaMarketCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
-
-    def fake_cached_call(_cache_key, fetcher, *args, **kwargs):  # noqa: ANN001
-        return fetcher(*args, **kwargs)
-
-    monkeypatch.setattr(collector, "cached_call", fake_cached_call)
     monkeypatch.setattr(
         collector,
-        "_ak_function",
-        lambda name: (
-            (lambda **_: pd.DataFrame({"净值日期": ["2026-03-07", "2026-03-08"], "单位净值": ["1.01", "1.02"]}))
-            if name == "fund_open_fund_info_em"
-            else (_ for _ in ()).throw(RuntimeError("unexpected"))
-        ),
+        "_ts_call",
+        lambda api_name, **kwargs: pd.DataFrame([{"ts_code": kwargs.get("ts_code"), "name": "宁德时代", "industry": "新能源设备"}]) if api_name == "stock_basic" else (_ for _ in ()).throw(AssertionError(api_name)),
     )
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare stock industry fallback should not be used")))
+
+    assert collector.get_stock_industry("300750") == "新能源设备"
+
+
+def test_market_cn_open_fund_daily_returns_empty_when_tushare_is_missing(monkeypatch):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_ts_call", lambda api_name, **kwargs: pd.DataFrame() if api_name == "fund_nav" else (_ for _ in ()).throw(AssertionError(api_name)))
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare open fund fallback should not be used")))
+
     frame = collector.get_open_fund_daily("022365")
-    assert list(frame.columns) == ["date", "open", "high", "low", "close", "volume", "amount"]
-    assert float(frame["close"].iloc[-1]) == 1.02
-    assert frame.attrs["history_source"] == "akshare"
-    assert frame.attrs["history_source_label"] == "AKShare 基金净值回退"
+    assert frame.empty is True
 
 
 def test_market_cn_index_daily_falls_back_to_proxy_etf(monkeypatch):
     collector = ChinaMarketCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
-    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(RuntimeError("ak failed")))
+    monkeypatch.setattr(
+        collector,
+        "_index_topic_collector",
+        lambda: type("FakeIndexTopic", (), {"get_index_history": staticmethod(lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ts failed")))})(),
+    )
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare index fallback should not be used")))
     monkeypatch.setattr(collector, "get_etf_daily", lambda symbol, **_: pd.DataFrame({"date": ["2026-03-08"], "open": [1], "high": [1], "low": [1], "close": [1], "volume": [0], "amount": [0]}))
     frame = collector.get_index_daily("000300", proxy_symbol="510330")
     assert not frame.empty
@@ -96,19 +53,24 @@ def test_market_cn_index_daily_falls_back_to_proxy_etf(monkeypatch):
 
 def test_market_cn_index_daily_uses_index_code_candidates(monkeypatch, tmp_path):
     collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
-
-    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
-        assert api_name == "index_daily"
-        if kwargs.get("ts_code") == "000300.SH":
-            return pd.DataFrame(
-                [
-                    {"trade_date": "20260310", "open": 10.0, "high": 10.5, "low": 9.8, "close": 10.2, "vol": 1000, "amount": 10000},
-                    {"trade_date": "20260309", "open": 9.8, "high": 10.1, "low": 9.7, "close": 10.0, "vol": 900, "amount": 9000},
-                ]
-            )
-        return pd.DataFrame()
-
-    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    monkeypatch.setattr(
+        collector,
+        "_index_topic_collector",
+        lambda: type(
+            "FakeIndexTopic",
+            (),
+            {
+                "get_index_history": staticmethod(
+                    lambda symbol, period="daily", start_date="", end_date="": pd.DataFrame(
+                        [
+                            {"日期": pd.Timestamp("2026-03-09"), "开盘": 9.8, "最高": 10.1, "最低": 9.7, "收盘": 10.0, "成交量": 900, "成交额": 9_000_000.0},
+                            {"日期": pd.Timestamp("2026-03-10"), "开盘": 10.0, "最高": 10.5, "最低": 9.8, "收盘": 10.2, "成交量": 1000, "成交额": 10_000_000.0},
+                        ]
+                    )
+                )
+            },
+        )(),
+    )
     frame = collector.get_index_daily("000300")
     assert not frame.empty
     assert float(frame["收盘"].iloc[-1]) == 10.2
@@ -155,7 +117,7 @@ def test_market_cn_ts_etf_daily_scales_amount_to_yuan(monkeypatch, tmp_path):
                     {"trade_date": "20260309", "open": 3.9, "high": 4.0, "low": 3.8, "close": 3.95, "vol": 1800, "amount": 500.0},
                 ]
             )
-        if api_name == "adj_factor":
+        if api_name == "fund_adj":
             return pd.DataFrame(
                 [
                     {"trade_date": "20260310", "adj_factor": 1.0},
@@ -170,6 +132,46 @@ def test_market_cn_ts_etf_daily_scales_amount_to_yuan(monkeypatch, tmp_path):
     assert float(frame["成交额"].iloc[-1]) == 567_800.0
     assert frame.attrs["history_source"] == "tushare"
     assert frame.attrs["history_source_label"] == "Tushare 日线"
+
+
+def test_market_cn_ts_etf_daily_falls_back_to_adj_factor_when_fund_adj_missing(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        if api_name == "fund_daily":
+            assert kwargs.get("ts_code") == "510300.SH"
+            return pd.DataFrame(
+                [
+                    {"trade_date": "20260310", "open": 4.0, "high": 4.1, "low": 3.9, "close": 4.05, "vol": 2000, "amount": 567.8},
+                ]
+            )
+        if api_name == "fund_adj":
+            return pd.DataFrame()
+        if api_name == "adj_factor":
+            return pd.DataFrame(
+                [
+                    {"trade_date": "20260310", "adj_factor": 1.0},
+                ]
+            )
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    frame = collector.get_etf_daily("510300")
+    assert not frame.empty
+    assert float(frame["成交额"].iloc[-1]) == 567_800.0
+
+
+def test_market_cn_etf_daily_does_not_fallback_to_akshare_when_tushare_unavailable(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    def fake_ts_etf_daily(symbol: str, start: str, end: str, adjust: str):  # noqa: ARG001
+        raise RuntimeError("temporary ts failure")
+
+    monkeypatch.setattr(collector, "_ts_etf_daily", fake_ts_etf_daily)
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare ETF daily fallback should not run")))
+
+    with pytest.raises(RuntimeError, match="temporary ts failure"):
+        collector.get_etf_daily("510300")
 
 
 def test_market_cn_retries_tushare_stock_daily_before_fallback(monkeypatch, tmp_path):
@@ -194,6 +196,94 @@ def test_market_cn_retries_tushare_stock_daily_before_fallback(monkeypatch, tmp_
     assert attempts["count"] == 2
     assert not frame.empty
     assert frame.attrs["history_source"] == "tushare"
+
+
+def test_market_cn_regulatory_risk_snapshot_aggregates_tushare_contracts(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda *args, **kwargs: ["20260312"])
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        if api_name == "stock_st":
+            assert kwargs.get("trade_date") == "20260312"
+            return pd.DataFrame(
+                [{"ts_code": "000711.SZ", "name": "ST京蓝", "trade_date": "20260312", "type": "ST", "type_name": "风险警示板"}]
+            )
+        if api_name == "st":
+            assert kwargs.get("ts_code") == "000711.SZ"
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000711.SZ",
+                        "name": "ST京蓝",
+                        "pub_date": "20260303",
+                        "imp_date": "20260304",
+                        "st_tpye": "ST",
+                        "st_reason": "其他风险警示",
+                        "st_explain": "持续经营存在不确定性",
+                    }
+                ]
+            )
+        if api_name == "stk_high_shock":
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000711.SZ",
+                        "trade_date": "20260310",
+                        "name": "ST京蓝",
+                        "trade_market": "深市主板",
+                        "reason": "连续10个交易日内4次出现同正向异常波动的证券",
+                        "period": "2026-02-25-2026-03-11",
+                    }
+                ]
+            )
+        if api_name == "stk_alert":
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000711.SZ",
+                        "name": "ST京蓝",
+                        "start_date": "20260304",
+                        "end_date": "20260317",
+                        "type": "交易所重点提示证券",
+                    }
+                ]
+            )
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+
+    snapshot = collector.get_stock_regulatory_risk_snapshot(
+        "000711",
+        as_of="2026-03-12",
+        display_name="ST京蓝",
+    )
+
+    assert snapshot["status"] == "❌"
+    assert snapshot["active_st"] is True
+    assert snapshot["high_shock_count"] == 1
+    assert snapshot["active_alert_count"] == 1
+    assert snapshot["components"]["stock_st"]["source"] == "tushare.stock_st"
+    assert snapshot["components"]["stk_alert"]["status"] == "⚠️"
+
+
+def test_market_cn_regulatory_risk_snapshot_does_not_fake_pass_on_blocked_st(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda *args, **kwargs: ["20260312"])
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        if api_name == "stock_st":
+            raise RuntimeError("抱歉，您没有访问该接口的权限")
+        if api_name in {"st", "stk_high_shock", "stk_alert"}:
+            return pd.DataFrame()
+        raise AssertionError(api_name)
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+
+    snapshot = collector.get_stock_regulatory_risk_snapshot("300308", as_of="2026-03-12")
+
+    assert snapshot["status"] == "ℹ️"
+    assert snapshot["components"]["stock_st"]["diagnosis"] == "permission_blocked"
+    assert "不把缺口写成通过" in snapshot["detail"] or "不把缺口写成通过" in snapshot["disclosure"]
 
 
 def test_market_cn_etf_universe_snapshot_merges_basic_and_daily(monkeypatch, tmp_path):
@@ -221,6 +311,10 @@ def test_market_cn_etf_universe_snapshot_merges_basic_and_daily(monkeypatch, tmp
     )
 
     def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        if api_name == "etf_basic":
+            return pd.DataFrame()
+        if api_name == "etf_share_size":
+            return pd.DataFrame()
         assert api_name == "fund_daily"
         assert kwargs.get("trade_date") == "20260312"
         return pd.DataFrame(
@@ -251,6 +345,84 @@ def test_market_cn_etf_universe_snapshot_merges_basic_and_daily(monkeypatch, tmp
     assert row["benchmark"] == "上证红利指数收益率"
 
 
+def test_market_cn_etf_universe_snapshot_prefers_etf_basic_and_share_size(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda *args, **kwargs: ["20260312"])
+    monkeypatch.setattr(
+        collector,
+        "_ts_etf_basic_snapshot",
+        lambda: pd.DataFrame(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "csname": "沪深300ETF",
+                    "extname": "沪深300ETF华泰柏瑞",
+                    "cname": "华泰柏瑞沪深300ETF",
+                    "index_code": "000300.SH",
+                    "index_name": "沪深300指数",
+                    "setup_date": "20110718",
+                    "list_date": "20110802",
+                    "etf_type": "境内",
+                    "mgr_name": "华泰柏瑞基金",
+                    "custod_name": "中国银行",
+                    "mgt_fee": 0.15,
+                    "exchange": "SH",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "_ts_etf_share_size_snapshot",
+        lambda **kwargs: pd.DataFrame(
+            [
+                {
+                    "trade_date": "20260312",
+                    "ts_code": "510300.SH",
+                    "etf_name": "沪深300ETF",
+                    "total_share": 4_741_854.98,
+                    "total_size": 22_878_980.0,
+                    "nav": 4.8332,
+                    "close": 4.8500,
+                    "exchange": "SH",
+                }
+            ]
+        ),
+    )
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "fund_daily"
+        assert kwargs.get("trade_date") == "20260312"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "trade_date": "20260312",
+                    "pre_close": 4.80,
+                    "open": 4.82,
+                    "high": 4.87,
+                    "low": 4.79,
+                    "close": 4.85,
+                    "change": 0.05,
+                    "pct_chg": 1.04,
+                    "vol": 756432.0,
+                    "amount": 238000.0,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    frame = collector.get_etf_universe_snapshot()
+    assert not frame.empty
+    row = frame.iloc[0]
+    assert row["name"] == "沪深300ETF"
+    assert row["benchmark"] == "沪深300指数"
+    assert row["management"] == "华泰柏瑞基金"
+    assert row["fund_type"] == "境内"
+    assert row["ETF总份额"] == 4_741_854.98
+    assert row["ETF总规模"] == 22_878_980.0
+
+
 def test_market_cn_etf_universe_snapshot_falls_back_to_previous_open_day_when_latest_empty(monkeypatch, tmp_path):
     collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
     monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda *args, **kwargs: ["20260311", "20260312", "20260313"])
@@ -278,6 +450,10 @@ def test_market_cn_etf_universe_snapshot_falls_back_to_previous_open_day_when_la
     seen_dates: list[str] = []
 
     def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        if api_name == "etf_basic":
+            return pd.DataFrame()
+        if api_name == "etf_share_size":
+            return pd.DataFrame()
         assert api_name == "fund_daily"
         trade_date = str(kwargs.get("trade_date"))
         seen_dates.append(trade_date)
@@ -621,44 +797,61 @@ def test_market_cn_tushare_north_south_flow_normalizes_to_yuan(monkeypatch, tmp_
     assert float(frame.loc[0, "南向资金净流入"]) == 300_000_000.0
 
 
-def test_market_cn_margin_fallback_combines_ak_summaries(monkeypatch, tmp_path):
+def test_market_cn_north_south_flow_returns_empty_without_akshare_fallback(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_ts_north_south_flow", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare north/south fallback should not be used")))
+
+    frame = collector.get_north_south_flow()
+
+    assert frame.empty is True
+
+
+def test_market_cn_margin_trading_returns_empty_without_akshare_fallback(monkeypatch, tmp_path):
     collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
 
     monkeypatch.setattr(collector, "_ts_margin", lambda: pd.DataFrame())
-    monkeypatch.setattr(collector, "cached_call", lambda _cache_key, fetcher, *args, **kwargs: fetcher(*args, **kwargs))
-
-    def fake_ak_function(name: str):
-        if name == "stock_margin_sse":
-            return lambda **_: pd.DataFrame(
-                [
-                    {
-                        "信用交易日期": "20260309",
-                        "融资余额": 1_333_276_798_688.0,
-                        "融资买入额": 120_266_698_867.0,
-                        "融券余量金额": 12_372_384_331.0,
-                        "融资融券余额": 1_345_649_183_019.0,
-                    }
-                ]
-            )
-        if name == "stock_margin_szse":
-            return lambda **_: pd.DataFrame(
-                [
-                    {
-                        "融资买入额": 1178.67,
-                        "融资余额": 12857.72,
-                        "融券余额": 57.47,
-                        "融资融券余额": 12915.20,
-                    }
-                ]
-            )
-        raise AssertionError(name)
-
-    monkeypatch.setattr(collector, "_ak_function", fake_ak_function)
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare margin fallback should not be used")))
     frame = collector.get_margin_trading()
-    assert set(frame["交易所"]) == {"上交所", "深交所"}
-    sse_row = frame[frame["交易所"] == "上交所"].iloc[0]
-    szse_row = frame[frame["交易所"] == "深交所"].iloc[0]
-    assert sse_row["日期"] == "2026-03-09"
-    assert float(sse_row["融资余额"]) == 1_333_276_798_688.0
-    assert float(szse_row["融资余额"]) == 1_285_772_000_000.0
-    assert float(szse_row["融资买入额"]) == 117_867_000_000.0
+
+    assert frame.empty is True
+
+
+def test_market_cn_stock_margin_snapshot_surfaces_crowding_risk(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda *args, **kwargs: ["20260328", "20260331", "20260401"])
+    monkeypatch.setattr(
+        collector,
+        "_ts_margin_detail_snapshot",
+        lambda **kwargs: pd.DataFrame(
+            [
+                {"ts_code": "300308.SZ", "trade_date": "20260328", "rzye": 1_000_000_000.0, "rzmre": 120_000_000.0, "rzche": 100_000_000.0, "rqye": 10_000_000.0, "rzrqye": 1_010_000_000.0},
+                {"ts_code": "300308.SZ", "trade_date": "20260331", "rzye": 1_080_000_000.0, "rzmre": 180_000_000.0, "rzche": 120_000_000.0, "rqye": 11_000_000.0, "rzrqye": 1_091_000_000.0},
+                {"ts_code": "300308.SZ", "trade_date": "20260401", "rzye": 1_180_000_000.0, "rzmre": 240_000_000.0, "rzche": 150_000_000.0, "rqye": 12_000_000.0, "rzrqye": 1_192_000_000.0},
+            ]
+        ),
+    )
+
+    snapshot = collector.get_stock_margin_snapshot("300308", as_of="2026-04-01", display_name="中际旭创")
+
+    assert snapshot["status"] == "⚠️"
+    assert snapshot["is_fresh"] is True
+    assert snapshot["crowding_level"] == "high"
+    assert round(float(snapshot["buy_repay_ratio"]), 2) == 1.60
+    assert round(float(snapshot["five_day_change_pct"]), 2) == 0.18
+
+
+def test_market_cn_stock_margin_snapshot_permission_block_does_not_fake_fresh(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda *args, **kwargs: ["20260401"])
+
+    def fake_margin_detail(**kwargs):  # noqa: ANN003
+        raise RuntimeError("not enough points")
+
+    monkeypatch.setattr(collector, "_ts_margin_detail_snapshot", fake_margin_detail)
+
+    snapshot = collector.get_stock_margin_snapshot("300308", as_of="2026-04-01", display_name="中际旭创")
+
+    assert snapshot["diagnosis"] == "permission_blocked"
+    assert snapshot["is_fresh"] is False
+    assert snapshot["status"] == "ℹ️"

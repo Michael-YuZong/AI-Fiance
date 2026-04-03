@@ -6,12 +6,17 @@ import json
 from pathlib import Path
 
 from src.commands.stock_pick import (
+    _attach_featured_visuals,
+    _client_final_runtime_overrides,
     _internal_detail_stem,
     _market_final_stem,
+    _preview_runtime_overrides,
     _run_market,
+    _watch_positive_candidates,
     build_parser,
     enrich_payload_with_score_history,
 )
+from src.utils.config import load_config
 
 
 def _sample_payload(score: int, signal: str, generated_at: str) -> dict:
@@ -233,6 +238,103 @@ def test_build_parser_defaults_to_cn_market() -> None:
     assert args.market == "cn"
 
 
+def test_client_final_runtime_overrides_apply_lightweight_stock_profile_by_default() -> None:
+    config, notes = _client_final_runtime_overrides(
+        {},
+        client_final=True,
+    )
+
+    assert config["market_context"]["skip_global_proxy"] is True
+    assert config["market_context"]["skip_market_monitor"] is True
+    assert config["market_context"]["skip_market_drivers"] is True
+    assert config["news_topic_search_enabled"] is False
+    assert config["news_feeds_file"] == "config/news_feeds.empty.yaml"
+    assert config["opportunity"]["analysis_workers"] == 2
+    assert config["opportunity"]["stock_max_scan_candidates"] == 18
+    assert config["structured_stock_intelligence_apis"] == ["forecast", "express", "dividend", "irm_qa_sh", "irm_qa_sz"]
+    assert config["stock_news_runtime_mode"] == "structured_only"
+    assert config["stock_news_limit"] == 6
+    assert config["skip_analysis_proxy_signals_runtime"] is True
+    assert config["skip_signal_confidence_runtime"] is True
+    assert config["stock_pool_skip_industry_lookup_runtime"] is True
+    assert any("跨市场代理" in item for item in notes)
+    assert any("板块驱动" in item for item in notes)
+    assert any("主题新闻扩搜" in item for item in notes)
+    assert any("轻量新闻源配置" in item for item in notes)
+    assert any("收窄个股分析并发" in item for item in notes)
+    assert any("收窄个股候选池" in item for item in notes)
+    assert any("结构化情报源" in item for item in notes)
+    assert any("结构化快链" in item for item in notes)
+    assert any("单票情报条数上限" in item for item in notes)
+    assert any("情绪代理" in item for item in notes)
+
+
+def test_client_final_runtime_overrides_respect_explicit_stock_config_path() -> None:
+    config, notes = _client_final_runtime_overrides(
+        {"news_topic_search_enabled": True},
+        client_final=True,
+        explicit_config_path="config/custom.yaml",
+    )
+
+    assert config["news_topic_search_enabled"] is True
+    assert "market_context" not in config
+    assert "news_feeds_file" not in config
+    assert notes == []
+
+
+def test_preview_runtime_overrides_apply_lightweight_preview_profile_by_default() -> None:
+    config, notes = _preview_runtime_overrides({})
+
+    assert config["market_context"]["skip_global_proxy"] is True
+    assert config["market_context"]["skip_market_monitor"] is True
+    assert config["market_context"]["skip_market_drivers"] is True
+    assert config["opportunity"]["analysis_workers"] == 2
+    assert config["opportunity"]["stock_max_scan_candidates"] == 15
+    assert config["news_topic_search_enabled"] is False
+    assert config["structured_stock_intelligence_apis"] == ["forecast", "express", "dividend", "irm_qa_sh", "irm_qa_sz"]
+    assert config["stock_news_runtime_mode"] == "structured_only"
+    assert config["stock_news_limit"] == 6
+    assert config["skip_analysis_proxy_signals_runtime"] is True
+    assert config["skip_signal_confidence_runtime"] is True
+    assert config["stock_pool_skip_industry_lookup_runtime"] is True
+    assert any("跨市场代理" in item for item in notes)
+    assert any("分析并发" in item for item in notes)
+    assert any("候选池" in item for item in notes)
+    assert any("主题新闻扩搜" in item for item in notes)
+    assert any("结构化情报" in item for item in notes)
+    assert any("结构化快链" in item for item in notes)
+    assert any("单票情报条数上限" in item for item in notes)
+    assert any("情绪代理" in item for item in notes)
+
+
+def test_preview_runtime_overrides_respect_explicit_stock_config_path() -> None:
+    config, notes = _preview_runtime_overrides(
+        {"opportunity": {"analysis_workers": 5}},
+        explicit_config_path="config/custom.yaml",
+    )
+
+    assert config["opportunity"]["analysis_workers"] == 5
+    assert "market_context" not in config
+    assert notes == []
+
+
+def test_repo_stock_pick_fast_profile_keeps_lightweight_runtime_contract() -> None:
+    config = load_config("config/config.stock_pick_fast.yaml")
+
+    assert config["news_feeds_file"] == "config/news_feeds.empty.yaml"
+    assert config["news_topic_search_enabled"] is False
+    assert config["structured_stock_intelligence_apis"] == ["forecast", "express", "dividend", "irm_qa_sh", "irm_qa_sz"]
+    assert config["stock_news_runtime_mode"] == "structured_only"
+    assert config["stock_news_limit"] == 6
+    assert config["skip_analysis_proxy_signals_runtime"] is True
+    assert config["skip_signal_confidence_runtime"] is True
+    assert config["stock_pool_skip_industry_lookup_runtime"] is True
+    assert config["market_context"]["skip_global_proxy"] is True
+    assert config["market_context"]["skip_market_monitor"] is True
+    assert config["opportunity"]["analysis_workers"] == 2
+    assert config["opportunity"]["stock_max_scan_candidates"] == 15
+
+
 def test_sector_filtered_final_paths_keep_scope_in_filename() -> None:
     assert _internal_detail_stem("cn", "2026-03-22 13:36:00", "黄金") == "stock_picks_cn_黄金_2026-03-22_internal_detail"
     assert _market_final_stem("cn", "2026-03-22 13:36:00", "黄金 / 贵金属") == "stock_picks_cn_黄金_贵金属_2026-03-22_final"
@@ -263,3 +365,144 @@ def test_run_market_reuses_shared_context(monkeypatch) -> None:
     assert payload["market"] == "cn"
     assert captured["market"] == "cn"
     assert captured["context"] is shared_context
+
+
+def test_run_market_client_final_reenriches_finalists_after_light_discovery(monkeypatch) -> None:
+    shared_context = {"regime": {"current_regime": "deflation"}}
+    captured: dict = {}
+
+    def fake_discover(config, top_n=20, market="all", sector_filter="", context=None):  # noqa: ANN001
+        captured["discover_config"] = dict(config)
+        captured["discover_context"] = context
+        return {
+            "generated_at": "2026-04-03 10:00:00",
+            "market": market,
+            "data_coverage": {"news_mode": "proxy", "degraded": True},
+            "top": [
+                {
+                    "symbol": "300750",
+                    "name": "宁德时代",
+                    "asset_type": "cn_stock",
+                    "metadata": {"sector": "新能源", "chain_nodes": ["锂电"]},
+                }
+            ],
+            "coverage_analyses": [
+                {
+                    "symbol": "300750",
+                    "name": "宁德时代",
+                    "asset_type": "cn_stock",
+                    "metadata": {"sector": "新能源", "chain_nodes": ["锂电"]},
+                }
+            ],
+            "watch_positive": [],
+        }
+
+    def fake_analyze(symbol, asset_type, config, context=None, metadata_override=None):  # noqa: ANN001
+        captured["analyze_config"] = dict(config)
+        captured["analyze_context"] = context
+        captured["metadata_override"] = dict(metadata_override or {})
+        return {
+            "symbol": symbol,
+            "name": "宁德时代",
+            "asset_type": asset_type,
+            "generated_at": "2026-04-03 10:05:00",
+            "metadata": {"sector": "新能源", "chain_nodes": ["锂电"]},
+            "rating": {"rank": 2, "label": "储备机会", "stars": "⭐"},
+            "dimensions": {
+                "technical": {"score": 42},
+                "fundamental": {"score": 88},
+                "catalyst": {"score": 44},
+                "relative_strength": {"score": 51},
+                "chips": {"score": 25},
+                "risk": {"score": 61},
+                "seasonality": {"score": 0},
+                "macro": {"score": 20},
+            },
+            "excluded": False,
+        }
+
+    monkeypatch.setattr("src.commands.stock_pick.discover_stock_opportunities", fake_discover)
+    monkeypatch.setattr("src.commands.stock_pick.analyze_opportunity", fake_analyze)
+    monkeypatch.setattr("src.commands.stock_pick.enrich_payload_with_score_history", lambda payload, market, sector_filter: payload)  # noqa: ARG005,E501
+    monkeypatch.setattr("src.commands.stock_pick.attach_portfolio_overlap_summaries", lambda rows, config: rows)  # noqa: ARG005
+    monkeypatch.setattr("src.commands.stock_pick._attach_featured_visuals", lambda payload: payload)
+
+    payload = _run_market({}, "cn", 5, "", context=shared_context, enrich_finalists=True)
+
+    assert captured["discover_context"] is shared_context
+    assert captured["discover_config"]["skip_cn_stock_chip_snapshot_runtime"] is True
+    assert captured["discover_config"]["skip_cn_stock_direct_news_runtime"] is True
+    assert captured["discover_config"]["skip_cn_stock_unlock_pressure_runtime"] is True
+    assert captured["discover_config"]["skip_cn_stock_pledge_risk_runtime"] is True
+    assert "skip_cn_stock_chip_snapshot_runtime" not in captured["analyze_config"]
+    assert captured["metadata_override"]["sector"] == "新能源"
+    assert payload["top"][0]["dimensions"]["fundamental"]["score"] == 88
+
+
+def test_watch_positive_candidates_softly_prefer_portfolio_style_complement() -> None:
+    repeat = _sample_payload(55, "催化不足", "2026-03-10 20:00:00")["top"][0]
+    repeat["symbol"] = "600406"
+    repeat["name"] = "国电南瑞"
+    repeat["rating"] = {"rank": 1}
+    repeat["dimensions"]["fundamental"]["score"] = 66
+    repeat["portfolio_overlap_summary"] = {
+        "overlap_label": "同一行业主线加码",
+        "style_conflict_label": "同风格延伸",
+        "same_sector_weight": 0.31,
+        "same_region_weight": 0.78,
+    }
+
+    complement = _sample_payload(55, "催化不足", "2026-03-10 20:00:00")["top"][0]
+    complement["symbol"] = "000651"
+    complement["name"] = "格力电器"
+    complement["rating"] = {"rank": 1}
+    complement["dimensions"]["fundamental"]["score"] = 64
+    complement["portfolio_overlap_summary"] = {
+        "overlap_label": "重复度较低",
+        "style_conflict_label": "风格补位",
+        "same_sector_weight": 0.0,
+        "same_region_weight": 0.12,
+    }
+
+    rows = _watch_positive_candidates([repeat, complement])
+
+    assert [item["symbol"] for item in rows[:2]] == ["000651", "600406"]
+
+
+def test_attach_featured_visuals_backfills_top_and_watch_from_richer_coverage_item(monkeypatch) -> None:
+    top_item = {
+        "asset_type": "cn_stock",
+        "symbol": "601899",
+        "name": "紫金矿业",
+        "generated_at": "2026-03-31 10:00:00",
+        "rating": {"rank": 1},
+        "dimensions": {
+            "technical": {"score": 35},
+            "fundamental": {"score": 83},
+            "catalyst": {"score": 0},
+            "relative_strength": {"score": 27},
+            "risk": {"score": 25},
+        },
+    }
+    watch_item = json.loads(json.dumps(top_item, ensure_ascii=False))
+    coverage_item = json.loads(json.dumps(top_item, ensure_ascii=False))
+    coverage_item["history"] = "full-history"
+    coverage_item["technical_raw"] = {"ma_system": {"mas": {"MA20": 1.0}}}
+    payload = {
+        "top": [top_item],
+        "watch_positive": [watch_item],
+        "coverage_analyses": [coverage_item],
+    }
+
+    def fake_attach(analyses):  # noqa: ANN001
+        for analysis in analyses:
+            if analysis.get("history") == "full-history":
+                analysis["visuals"] = {"dashboard": "/tmp/601899_dashboard.png"}
+
+    monkeypatch.setattr("src.commands.stock_pick.attach_visuals_to_analyses", fake_attach)
+
+    enriched = _attach_featured_visuals(payload)
+
+    assert enriched["top"][0]["visuals"]["dashboard"] == "/tmp/601899_dashboard.png"
+    assert enriched["watch_positive"][0]["visuals"]["dashboard"] == "/tmp/601899_dashboard.png"
+    assert enriched["coverage_analyses"][0]["visuals"]["dashboard"] == "/tmp/601899_dashboard.png"

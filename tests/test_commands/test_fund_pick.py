@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.commands.fund_pick import _payload_from_analyses, _selection_context
+from src.commands.fund_pick import _client_final_runtime_overrides, _payload_from_analyses, _selection_context
 
 
 def _analysis(
@@ -57,6 +57,45 @@ def test_payload_prefers_gold_candidate_in_defensive_mode() -> None:
     assert payload["winner"]["symbol"] == "021740"
     assert any("防守" in line or "黄金" in line for line in payload["winner"]["positives"])
     assert payload["alternatives"][0]["symbol"] == "022365"
+
+
+def test_client_final_runtime_overrides_apply_lightweight_fund_profile_by_default() -> None:
+    config, notes = _client_final_runtime_overrides(
+        {"opportunity": {"analysis_workers": 4}},
+        client_final=True,
+    )
+
+    assert config["market_context"]["skip_global_proxy"] is True
+    assert config["market_context"]["skip_market_monitor"] is True
+    assert config["market_context"]["skip_market_drivers"] is True
+    assert config["opportunity"]["analysis_workers"] == 2
+    assert config["opportunity"]["fund_max_scan_candidates"] == 10
+    assert config["news_topic_search_enabled"] is False
+    assert config["news_feeds_file"] == "config/news_feeds.empty.yaml"
+    assert config["fund_profile_timeout_seconds"] == 10
+    assert config["index_topic_bundle_timeout_seconds"] == 10
+    assert any("跨市场代理" in item for item in notes)
+    assert any("板块驱动慢链" in item for item in notes)
+    assert any("分析并发" in item for item in notes)
+    assert any("候选池" in item for item in notes)
+    assert any("主题新闻扩搜" in item for item in notes)
+    assert any("轻量新闻源配置" in item for item in notes)
+    assert any("基金画像慢链超时" in item for item in notes)
+    assert any("指数专题慢链超时" in item for item in notes)
+
+
+def test_client_final_runtime_overrides_respect_explicit_fund_config_path() -> None:
+    config, notes = _client_final_runtime_overrides(
+        {"opportunity": {"analysis_workers": 4}},
+        client_final=True,
+        explicit_config_path="config/custom.yaml",
+    )
+
+    assert config["opportunity"]["analysis_workers"] == 4
+    assert "market_context" not in config
+    assert "news_topic_search_enabled" not in config
+    assert "news_feeds_file" not in config
+    assert notes == []
 
 
 def test_payload_keeps_selection_context() -> None:
@@ -144,3 +183,37 @@ def test_payload_keeps_provenance_fields_for_renderer() -> None:
     assert payload["winner"]["generated_at"] == "2026-03-11 10:00:00"
     assert payload["winner"]["provenance"]["relative_benchmark_symbol"] == "000985"
     assert payload["winner"]["benchmark_name"] == "中证科技"
+
+
+def test_payload_keeps_portfolio_overlap_summary_for_renderer() -> None:
+    analysis = _analysis("022365", "永赢科技智选混合发起C", "科技", technical=35, fundamental=75, catalyst=50, relative=47, risk=85, macro=30)
+    analysis["portfolio_overlap_summary"] = {
+        "summary_line": "这条建议和现有组合最重的行业同线，更像同一主线延伸。",
+        "style_summary_line": "风格上至少有 2 只都偏进攻，但还存在一定分化。",
+    }
+
+    payload = _payload_from_analyses([analysis], {})
+
+    assert "同一主线延伸" in payload["winner"]["portfolio_overlap_summary"]["summary_line"]
+
+
+def test_payload_softly_prefers_portfolio_style_complement_within_same_score_band() -> None:
+    repeat = _analysis("022365", "永赢科技智选混合发起C", "科技", technical=35, fundamental=75, catalyst=50, relative=47, risk=85, macro=30)
+    repeat["portfolio_overlap_summary"] = {
+        "overlap_label": "同一行业主线加码",
+        "style_conflict_label": "同风格延伸",
+        "same_sector_weight": 0.33,
+        "same_region_weight": 0.88,
+    }
+
+    complement = _analysis("021735", "均衡精选混合A", "消费", technical=35, fundamental=75, catalyst=50, relative=45, risk=84, macro=30)
+    complement["portfolio_overlap_summary"] = {
+        "overlap_label": "重复度较低",
+        "style_conflict_label": "风格补位",
+        "same_sector_weight": 0.0,
+        "same_region_weight": 0.12,
+    }
+
+    payload = _payload_from_analyses([repeat, complement], {})
+
+    assert payload["winner"]["symbol"] == "021735"

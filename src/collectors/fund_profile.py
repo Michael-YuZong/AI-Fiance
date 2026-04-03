@@ -1,4 +1,4 @@
-"""Open-end fund profile collector — Tushare-first for core fund facts, AKShare fallback for richer detail."""
+"""Open-end fund profile collector — Tushare-first for fund/ETF core facts, AKShare only for uncovered open-end detail."""
 
 from __future__ import annotations
 
@@ -78,10 +78,18 @@ class FundProfileCollector(BaseCollector):
     - fund_div
 
     AKShare remains the richer fallback for:
-    - fund overview text fields
+    - open-end fund overview text fields
     - holdings names / industry allocation
     - manager AUM / peer-fund enrichment
     - rating tables
+
+    For ETFs, overview/benchmark/share-size are expected to come from:
+    - etf_basic
+    - etf_index
+    - etf_share_size
+
+    Once those Tushare feeds are available, ETF main-path research should not
+    keep a parallel AKShare overview / holdings chain.
     """
 
     def _ak_function(self, name: str):
@@ -122,6 +130,159 @@ class FundProfileCollector(BaseCollector):
             self._save_cache(cache_key, raw)
             return self._remember_shared_frame(f"ts_fund_basic:{market}", raw)
         return pd.DataFrame()
+
+    def get_etf_basic_ts(self, symbol: str = "") -> pd.DataFrame:
+        """Tushare etf_basic — ETF 基础信息。"""
+        cache_suffix = str(symbol).strip() or "all"
+        process_cached = self._shared_frame_cache(f"ts_etf_basic:{cache_suffix}")
+        if process_cached is not None:
+            return process_cached
+        cache_key = f"fund_profile:ts_etf_basic:{cache_suffix}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return self._remember_shared_frame(f"ts_etf_basic:{cache_suffix}", cached)
+        raw = self._ts_etf_basic_snapshot()
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+        frame = raw.copy()
+        if symbol and "ts_code" in frame.columns:
+            resolved = self._resolve_tushare_etf_code(symbol, preferred_markets=("E", "O", "L"))
+            bare = str(resolved).split(".")[0]
+            matched = frame[frame["ts_code"].astype(str).str.startswith(f"{bare}.", na=False)]
+            if matched.empty:
+                return pd.DataFrame()
+            frame = matched.reset_index(drop=True)
+        self._save_cache(cache_key, frame)
+        return self._remember_shared_frame(f"ts_etf_basic:{cache_suffix}", frame.reset_index(drop=True))
+
+    def get_etf_index_ts(self, symbol: str = "") -> pd.DataFrame:
+        """Tushare etf_index — ETF 基准指数列表。"""
+        cache_suffix = str(symbol).strip() or "all"
+        process_cached = self._shared_frame_cache(f"ts_etf_index:{cache_suffix}")
+        if process_cached is not None:
+            return process_cached
+        cache_key = f"fund_profile:ts_etf_index:{cache_suffix}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return self._remember_shared_frame(f"ts_etf_index:{cache_suffix}", cached)
+        raw = self._ts_etf_index_snapshot()
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+        frame = raw.copy()
+        if symbol:
+            basic = self.get_etf_basic_ts(symbol)
+            index_code = ""
+            if not basic.empty and "index_code" in basic.columns:
+                index_code = str(basic.iloc[0].get("index_code", "")).strip()
+            if not index_code or "ts_code" not in frame.columns:
+                return pd.DataFrame()
+            matched = frame[frame["ts_code"].astype(str) == index_code]
+            if matched.empty:
+                return pd.DataFrame()
+            frame = matched.reset_index(drop=True)
+        self._save_cache(cache_key, frame)
+        return self._remember_shared_frame(f"ts_etf_index:{cache_suffix}", frame.reset_index(drop=True))
+
+    def get_etf_share_size_ts(self, symbol: str, trade_date: str = "", start_date: str = "", end_date: str = "") -> pd.DataFrame:
+        """Tushare etf_share_size — ETF 份额和规模数据。"""
+        cache_suffix = f"{symbol}:{trade_date}:{start_date}:{end_date}".strip(":")
+        process_cached = self._shared_frame_cache(f"ts_etf_share_size:{cache_suffix}")
+        if process_cached is not None:
+            return process_cached
+        ts_code = self._resolve_tushare_etf_code(symbol, preferred_markets=("E", "O", "L"))
+        trade_date = str(trade_date).replace("-", "").strip()
+        start_date = str(start_date).replace("-", "").strip()
+        end_date = str(end_date).replace("-", "").strip()
+        if not trade_date and not start_date and not end_date:
+            recent_open_dates = self._recent_open_trade_dates(lookback_days=21)
+            if recent_open_dates:
+                end_date = recent_open_dates[-1]
+                start_idx = max(len(recent_open_dates) - 7, 0)
+                start_date = recent_open_dates[start_idx]
+            else:
+                trade_date = self._latest_open_trade_date()
+        cache_key = f"fund_profile:ts_etf_share_size:{ts_code}:{trade_date}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return self._remember_shared_frame(f"ts_etf_share_size:{cache_suffix}", cached)
+        raw = self._ts_etf_share_size_snapshot(ts_code=ts_code, trade_date=trade_date, start_date=start_date, end_date=end_date)
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+        frame = raw.copy()
+        if "trade_date" in frame.columns:
+            frame["trade_date"] = frame["trade_date"].map(self._normalize_compact_date)
+        for column in ("total_share", "total_size", "nav", "close"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        if "trade_date" in frame.columns:
+            frame = frame.sort_values("trade_date", ascending=False, na_position="last")
+        self._save_cache(cache_key, frame)
+        return self._remember_shared_frame(f"ts_etf_share_size:{cache_suffix}", frame.reset_index(drop=True))
+
+    def get_fund_factor_pro_ts(
+        self,
+        symbol: str,
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> pd.DataFrame:
+        """Tushare fund_factor_pro — 场内基金/ETF 技术面因子数据。"""
+        cache_suffix = f"{symbol}:{trade_date}:{start_date}:{end_date}".strip(":")
+        process_cached = self._shared_frame_cache(f"ts_fund_factor_pro:{cache_suffix}")
+        if process_cached is not None:
+            return process_cached
+        ts_code = self._resolve_tushare_fund_code(symbol, preferred_markets=("E", "O", "L"))
+        trade_date = str(trade_date).replace("-", "").strip()
+        start_date = str(start_date).replace("-", "").strip()
+        end_date = str(end_date).replace("-", "").strip()
+        if not trade_date and not start_date and not end_date:
+            recent_open_dates = self._recent_open_trade_dates(lookback_days=14)
+            if recent_open_dates:
+                end_date = recent_open_dates[-1]
+                start_date = recent_open_dates[-2] if len(recent_open_dates) >= 2 else recent_open_dates[-1]
+            else:
+                trade_date = self._latest_open_trade_date()
+        cache_key = f"fund_profile:ts_fund_factor_pro:{ts_code}:{trade_date}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return self._remember_shared_frame(f"ts_fund_factor_pro:{cache_suffix}", cached)
+        raw = self._ts_fund_factor_pro_snapshot(ts_code=ts_code, trade_date=trade_date, start_date=start_date, end_date=end_date)
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+        frame = raw.copy()
+        if "trade_date" in frame.columns:
+            frame["trade_date"] = frame["trade_date"].map(self._normalize_compact_date)
+            frame = frame.sort_values("trade_date", ascending=False, na_position="last")
+        elif "date" in frame.columns:
+            frame["date"] = frame["date"].map(self._normalize_compact_date)
+            frame = frame.sort_values("date", ascending=False, na_position="last")
+        for column in frame.columns:
+            if column in {"ts_code", "trade_date", "date", "fund_name", "name"}:
+                continue
+            if frame[column].dtype == object:
+                numeric = pd.to_numeric(frame[column], errors="coerce")
+                if numeric.notna().any():
+                    frame[column] = numeric
+        latest_date_text = ""
+        if not frame.empty:
+            latest_date_text = str(frame.iloc[0].get("trade_date", frame.iloc[0].get("date", ""))).strip()
+        latest_date = BaseCollector._normalize_date_text(latest_date_text)
+        is_fresh = False
+        if latest_date:
+            try:
+                latest_dt = datetime.strptime(latest_date, "%Y-%m-%d")
+            except ValueError:
+                latest_dt = None
+            if latest_dt is not None:
+                is_fresh = abs((datetime.now().date() - latest_dt.date()).days) <= 4
+        frame.attrs["source"] = "tushare.fund_factor_pro"
+        frame.attrs["as_of"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        frame.attrs["latest_date"] = latest_date
+        frame.attrs["is_fresh"] = is_fresh
+        frame.attrs["fallback"] = "none"
+        frame.attrs["disclosure"] = "场内基金技术面因子来自 Tushare fund_factor_pro；空表或受限时按缺失处理，不伪装成 fresh。"
+        self._save_cache(cache_key, frame)
+        return self._remember_shared_frame(f"ts_fund_factor_pro:{cache_suffix}", frame.reset_index(drop=True))
 
     def get_fund_nav_ts(self, symbol: str) -> pd.DataFrame:
         """Tushare fund_nav — 基金历史净值。"""
@@ -175,6 +336,26 @@ class FundProfileCollector(BaseCollector):
         if raw is not None and not raw.empty:
             self._save_cache(cache_key, raw)
             return self._remember_shared_frame("ts_fund_company", raw)
+        return pd.DataFrame()
+
+    def get_stock_basic_ts(self) -> pd.DataFrame:
+        """Tushare stock_basic — 个股名称映射，用于 ETF 持仓去 AKShare 化。"""
+        process_cached = self._shared_frame_cache("ts_stock_basic")
+        if process_cached is not None:
+            return process_cached
+        cache_key = "fund_profile:ts_stock_basic"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return self._remember_shared_frame("ts_stock_basic", cached)
+        raw = self._ts_call(
+            "stock_basic",
+            exchange="",
+            list_status="L",
+            fields="ts_code,symbol,name",
+        )
+        if raw is not None and not raw.empty:
+            self._save_cache(cache_key, raw)
+            return self._remember_shared_frame("ts_stock_basic", raw)
         return pd.DataFrame()
 
     def get_fund_div_ts(self, symbol: str) -> pd.DataFrame:
@@ -310,31 +491,50 @@ class FundProfileCollector(BaseCollector):
             ),
         )
 
-    def collect_profile(self, symbol: str, asset_type: str = "cn_fund") -> Dict[str, Any]:
+    def collect_profile(self, symbol: str, asset_type: str = "cn_fund", profile_mode: str = "full") -> Dict[str, Any]:
         notes: List[str] = []
+        mode = str(profile_mode or "full").strip().lower() or "full"
+        light_mode = mode == "light"
         previous_prefer_stale = bool(getattr(self, "_profile_prefer_stale", False))
         self._profile_prefer_stale = asset_type == "cn_etf"
         try:
-            ts_manager_df = self._safe_frame(self.get_fund_manager_ts, symbol)
-            ts_company_df = self._safe_frame(self.get_fund_company_ts)
-            ts_div_df = self._safe_frame(self.get_fund_div_ts, symbol)
-            ts_holdings_df = self._safe_frame(self.get_fund_portfolio_ts, symbol)
-            overview_df = self._safe_frame(self.get_overview, symbol)
-            achievement_df = self._safe_frame(self.get_achievement, symbol)
-            asset_mix_df = self._safe_frame(self.get_asset_allocation, symbol)
-            ak_holdings_df = self._safe_frame(self.get_portfolio_hold, symbol)
-            industry_df = self._safe_frame(self.get_industry_allocation, symbol)
-            manager_df = self._safe_frame(self.get_manager_directory)
-            rating_df = self._safe_frame(self.get_rating_table)
+            etf_basic_df = self._safe_frame(self.get_etf_basic_ts, symbol) if asset_type == "cn_etf" else pd.DataFrame()
+            etf_index_df = self._safe_frame(self.get_etf_index_ts, symbol) if asset_type == "cn_etf" else pd.DataFrame()
+            etf_share_size_df = self._safe_frame(self.get_etf_share_size_ts, symbol) if asset_type == "cn_etf" else pd.DataFrame()
+            fund_factor_df = self._safe_frame(self.get_fund_factor_pro_ts, symbol) if asset_type in {"cn_etf", "cn_fund"} else pd.DataFrame()
+            ts_manager_df = self._safe_frame(self.get_fund_manager_ts, symbol) if not light_mode else pd.DataFrame()
+            ts_company_df = self._safe_frame(self.get_fund_company_ts) if not light_mode else pd.DataFrame()
+            ts_div_df = self._safe_frame(self.get_fund_div_ts, symbol) if not light_mode else pd.DataFrame()
+            ts_holdings_df = self._safe_frame(self.get_fund_portfolio_ts, symbol) if not light_mode else pd.DataFrame()
+            stock_basic_df = self._safe_frame(self.get_stock_basic_ts) if asset_type == "cn_etf" and not light_mode else pd.DataFrame()
+            overview_df = pd.DataFrame() if asset_type == "cn_etf" else self._safe_frame(self.get_overview, symbol)
+            achievement_df = self._safe_frame(self.get_achievement, symbol) if not light_mode else pd.DataFrame()
+            asset_mix_df = self._safe_frame(self.get_asset_allocation, symbol) if not light_mode else pd.DataFrame()
+            etf_tushare_holdings_ready = asset_type == "cn_etf" and isinstance(ts_holdings_df, pd.DataFrame) and not ts_holdings_df.empty
+            ak_holdings_df = (
+                pd.DataFrame()
+                if light_mode or asset_type == "cn_etf" or etf_tushare_holdings_ready
+                else self._safe_frame(self.get_portfolio_hold, symbol)
+            )
+            industry_df = self._safe_frame(self.get_industry_allocation, symbol) if not light_mode else pd.DataFrame()
+            manager_df = self._safe_frame(self.get_manager_directory) if not light_mode else pd.DataFrame()
+            rating_df = self._safe_frame(self.get_rating_table) if not light_mode else pd.DataFrame()
         finally:
             self._profile_prefer_stale = previous_prefer_stale
 
         overview = overview_df.iloc[0].to_dict() if not overview_df.empty else {}
-        overview = self._merge_overview_with_tushare(overview, symbol)
+        overview = self._merge_overview_with_tushare(
+            overview,
+            symbol,
+            asset_type=asset_type,
+            etf_basic_df=etf_basic_df,
+            etf_index_df=etf_index_df,
+            etf_share_size_df=etf_share_size_df,
+        )
         if not overview:
             notes.append("基金概况缺失")
         achievement = self._achievement_snapshot(achievement_df)
-        merged_holdings = self._merge_holdings(ts_holdings_df, ak_holdings_df)
+        merged_holdings = self._merge_holdings(ts_holdings_df, ak_holdings_df, stock_basic_df=stock_basic_df)
         top_holdings = self._top_holdings(merged_holdings)
         top_industries = self._top_industries(industry_df)
         asset_mix = self._asset_mix(asset_mix_df)
@@ -356,6 +556,17 @@ class FundProfileCollector(BaseCollector):
             notes.append("基金公司画像缺失")
         if not rating:
             notes.append("基金评级缺失")
+        etf_snapshot = (
+            self._build_etf_snapshot(
+                overview,
+                etf_basic_df=etf_basic_df,
+                etf_index_df=etf_index_df,
+                etf_share_size_df=etf_share_size_df,
+            )
+            if asset_type == "cn_etf"
+            else {}
+        )
+        fund_factor_snapshot = self._build_fund_factor_snapshot(fund_factor_df)
 
         return {
             "overview": overview,
@@ -369,12 +580,279 @@ class FundProfileCollector(BaseCollector):
             "rating": rating,
             "style": style,
             "latest_quarter": str(top_holdings[0].get("季度", "")) if top_holdings else "",
+            "etf_snapshot": etf_snapshot,
+            "fund_factor_snapshot": fund_factor_snapshot,
+            "profile_mode": mode,
             "notes": notes,
         }
 
-    def _merge_overview_with_tushare(self, overview: Dict[str, Any], symbol: str) -> Dict[str, Any]:
-        basic = self._tushare_fund_basic_row(symbol)
-        merged = self._overview_from_tushare_basic(basic) if basic else {}
+    def _build_etf_snapshot(
+        self,
+        overview: Mapping[str, Any],
+        *,
+        etf_basic_df: pd.DataFrame | None = None,
+        etf_index_df: pd.DataFrame | None = None,
+        etf_share_size_df: pd.DataFrame | None = None,
+    ) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {}
+        basic_row = etf_basic_df.iloc[0].to_dict() if isinstance(etf_basic_df, pd.DataFrame) and not etf_basic_df.empty else {}
+        index_row = etf_index_df.iloc[0].to_dict() if isinstance(etf_index_df, pd.DataFrame) and not etf_index_df.empty else {}
+        share_frame = etf_share_size_df.copy() if isinstance(etf_share_size_df, pd.DataFrame) and not etf_share_size_df.empty else pd.DataFrame()
+
+        for source_key, target_key in (
+            ("ts_code", "ts_code"),
+            ("index_code", "index_code"),
+            ("index_name", "index_name"),
+            ("mgr_name", "manager_name"),
+            ("custod_name", "custodian_name"),
+            ("exchange", "exchange"),
+            ("list_status", "list_status"),
+            ("etf_type", "etf_type"),
+        ):
+            value = basic_row.get(source_key)
+            if value not in (None, "", []):
+                snapshot[target_key] = value
+
+        if basic_row.get("list_date") not in (None, ""):
+            snapshot["list_date"] = self._normalize_compact_date(basic_row.get("list_date"))
+        if basic_row.get("setup_date") not in (None, ""):
+            snapshot["setup_date"] = self._normalize_compact_date(basic_row.get("setup_date"))
+        management_fee = self._to_float(basic_row.get("mgt_fee"))
+        if management_fee is not None and pd.notna(management_fee):
+            snapshot["management_fee"] = management_fee
+
+        for source_key, target_key in (
+            ("indx_csname", "index_short_name"),
+            ("pub_party_name", "index_publisher"),
+            ("adj_circle", "index_rebalance_cycle"),
+        ):
+            value = index_row.get(source_key)
+            if value not in (None, "", []):
+                snapshot[target_key] = value
+        if index_row.get("pub_date") not in (None, ""):
+            snapshot["index_publish_date"] = self._normalize_compact_date(index_row.get("pub_date"))
+        if index_row.get("base_date") not in (None, ""):
+            snapshot["index_base_date"] = self._normalize_compact_date(index_row.get("base_date"))
+        base_point = self._to_float(index_row.get("bp"))
+        if base_point is not None and pd.notna(base_point):
+            snapshot["index_base_point"] = base_point
+
+        if not share_frame.empty:
+            if "trade_date" in share_frame.columns:
+                share_frame["trade_date"] = share_frame["trade_date"].map(self._normalize_compact_date)
+                share_frame = share_frame.sort_values("trade_date", ascending=False, na_position="last")
+            latest_row = share_frame.iloc[0].to_dict()
+            trade_date = str(latest_row.get("trade_date", "")).strip()
+            total_share = self._to_float(latest_row.get("total_share"))
+            total_size = self._to_float(latest_row.get("total_size"))
+            nav = self._to_float(latest_row.get("nav"))
+            close = self._to_float(latest_row.get("close"))
+            if trade_date:
+                snapshot["share_as_of"] = trade_date
+            if total_share is not None and pd.notna(total_share):
+                snapshot["total_share"] = total_share
+                snapshot["total_share_yi"] = total_share / 10000.0
+            if total_size is not None and pd.notna(total_size):
+                snapshot["total_size"] = total_size
+                snapshot["total_size_yi"] = total_size / 10000.0
+            if nav is not None and pd.notna(nav):
+                snapshot["nav"] = nav
+            if close is not None and pd.notna(close):
+                snapshot["close"] = close
+            if len(share_frame.index) >= 2:
+                previous_row = share_frame.iloc[1].to_dict()
+                previous_trade_date = str(previous_row.get("trade_date", "")).strip()
+                previous_share = self._to_float(previous_row.get("total_share"))
+                previous_size = self._to_float(previous_row.get("total_size"))
+                if previous_trade_date:
+                    snapshot["previous_share_as_of"] = previous_trade_date
+                    snapshot["previous_size_as_of"] = previous_trade_date
+                if (
+                    total_share is not None
+                    and pd.notna(total_share)
+                    and previous_share is not None
+                    and pd.notna(previous_share)
+                ):
+                    share_change = total_share - previous_share
+                    snapshot["etf_share_change_raw"] = share_change
+                    snapshot["etf_share_change"] = share_change / 10000.0
+                    if previous_share:
+                        snapshot["etf_share_change_pct"] = share_change / previous_share * 100.0
+                if (
+                    total_size is not None
+                    and pd.notna(total_size)
+                    and previous_size is not None
+                    and pd.notna(previous_size)
+                ):
+                    size_change = total_size - previous_size
+                    snapshot["etf_size_change_raw"] = size_change
+                    snapshot["etf_size_change"] = size_change / 10000.0
+                    if previous_size:
+                        snapshot["etf_size_change_pct"] = size_change / previous_size * 100.0
+            snapshot["share_change_text"] = self._format_etf_flow_change(
+                snapshot.get("etf_share_change"),
+                snapshot.get("etf_share_change_pct"),
+                positive_label="净创设",
+                negative_label="净赎回",
+                neutral_label="基本持平",
+                unit="亿份",
+                previous_date=snapshot.get("previous_share_as_of"),
+            )
+            snapshot["size_change_text"] = self._format_etf_flow_change(
+                snapshot.get("etf_size_change"),
+                snapshot.get("etf_size_change_pct"),
+                positive_label="规模扩张",
+                negative_label="规模收缩",
+                neutral_label="规模基本持平",
+                unit="亿元",
+                previous_date=snapshot.get("previous_size_as_of"),
+            )
+
+        if "index_name" not in snapshot:
+            benchmark = str(overview.get("ETF基准指数中文全称", "") or overview.get("业绩比较基准", "")).strip()
+            if benchmark:
+                snapshot["index_name"] = benchmark
+        if "exchange" not in snapshot:
+            exchange = str(overview.get("交易所", "")).strip()
+            if exchange:
+                snapshot["exchange"] = exchange
+        return snapshot
+
+    def _build_fund_factor_snapshot(self, factor_df: pd.DataFrame | None) -> Dict[str, Any]:
+        if not isinstance(factor_df, pd.DataFrame) or factor_df.empty:
+            return {}
+
+        latest_row = factor_df.iloc[0].to_dict()
+
+        def _first_float(*keys: str) -> float | None:
+            for key in keys:
+                value = self._to_float(latest_row.get(key))
+                if value is not None and pd.notna(value):
+                    return float(value)
+            return None
+
+        latest_date = str(
+            latest_row.get("trade_date", latest_row.get("date", factor_df.attrs.get("latest_date", "")))
+        ).strip()
+        trade_date = self._normalize_compact_date(latest_date)
+        close = _first_float("close")
+        pct_change = _first_float("pct_change", "pct_chg")
+        ma20 = _first_float("ma_bfq_20", "ma20")
+        ma60 = _first_float("ma_bfq_60", "ma60")
+        macd = _first_float("macd_bfq", "macd")
+        rsi6 = _first_float("rsi_bfq_6", "rsi6")
+
+        trend_label = "震荡"
+        if close is not None and ma20 is not None and ma60 is not None:
+            if close >= ma20 >= ma60:
+                trend_label = "趋势偏强"
+            elif close >= ma20:
+                trend_label = "修复中"
+            elif close < ma20 < ma60:
+                trend_label = "趋势偏弱"
+
+        momentum_label = ""
+        if macd is not None:
+            if macd >= 0:
+                momentum_label = "动能改善"
+            elif macd < 0:
+                momentum_label = "动能偏弱"
+        if rsi6 is not None:
+            if rsi6 >= 65 and momentum_label != "动能改善":
+                momentum_label = "动能改善"
+            elif rsi6 <= 40 and momentum_label != "动能偏弱":
+                momentum_label = "动能偏弱"
+
+        detail_parts: List[str] = []
+        if close is not None:
+            detail_parts.append(f"收盘 {close:.2f}")
+        if ma20 is not None:
+            detail_parts.append(f"MA20 {ma20:.2f}")
+        if ma60 is not None:
+            detail_parts.append(f"MA60 {ma60:.2f}")
+        if macd is not None:
+            detail_parts.append(f"MACD {macd:+.2f}")
+        if rsi6 is not None:
+            detail_parts.append(f"RSI6 {rsi6:.1f}")
+
+        signal_strength = "中"
+        if pct_change is not None:
+            if pct_change >= 3:
+                signal_strength = "高"
+            elif pct_change < 1:
+                signal_strength = "低"
+
+        return {
+            "trade_date": trade_date,
+            "latest_date": str(factor_df.attrs.get("latest_date", trade_date or "")).strip() or trade_date,
+            "as_of": str(factor_df.attrs.get("as_of", "")).strip(),
+            "is_fresh": bool(factor_df.attrs.get("is_fresh", False)),
+            "source": str(factor_df.attrs.get("source", "tushare.fund_factor_pro")).strip() or "tushare.fund_factor_pro",
+            "fallback": str(factor_df.attrs.get("fallback", "none")).strip() or "none",
+            "disclosure": str(factor_df.attrs.get("disclosure", "")).strip(),
+            "status": "matched",
+            "close": close,
+            "pct_change": pct_change,
+            "ma20": ma20,
+            "ma60": ma60,
+            "macd": macd,
+            "rsi6": rsi6,
+            "trend_label": trend_label,
+            "momentum_label": momentum_label,
+            "signal_strength": signal_strength,
+            "detail": " / ".join(detail_parts),
+        }
+
+    def _format_etf_flow_change(
+        self,
+        change_value: Any,
+        change_pct: Any,
+        *,
+        positive_label: str,
+        negative_label: str,
+        neutral_label: str,
+        unit: str,
+        previous_date: Any = "",
+    ) -> str:
+        change = self._to_float(change_value)
+        pct = self._to_float(change_pct)
+        if change is None or pd.isna(change):
+            return ""
+        if change > 0:
+            label = positive_label
+        elif change < 0:
+            label = negative_label
+        else:
+            label = neutral_label
+        pct_text = ""
+        if pct is not None and pd.notna(pct):
+            pct_text = f" ({pct:+.2f}%)"
+        basis_text = f"，较 {str(previous_date).strip()}" if str(previous_date).strip() else ""
+        return f"{label} {change:+.2f}{unit}{pct_text}{basis_text}"
+
+    def _merge_overview_with_tushare(
+        self,
+        overview: Dict[str, Any],
+        symbol: str,
+        asset_type: str = "cn_fund",
+        etf_basic_df: pd.DataFrame | None = None,
+        etf_index_df: pd.DataFrame | None = None,
+        etf_share_size_df: pd.DataFrame | None = None,
+    ) -> Dict[str, Any]:
+        if asset_type == "cn_etf":
+            etf_basic = etf_basic_df.iloc[0].to_dict() if isinstance(etf_basic_df, pd.DataFrame) and not etf_basic_df.empty else self._tushare_etf_basic_row(symbol)
+            if etf_basic:
+                merged = self._overview_from_tushare_etf_basic(etf_basic)
+            else:
+                basic = self._tushare_fund_basic_row(symbol)
+                merged = self._overview_from_tushare_basic(basic) if basic else {}
+            if isinstance(etf_index_df, pd.DataFrame) and not etf_index_df.empty:
+                merged = self._merge_etf_index_overview(merged, etf_index_df.iloc[0].to_dict())
+            if isinstance(etf_share_size_df, pd.DataFrame) and not etf_share_size_df.empty:
+                merged = self._merge_etf_share_size_overview(merged, etf_share_size_df.iloc[0].to_dict())
+        else:
+            basic = self._tushare_fund_basic_row(symbol)
+            merged = self._overview_from_tushare_basic(basic) if basic else {}
         if not overview:
             return merged
         if not merged:
@@ -384,6 +862,113 @@ class FundProfileCollector(BaseCollector):
             if merged.get(key) in (None, "", "—"):
                 if value not in (None, "", "—"):
                     merged[key] = value
+        return merged
+
+    def _overview_from_tushare_etf_basic(self, basic: Dict[str, Any]) -> Dict[str, Any]:
+        overview: Dict[str, Any] = {}
+        if not basic:
+            return overview
+
+        ts_code = str(basic.get("ts_code", "")).strip()
+        csname = str(basic.get("csname", "") or basic.get("extname", "") or basic.get("cname", "")).strip()
+        extname = str(basic.get("extname", "")).strip()
+        cname = str(basic.get("cname", "")).strip()
+        index_code = str(basic.get("index_code", "")).strip()
+        index_name = str(basic.get("index_name", "")).strip()
+        setup_date = self._normalize_compact_date(basic.get("setup_date"))
+        list_date = self._normalize_compact_date(basic.get("list_date"))
+        etf_type = str(basic.get("etf_type", "")).strip()
+        mgr_name = str(basic.get("mgr_name", "")).strip()
+        custod_name = str(basic.get("custod_name", "")).strip()
+        mgt_fee = self._to_float(basic.get("mgt_fee"))
+        exchange = str(basic.get("exchange", "")).strip()
+
+        if csname:
+            overview["基金简称"] = csname
+        if ts_code:
+            overview["基金代码"] = ts_code.split(".")[0]
+        if extname:
+            overview["ETF扩位简称"] = extname
+        if cname:
+            overview["基金中文全称"] = cname
+        if index_code:
+            overview["ETF基准指数代码"] = index_code
+        if index_name:
+            overview["ETF基准指数中文全称"] = index_name
+            overview["业绩比较基准"] = index_name
+            overview["跟踪标的"] = index_name
+        if setup_date:
+            overview["成立日期"] = setup_date
+        if list_date:
+            overview["上市日期"] = list_date
+        if mgr_name:
+            overview["基金管理人"] = mgr_name
+        if custod_name:
+            overview["基金托管人"] = custod_name
+        if etf_type:
+            overview["ETF类型"] = etf_type
+            overview.setdefault("基金类型", f"ETF / {etf_type}")
+        if exchange:
+            overview["交易所"] = exchange
+        if mgt_fee is not None and pd.notna(mgt_fee):
+            overview["管理费率"] = f"{mgt_fee:.2f}%（每年）"
+        return overview
+
+    def _merge_etf_index_overview(self, overview: Dict[str, Any], index_row: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(overview)
+        if not index_row:
+            return merged
+        index_name = str(index_row.get("indx_name", "") or index_row.get("index_name", "")).strip()
+        index_short = str(index_row.get("indx_csname", "")).strip()
+        publisher = str(index_row.get("pub_party_name", "")).strip()
+        pub_date = self._normalize_compact_date(index_row.get("pub_date"))
+        base_date = self._normalize_compact_date(index_row.get("base_date"))
+        adj_circle = str(index_row.get("adj_circle", "")).strip()
+        bp = self._to_float(index_row.get("bp"))
+
+        if index_name and not merged.get("ETF基准指数中文全称"):
+            merged["ETF基准指数中文全称"] = index_name
+        if index_short and not merged.get("ETF基准指数简称"):
+            merged["ETF基准指数简称"] = index_short
+        if publisher and not merged.get("ETF基准指数发布机构"):
+            merged["ETF基准指数发布机构"] = publisher
+        if pub_date and not merged.get("ETF基准指数发布日期"):
+            merged["ETF基准指数发布日期"] = pub_date
+        if base_date and not merged.get("ETF基准指数基日"):
+            merged["ETF基准指数基日"] = base_date
+        if adj_circle and not merged.get("ETF基准指数调样周期"):
+            merged["ETF基准指数调样周期"] = adj_circle
+        if bp is not None and not merged.get("ETF基准指数基点"):
+            merged["ETF基准指数基点"] = bp
+        return merged
+
+    def _merge_etf_share_size_overview(self, overview: Dict[str, Any], share_row: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(overview)
+        if not share_row:
+            return merged
+        trade_date = str(share_row.get("trade_date", "")).strip()
+        total_share = self._to_float(share_row.get("total_share"))
+        total_size = self._to_float(share_row.get("total_size"))
+        nav = self._to_float(share_row.get("nav"))
+        close = self._to_float(share_row.get("close"))
+        etf_name = str(share_row.get("etf_name", "")).strip()
+        exchange = str(share_row.get("exchange", "")).strip()
+
+        if trade_date:
+            merged["ETF份额规模日期"] = trade_date
+        if etf_name and not merged.get("基金简称"):
+            merged["基金简称"] = etf_name
+        if total_share is not None and pd.notna(total_share):
+            merged["ETF总份额"] = f"{total_share:.2f}万份"
+        if total_size is not None and pd.notna(total_size):
+            merged["ETF总规模"] = f"{total_size:.2f}万元"
+            merged.setdefault("净资产规模", f"{total_size:.2f}万元（截止至：{trade_date}）" if trade_date else f"{total_size:.2f}万元")
+        if nav is not None and pd.notna(nav):
+            merged["ETF份额净值"] = f"{nav:.4f}"
+        if close is not None and pd.notna(close):
+            merged["ETF收盘价"] = f"{close:.4f}"
+        if exchange and not merged.get("交易所"):
+            merged["交易所"] = exchange
         return merged
 
     def _overview_from_tushare_basic(self, basic: Dict[str, Any]) -> Dict[str, Any]:
@@ -444,6 +1029,16 @@ class FundProfileCollector(BaseCollector):
             matched = frame[frame["ts_code"].astype(str).str.startswith(f"{bare_symbol}.", na=False)]
             if not matched.empty:
                 return matched.iloc[0].to_dict()
+        return {}
+
+    def _tushare_etf_basic_row(self, symbol: str) -> Dict[str, Any]:
+        bare_symbol = str(symbol).split(".")[0]
+        frame = self.get_etf_basic_ts(symbol)
+        if frame.empty or "ts_code" not in frame.columns:
+            return {}
+        matched = frame[frame["ts_code"].astype(str).str.startswith(f"{bare_symbol}.", na=False)]
+        if not matched.empty:
+            return matched.iloc[0].to_dict()
         return {}
 
     def _normalize_compact_date(self, value: Any) -> str:
@@ -542,8 +1137,8 @@ class FundProfileCollector(BaseCollector):
             )
         return result
 
-    def _merge_holdings(self, ts_frame: pd.DataFrame, ak_frame: pd.DataFrame) -> pd.DataFrame:
-        ts_norm = self._normalize_tushare_holdings(ts_frame)
+    def _merge_holdings(self, ts_frame: pd.DataFrame, ak_frame: pd.DataFrame, *, stock_basic_df: pd.DataFrame | None = None) -> pd.DataFrame:
+        ts_norm = self._normalize_tushare_holdings(ts_frame, stock_basic_df=stock_basic_df)
         ak_norm = self._normalize_ak_holdings(ak_frame)
         if ts_norm.empty:
             return ak_norm
@@ -573,7 +1168,7 @@ class FundProfileCollector(BaseCollector):
             merged = merged.drop(columns=["占净值比例_ak"])
         return merged
 
-    def _normalize_tushare_holdings(self, frame: pd.DataFrame) -> pd.DataFrame:
+    def _normalize_tushare_holdings(self, frame: pd.DataFrame, *, stock_basic_df: pd.DataFrame | None = None) -> pd.DataFrame:
         if frame.empty:
             return pd.DataFrame()
         symbol_col = "symbol" if "symbol" in frame.columns else "stk_code" if "stk_code" in frame.columns else None
@@ -600,6 +1195,16 @@ class FundProfileCollector(BaseCollector):
         normalized = pd.DataFrame()
         normalized["股票代码"] = working[symbol_col].fillna("").astype(str).str.split(".").str[0]
         normalized["股票名称"] = ""
+        if isinstance(stock_basic_df, pd.DataFrame) and not stock_basic_df.empty:
+            name_map = (
+                stock_basic_df.assign(_symbol=stock_basic_df.get("symbol", pd.Series(dtype=str)).fillna("").astype(str).str.strip())
+                .loc[lambda df: df["_symbol"] != "", ["_symbol", "name"]]
+                .drop_duplicates("_symbol")
+                .set_index("_symbol")["name"]
+                .to_dict()
+            )
+            if name_map:
+                normalized["股票名称"] = normalized["股票代码"].map(lambda code: str(name_map.get(str(code).strip(), "")).strip())
         normalized["占净值比例"] = pd.to_numeric(working[ratio_col], errors="coerce") if ratio_col else pd.NA
         normalized["持股数"] = pd.to_numeric(working[amount_col], errors="coerce") if amount_col else pd.NA
         normalized["持仓市值"] = pd.to_numeric(working[value_col], errors="coerce") if value_col else pd.NA

@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
+import re
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from src.collectors import ChinaMarketCollector, CommodityCollector, HongKongMarketCollector, USMarketCollector
+from src.collectors import AssetLookupCollector, ChinaMarketCollector, CommodityCollector, HongKongMarketCollector, USMarketCollector
 from src.processors.technical import normalize_ohlcv_frame
-from src.utils.config import resolve_project_path
+from src.utils.config import detect_asset_type, resolve_project_path
 from src.utils.data import load_asset_aliases, load_watchlist
 
 
@@ -86,21 +87,101 @@ class AssetContext:
     metadata: Dict[str, Any]
 
 
-def get_asset_context(symbol: str, asset_type: str, config: Dict[str, Any]) -> AssetContext:
-    watchlist = {item["symbol"]: item for item in load_watchlist()}
+def _asset_metadata_by_symbol(symbol: str, config: Mapping[str, Any]) -> Dict[str, Any]:
     alias_path = resolve_project_path(config.get("asset_aliases_file", "config/asset_aliases.yaml"))
     aliases = {item["symbol"]: item for item in load_asset_aliases(alias_path)}
+    watchlist = {item["symbol"]: item for item in load_watchlist()}
     metadata = dict(aliases.get(symbol, {}))
     metadata.update(dict(watchlist.get(symbol, {})))
-    name = metadata.get("name", symbol)
-    source_symbol = metadata.get("proxy_symbol", symbol)
+    return metadata
+
+
+def _local_asset_match(query: str, config: Mapping[str, Any]) -> Dict[str, Any]:
+    lowered = str(query).strip().lower()
+    if not lowered:
+        return {}
+    alias_path = resolve_project_path(config.get("asset_aliases_file", "config/asset_aliases.yaml"))
+    records = list(load_asset_aliases(alias_path))
+    records.extend(load_watchlist())
+    for item in records:
+        symbol = str(item.get("symbol", "")).strip()
+        name = str(item.get("name", "")).strip()
+        aliases = [symbol, name] + [str(alias).strip() for alias in item.get("aliases", []) if str(alias).strip()]
+        if any(lowered == alias.lower() for alias in aliases if alias):
+            return {
+                "symbol": symbol or query,
+                "name": name or symbol or query,
+                "asset_type": str(item.get("asset_type", "")).strip(),
+                "sector": str(item.get("sector", "")).strip(),
+                "chain_nodes": list(item.get("chain_nodes", []) or []),
+                "region": str(item.get("region", "")).strip(),
+                "proxy_symbol": str(item.get("proxy_symbol", "")).strip(),
+                "source": "local_exact",
+                "match_type": "exact_alias",
+            }
+    return {}
+
+
+def _resolve_asset_record(query: str, asset_type: str, config: Mapping[str, Any]) -> Dict[str, Any]:
+    local = _local_asset_match(query, config)
+    if local and (not asset_type or asset_type == "unknown" or local.get("asset_type") in {"", asset_type}):
+        return local
+    try:
+        best = AssetLookupCollector(dict(config)).resolve_best(query)
+    except Exception:
+        best = None
+    if best and (not asset_type or asset_type == "unknown" or str(best.get("asset_type", "")).strip() in {"", asset_type}):
+        return dict(best)
+    return {}
+
+
+def _can_fast_path_direct_symbol(query: str, asset_type: str) -> bool:
+    normalized = str(query).strip().upper()
+    hinted_type = str(asset_type or "").strip()
+    if hinted_type not in {"cn_stock", "cn_etf", "cn_fund", "cn_index"}:
+        return False
+    return bool(re.fullmatch(r"\d{6}", normalized))
+
+
+def get_asset_context(symbol: str, asset_type: str, config: Dict[str, Any]) -> AssetContext:
+    requested = str(symbol).strip()
+    hinted_type = str(asset_type or "").strip()
+    metadata = _asset_metadata_by_symbol(requested, config)
+    if _can_fast_path_direct_symbol(requested, hinted_type):
+        resolved = {
+            "symbol": requested,
+            "name": str(metadata.get("name", "")).strip(),
+            "asset_type": hinted_type,
+            "sector": str(metadata.get("sector", "")).strip(),
+            "chain_nodes": list(metadata.get("chain_nodes", []) or []),
+            "region": str(metadata.get("region", "")).strip(),
+            "proxy_symbol": str(metadata.get("proxy_symbol", "")).strip(),
+            "source": "direct_symbol",
+            "match_type": "direct_symbol",
+        }
+    else:
+        resolved = _resolve_asset_record(requested, hinted_type, config)
+    canonical_symbol = str(resolved.get("symbol", "") or requested)
+    metadata = _asset_metadata_by_symbol(canonical_symbol, config)
+    for key in ("name", "sector", "chain_nodes", "region", "proxy_symbol"):
+        value = resolved.get(key)
+        if value not in (None, "", []):
+            metadata[key] = value
+    resolved_type = str(resolved.get("asset_type", "") or hinted_type or detect_asset_type(canonical_symbol, config)).strip() or "unknown"
+    name = str(metadata.get("name", "") or resolved.get("name", "") or canonical_symbol)
+    source_symbol = str(metadata.get("proxy_symbol", "") or canonical_symbol)
     return AssetContext(
-        symbol=symbol,
+        symbol=canonical_symbol,
         name=name,
-        asset_type=asset_type,
+        asset_type=resolved_type,
         source_symbol=source_symbol,
         metadata=metadata,
     )
+
+
+def resolve_asset_context(query: str, config: Mapping[str, Any], asset_type_hint: str = "") -> AssetContext:
+    hinted_type = str(asset_type_hint or "").strip() or detect_asset_type(str(query).strip(), dict(config))
+    return get_asset_context(str(query).strip(), hinted_type, dict(config))
 
 
 def fetch_asset_history(

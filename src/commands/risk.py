@@ -16,7 +16,7 @@ from src.processors.risk_support import (
     load_stress_scenarios,
     resolve_stress_scenario,
 )
-from src.storage.portfolio import PortfolioRepository
+from src.storage.portfolio import PortfolioRepository, build_portfolio_overlap_summary
 from src.utils.config import load_config
 
 
@@ -84,6 +84,7 @@ def _summary_lines(context: Any) -> List[str]:
     holdings = status.get("holdings", [])
     if not holdings:
         return ["当前没有持仓记录。"]
+    overlap = build_portfolio_overlap_summary(status)
     return [
         f"总市值约 {status['total_value']:.2f} {status['base_currency']}，共 {len(holdings)} 个持仓。",
         "地区暴露: "
@@ -96,6 +97,11 @@ def _summary_lines(context: Any) -> List[str]:
             f"{sector} {weight * 100:.1f}%"
             for sector, weight in sorted(status.get("sector_exposure", {}).items(), key=lambda item: item[1], reverse=True)
         ),
+        f"组合联动: {overlap['summary_line']}",
+        f"组合重复度: {overlap['overlap_label']}；{overlap['conflict_label']}",
+        f"风格与方向: {overlap.get('style_summary_line', '当前风格信息不足。')}",
+        f"风格暴露: {overlap.get('style_detail_line', '风格暴露信息不足。')}",
+        f"组合优先级: {overlap.get('style_priority_hint', '当前风格已足够分散，优先级仍以主线判断为准。')}",
     ]
 
 

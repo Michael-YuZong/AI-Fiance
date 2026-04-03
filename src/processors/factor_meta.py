@@ -410,6 +410,12 @@ FACTOR_REGISTRY: Dict[str, FactorMeta] = {
         lag_days=1,
         notes="ETF 份额申赎/资金流，T+1 可见",
     ),
+    "j5_fund_factor_pro": FactorMeta.scoring_supportive(
+        "j5_fund_factor_pro", "J-5", "etf_specific",
+        visibility_class="daily_close", proxy_level="direct",
+        lag_days=1,
+        notes="场内基金/ETF 技术因子，Tushare fund_factor_pro",
+    ),
     "j5_tracking_error": FactorMeta.scoring_supportive(
         "j5_tracking_error", "J-5", "etf_specific",
         visibility_class="daily_close", proxy_level="direct",

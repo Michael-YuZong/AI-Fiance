@@ -38,6 +38,10 @@ _SOLIDIFICATION_KEYS = (
 )
 _FACTOR_CONTRACT_REPORT_TYPES = {"stock_pick", "etf_pick", "fund_pick", "briefing"}
 _PROXY_CONTRACT_REPORT_TYPES = {"stock_pick", "etf_pick", "fund_pick", "briefing"}
+_THEME_PLAYBOOK_CONTRACT_REPORT_TYPES = {"scan", "stock_analysis", "stock_pick", "etf_pick", "fund_pick", "briefing"}
+_EVENT_DIGEST_CONTRACT_REPORT_TYPES = {"scan", "stock_analysis", "stock_pick", "etf_pick", "fund_pick", "briefing"}
+_WHAT_CHANGED_CONTRACT_REPORT_TYPES = {"scan", "stock_analysis", "stock_pick", "etf_pick", "fund_pick", "briefing"}
+_CATALYST_WEB_REVIEW_REPORT_TYPES = {"scan", "stock_analysis", "stock_pick", "etf_pick", "fund_pick", "briefing"}
 
 
 @dataclass(frozen=True)
@@ -477,6 +481,270 @@ def _audit_manifest_proxy_contract(record: ReviewRecord) -> List[ReviewAuditFind
     return findings
 
 
+def _audit_manifest_theme_playbook_contract(record: ReviewRecord) -> List[ReviewAuditFinding]:
+    findings: List[ReviewAuditFinding] = []
+    manifest_payload = _manifest_payload_for_record(record)
+    if not manifest_payload:
+        return findings
+    report_type = str(manifest_payload.get("report_type", "")).strip()
+    if report_type not in _THEME_PLAYBOOK_CONTRACT_REPORT_TYPES:
+        return findings
+    artifacts = dict(manifest_payload.get("artifacts") or {})
+    contract = dict(artifacts.get("theme_playbook_contract") or {})
+    if not contract:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="manifest 缺少 theme_playbook_contract",
+                detail=f"`{report_type}` 的 manifest 已生成，但没有写入 theme_playbook_contract，无法在 review audit 里追踪主题边界、行业层 fallback 和细分观察合同。",
+            )
+        )
+        return findings
+    playbook_level = str(contract.get("playbook_level") or "").strip()
+    label = str(contract.get("label") or "").strip()
+    if playbook_level not in {"theme", "sector"} or not label:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="theme_playbook_contract 信息不完整",
+                detail="manifest 已写入 theme_playbook_contract，但缺少 `playbook_level` 或 `label`，无法还原正文里的主题边界来源。",
+            )
+        )
+    theme_match_status = str(contract.get("theme_match_status") or "").strip()
+    theme_match_candidates = [
+        str(item).strip()
+        for item in list(contract.get("theme_match_candidates") or [])
+        if str(item).strip()
+    ]
+    if playbook_level == "sector" and theme_match_status == "ambiguous_conflict" and not theme_match_candidates:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="theme_playbook_contract 缺少冲突候选主题",
+                detail="manifest 把当前 playbook 标成 `ambiguous_conflict`，但没有写出 `theme_match_candidates`，后续无法核对正文为何退回行业层。",
+            )
+        )
+    bridge_confidence = str(contract.get("subtheme_bridge_confidence") or "").strip()
+    bridge_top_label = str(contract.get("subtheme_bridge_top_label") or "").strip()
+    if bridge_confidence in {"high", "medium"} and not bridge_top_label:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="theme_playbook_contract 缺少下钻主线",
+                detail="manifest 已声明行业层 bridge 置信度较高，但没有写出 `subtheme_bridge_top_label`，无法回看正文里的细分观察指向了什么。",
+            )
+        )
+    return findings
+
+
+def _audit_manifest_event_digest_contract(record: ReviewRecord) -> List[ReviewAuditFinding]:
+    findings: List[ReviewAuditFinding] = []
+    manifest_payload = _manifest_payload_for_record(record)
+    if not manifest_payload:
+        return findings
+    report_type = str(manifest_payload.get("report_type", "")).strip()
+    if report_type not in _EVENT_DIGEST_CONTRACT_REPORT_TYPES:
+        return findings
+    artifacts = dict(manifest_payload.get("artifacts") or {})
+    contract = dict(artifacts.get("event_digest_contract") or {})
+    if not contract:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="manifest 缺少 event_digest_contract",
+                detail=f"`{report_type}` 的 manifest 已生成，但没有写入 event_digest_contract，无法在 review audit 里追踪事件消化状态、分层和研究解释。",
+            )
+        )
+        return findings
+    status = str(contract.get("status") or "").strip()
+    changed_what = str(contract.get("changed_what") or "").strip()
+    if status not in {"待补充", "待复核", "已消化"} or not changed_what:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="event_digest_contract 信息不完整",
+                detail="manifest 已写入 event_digest_contract，但缺少合法 `status` 或 `changed_what`，无法回看这次事件到底改变了什么。",
+            )
+        )
+    lead_layer = str(contract.get("lead_layer") or "").strip()
+    if lead_layer not in {"财报", "公告", "政策", "新闻", "行业主题事件"}:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="event_digest_contract 缺少有效事件分层",
+                detail="manifest 已写入 event_digest_contract，但 `lead_layer` 缺失或不在正式分层枚举中，后续无法回看系统到底把这次事件归到哪一层。",
+            )
+        )
+    lead_detail = str(contract.get("lead_detail") or "").strip()
+    impact_summary = str(contract.get("impact_summary") or "").strip()
+    thesis_scope = str(contract.get("thesis_scope") or "").strip()
+    importance_reason = str(contract.get("importance_reason") or "").strip()
+    if any((lead_detail, impact_summary, thesis_scope, importance_reason)) and not all((lead_detail, impact_summary, thesis_scope, importance_reason)):
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="event_digest_contract 深度字段不完整",
+                detail="manifest 已开始写入事件细分/影响层/事件性质/优先级判断，但这些深度字段没有同时落齐，后续无法稳定回看这次事件到底影响盈利、估值、景气还是资金偏好，以及为什么它该前置或先不升级。",
+            )
+        )
+    return findings
+
+
+def _audit_manifest_what_changed_contract(record: ReviewRecord) -> List[ReviewAuditFinding]:
+    findings: List[ReviewAuditFinding] = []
+    manifest_payload = _manifest_payload_for_record(record)
+    if not manifest_payload:
+        return findings
+    report_type = str(manifest_payload.get("report_type", "")).strip()
+    if report_type not in _WHAT_CHANGED_CONTRACT_REPORT_TYPES:
+        return findings
+    artifacts = dict(manifest_payload.get("artifacts") or {})
+    contract = dict(artifacts.get("what_changed_contract") or {})
+    if not contract:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="manifest 缺少 what_changed_contract",
+                detail=f"`{report_type}` 的 manifest 已生成，但没有写入 what_changed_contract，无法在 review audit 里回看连续研究对“上次怎么看 / 这次什么变了 / 结论变化”的正式合同。",
+            )
+        )
+        return findings
+    previous_view = str(contract.get("previous_view") or "").strip()
+    change_summary = str(contract.get("change_summary") or "").strip()
+    conclusion_label = str(contract.get("conclusion_label") or "").strip()
+    if not previous_view or not change_summary or not conclusion_label:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="what_changed_contract 信息不完整",
+                detail="manifest 已写入 what_changed_contract，但缺少 `previous_view` / `change_summary` / `conclusion_label`，无法回看这次连续研究到底继承了什么旧判断、变化了什么、结论是否升级或降级。",
+            )
+        )
+    current_event_understanding = str(contract.get("current_event_understanding") or "").strip()
+    if not current_event_understanding:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="what_changed_contract 缺少当前事件理解",
+                detail="manifest 已写入 what_changed_contract，但没有记录“当前事件理解”，后续无法回看这次变化更像什么事件、影响盈利/估值/景气/资金偏好的哪一层，以及它更像噪音还是 thesis 变化。",
+            )
+        )
+    state_trigger = str(contract.get("state_trigger") or "").strip()
+    if not state_trigger:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="what_changed_contract 缺少状态触发",
+                detail="manifest 已写入 what_changed_contract，但没有记录这次为什么升级、削弱、维持或待复核；后续无法回看连续研究的状态机原因，只能看到结果标签。",
+            )
+        )
+    state_summary = str(contract.get("state_summary") or "").strip()
+    if state_trigger and not state_summary:
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P2",
+                category="manifest_contract",
+                title="what_changed_contract 缺少状态解释",
+                detail="manifest 已写入状态触发，但没有记录状态解释；后续只能看到“为什么变了”的标签，看不到这次连续研究到底如何解释升级、削弱或待复核。",
+            )
+        )
+    return findings
+
+
+def _audit_manifest_catalyst_web_review(record: ReviewRecord) -> List[ReviewAuditFinding]:
+    findings: List[ReviewAuditFinding] = []
+    manifest_payload = _manifest_payload_for_record(record)
+    if not manifest_payload:
+        return findings
+    report_type = str(manifest_payload.get("report_type", "")).strip()
+    if report_type not in _CATALYST_WEB_REVIEW_REPORT_TYPES:
+        return findings
+    artifacts = dict(manifest_payload.get("artifacts") or {})
+    editor_artifacts = dict(artifacts.get("editor_artifacts") or {})
+    review_ref = str(editor_artifacts.get("catalyst_web_review") or "").strip()
+    if not review_ref:
+        return findings
+    review_path = Path(review_ref)
+    if not review_path.exists():
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P1",
+                category="manifest_contract",
+                title="manifest 指向的催化联网复核文件缺失",
+                detail=f"`{report_type}` 的 manifest 指向了 `{review_path}`，但文件不存在。",
+            )
+        )
+        return findings
+    text = review_path.read_text(encoding="utf-8")
+    if any(token in text for token in ("- 结论：待补", "\n- 待补\n")):
+        findings.append(
+            ReviewAuditFinding(
+                path=record.path,
+                series_id=record.series_id,
+                round=record.round,
+                severity="P1",
+                category="manifest_contract",
+                title="催化联网复核仍停留在待补模板",
+                detail=f"`{review_path}` 仍然保留 `待补` 模板内容，说明 suspected_search_gap 尚未完成独立联网复核。",
+            )
+        )
+    return findings
+
+
 def build_review_audit(root: Path) -> Dict[str, Any]:
     records = collect_review_records(root)
     audited_records = [record for record in records if record.protocol == "structured_round"]
@@ -492,6 +760,10 @@ def build_review_audit(root: Path) -> Dict[str, Any]:
         findings.extend(_audit_solidification(record, sections))
         findings.extend(_audit_manifest_factor_contract(record))
         findings.extend(_audit_manifest_proxy_contract(record))
+        findings.extend(_audit_manifest_theme_playbook_contract(record))
+        findings.extend(_audit_manifest_event_digest_contract(record))
+        findings.extend(_audit_manifest_what_changed_contract(record))
+        findings.extend(_audit_manifest_catalyst_web_review(record))
 
     for series_id, series_records in _records_by_series(audited_records).items():
         findings.extend(_audit_series_consistency(series_id, series_records, sections_by_path))

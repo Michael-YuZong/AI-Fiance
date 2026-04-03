@@ -77,7 +77,7 @@ class BaseCollector:
         global _tushare_api_instance, _tushare_api_timeout
         if ts is None:
             return None
-        timeout_seconds = float(self.config.get("tushare_timeout_seconds", 12))
+        timeout_seconds = float(self.config.get("tushare_timeout_seconds", 8))
         if _tushare_api_instance is not None and _tushare_api_timeout == timeout_seconds:
             return _tushare_api_instance
         token = (self.config.get("api_keys") or {}).get("tushare", "")
@@ -99,6 +99,47 @@ class BaseCollector:
             logger.warning(f"Tushare API not found: {api_name}")
             return None
         return method(**kwargs)
+
+    @staticmethod
+    def _tushare_failure_diagnosis(exc: BaseException) -> str:
+        text = str(exc)
+        lower = text.lower()
+        rate_limit_markers = (
+            "too many requests",
+            "rate limited",
+            "rate limit",
+            "频率",
+            "频次",
+            "每分钟最多",
+            "每小时最多",
+            "访问过于频繁",
+        )
+        permission_markers = (
+            "无权限",
+            "没有权限",
+            "权限",
+            "积分",
+            "抱歉",
+            "not enough points",
+        )
+        if any(marker in lower for marker in rate_limit_markers):
+            return "rate_limited"
+        if any(marker in text for marker in permission_markers):
+            return "permission_blocked"
+        if BaseCollector._looks_like_resolution_error(exc):
+            return "network_error"
+        return "fetch_error"
+
+    @staticmethod
+    def _blocked_disclosure(diagnosis: str, *, source: str) -> str:
+        mapping = {
+            "permission_blocked": f"{source} 当前未授权或积分不足，本轮不把它写成已命中的确定性结论。",
+            "rate_limited": f"{source} 当前触发频控，本轮不把空结果写成 fresh 命中。",
+            "network_error": f"{source} 当前网络请求失败，本轮不把缺口误写成没有风险或没有主题归因。",
+            "fetch_error": f"{source} 当前抓取失败，本轮按缺失处理，不把它写成 fresh 命中。",
+            "unavailable": f"{source} 当前不可用，本轮按缺失处理。",
+        }
+        return mapping.get(diagnosis, f"{source} 当前不可用，本轮按缺失处理。")
 
     @staticmethod
     def _to_ts_code(symbol: str) -> str:
@@ -149,6 +190,306 @@ class BaseCollector:
             return raw
         return None
 
+    def _ts_etf_basic_snapshot(self) -> Any:
+        """Return cached Tushare etf_basic snapshot."""
+        cache_key = "base:ts_etf_basic"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+        raw = self._ts_call("etf_basic")
+        if raw is not None and not getattr(raw, "empty", False):
+            self._save_cache(cache_key, raw)
+            return raw
+        return None
+
+    def _ts_etf_index_snapshot(self) -> Any:
+        """Return cached Tushare etf_index snapshot."""
+        cache_key = "base:ts_etf_index"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+        raw = self._ts_call("etf_index")
+        if raw is not None and not getattr(raw, "empty", False):
+            self._save_cache(cache_key, raw)
+            return raw
+        return None
+
+    def _ts_etf_share_size_snapshot(
+        self,
+        ts_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        exchange: str = "",
+    ) -> Any:
+        """Return cached Tushare etf_share_size snapshot."""
+        ts_code = str(ts_code).strip()
+        trade_date = str(trade_date).replace("-", "").strip()
+        start_date = str(start_date).replace("-", "").strip()
+        end_date = str(end_date).replace("-", "").strip()
+        exchange = str(exchange).strip()
+        cache_key = f"base:ts_etf_share_size:{ts_code}:{trade_date}:{start_date}:{end_date}:{exchange}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        kwargs: dict[str, Any] = {}
+        if ts_code:
+            kwargs["ts_code"] = ts_code
+        if trade_date:
+            kwargs["trade_date"] = trade_date
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+        if exchange:
+            kwargs["exchange"] = exchange
+
+        raw = self._ts_call("etf_share_size", **kwargs)
+        if raw is not None and not getattr(raw, "empty", False):
+            self._save_cache(cache_key, raw)
+            return raw
+        return None
+
+    def _ts_fund_adj_snapshot(
+        self,
+        ts_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> Any:
+        """Return cached Tushare fund_adj snapshot."""
+        ts_code = str(ts_code).strip()
+        trade_date = str(trade_date).replace("-", "").strip()
+        start_date = str(start_date).replace("-", "").strip()
+        end_date = str(end_date).replace("-", "").strip()
+        cache_key = f"base:ts_fund_adj:{ts_code}:{trade_date}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        kwargs: dict[str, Any] = {}
+        if ts_code:
+            kwargs["ts_code"] = ts_code
+        if trade_date:
+            kwargs["trade_date"] = trade_date
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+
+        raw = self._ts_call("fund_adj", **kwargs)
+        if raw is not None and not getattr(raw, "empty", False):
+            self._save_cache(cache_key, raw)
+            return raw
+        return None
+
+    def _ts_fund_factor_pro_snapshot(
+        self,
+        ts_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> Any:
+        """Return cached Tushare fund_factor_pro snapshot."""
+        ts_code = str(ts_code).strip()
+        trade_date = str(trade_date).replace("-", "").strip()
+        start_date = str(start_date).replace("-", "").strip()
+        end_date = str(end_date).replace("-", "").strip()
+        cache_key = f"base:ts_fund_factor_pro:{ts_code}:{trade_date}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        kwargs: dict[str, Any] = {}
+        if ts_code:
+            kwargs["ts_code"] = ts_code
+        if trade_date:
+            kwargs["trade_date"] = trade_date
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+
+        raw = self._ts_call("fund_factor_pro", **kwargs)
+        if raw is not None and not getattr(raw, "empty", False):
+            self._save_cache(cache_key, raw)
+            return raw
+        return None
+
+    def _ts_cyq_perf_snapshot(
+        self,
+        ts_code: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> Any:
+        """Return cached Tushare cyq_perf snapshot."""
+        ts_code = str(ts_code).strip()
+        start_date = str(start_date).replace("-", "").strip()
+        end_date = str(end_date).replace("-", "").strip()
+        cache_key = f"base:ts_cyq_perf:{ts_code}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        kwargs: dict[str, Any] = {}
+        if ts_code:
+            kwargs["ts_code"] = ts_code
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+
+        raw = self._ts_call("cyq_perf", **kwargs)
+        if raw is not None and not getattr(raw, "empty", False):
+            self._save_cache(cache_key, raw)
+        return raw
+
+    def _ts_cyq_chips_snapshot(
+        self,
+        ts_code: str = "",
+        trade_date: str = "",
+    ) -> Any:
+        """Return cached Tushare cyq_chips snapshot."""
+        ts_code = str(ts_code).strip()
+        trade_date = str(trade_date).replace("-", "").strip()
+        cache_key = f"base:ts_cyq_chips:{ts_code}:{trade_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        kwargs: dict[str, Any] = {}
+        if ts_code:
+            kwargs["ts_code"] = ts_code
+        if trade_date:
+            kwargs["trade_date"] = trade_date
+
+        raw = self._ts_call("cyq_chips", **kwargs)
+        if raw is not None and not getattr(raw, "empty", False):
+            self._save_cache(cache_key, raw)
+        return raw
+
+    def _ts_stock_moneyflow_snapshot(
+        self,
+        ts_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> Any:
+        """Return cached Tushare moneyflow snapshot for a single stock."""
+        ts_code = str(ts_code).strip()
+        trade_date = str(trade_date).replace("-", "").strip()
+        start_date = str(start_date).replace("-", "").strip()
+        end_date = str(end_date).replace("-", "").strip()
+        cache_key = f"base:ts_stock_moneyflow:{ts_code}:{trade_date}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        kwargs: dict[str, Any] = {}
+        if ts_code:
+            kwargs["ts_code"] = ts_code
+        if trade_date:
+            kwargs["trade_date"] = trade_date
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+
+        raw = self._ts_call("moneyflow", **kwargs)
+        if raw is not None and not getattr(raw, "empty", False):
+            self._save_cache(cache_key, raw)
+        return raw
+
+    def _ts_margin_detail_snapshot(
+        self,
+        ts_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> Any:
+        """Return cached Tushare margin_detail snapshot."""
+        ts_code = str(ts_code).strip()
+        trade_date = str(trade_date).replace("-", "").strip()
+        start_date = str(start_date).replace("-", "").strip()
+        end_date = str(end_date).replace("-", "").strip()
+        cache_key = f"base:ts_margin_detail:{ts_code}:{trade_date}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        kwargs: dict[str, Any] = {}
+        if ts_code:
+            kwargs["ts_code"] = ts_code
+        if trade_date:
+            kwargs["trade_date"] = trade_date
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+
+        raw = self._ts_call("margin_detail", **kwargs)
+        if raw is not None and not getattr(raw, "empty", False):
+            self._save_cache(cache_key, raw)
+        return raw
+
+    def _ts_broker_recommend_snapshot(
+        self,
+        month: str = "",
+    ) -> Any:
+        """Return cached Tushare broker_recommend snapshot."""
+        month = str(month).replace("-", "").strip()
+        cache_key = f"base:ts_broker_recommend:{month}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+
+        kwargs: dict[str, Any] = {}
+        if month:
+            kwargs["month"] = month
+
+        raw = self._ts_call("broker_recommend", **kwargs)
+        if raw is not None and not getattr(raw, "empty", False):
+            self._save_cache(cache_key, raw)
+        return raw
+
+    def _ts_irm_qa_snapshot(
+        self,
+        api_name: str,
+        *,
+        ts_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> Any:
+        """Return cached Tushare SSE/SZSE investor-interaction Q&A snapshot."""
+        api_name = str(api_name).strip()
+        if api_name not in {"irm_qa_sh", "irm_qa_sz"}:
+            return None
+        ts_code = str(ts_code).strip()
+        trade_date = str(trade_date).replace("-", "").strip()
+        start_date = str(start_date).replace("-", "").strip()
+        end_date = str(end_date).replace("-", "").strip()
+        cache_key = f"base:ts_{api_name}:{ts_code}:{trade_date}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        kwargs: dict[str, Any] = {}
+        if ts_code:
+            kwargs["ts_code"] = ts_code
+        if trade_date:
+            kwargs["trade_date"] = trade_date
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+
+        raw = self._ts_call(api_name, **kwargs)
+        if raw is not None and not getattr(raw, "empty", False):
+            self._save_cache(cache_key, raw)
+        return raw
+
     def _resolve_tushare_fund_code(
         self,
         symbol: str,
@@ -174,6 +515,60 @@ class BaseCollector:
 
         # Exchange-traded funds commonly use SH/SZ suffixes and can still be
         # queried with the stock-style converter when fund_basic is unavailable.
+        return self._to_ts_code(symbol)
+
+    def _resolve_tushare_etf_code(
+        self,
+        symbol: str,
+        preferred_markets: Sequence[str] = ("E", "O", "L"),
+    ) -> str:
+        """Resolve a bare ETF code into a Tushare ``ts_code`` when possible."""
+        symbol = str(symbol).strip()
+        if not symbol or "." in symbol:
+            return symbol
+        if not (len(symbol) == 6 and symbol.isdigit()):
+            return symbol
+
+        def _prefer_listed_rows(frame: pd.DataFrame) -> pd.DataFrame:
+            if frame is None or frame.empty or "ts_code" not in frame.columns:
+                return frame
+            ranked = frame.copy()
+            ranked["_ts_code_suffix_rank"] = ranked["ts_code"].astype(str).map(
+                lambda value: 0
+                if value.endswith((".SH", ".SZ", ".BJ"))
+                else 1
+                if value.endswith(".OF")
+                else 2
+            )
+            if "list_status" in ranked.columns:
+                ranked["_ts_code_list_rank"] = ranked["list_status"].astype(str).map(lambda value: 0 if value == "L" else 1)
+            else:
+                ranked["_ts_code_list_rank"] = 1
+            return ranked.sort_values(
+                ["_ts_code_suffix_rank", "_ts_code_list_rank", "ts_code"],
+                ascending=[True, True, True],
+                na_position="last",
+            ).reset_index(drop=True)
+
+        etf_basic = self._ts_etf_basic_snapshot()
+        if etf_basic is not None and not getattr(etf_basic, "empty", False) and "ts_code" in etf_basic.columns:
+            matched = etf_basic[etf_basic["ts_code"].astype(str).str.startswith(f"{symbol}.", na=False)]
+            if not matched.empty:
+                preferred = _prefer_listed_rows(matched)
+                return str(preferred.iloc[0]["ts_code"])
+
+        for market in preferred_markets:
+            frame = self._ts_fund_basic_snapshot(market)
+            if frame is None or getattr(frame, "empty", False):
+                continue
+            ts_codes = frame.get("ts_code")
+            if ts_codes is None:
+                continue
+            matched = frame[ts_codes.astype(str).str.startswith(f"{symbol}.", na=False)]
+            if not matched.empty:
+                preferred = _prefer_listed_rows(matched)
+                return str(preferred.iloc[0]["ts_code"])
+
         return self._to_ts_code(symbol)
 
     def _recent_open_trade_dates(self, lookback_days: int = 14, exchange: str = "SSE") -> list[str]:
@@ -407,6 +802,122 @@ class BaseCollector:
             normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
         return normalized[desired].sort_values(["日期", "交易所"]).reset_index(drop=True)
 
+    def _normalize_stock_moneyflow_frame(
+        self,
+        frame: pd.DataFrame | None,
+        default_date: str = "",
+    ) -> pd.DataFrame:
+        """Normalize Tushare moneyflow rows into a stable stock-level shape."""
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+
+        working = frame.copy()
+        ts_code_col = self._first_existing_column(working, ("ts_code", "code"))
+        date_col = self._first_existing_column(working, ("trade_date", "日期"))
+        if ts_code_col is None:
+            return pd.DataFrame()
+
+        def _amount_series(candidates: Sequence[str]) -> pd.Series:
+            column = self._first_existing_column(working, candidates)
+            if column is None:
+                return pd.Series(pd.NA, index=working.index, dtype="Float64")
+            return pd.to_numeric(working[column], errors="coerce").astype("Float64") * 10_000.0
+
+        buy_sm = _amount_series(("buy_sm_amount", "买入小单金额"))
+        sell_sm = _amount_series(("sell_sm_amount", "卖出小单金额"))
+        buy_md = _amount_series(("buy_md_amount", "买入中单金额"))
+        sell_md = _amount_series(("sell_md_amount", "卖出中单金额"))
+        buy_lg = _amount_series(("buy_lg_amount", "买入大单金额"))
+        sell_lg = _amount_series(("sell_lg_amount", "卖出大单金额"))
+        buy_elg = _amount_series(("buy_elg_amount", "买入超大单金额"))
+        sell_elg = _amount_series(("sell_elg_amount", "卖出超大单金额"))
+
+        net_sm = buy_sm - sell_sm
+        net_md = buy_md - sell_md
+        net_lg = buy_lg - sell_lg
+        net_elg = buy_elg - sell_elg
+        main_flow = net_lg.fillna(0.0) + net_elg.fillna(0.0)
+        traded_amount = (
+            buy_sm.fillna(0.0)
+            + sell_sm.fillna(0.0)
+            + buy_md.fillna(0.0)
+            + sell_md.fillna(0.0)
+            + buy_lg.fillna(0.0)
+            + sell_lg.fillna(0.0)
+            + buy_elg.fillna(0.0)
+            + sell_elg.fillna(0.0)
+        ) / 2.0
+
+        normalized = pd.DataFrame(
+            {
+                "日期": (
+                    working[date_col].map(self._normalize_date_text)
+                    if date_col is not None
+                    else pd.Series(self._normalize_date_text(default_date), index=working.index)
+                ),
+                "ts_code": working[ts_code_col].astype(str),
+                "代码": working[ts_code_col].astype(str).map(self._from_ts_code),
+                "小单净流入-净额": net_sm,
+                "中单净流入-净额": net_md,
+                "大单净流入-净额": net_lg,
+                "超大单净流入-净额": net_elg,
+                "主力净流入-净额": main_flow,
+                "估算成交额": traded_amount,
+            }
+        )
+        normalized["主力净流入-净占比"] = pd.Series(pd.NA, index=normalized.index, dtype="Float64")
+        valid_amount = pd.to_numeric(normalized["估算成交额"], errors="coerce")
+        valid_main = pd.to_numeric(normalized["主力净流入-净额"], errors="coerce")
+        mask = valid_amount.notna() & (valid_amount != 0)
+        normalized.loc[mask, "主力净流入-净占比"] = (valid_main[mask] / valid_amount[mask]).astype("Float64")
+        normalized = normalized[normalized["日期"].astype(str) != ""]
+        normalized = normalized.dropna(subset=["日期", "ts_code"]).sort_values(["日期", "ts_code"]).drop_duplicates(["日期", "ts_code"], keep="last")
+        return normalized.reset_index(drop=True)
+
+    def _normalize_margin_detail_frame(
+        self,
+        frame: pd.DataFrame | None,
+        default_date: str = "",
+    ) -> pd.DataFrame:
+        """Normalize Tushare margin_detail rows into a stock-level leverage shape."""
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+
+        working = frame.copy()
+        ts_code_col = self._first_existing_column(working, ("ts_code", "code"))
+        date_col = self._first_existing_column(working, ("trade_date", "日期"))
+        if ts_code_col is None:
+            return pd.DataFrame()
+
+        def _numeric_series(candidates: Sequence[str]) -> pd.Series:
+            column = self._first_existing_column(working, candidates)
+            if column is None:
+                return pd.Series(pd.NA, index=working.index, dtype="Float64")
+            return pd.to_numeric(working[column], errors="coerce").astype("Float64")
+
+        normalized = pd.DataFrame(
+            {
+                "日期": (
+                    working[date_col].map(self._normalize_date_text)
+                    if date_col is not None
+                    else pd.Series(self._normalize_date_text(default_date), index=working.index)
+                ),
+                "ts_code": working[ts_code_col].astype(str),
+                "代码": working[ts_code_col].astype(str).map(self._from_ts_code),
+                "融资余额": _numeric_series(("rzye", "融资余额")),
+                "融资买入额": _numeric_series(("rzmre", "融资买入额")),
+                "融资偿还额": _numeric_series(("rzche", "融资偿还额")),
+                "融券余额": _numeric_series(("rqye", "融券余额", "融券余量金额")),
+                "融资融券余额": _numeric_series(("rzrqye", "融资融券余额")),
+                "融券余量": _numeric_series(("rqyl", "融券余量")),
+                "融券卖出量": _numeric_series(("rqmcl", "融券卖出量")),
+                "融券偿还量": _numeric_series(("rqchl", "融券偿还量")),
+            }
+        )
+        normalized = normalized[normalized["日期"].astype(str) != ""]
+        normalized = normalized.dropna(subset=["日期", "ts_code"]).sort_values(["日期", "ts_code"]).drop_duplicates(["日期", "ts_code"], keep="last")
+        return normalized.reset_index(drop=True)
+
     def _normalize_hsgt_top10_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
         """Normalize Tushare hsgt_top10 rows into a stable schema."""
         if frame is None or frame.empty:
@@ -586,6 +1097,7 @@ class BaseCollector:
         ttl_hours: Optional[int] = None,
         use_cache: bool = True,
         prefer_stale: bool = False,
+        allow_stale_on_error: bool = True,
         **kwargs,
     ) -> Any:
         """Return cached result when possible, otherwise fetch and cache."""
@@ -609,12 +1121,12 @@ class BaseCollector:
                 **kwargs,
             )
         except Exception as exc:
-            if stale_cached is not None:
+            if allow_stale_on_error and stale_cached is not None:
                 logger.warning(f"{self.name} fetch failed for {cache_key}; using stale cache: {exc}")
                 return stale_cached
             raise
         if result is None or getattr(result, "empty", False):
-            if stale_cached is not None:
+            if allow_stale_on_error and stale_cached is not None:
                 logger.warning(f"{self.name} returned empty result for {cache_key}; using stale cache")
                 return stale_cached
             raise ValueError(f"{self.name} returned empty result for {cache_key}")

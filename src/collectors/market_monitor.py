@@ -29,7 +29,16 @@ class MarketMonitorCollector(BaseCollector):
         self.max_stale_hours = float(self.config.get("market_monitor_max_stale_hours", 12))
         self.fetch_timeout_seconds = float(self.config.get("market_monitor_fetch_timeout_seconds", 8))
 
+    def _runtime_enabled(self) -> bool:
+        market_context_cfg = dict(self.config.get("market_context") or {})
+        return bool(
+            market_context_cfg.get("enable_market_monitor_runtime", False)
+            or self.config.get("enable_market_monitor_runtime", False)
+        )
+
     def collect(self) -> List[Dict[str, Any]]:
+        if not self._runtime_enabled():
+            return []
         if yf is None:
             return []
         payload = load_yaml(self.monitors_path, default={"monitors": []}) or {"monitors": []}

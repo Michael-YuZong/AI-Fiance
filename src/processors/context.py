@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -221,7 +221,18 @@ def load_china_macro_snapshot(config: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
-def load_global_proxy_snapshot() -> Dict[str, Any]:
+def global_proxy_runtime_enabled(config: Mapping[str, Any] | None = None) -> bool:
+    payload = dict(config or {})
+    market_context_cfg = dict(payload.get("market_context") or {})
+    return bool(
+        market_context_cfg.get("enable_global_proxy_runtime", False)
+        or payload.get("enable_global_proxy_runtime", False)
+    )
+
+
+def load_global_proxy_snapshot(config: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+    if not global_proxy_runtime_enabled(config):
+        return {}
     return market_regime_proxy()
 
 

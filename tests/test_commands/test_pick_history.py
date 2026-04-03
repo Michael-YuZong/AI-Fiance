@@ -172,7 +172,7 @@ def test_grade_pick_delivery_labels_realtime_universe_as_intraday_final() -> Non
     assert delivery["code"] == "realtime_snapshot_note"
     assert delivery["label"] == "盘中快照成稿"
     assert delivery["observe_only"] is True
-    assert any("正式 final" in note for note in delivery["notes"])
+    assert any("盘中快照理解" in note for note in delivery["notes"])
 
 
 def test_grade_pick_delivery_keeps_watchlist_fallback_as_observe_only() -> None:

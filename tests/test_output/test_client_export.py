@@ -89,9 +89,31 @@ def test_markdown_to_html_renders_emphasis_and_highlight() -> None:
 
 def test_markdown_to_html_uses_report_theme_styles() -> None:
     rendered = markdown_to_html("1. **标签**：内容", "demo")
+    assert 'class="report-body theme-terminal"' in rendered
+    assert 'body.theme-abyss-gold {' in rendered
+    assert 'body.theme-institutional {' in rendered
+    assert 'data-report-theme="terminal"' in rendered
+    assert 'data-report-theme="abyss-gold"' in rendered
+    assert 'font-variant-numeric: tabular-nums lining-nums;' in rendered
     assert "ol > li" in rendered
-    assert "background: linear-gradient(180deg, rgba(251, 246, 239, 0.92)" in rendered
+    assert "report-theme-switcher" in rendered
     assert "li strong:first-child" in rendered
+
+
+def test_markdown_to_html_wraps_top_level_sections_into_cards() -> None:
+    markdown = "# 标题\n\n一句摘要\n\n## 宏观面\n\n内容A\n\n## 动作建议\n\n内容B\n"
+    rendered = markdown_to_html(markdown, "demo")
+    assert '<section class="report-hero">' in rendered
+    assert rendered.count('<section class="report-section">') == 2
+    assert "<h2>宏观面</h2>" in rendered
+    assert "<h2>动作建议</h2>" in rendered
+
+
+def test_markdown_to_html_honors_theme_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AI_FINANCE_REPORT_THEME", "abyss-gold")
+    rendered = markdown_to_html("# 标题", "demo")
+    assert 'class="report-body theme-abyss-gold"' in rendered
+    assert 'data-default-theme="abyss-gold"' in rendered
 
 
 def test_briefing_pdf_accepts_h4(tmp_path: Path) -> None:

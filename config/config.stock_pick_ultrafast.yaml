@@ -1,0 +1,22 @@
+# Temporary narrow profile for same-day stock_pick preview runs.
+news_feeds_file: config/news_feeds.empty.yaml
+news_topic_search_enabled: false
+structured_stock_intelligence_apis:
+  - forecast
+  - express
+  - dividend
+  - irm_qa_sh
+  - irm_qa_sz
+stock_news_limit: 4
+skip_analysis_proxy_signals_runtime: true
+skip_signal_confidence_runtime: true
+stock_pool_skip_industry_lookup_runtime: true
+
+market_context:
+  skip_global_proxy: true
+  skip_market_monitor: true
+  skip_market_drivers: true
+
+opportunity:
+  analysis_workers: 1
+  stock_max_scan_candidates: 6

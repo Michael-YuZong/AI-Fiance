@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import pandas as pd
 
@@ -21,11 +22,15 @@ from src.commands.research import (
     _pick_evidence_lines,
     _portfolio_risk_payload,
     _pulse_stats,
+    _current_asset_event_digest_payload,
     _render_research_markdown,
     _snapshot_bias,
+    _thesis_event_memory_payload,
     _trade_plan_focus,
+    run_research_review,
 )
 from src.processors.risk import RiskAnalyzer
+from src.storage.thesis import ThesisRepository
 
 
 def test_classify_question_prefers_portfolio_risk_when_holdings_exist() -> None:
@@ -145,6 +150,167 @@ def test_render_research_markdown_has_structured_sections() -> None:
     assert "类型: 标的研究 / 交易问题" in markdown
 
 
+def test_render_research_markdown_includes_thesis_memory_section() -> None:
+    markdown = _render_research_markdown(
+        question="561380 现在为什么还值得看",
+        intent=ResearchIntent("asset_thesis", "标的研究 / 交易问题", True, False, False),
+        symbols=["561380"],
+        direct_answer_lines=["当前更像趋势未坏但还要看兑现。"],
+        proxy_contract={},
+        evidence_lines=["[事件消化] 当前 `已消化` / `公告`：判断已下沉到公司级执行。"],
+        provenance_lines=["[事件消化] 当前事件快照 as_of `2026-03-29`。"],
+        risk_lines=["旧催化不能直接当作已经验证。"],
+        action_lines=["先看公司级兑现。"],
+        thesis_memory_lines=["上次为什么看：`电网投资提升`。", "这次什么变了：事件状态从 `待补充` 升到 `已消化`。"],
+    )
+
+    assert "## 研究记忆 / Thesis Ledger" in markdown
+    assert "这次什么变了" in markdown
+
+
+def test_thesis_event_memory_payload_records_delta(tmp_path: Path) -> None:
+    repo = ThesisRepository(thesis_path=tmp_path / "thesis.json")
+    repo.upsert(
+        symbol="561380",
+        core_assumption="电网投资提升",
+        validation_metric="投资完成额同比 > 10%",
+        stop_condition="估值过高且增速下滑",
+        holding_period="6-12个月",
+    )
+    repo.record_event_digest(
+        "561380",
+        {
+            "status": "待补充",
+            "lead_layer": "行业主题事件",
+            "lead_detail": "主题事件：景气/价格验证",
+            "importance": "medium",
+            "lead_title": "特高压投资节奏跟踪",
+            "impact_summary": "景气 / 资金偏好",
+            "thesis_scope": "待确认",
+            "importance_reason": "先观察，因为产业链景气验证还没下沉成公司级兑现。",
+            "changed_what": "先按产业链热度跟踪。",
+            "next_step": "补公司级事件。",
+        },
+        source="scan",
+        recorded_at="2026-03-28 10:00:00",
+    )
+
+    payload = _thesis_event_memory_payload(
+        symbol="561380",
+        thesis_repo=repo,
+        current_event_digest={
+            "status": "已消化",
+            "lead_layer": "公告",
+            "lead_detail": "公告类型：中标/订单",
+            "importance": "high",
+            "lead_title": "国电南瑞中标国家电网项目",
+            "impact_summary": "盈利 / 景气",
+            "thesis_scope": "thesis变化",
+            "importance_reason": "优先前置，因为公司级执行事件已开始改写盈利 / 景气。",
+            "changed_what": "已经下沉到公司级执行。",
+            "next_step": "继续盯兑现节奏。",
+        },
+        source="research",
+        recorded_at="2026-03-29 10:00:00",
+    )
+
+    assert any("上次为什么看" in item for item in payload["memory_lines"])
+    assert any("这次什么变了" in item for item in payload["memory_lines"])
+    assert any("上次事件细分" in item and "事件优先级 `medium`" in item and "优先级判断" in item for item in payload["memory_lines"])
+    assert any("这次事件细分" in item and "盈利 / 景气" in item and "thesis变化" in item for item in payload["memory_lines"])
+    assert any("这次事件细分" in item and "事件优先级 `high`" in item and "优先级判断" in item for item in payload["memory_lines"])
+    assert any("thesis 状态" in item and "升级" in item and "事件完成消化" in item for item in payload["memory_lines"])
+    assert any("thesis ledger" in item for item in payload["provenance_lines"])
+    assert repo.get("561380")["event_digest_snapshot"]["status"] == "已消化"
+
+
+def test_current_asset_event_digest_payload_surfaces_event_depth(monkeypatch) -> None:
+    monkeypatch.setattr("src.commands.research.detect_asset_type", lambda symbol, config: "cn_etf")
+    monkeypatch.setattr("src.commands.research.build_market_context", lambda config, relevant_asset_types=None: {})
+    monkeypatch.setattr("src.commands.research.analyze_opportunity", lambda symbol, asset_type, config, context=None, today_mode=False: {"generated_at": "2026-03-29 10:00:00"})
+    monkeypatch.setattr("src.commands.research.build_event_digest", lambda analysis: analysis)
+    monkeypatch.setattr(
+        "src.commands.research.summarize_event_digest_contract",
+        lambda payload: {
+            "status": "已消化",
+            "lead_layer": "公告",
+            "lead_detail": "公告类型：中标/订单",
+            "importance": "high",
+            "impact_summary": "盈利 / 景气",
+            "thesis_scope": "thesis变化",
+            "importance_reason": "优先前置，因为公司级执行事件已开始改写盈利 / 景气。",
+            "changed_what": "已经下沉到公司级执行。",
+        },
+    )
+
+    payload = _current_asset_event_digest_payload("561380", {"technical": {}})
+
+    assert payload["contract"]["lead_detail"] == "公告类型：中标/订单"
+    assert any("事件细分 `公告类型：中标/订单`" in item for item in payload["evidence_lines"])
+    assert any("当前优先级 `high`" in item for item in payload["evidence_lines"])
+    assert any("更直接影响 `盈利 / 景气`" in item for item in payload["evidence_lines"])
+    assert any("当前更像 `thesis变化`" in item for item in payload["evidence_lines"])
+    assert any("优先级判断：优先前置" in item for item in payload["evidence_lines"])
+
+
+def test_run_research_review_persists_internal_artifact_and_summary(tmp_path: Path, monkeypatch) -> None:
+    repo = ThesisRepository(thesis_path=tmp_path / "thesis.json")
+    repo.upsert(
+        symbol="561380",
+        core_assumption="电网投资提升",
+        validation_metric="投资完成额同比 > 10%",
+        stop_condition="估值过高且增速下滑",
+        holding_period="6-12个月",
+    )
+    monkeypatch.setattr(
+        "src.commands.research.load_config",
+        lambda _path=None: {"technical": {}},
+    )
+    monkeypatch.setattr(
+        "src.commands.research._symbol_snapshot",
+        lambda symbol, config: {
+            "symbol": symbol,
+            "answer": "当前更像趋势未坏但还要看兑现。",
+            "risks": ["短线波动仍在。"],
+            "scenario_lines": ["[场景概率] 主场景仍是震荡上行。"],
+            "provenance_lines": ["[行情时点] 561380 日线 as_of `2026-03-29`。"],
+            "evidence_lines": ["561380: 最新价 2.230，近20日 +6.00%。"],
+        },
+    )
+    monkeypatch.setattr(
+        "src.commands.research._current_asset_event_digest_payload",
+        lambda symbol, config: {
+            "contract": {
+                "status": "已消化",
+                "lead_layer": "公告",
+                "lead_title": "国电南瑞中标国家电网项目",
+                "changed_what": "已经下沉到公司级执行。",
+                "next_step": "继续盯兑现节奏。",
+            },
+            "evidence_lines": ["[事件消化] 当前 `已消化` / `公告`：已经下沉到公司级执行。"],
+            "provenance_lines": ["[事件消化] 当前事件快照 as_of `2026-03-29`。"],
+            "risk_lines": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.commands.research.resolve_project_path",
+        lambda path="": tmp_path / str(path),
+    )
+
+    payload = run_research_review(
+        "561380",
+        question="这次什么变了",
+        thesis_repo=repo,
+        recorded_at="2026-03-29 10:00:00",
+    )
+
+    assert "这次什么变了" in payload["markdown"]
+    assert payload["artifact_path"].endswith("research_561380_review_2026-03-29_100000.md")
+    assert Path(payload["artifact_path"]).exists()
+    assert "这次先记住当前是" in payload["summary"]
+    assert repo.get("561380")["thesis_state_snapshot"]["state"] == "升级"
+
+
 def test_market_takeaway_marks_split_market_and_proxy_risk() -> None:
     takeaway = _market_takeaway(
         day_theme_label="背景宏观主导",
@@ -156,6 +322,101 @@ def test_market_takeaway_marks_split_market_and_proxy_risk() -> None:
     assert takeaway["state"] == "split_market"
     assert "分歧市" in takeaway["answer_lines"][0]
     assert any("代理" in item for item in takeaway["risk_lines"])
+
+
+def test_run_research_review_surfaces_outdated_final_status(tmp_path, monkeypatch) -> None:
+    repo = ThesisRepository(
+        thesis_path=tmp_path / "thesis.json",
+        review_queue_path=tmp_path / "thesis_review_queue.json",
+    )
+    repo.upsert(
+        symbol="561380",
+        core_assumption="电网投资提升",
+        validation_metric="投资完成额同比 > 10%",
+        stop_condition="估值过高且增速下滑",
+        holding_period="6-12个月",
+    )
+    monkeypatch.setattr(
+        "src.storage.thesis.lookup_latest_symbol_reports",
+        lambda symbols, reviews_root=None, limit=2: {
+            "561380": [
+                {
+                    "report_type": "scan",
+                    "generated_at": "2026-03-29 09:00:00",
+                    "markdown": "reports/scans/final/scan_561380_2026-03-29_client_final.md",
+                    "manifest": "reports/reviews/scans/final/scan_561380_2026-03-29_client_final__release_manifest.json",
+                }
+            ]
+        },
+    )
+    repo.record_review_queue(
+        [
+            {
+                "symbol": "561380",
+                "priority": "高",
+                "score": 92,
+                "summary": "事件边界待复核，仓位较重",
+                "thesis_state_trigger": "事件边界待复核",
+                "thesis_state_summary": "当前事件边界已退回待复核，旧 thesis 先不要按已验证继续沿用。",
+                "event_detail": "政策影响层：配套细则",
+                "event_importance_label": "高",
+                "event_importance_reason": "必须前置复核，因为政策细则可能改写盈利 / 景气。",
+                "impact_summary": "盈利 / 景气",
+                "thesis_scope": "待确认",
+                "event_monitor_label": "事件待复核",
+                "has_thesis": True,
+            }
+        ],
+        source="briefing_daily",
+        as_of="2026-03-29 10:00:00",
+    )
+    repo.record_review_run(
+        "561380",
+        action="重跑 scan",
+        status="completed",
+        artifact_path="reports/research/internal/research_561380_review_2026-03-29_103000.md",
+        summary="复查已完成，但当前正式稿还没更新。",
+        recorded_at="2026-03-29 10:30:00",
+    )
+
+    monkeypatch.setattr("src.commands.research.load_config", lambda _path=None: {"technical": {}})
+    monkeypatch.setattr(
+        "src.commands.research._symbol_snapshot",
+        lambda symbol, config: {
+            "symbol": symbol,
+            "answer": "当前更像趋势未坏但还要看兑现。",
+            "risks": ["短线波动仍在。"],
+            "scenario_lines": ["[场景概率] 主场景仍是震荡上行。"],
+            "provenance_lines": ["[行情时点] 561380 日线 as_of `2026-03-29`。"],
+            "evidence_lines": ["561380: 最新价 2.230，近20日 +6.00%。"],
+        },
+    )
+    monkeypatch.setattr(
+        "src.commands.research._current_asset_event_digest_payload",
+        lambda symbol, config: {
+            "contract": {
+                "status": "已消化",
+                "lead_layer": "公告",
+                "lead_title": "国电南瑞中标国家电网项目",
+                "changed_what": "已经下沉到公司级执行。",
+                "next_step": "继续盯兑现节奏。",
+            },
+            "evidence_lines": ["[事件消化] 当前 `已消化` / `公告`：已经下沉到公司级执行。"],
+            "provenance_lines": ["[事件消化] 当前事件快照 as_of `2026-03-29`。"],
+            "risk_lines": [],
+        },
+    )
+    monkeypatch.setattr("src.commands.research.resolve_project_path", lambda path="": tmp_path / str(path))
+
+    payload = run_research_review(
+        "561380",
+        question="这次什么变了",
+        thesis_repo=repo,
+        recorded_at="2026-03-29 10:40:00",
+    )
+
+    assert "最近正式稿状态: 待更新正式稿" in payload["markdown"]
+    assert "旧正式稿当前不能直接沿用" in payload["markdown"]
 
 
 def test_pick_evidence_lines_prioritizes_market_for_market_diagnosis() -> None:

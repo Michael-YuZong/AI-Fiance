@@ -423,6 +423,9 @@ def test_strategy_report_renderer_renders_validation_summary() -> None:
     )
 
     assert "# Strategy Validation" in rendered
+    assert "## 动作卡片" in rendered
+    assert "> **继续观察｜暂不可用，不要当成稳定策略**" in rendered
+    assert "## 当前结论" in rendered
     assert "## 这套策略是什么" in rendered
     assert "## 这次到底看出来什么" in rendered
     assert "## 执行摘要" in rendered
@@ -485,6 +488,8 @@ def test_strategy_report_renderer_renders_client_facing_validation_summary() -> 
 
     assert "正式成稿" in rendered
     assert "已回写账本" not in rendered
+    assert "## 动作卡片" in rendered
+    assert "## 当前结论" in rendered
     assert "## 这套策略是什么" in rendered
     assert "## 这次到底看出来什么" in rendered
     assert "预测时窗口快照" in rendered
@@ -615,6 +620,9 @@ def test_strategy_report_renderer_renders_experiment_summary() -> None:
     )
 
     assert "# Strategy Experiment" in rendered
+    assert "## 动作卡片" in rendered
+    assert "> **进入下一阶段验证｜不能直接切换，只能继续验证**" in rendered
+    assert "## 当前结论" in rendered
     assert "## 这套策略是什么" in rendered
     assert "## 这次到底看出来什么" in rendered
     assert "## 执行摘要" in rendered

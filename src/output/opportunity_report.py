@@ -7,6 +7,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import pandas as pd
 
+from src.output.pick_ranking import analysis_is_actionable as _shared_analysis_is_actionable
+from src.output.technical_signal_labels import append_technical_trigger_text, compact_technical_signal_text
 from src.processors.provenance import build_analysis_provenance
 from src.processors.trade_handoff import portfolio_whatif_handoff
 
@@ -65,11 +67,14 @@ def _table(headers: Sequence[str], rows: Iterable[Sequence[str]]) -> List[str]:
 
 def _dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
     rows: List[List[str]] = []
+    technical_signal_text = compact_technical_signal_text(analysis.get("history"))
     for key, label in DIMENSION_ORDER:
         dimension = analysis["dimensions"][key]
         display_name = str(dimension.get("display_name", label))
         score = "缺失" if dimension.get("score") is None else f"{dimension['score']}/{dimension['max_score']}"
         core_signal = dimension.get("core_signal", "—")
+        if key == "technical" and technical_signal_text:
+            core_signal = f"{core_signal}；{technical_signal_text}" if str(core_signal).strip() and str(core_signal).strip() != "—" else technical_signal_text
         if key == "chips":
             display_name = "筹码结构（辅助项）"
             score = "辅助项"
@@ -81,11 +86,14 @@ def _dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
 
 def _dimension_summary_rows(analysis: Dict[str, Any]) -> List[List[str]]:
     rows: List[List[str]] = []
+    technical_signal_text = compact_technical_signal_text(analysis.get("history"))
     for key, label in DIMENSION_ORDER:
         dimension = analysis["dimensions"][key]
         display_name = str(dimension.get("display_name", label))
         score = "—/100" if dimension.get("score") is None else f"{dimension['score']}/{dimension['max_score']}"
         summary = _dimension_summary_text(key, dimension)
+        if key == "technical" and technical_signal_text and technical_signal_text not in summary:
+            summary = f"{summary} {technical_signal_text}".strip() if summary and summary != "—" else technical_signal_text
         if key == "chips":
             display_name = "筹码结构（辅助项）"
             score = "辅助项"
@@ -375,6 +383,21 @@ def _primary_upgrade_trigger(analysis: Mapping[str, Any]) -> str:
     return "先等技术、催化和相对强弱里至少两项一起改善。"
 
 
+def _strategy_background_summary_text(analysis: Mapping[str, Any]) -> str:
+    confidence = dict(analysis.get("strategy_background_confidence") or {})
+    if not confidence:
+        return ""
+    status = str(confidence.get("status", "")).strip()
+    reason = str(confidence.get("reason") or confidence.get("summary") or "").strip()
+    if status == "degraded":
+        return f"退化：{reason} 当前应先下调置信度，不单靠它升级动作。"
+    if status == "watch":
+        return f"观察：{reason} 这次信号先只作辅助说明。"
+    if status == "stable":
+        return f"稳定：{reason} 这层只作辅助加分，不单独替代当前事实层。"
+    return ""
+
+
 def _manager_profile_text(manager: Mapping[str, Any], overview: Optional[Mapping[str, Any]] = None) -> str:
     manager = dict(manager or {})
     overview = dict(overview or {})
@@ -458,14 +481,14 @@ def _score_change_rows(analysis: Dict[str, Any]) -> List[List[str]]:
 
 
 def _data_sources(analysis: Dict[str, Any]) -> str:
-    sources: List[str] = ["行情/技术: Tushare 优先，AKShare / Yahoo 回退"]
+    sources: List[str] = ["行情/技术: Tushare 优先，AKShare / 本地快照回退"]
     if dict(analysis.get("intraday") or {}).get("enabled"):
         sources.append("盘中快照: AKShare 分钟线 / 实时行情")
     if analysis["dimensions"]["fundamental"].get("valuation_snapshot"):
         sources.append("估值/基本面: Tushare + 指数估值快照/财务代理")
     else:
         sources.append("估值: 价格位置代理")
-    sources.append("催化: RSS + 动态关键词检索")
+    sources.append("催化: RSS + 动态关键词检索；热点主题 0 结果会标记待 AI 联网复核")
     sources.append("事件: 本地事件日历")
     if analysis.get("asset_type") in {"cn_fund", "cn_etf"}:
         sources.append("基金画像: Tushare + 天天基金/雪球")
@@ -483,6 +506,9 @@ def _analysis_provenance_rows(analysis: Dict[str, Any]) -> List[List[str]]:
         ["盘中快照 as_of", provenance.get("intraday_as_of", "未启用")],
         ["催化证据 as_of", provenance.get("catalyst_evidence_as_of", "—")],
         ["催化来源", provenance.get("catalyst_sources_text", "—")],
+        ["催化诊断", provenance.get("catalyst_diagnosis", "—")],
+        ["联网复核结论", provenance.get("catalyst_web_review_decision", "—")],
+        ["联网复核影响", provenance.get("catalyst_web_review_impact", "—")],
         ["新闻模式", provenance.get("news_mode", "unknown")],
         ["时点边界", provenance.get("point_in_time_note", "默认只使用生成时点前可见信息。")],
     ]
@@ -522,7 +548,7 @@ def _estimated_notes(analysis: Dict[str, Any]) -> str:
         notes.append("基本面估值未接入可用指数估值时，使用价格位置代理")
     for note in analysis.get("notes", []):
         if "代理" in note or "估算" in note or "回退" in note:
-            notes.append(note)
+            notes.append(str(note).strip().rstrip("。；;,， "))
     proxy_symbol = analysis.get("metadata", {}).get("proxy_symbol")
     if proxy_symbol:
         notes.append(f"行情代理使用 {proxy_symbol}")
@@ -715,6 +741,18 @@ def _compare_leading_dimensions(analysis: Dict[str, Any]) -> str:
     return " / ".join(leaders[:3]) if leaders else "暂无 60 分以上维度"
 
 
+def _compare_strategy_confidence_rows(analyses: Sequence[Dict[str, Any]]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for analysis in analyses:
+        confidence = dict(analysis.get("strategy_background_confidence") or {})
+        label = str(confidence.get("label", "")).strip() or "未覆盖"
+        reason = str(confidence.get("reason") or confidence.get("summary") or "").strip()
+        if not reason:
+            reason = "当前没有足够历史验证样本，先不把这层当成主要判断依据。"
+        rows.append([f"{analysis.get('name', '—')} ({analysis.get('symbol', '—')})", label, reason])
+    return rows
+
+
 def _fmt_number(value: Any, digits: int = 2, suffix: str = "") -> str:
     if _is_missing_scalar(value):
         return "—"
@@ -810,6 +848,7 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
     profile = dict(analysis.get("fund_profile") or {})
     if not profile:
         return []
+    asset_type = str(analysis.get("asset_type", "")).strip()
     overview = dict(profile.get("overview") or {})
     manager = dict(profile.get("manager") or {})
     company = dict(profile.get("company") or {})
@@ -820,6 +859,72 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
     asset_mix = list(profile.get("asset_allocation") or [])
     industries = list(profile.get("industry_allocation") or [])
     achievement = dict(profile.get("achievement") or {})
+    etf_snapshot = dict(profile.get("etf_snapshot") or {})
+    fund_factor_snapshot = dict(profile.get("fund_factor_snapshot") or {})
+    if etf_snapshot:
+        def _is_blank(value: Any) -> bool:
+            if value in ("", None):
+                return True
+            try:
+                return bool(pd.isna(value))
+            except Exception:
+                return False
+
+        def _fill_if_blank(key: str, value: Any) -> None:
+            if _is_blank(value):
+                return
+            if _is_blank(overview.get(key)):
+                overview[key] = value
+
+        latest_close = None
+        history = analysis.get("history")
+        if isinstance(history, pd.DataFrame) and not history.empty:
+            for column in ("收盘", "close"):
+                if column in history.columns:
+                    try:
+                        latest_close = float(pd.to_numeric(history[column], errors="coerce").dropna().iloc[-1])
+                    except Exception:
+                        latest_close = None
+                    if latest_close is not None:
+                        break
+        total_size_value = etf_snapshot.get("total_size_yi", etf_snapshot.get("total_size", ""))
+        if total_size_value in ("", None) or pd.isna(total_size_value):
+            try:
+                total_share_raw = float(etf_snapshot.get("total_share"))
+            except (TypeError, ValueError):
+                total_share_raw = None
+            if total_share_raw is not None and latest_close is not None:
+                total_size_value = f"约{(total_share_raw * latest_close / 10000.0):.2f}亿元（按最近收盘估算）"
+        share_change_text = str(etf_snapshot.get("share_change_text", "") or "").strip()
+        size_change_text = str(etf_snapshot.get("size_change_text", "") or "").strip()
+        share_as_of = str(etf_snapshot.get("share_as_of", "") or "").strip()
+        if not share_change_text and share_as_of and etf_snapshot.get("total_share") not in ("", None):
+            share_change_text = f"截至 {share_as_of} 仅有单日快照，不能据此写成净创设/净赎回"
+        if not size_change_text and share_as_of and total_size_value not in ("", None, ""):
+            size_change_text = f"截至 {share_as_of} 仅有单日规模口径，不能据此写成规模扩张/收缩"
+        _fill_if_blank("ETF类型", etf_snapshot.get("etf_type", ""))
+        _fill_if_blank("交易所", etf_snapshot.get("exchange", ""))
+        _fill_if_blank("ETF基准指数中文全称", etf_snapshot.get("index_name", ""))
+        _fill_if_blank("ETF基准指数代码", etf_snapshot.get("index_code", ""))
+        _fill_if_blank("ETF基准指数发布机构", etf_snapshot.get("index_publisher", ""))
+        _fill_if_blank("ETF基准指数调样周期", etf_snapshot.get("index_rebalance_cycle", ""))
+        _fill_if_blank("ETF份额规模日期", etf_snapshot.get("share_as_of", ""))
+        _fill_if_blank("ETF总份额", etf_snapshot.get("total_share_yi", etf_snapshot.get("total_share", "")))
+        _fill_if_blank("ETF总规模", total_size_value)
+        _fill_if_blank("ETF最近份额变化", share_change_text)
+        _fill_if_blank("ETF最近规模变化", size_change_text)
+    factor_trend = str(fund_factor_snapshot.get("trend_label", "") or "").strip()
+    factor_momentum = str(fund_factor_snapshot.get("momentum_label", "") or "").strip()
+    factor_date = str(fund_factor_snapshot.get("latest_date", "") or fund_factor_snapshot.get("trade_date", "") or "").strip()
+    factor_text = ""
+    if factor_trend:
+        factor_text = factor_trend
+        if factor_momentum:
+            factor_text += f" / {factor_momentum}"
+        if factor_date:
+            factor_text += f"（{factor_date}）"
+    if factor_text and not str(overview.get("ETF场内技术状态", "") or "").strip():
+        overview["ETF场内技术状态"] = factor_text
 
     lines = [
         "",
@@ -832,7 +937,7 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
                 ["基金类型", overview.get("基金类型", "—")],
                 ["基金公司", overview.get("基金管理人", "—")],
                 ["基金经理", overview.get("基金经理人", "—")],
-                ["成立日期", overview.get("成立日期/规模", "—")],
+                ["成立日期", overview.get("成立日期", overview.get("成立日期/规模", "—"))],
                 ["净资产规模", overview.get("净资产规模", "—")],
                 ["业绩比较基准", overview.get("业绩比较基准", "—")],
                 [
@@ -853,6 +958,38 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
             ],
         )
     )
+
+    if asset_type == "cn_etf" or any(
+        str(overview.get(key, "")).strip()
+        for key in (
+            "ETF类型",
+            "交易所",
+            "ETF基准指数中文全称",
+            "ETF基准指数代码",
+            "ETF总份额",
+            "ETF总规模",
+        )
+    ):
+        lines.extend(["", "### ETF专用信息"])
+        lines.extend(
+            _table(
+                ["维度", "内容"],
+                [
+                    ["ETF类型", overview.get("ETF类型", "—")],
+                    ["交易所", overview.get("交易所", "—")],
+                    ["跟踪指数", overview.get("ETF基准指数中文全称", overview.get("业绩比较基准", "—"))],
+                    ["指数代码", overview.get("ETF基准指数代码", "—")],
+                    ["指数发布机构", overview.get("ETF基准指数发布机构", "—")],
+                    ["调样周期", overview.get("ETF基准指数调样周期", "—")],
+                    ["场内基金技术状态", overview.get("ETF场内技术状态", "—")],
+                    ["最新总份额", overview.get("ETF总份额", "—")],
+                    ["最新总规模", overview.get("ETF总规模", overview.get("净资产规模", "—"))],
+                    ["份额规模日期", overview.get("ETF份额规模日期", "—")],
+                    ["最近份额变化", overview.get("ETF最近份额变化", "—") or "—"],
+                    ["最近规模变化", overview.get("ETF最近规模变化", "—") or "—"],
+                ],
+            )
+        )
 
     company_rows = [
         ["公司简称", company.get("short_name", "—")],
@@ -970,6 +1107,95 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
         for item in profile["notes"]:
             lines.append(f"- {item}")
     return lines
+
+
+def _etf_compare_tracking_index(analysis: Mapping[str, Any]) -> str:
+    profile = dict(analysis.get("fund_profile") or {})
+    overview = dict(profile.get("overview") or {})
+    etf_snapshot = dict(profile.get("etf_snapshot") or {})
+    metadata = dict(analysis.get("metadata") or {})
+    return (
+        str(overview.get("ETF基准指数中文全称", "")).strip()
+        or str(etf_snapshot.get("index_name", "")).strip()
+        or str(metadata.get("tracked_index_name", "")).strip()
+        or str(metadata.get("index_framework_label", "")).strip()
+        or str(analysis.get("benchmark_name", "")).strip()
+        or "—"
+    )
+
+
+def _etf_compare_share_flow(analysis: Mapping[str, Any]) -> str:
+    profile = dict(analysis.get("fund_profile") or {})
+    overview = dict(profile.get("overview") or {})
+    etf_snapshot = dict(profile.get("etf_snapshot") or {})
+    share_text = str(etf_snapshot.get("share_change_text", "")).strip() or str(overview.get("ETF最近份额变化", "")).strip()
+    if share_text:
+        return share_text
+    share_as_of = str(etf_snapshot.get("share_as_of", "")).strip()
+    if share_as_of and etf_snapshot.get("total_share") not in ("", None):
+        return f"截至 {share_as_of} 仅有单日快照"
+    return "—"
+
+
+def _etf_compare_factor_status(analysis: Mapping[str, Any]) -> str:
+    profile = dict(analysis.get("fund_profile") or {})
+    overview = dict(profile.get("overview") or {})
+    fund_factor_snapshot = dict(profile.get("fund_factor_snapshot") or {})
+    overview_text = str(overview.get("ETF场内技术状态", "")).strip() or str(overview.get("场内基金技术状态", "")).strip()
+    if overview_text:
+        return overview_text
+    trend_label = str(fund_factor_snapshot.get("trend_label", "")).strip()
+    momentum_label = str(fund_factor_snapshot.get("momentum_label", "")).strip()
+    factor_date = str(fund_factor_snapshot.get("latest_date", "") or fund_factor_snapshot.get("trade_date", "")).strip()
+    if not trend_label:
+        return "—"
+    text = trend_label
+    if momentum_label:
+        text += f" / {momentum_label}"
+    if factor_date:
+        text += f"（{factor_date}）"
+    return text
+
+
+def _etf_compare_intelligence_status(analysis: Mapping[str, Any]) -> str:
+    news_report = dict(analysis.get("news_report") or {})
+    linked_items = [
+        item
+        for item in list(news_report.get("items") or [])
+        if str(dict(item).get("link") or "").strip()
+    ]
+    if linked_items:
+        return f"已接上 {len(linked_items)} 条可点击外部情报"
+    catalyst = dict(dict(analysis.get("dimensions") or {}).get("catalyst") or {})
+    coverage = dict(catalyst.get("coverage") or {})
+    if list(news_report.get("items") or []) or list(catalyst.get("theme_news") or []) or list(catalyst.get("evidence") or []):
+        return "已有情报线索，但还不够硬"
+    if coverage.get("degraded") or coverage.get("fallback_applied"):
+        return "当前外部情报仍偏薄"
+    return "—"
+
+
+def _etf_compare_product_rows(analyses: Sequence[Dict[str, Any]]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for analysis in analyses:
+        if str(analysis.get("asset_type", "")).strip() != "cn_etf":
+            continue
+        tracking_index = _etf_compare_tracking_index(analysis)
+        share_flow = _etf_compare_share_flow(analysis)
+        factor_status = _etf_compare_factor_status(analysis)
+        intelligence_status = _etf_compare_intelligence_status(analysis)
+        if all(text in {"", "—"} for text in (tracking_index, share_flow, factor_status, intelligence_status)):
+            continue
+        rows.append(
+            [
+                f"{analysis.get('name', '—')} ({analysis.get('symbol', '—')})",
+                tracking_index,
+                share_flow,
+                factor_status,
+                intelligence_status,
+            ]
+        )
+    return rows
 
 
 def _intraday_lines(analysis: Dict[str, Any]) -> List[str]:
@@ -1098,6 +1324,74 @@ def _merge_unique_lines(primary: Sequence[str], secondary: Sequence[str], *, max
     return merged
 
 
+def _index_horizon_lines(analysis: Mapping[str, Any]) -> List[str]:
+    bundle = dict(analysis.get("index_topic_bundle") or {})
+    history_snapshots = dict(bundle.get("history_snapshots") or {})
+    snapshot = dict(bundle.get("index_snapshot") or {})
+    index_name = (
+        str(snapshot.get("index_name", "")).strip()
+        or str(analysis.get("benchmark_name", "")).strip()
+        or str(analysis.get("name", "")).strip()
+        or "相关指数"
+    )
+    weekly = dict(history_snapshots.get("weekly") or {})
+    monthly = dict(history_snapshots.get("monthly") or {})
+    if weekly.get("status") != "matched" and monthly.get("status") != "matched":
+        return []
+
+    def _period_line(label: str, row: Mapping[str, Any]) -> str:
+        summary = str(row.get("summary", "")).strip()
+        trend_label = str(row.get("trend_label", "")).strip()
+        momentum_label = str(row.get("momentum_label", "")).strip()
+        latest_date = str(row.get("latest_date", "")).strip()
+        parts: List[str] = []
+        if summary:
+            parts.append(summary)
+        for extra in (trend_label, momentum_label):
+            if extra and extra not in summary:
+                parts.append(extra)
+        text = "，".join(parts) if parts else "缺失"
+        if latest_date:
+            text += f"（{latest_date}）"
+        return f"- {label}：{index_name} {text}。"
+
+    lines = ["", "## 周月节奏"]
+    if weekly.get("status") == "matched":
+        lines.append(_period_line("周线", weekly))
+    if monthly.get("status") == "matched":
+        lines.append(_period_line("月线", monthly))
+
+    weekly_trend = str(weekly.get("trend_label", "")).strip()
+    monthly_trend = str(monthly.get("trend_label", "")).strip()
+    if weekly_trend and monthly_trend:
+        if weekly_trend in {"趋势偏强", "修复中"} and monthly_trend in {"趋势偏强", "修复中"}:
+            lines.append(f"- 结论：`{index_name}` 的周月节奏同向偏强，当前更适合按延续看，不把单日波动误判成反转。")
+        elif weekly_trend == monthly_trend:
+            lines.append(f"- 结论：`{index_name}` 的周月节奏同向，但还没到满配共振，当前更适合继续等确认。")
+        else:
+            lines.append(f"- 结论：`{index_name}` 的周月节奏暂时分歧，当前更像节奏切换，不宜把单日涨跌直接写成趋势翻转。")
+    else:
+        lines.append(f"- 结论：`{index_name}` 当前只拿到单层周期确认，另一层先按缺失处理，不补写成共振。")
+    return lines
+
+
+def _scan_observe_only(
+    analysis: Mapping[str, Any],
+    narrative: Mapping[str, Any],
+    action: Mapping[str, Any],
+) -> bool:
+    if bool(analysis.get("delivery_observe_only")):
+        return True
+    state = str(dict(narrative.get("judgment") or {}).get("state", "")).strip()
+    direction = str(action.get("direction", "")).strip()
+    position = str(action.get("position", "")).strip()
+    if state == "观察为主":
+        return True
+    if position == "暂不出手":
+        return True
+    return direction in {"回避", "观望"}
+
+
 class OpportunityReportRenderer:
     """Render opportunity scan, analysis, and compare payloads."""
 
@@ -1108,8 +1402,15 @@ class OpportunityReportRenderer:
         win_rate, win_rate_note = _win_rate_label(analysis)
         warnings = analysis.get("rating", {}).get("warnings", [])
         action = analysis["action"]
+        observe_only = _scan_observe_only(analysis, narrative, action)
+        technical_signal_text = compact_technical_signal_text(analysis.get("history"))
+        gate_reason = _decision_gate_explanation(analysis)
+        if technical_signal_text and technical_signal_text not in gate_reason:
+            gate_reason = f"{gate_reason} {technical_signal_text}".strip()
+        upgrade_trigger = append_technical_trigger_text(_primary_upgrade_trigger(analysis), analysis.get("history"))
+        report_title = "观察型详细分析" if observe_only else "全景分析"
         lines = [
-            f"# {name} ({symbol}) 全景分析 | {analysis['generated_at'][:10]}",
+            f"# {name} ({symbol}) {report_title} | {analysis['generated_at'][:10]}",
             "",
             "## 一句话结论",
             _scan_rating_header(analysis),
@@ -1134,8 +1435,8 @@ class OpportunityReportRenderer:
                     ["赔率", narrative["judgment"]["odds"], "基于位置、支撑和目标空间的综合判断。"],
                     ["胜率", win_rate, win_rate_note],
                     ["交易状态", narrative["judgment"]["state"], "这是当前更合理的参与方式，而不是口号式买卖建议。"],
-                    ["为什么还不升级", "主要卡在确认不足", _decision_gate_explanation(analysis)],
-                    ["升级条件", "先看首个触发器", _primary_upgrade_trigger(analysis)],
+                    ["为什么还不升级", "主要卡在确认不足", gate_reason],
+                    ["升级条件", "先看首个触发器", upgrade_trigger],
                 ],
             )
         )
@@ -1167,6 +1468,9 @@ class OpportunityReportRenderer:
                 f"4. **技术结构**: {narrative['drivers']['technical']}",
             ]
         )
+        horizon_lines = _index_horizon_lines(analysis)
+        if horizon_lines:
+            lines.extend(horizon_lines)
         fund_profile_lines = _fund_profile_lines(analysis)
         if fund_profile_lines:
             lines.extend(fund_profile_lines)
@@ -1223,6 +1527,9 @@ class OpportunityReportRenderer:
         )
         for item in narrative["watch_points"]:
             lines.append(f"- {item}")
+        strategy_background_text = _strategy_background_summary_text(analysis)
+        if strategy_background_text:
+            lines.append(f"- 后台置信度：{strategy_background_text}")
         validation_points = narrative.get("validation_points", [])
         if validation_points:
             lines.extend(["", "## 后续验证点"])
@@ -1243,26 +1550,38 @@ class OpportunityReportRenderer:
                 f"- **乐观情景**: {narrative['scenarios']['bull']}",
                 f"- **风险情景**: {narrative['scenarios']['bear']}",
                 "",
-                "## 操作建议",
+                "## 观察方式" if observe_only else "## 操作建议",
             ]
         )
-        lines.extend(
-            _table(
-                ["项目", "建议"],
+        if observe_only:
+            lines.extend(
                 [
-                    ["当前动作", f"{action['direction']} / {narrative['judgment']['state']}"],
-                    ["适合谁", f"左侧型：{narrative['playbook']['allocation']} / 右侧型：{narrative['playbook']['trend']}"],
-                    ["持有周期", str(dict(action.get("horizon") or {}).get("label", action["timeframe"]))],
-                    ["周期理由", str(dict(action.get("horizon") or {}).get("fit_reason", dict(action.get("horizon") or {}).get("style", "按当前动作和仓位框架理解即可")))],
-                    ["不适合打法", str(dict(action.get("horizon") or {}).get("misfit_reason", "不要自动切换成另一种更长或更短的打法。"))],
-                    ["介入条件", action["entry"]],
-                    ["仓位", action["position"]],
-                    ["止损", action["stop"]],
-                    ["目标", action["target"]],
-                    ["时间框架", action["timeframe"]],
-                ],
+                    f"- 当前动作：{narrative['judgment']['state']}",
+                    f"- 持有周期：{str(dict(action.get('horizon') or {}).get('label', action['timeframe']))}",
+                    f"- 周期理由：{str(dict(action.get('horizon') or {}).get('fit_reason', dict(action.get('horizon') or {}).get('style', '按当前动作和仓位框架理解即可')))}",
+                    f"- 不适合打法：{str(dict(action.get('horizon') or {}).get('misfit_reason', '不要自动切换成另一种更长或更短的打法。'))}",
+                    f"- 观察重点：{upgrade_trigger}",
+                    "- 当前理解：这份稿当前按观察型详细分析理解，先不展开正式仓位、止损和目标模板。",
+                ]
             )
-        )
+        else:
+            lines.extend(
+                _table(
+                    ["项目", "建议"],
+                    [
+                        ["当前动作", f"{action['direction']} / {narrative['judgment']['state']}"],
+                        ["适合谁", f"左侧型：{narrative['playbook']['allocation']} / 右侧型：{narrative['playbook']['trend']}"],
+                        ["持有周期", str(dict(action.get("horizon") or {}).get("label", action["timeframe"]))],
+                        ["周期理由", str(dict(action.get("horizon") or {}).get("fit_reason", dict(action.get("horizon") or {}).get("style", "按当前动作和仓位框架理解即可")))],
+                        ["不适合打法", str(dict(action.get("horizon") or {}).get("misfit_reason", "不要自动切换成另一种更长或更短的打法。"))],
+                        ["介入条件", action["entry"]],
+                        ["仓位", action["position"]],
+                        ["止损", action["stop"]],
+                        ["目标", action["target"]],
+                        ["时间框架", action["timeframe"]],
+                    ],
+                )
+            )
         lines.extend(
             [
                 "",
@@ -1285,6 +1604,13 @@ class OpportunityReportRenderer:
             lines.append("")
         for item in extra_risks:
             lines.append(f"- {item}")
+        if observe_only:
+            lines = [
+                "- 当前没有触发额外强风险，但仍需按主线和观察条件管理。"
+                if line == "- 当前没有触发额外强风险，但仍需按主线和止损条件执行。"
+                else line
+                for line in lines
+            ]
         provenance = dict(analysis.get("provenance") or build_analysis_provenance(analysis))
         lines.extend(
             [
@@ -1398,6 +1724,7 @@ class OpportunityReportRenderer:
         analyses = payload["analyses"]
         best_symbol = payload["best_symbol"]
         best = next(item for item in analyses if item["symbol"] == best_symbol)
+        linkage_summary = dict(payload.get("compare_linkage_summary") or {})
         ranked = sorted(analyses, key=_compare_sort_key, reverse=True)
         runner_up = next(item for item in ranked if item["symbol"] != best_symbol)
         best_total = _total_dimension_score(best)
@@ -1431,6 +1758,38 @@ class OpportunityReportRenderer:
                 )
             lines.extend(["", "## 综合排序"])
             lines.extend(_table(["排名", "标的", "评级", "总分", "领先维度"], ranking_rows))
+
+        lines.extend(["", "## 后台置信度"])
+        lines.extend(_table(["标的", "状态", "说明"], _compare_strategy_confidence_rows(analyses)))
+
+        if linkage_summary:
+            lines.extend(["", "## 主线与风格联动"])
+            lines.append(f"- 重复度: `{linkage_summary.get('overlap_label', '—')}`")
+            summary_line = str(linkage_summary.get("summary_line", "")).strip()
+            if summary_line:
+                lines.append(f"- {summary_line}")
+            region_line = str(linkage_summary.get("region_line", "")).strip()
+            if region_line:
+                lines.append(f"- {region_line}")
+            style_summary_line = str(linkage_summary.get("style_summary_line", "")).strip()
+            if style_summary_line:
+                lines.append(f"- {style_summary_line}")
+            style_priority_hint = str(linkage_summary.get("style_priority_hint", "")).strip()
+            if style_priority_hint:
+                if style_priority_hint.startswith("如果只选一个"):
+                    lines.append(f"- {style_priority_hint}")
+                else:
+                    lines.append(f"- 如果只选一个: {style_priority_hint}")
+                lines.append(f"- 组合提示: {style_priority_hint}")
+            for detail in list(linkage_summary.get("detail_lines") or [])[:3]:
+                text = str(detail).strip()
+                if text:
+                    lines.append(f"- {text}")
+
+        etf_product_rows = _etf_compare_product_rows(analyses)
+        if etf_product_rows:
+            lines.extend(["", "## ETF产品层对比"])
+            lines.extend(_table(["标的", "跟踪指数", "最近份额变化", "场内基金技术状态", "外部情报"], etf_product_rows))
 
         lines.extend(["", "## 八维对比"])
         rows: List[List[str]] = []
@@ -1488,6 +1847,7 @@ class OpportunityReportRenderer:
         top = payload.get("top", [])
         market_label = payload.get("market_label", "全市场")
         sector_filter = payload.get("sector_filter", "")
+        observe_only_report = not any(_shared_analysis_is_actionable(item) for item in top)
 
         # Count by market
         cn_count = sum(1 for a in top if a.get("asset_type") == "cn_stock")
@@ -1495,7 +1855,7 @@ class OpportunityReportRenderer:
         us_count = sum(1 for a in top if a.get("asset_type") == "us")
 
         lines = [
-            f"# 个股精选 TOP {len(top)} | {payload['generated_at'][:10]}",
+            f"# {'个股观察池' if observe_only_report else '个股精选'} TOP {len(top)} | {payload['generated_at'][:10]}",
             "",
             f"> 范围: {market_label}" + (f" / {sector_filter}" if sector_filter else ""),
             f"> 扫描池: {payload.get('scan_pool', 0)}只 | 过门槛: {payload.get('passed_pool', 0)}只 | Regime: {regime.get('current_regime', 'unknown')} | 主线: {day_theme.get('label', '未识别')}",
@@ -1631,17 +1991,23 @@ class OpportunityReportRenderer:
             lines.extend(
                 [
                     "",
-                    "**建议操作：**",
+                    "**建议操作：**" if not observe_only_report else "**观察重点：**",
                     f"- 持有周期：{dict(action.get('horizon') or {}).get('label', action.get('timeframe', '未标注'))}",
                     f"- 周期理由：{dict(action.get('horizon') or {}).get('fit_reason', dict(action.get('horizon') or {}).get('style', '按当前动作和仓位框架理解即可'))}",
                     f"- 不适合打法：{dict(action.get('horizon') or {}).get('misfit_reason', '不要自动切换成另一种更长或更短的打法。')}",
                     f"- 介入条件：{action['entry']}",
-                    f"- 建议仓位：{action['position']}",
-                    f"- 单标的上限：{action.get('max_portfolio_exposure', '—')}",
-                    f"- 加仓节奏：{action.get('scaling_plan', '—')}",
-                    f"- 建议止损：{action.get('stop_loss_pct', '—')}",
-                    f"- 止损参考：{action['stop']}",
-                    f"- 目标参考：{action.get('target', '待定')}",
+                    *(
+                        [
+                            f"- 建议仓位：{action['position']}",
+                            f"- 单标的上限：{action.get('max_portfolio_exposure', '—')}",
+                            f"- 加仓节奏：{action.get('scaling_plan', '—')}",
+                            f"- 建议止损：{action.get('stop_loss_pct', '—')}",
+                            f"- 止损参考：{action['stop']}",
+                            f"- 目标参考：{action.get('target', '待定')}",
+                        ]
+                        if not observe_only_report
+                        else ["- 当前是观察稿，先不前置精确仓位、止损和目标模板。"]
+                    ),
                 ]
             )
             if action.get("correlated_warning"):
@@ -1652,8 +2018,10 @@ class OpportunityReportRenderer:
             lines.extend(
                 [
                     "",
-                    "## 看好但暂不推荐",
-                    "这些标的当前没有进入正式推荐，但至少有一块是明显成立的，适合作为下一轮观察池。",
+                    "## 继续观察名单" if observe_only_report else "## 看好但暂不推荐",
+                    "这些标的当前没有进入正式推荐，但至少有一块是明显成立的，适合作为下一轮观察池。"
+                    if not observe_only_report
+                    else "这批票当前更适合作为下一轮观察池，不把它们写成已经接近可执行的动作名单。",
                 ]
             )
             lines.extend(_table(["标的", "看好的地方", "暂不推荐原因"], _watch_positive_reason_rows(payload.get("watch_positive", []))))

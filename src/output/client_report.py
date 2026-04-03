@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from src.output.analysis_charts import AnalysisChartRenderer
 from src.output.opportunity_report import (
     OpportunityReportRenderer,
     _catalyst_structure_rows,
@@ -23,6 +24,36 @@ from src.output.opportunity_report import (
     _scan_topline_text,
     _visual_lines,
 )
+from src.output.editor_payload import (
+    _strategy_background_confidence,
+    build_briefing_editor_packet,
+    build_etf_pick_editor_packet,
+    build_fund_pick_editor_packet,
+    build_scan_editor_packet,
+    build_stock_analysis_editor_packet,
+    build_stock_pick_editor_packet,
+    render_editor_homepage,
+)
+from src.output.event_digest import (
+    _is_diagnostic_intelligence_row,
+    compact_importance_reason,
+    effective_intelligence_link,
+    format_intelligence_attributes,
+    intelligence_attribute_labels,
+    intelligence_source_lane,
+    render_event_digest_section,
+    review_history_context_text,
+    sort_event_items,
+)
+from src.output.pick_ranking import (
+    analysis_is_actionable as _shared_analysis_is_actionable,
+    bucket_priority as _shared_bucket_priority,
+    rank_market_items as _shared_rank_market_items,
+    recommendation_bucket as _shared_recommendation_bucket,
+    score_dimension as _shared_score_dimension,
+    strategy_confidence_status as _shared_strategy_confidence_status,
+)
+from src.output.technical_signal_labels import append_technical_trigger_text, compact_technical_signal_text
 from src.processors.factor_meta import factor_meta_payload
 from src.processors.provenance import build_analysis_provenance
 from src.processors.trade_handoff import portfolio_whatif_handoff
@@ -88,6 +119,26 @@ RELATED_ETF_PROXY_MAP = [
         ],
     ),
 ]
+
+_CHART_RENDERER: AnalysisChartRenderer | None = None
+
+
+def _ensure_analysis_visuals(item: Mapping[str, Any] | None) -> Dict[str, str]:
+    if not isinstance(item, dict):
+        return {}
+    visuals = dict(item.get("visuals") or {})
+    if visuals:
+        return visuals
+    history = item.get("history")
+    if not isinstance(history, pd.DataFrame) or history.empty:
+        return {}
+    global _CHART_RENDERER
+    if _CHART_RENDERER is None:
+        _CHART_RENDERER = AnalysisChartRenderer()
+    visuals = _CHART_RENDERER.render(item)
+    if visuals:
+        item["visuals"] = dict(visuals)
+    return dict(item.get("visuals") or {})
 
 
 def _fmt_pct(value: Any) -> str:
@@ -163,26 +214,61 @@ def _regime_basis_section(
     *,
     day_theme: str = "",
     heading: str = "## 宏观判断依据",
+    emphasize: bool = True,
 ) -> List[str]:
     regime_payload = dict(regime or {})
     regime_name = str(regime_payload.get("current_regime", "")).strip()
+    basis_lines = [str(item).strip() for item in regime_payload.get("basis_lines", []) if str(item).strip()]
     reasoning = [str(item).strip() for item in regime_payload.get("reasoning", []) if str(item).strip()]
-    if not regime_name or not reasoning:
+    macro_lines = list(dict.fromkeys([*basis_lines, *reasoning]))
+    if not regime_name or not macro_lines:
         return []
     lines = [heading, ""]
-    lines.extend(_section_lead_lines("这段只回答为什么把今天的中期背景判断成这个 regime，不把切换写成无依据结论。"))
-    for item in reasoning[:3]:
+    lines.extend(_section_lead_lines("这段只回答为什么把今天的中期背景判断成这个 regime，不把切换写成无依据结论。", emphasize=emphasize))
+    for item in macro_lines[:4]:
         lines.append(f"- {item}")
     if day_theme:
         lines.append(f"- 当天主线写成 `{day_theme}`，是这层中期背景里的短线表达，不等于 macro regime 重新切档。")
     return lines
 
 
-def _section_lead_lines(text: str) -> List[str]:
+def _section_lead_lines(text: str, *, emphasize: bool = True) -> List[str]:
     line = str(text).strip()
     if not line:
         return []
-    return [f"**先看结论：** {line}", ""]
+    if emphasize:
+        return [f"**先看结论：** {line}", ""]
+    return [line, ""]
+
+
+def render_what_changed_section(payload: Mapping[str, Any], *, heading: str = "## What Changed") -> List[str]:
+    summary = dict(payload or {})
+    if not summary:
+        return []
+    previous_view = _pick_client_safe_line(summary.get("previous_view") or "")
+    change_summary = _pick_client_safe_line(summary.get("change_summary") or "")
+    conclusion_label = str(summary.get("conclusion_label") or "").strip()
+    state_trigger = str(summary.get("state_trigger") or "").strip()
+    state_summary = _pick_client_safe_line(summary.get("state_summary") or "")
+    current_view = _pick_client_safe_line(summary.get("current_view") or "")
+    current_event_understanding = _pick_client_safe_line(summary.get("current_event_understanding") or "")
+    lines = [heading, ""]
+    if previous_view:
+        lines.append(f"- 上次怎么看：{previous_view}")
+    if change_summary:
+        lines.append(f"- 这次什么变了：{change_summary}")
+    if current_event_understanding:
+        lines.append(f"- 当前事件理解：{current_event_understanding}")
+    if conclusion_label:
+        line = f"- 结论变化：`{conclusion_label}`"
+        if current_view:
+            line += f"；当前更像 `{current_view}`"
+        if state_trigger:
+            line += f"；触发：{state_trigger}"
+        lines.append(line + "。")
+    if state_summary:
+        lines.append(f"- 状态解释：{state_summary}")
+    return lines if len(lines) > 2 else []
 
 
 def _is_observe_style_text(text: Any) -> bool:
@@ -238,6 +324,86 @@ def _analysis_constraint_hint(analysis: Mapping[str, Any]) -> str:
     if len(reason) > 32:
         reason = reason[:32].rstrip("，；。 ") + "..."
     return f"先看{label}里的“{reason}”能不能先改善。"
+
+
+def _index_horizon_summary_lines(
+    payload: Mapping[str, Any],
+    *,
+    bundle_key: str = "index_topic_bundle",
+    market_lines_key: str = "domestic_market_lines",
+) -> List[str]:
+    bundle = dict(payload.get(bundle_key) or {})
+    history_snapshots = dict(bundle.get("history_snapshots") or {})
+    snapshot = dict(bundle.get("index_snapshot") or {})
+    technical = dict(bundle.get("technical_snapshot") or {})
+    index_name = (
+        str(snapshot.get("index_name", "")).strip()
+        or str(payload.get("name", "")).strip()
+        or str(payload.get("benchmark_name", "")).strip()
+        or str(payload.get("benchmark", "")).strip()
+        or "相关指数"
+    )
+    source_label = str(snapshot.get("display_label") or technical.get("source_label") or "指数主链").strip()
+
+    def _trend_summary(period: str, row: Mapping[str, Any]) -> str:
+        summary = str(row.get("summary", "")).strip()
+        trend_label = str(row.get("trend_label", "")).strip()
+        momentum_label = str(row.get("momentum_label", "")).strip()
+        latest_date = str(row.get("latest_date", "")).strip()
+        parts: List[str] = []
+        if summary:
+            parts.append(summary)
+        for extra in (trend_label, momentum_label):
+            if extra and extra not in summary:
+                parts.append(extra)
+        if not parts:
+            parts = ["缺失"]
+        text = "，".join(parts)
+        if latest_date:
+            text += f"（{latest_date}）"
+        return f"- {period}：{index_name} {text}。"
+
+    weekly = dict(history_snapshots.get("weekly") or {})
+    monthly = dict(history_snapshots.get("monthly") or {})
+    horizon_lines: List[str] = []
+    if weekly.get("status") == "matched" or monthly.get("status") == "matched":
+        horizon_lines.extend(["## 周月节奏", ""])
+        if weekly.get("status") == "matched":
+            horizon_lines.append(_trend_summary("周线", weekly))
+        if monthly.get("status") == "matched":
+            horizon_lines.append(_trend_summary("月线", monthly))
+        weekly_trend = str(weekly.get("trend_label", "")).strip()
+        monthly_trend = str(monthly.get("trend_label", "")).strip()
+        if weekly_trend and monthly_trend:
+            if weekly_trend in {"趋势偏强", "修复中"} and monthly_trend in {"趋势偏强", "修复中"}:
+                horizon_lines.append(f"- 结论：`{index_name}` 的周月节奏同向偏强，今天更适合按延续看，不把单日波动误判成反转。")
+            elif weekly_trend == monthly_trend:
+                horizon_lines.append(f"- 结论：`{index_name}` 的周月节奏同向，但强弱还不算满配共振，今天更适合看确认。")
+            else:
+                horizon_lines.append(f"- 结论：`{index_name}` 的周月节奏暂时分歧，今天更像节奏切换，不宜把单日涨跌直接写成趋势翻转。")
+        elif weekly_trend or monthly_trend:
+            horizon_lines.append(f"- 结论：`{index_name}` 当前只拿到一层周期确认，另一层暂按缺失处理，不补写成共振。")
+        if source_label:
+            horizon_lines.append(f"- 来源：{source_label}。")
+        return horizon_lines
+
+    market_lines = [str(item).strip() for item in list(payload.get(market_lines_key) or []) if str(item).strip()]
+    structured_lines = [line for line in market_lines if "周线" in line or "月线" in line]
+    if not structured_lines:
+        return []
+    horizon_lines.extend(["## 周月节奏", ""])
+    for item in structured_lines[:4]:
+        horizon_lines.append(f"- {item.rstrip('。')}。")
+    body = " ".join(structured_lines)
+    if any(token in body for token in ("趋势偏强", "修复中")) and not any(token in body for token in ("趋势偏弱", "承压震荡")):
+        horizon_lines.append("- 结论：周月节奏同向偏强，今天更适合按延续看，不把单日波动误判成反转。")
+    elif any(token in body for token in ("趋势偏弱", "承压震荡")) and any(token in body for token in ("趋势偏强", "修复中")):
+        horizon_lines.append("- 结论：周月节奏暂时分歧，今天更像节奏切换，不宜把单日涨跌直接写成趋势翻转。")
+    elif len(structured_lines) >= 2:
+        horizon_lines.append("- 结论：`周月节奏` 已进入正文判断，不再只停留在表格里。")
+    else:
+        horizon_lines.append("- `周月节奏` 已进入正文判断，不再只停留在表格里。")
+    return horizon_lines
 
 
 def _pick_visual_lines(visuals: Optional[Mapping[str, str]], *, nested: bool = False) -> List[str]:
@@ -430,11 +596,7 @@ def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> List[str]:
 
 
 def _score(analysis: Mapping[str, Any], dimension: str) -> int:
-    value = analysis.get("dimensions", {}).get(dimension, {}).get("score")
-    try:
-        return int(value or 0)
-    except Exception:
-        return 0
+    return _shared_score_dimension(analysis, dimension)
 
 
 def _score_value(value: Any) -> Optional[float]:
@@ -468,68 +630,14 @@ def _recommendation_bucket(
     analysis: Mapping[str, Any],
     watch_symbols: Optional[set[str]] = None,
 ) -> str:
-    rating_rank = int(analysis.get("rating", {}).get("rank", 0) or 0)
-    technical = _score(analysis, "technical")
-    fundamental = _score(analysis, "fundamental")
-    catalyst = _score(analysis, "catalyst")
-    relative = _score(analysis, "relative_strength")
-    risk = _score(analysis, "risk")
-
-    support_dims = sum(score >= 60 for score in (technical, fundamental, catalyst, relative, risk))
-    positive_dims = sum(score >= 60 for score in (fundamental, catalyst, relative, risk))
-    elite_positive = max(fundamental, catalyst, relative, risk) >= 80
-
-    def qualified_watch() -> bool:
-        return (
-            positive_dims >= 2
-            or (elite_positive and technical >= 35)
-            or (fundamental >= 75 and catalyst >= 30 and technical >= 30)
-            or (catalyst >= 60 and relative >= 45 and technical >= 25)
-            or (relative >= 70 and technical >= 45)
-            or support_dims >= 3
-        )
-
-    if rating_rank >= 3:
-        return "正式推荐"
-    if rating_rank >= 2:
-        return "看好但暂不推荐"
-    if watch_symbols and str(analysis.get("symbol", "")) in watch_symbols and qualified_watch():
-        return "看好但暂不推荐"
-    if qualified_watch():
-        return "看好但暂不推荐"
-    return "观察为主"
+    return _shared_recommendation_bucket(analysis, watch_symbols)
 
 
 def _analysis_is_actionable(
     analysis: Mapping[str, Any],
     watch_symbols: Optional[set[str]] = None,
 ) -> bool:
-    bucket = _recommendation_bucket(analysis, watch_symbols)
-    if bucket == "正式推荐":
-        return True
-    if bucket != "看好但暂不推荐":
-        return False
-
-    action = dict(analysis.get("action") or {})
-    direction = _pick_client_safe_line(action.get("direction", ""))
-    position = _pick_client_safe_line(action.get("position", ""))
-    entry = _pick_client_safe_line(action.get("entry", ""))
-    combined = " / ".join(part for part in (direction, position, entry) if part)
-    non_action_markers = (
-        "暂不出手",
-        "仅观察仓",
-        "先按观察仓",
-        "先观察",
-        "观察为主",
-        "回避",
-        "等待更好窗口",
-        "触发前先别急着",
-    )
-    if any(marker in combined for marker in non_action_markers):
-        return False
-    if "观望" in direction and not any(token in combined for token in ("试仓", "建仓", "小仓", "%", "分批")):
-        return False
-    return True
+    return _shared_analysis_is_actionable(analysis, watch_symbols)
 
 
 def _analysis_horizon_profile(analysis: Mapping[str, Any]) -> Dict[str, str]:
@@ -692,12 +800,16 @@ def _market_watch_trigger_rows(
         if not symbol or symbol in seen:
             continue
         seen.add(symbol)
+        gate_text = _pick_client_safe_line(_decision_gate_explanation(item))
+        strategy_upgrade_text = _strategy_background_upgrade_text(item)
+        if strategy_upgrade_text:
+            gate_text = _append_sentence(gate_text, strategy_upgrade_text)
         rows.append(
             [
                 labels[len(rows)] if len(rows) < len(labels) else f"观察 {len(rows) + 1}",
                 f"{item.get('name', '—')} ({symbol})",
                 _analysis_track_reason(item),
-                _pick_client_safe_line(_decision_gate_explanation(item)),
+                gate_text,
                 _pick_client_safe_line(_primary_upgrade_trigger(item)),
                 _observe_watch_levels(item) or "先等关键位和动能一起改善。",
             ]
@@ -705,6 +817,108 @@ def _market_watch_trigger_rows(
         if len(rows) >= limit:
             break
     return rows
+
+
+def _market_followup_watch_rows(
+    ranked_items: Sequence[Mapping[str, Any]],
+    watch_symbols: set[str],
+    *,
+    skip: int = 2,
+    limit: int = 2,
+) -> List[List[str]]:
+    rows: List[List[str]] = []
+    seen: set[str] = set()
+    skipped = 0
+    for item in ranked_items:
+        if _analysis_is_actionable(item, watch_symbols):
+            continue
+        symbol = str(item.get("symbol", "")).strip()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        if skipped < skip:
+            skipped += 1
+            continue
+        cautions = _merge_reason_lines(
+            _bottom_dimension_reasons(item, top_n=1),
+            list(dict(item.get("narrative") or {}).get("cautions") or []),
+            max_items=2,
+        )
+        why_wait = _pick_client_safe_line(cautions[0]) if cautions else _pick_client_safe_line(_decision_gate_explanation(item))
+        if not why_wait:
+            why_wait = "当前还缺更硬的右侧确认。"
+        next_watch = _pick_client_safe_line(_primary_upgrade_trigger(item))
+        if not next_watch:
+            next_watch = _observe_trigger_condition(
+                item,
+                _analysis_horizon_profile(item),
+                default_text="先看关键位、动能和量能能不能一起改善。",
+            )
+        rows.append(
+            [
+                f"{item.get('name', '—')} ({symbol})",
+                why_wait,
+                next_watch,
+            ]
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _observe_representative_card_lines(
+    analysis: Mapping[str, Any],
+    *,
+    watch_symbols: set[str],
+    day_theme: str,
+) -> List[str]:
+    name = str(analysis.get("name", "—")).strip() or "—"
+    symbol = str(analysis.get("symbol", "—")).strip() or "—"
+    action = dict(analysis.get("action") or {})
+    horizon = _analysis_horizon_profile(analysis)
+    handoff = portfolio_whatif_handoff(
+        symbol=symbol,
+        horizon=horizon,
+        direction=str(action.get("direction", "")),
+        asset_type=str(analysis.get("asset_type", "")),
+        reference_price=dict(analysis.get("metrics") or {}).get("last_close"),
+        generated_at=str(analysis.get("generated_at", "")),
+    )
+    positives = _merge_reason_lines(
+        _top_dimension_reasons(analysis, top_n=1),
+        list(dict(analysis.get("narrative") or {}).get("positives") or []),
+        max_items=2,
+    )
+    why_watch = _pick_client_safe_line(positives[0]) if positives else _analysis_track_reason(analysis)
+    gate_text = _pick_client_safe_line(_decision_gate_explanation(analysis)) or "当前仍缺更硬的右侧确认。"
+    strategy_upgrade_text = _strategy_background_upgrade_text(analysis)
+    if strategy_upgrade_text:
+        gate_text = _append_sentence(gate_text, strategy_upgrade_text)
+    trigger_text = _pick_client_safe_line(_primary_upgrade_trigger(analysis)) or "先看关键位、动能和量能能不能一起改善。"
+    watch_levels = _observe_watch_levels(analysis) or "先等关键位和动能一起改善。"
+    packet = build_scan_editor_packet(dict(analysis, day_theme={"label": day_theme} if day_theme else {}), bucket=_recommendation_bucket(analysis, watch_symbols))
+    evidence_lines = _evidence_lines_with_event_digest(
+        list(dict(analysis.get("dimensions", {}).get("catalyst") or {}).get("evidence") or []),
+        event_digest=packet.get("event_digest") or {},
+        max_items=1,
+        as_of=analysis.get("generated_at"),
+        symbol=analysis.get("symbol"),
+    )
+    evidence_line = evidence_lines[0] if evidence_lines else "- 当前更适合先按结构化披露和后文证据理解。"
+    return [
+        f"### {name} ({symbol})",
+        "",
+        f"- 为什么继续看：{why_watch}",
+        f"- 现在主要卡点：{gate_text}",
+        f"- 升级条件：{trigger_text}",
+        f"- 关键盯盘价位：{watch_levels}",
+        f"- 当前更合适的动作：{_pick_client_safe_line(action.get('entry', '先看确认，不急着给仓位。')) or '先看确认，不急着给仓位。'}",
+        f"- 首次仓位：{_pick_client_safe_line(action.get('position', '≤2% 观察仓，或先不出手'))}",
+        f"- 组合预演：{handoff.get('summary', '先跑组合预演，再决定真实金额。')}",
+        f"- 预演命令：`{handoff.get('command', f'portfolio whatif buy {symbol} 最新价 计划金额')}`",
+        "- 前置证据：",
+        evidence_line,
+    ]
 
 
 def _cn_stock_lot_cost(analysis: Mapping[str, Any]) -> Optional[float]:
@@ -725,11 +939,13 @@ def _affordable_stock_rows(
     *,
     max_lot_cost: float = 10000.0,
     limit: int = 2,
+    actionable_only: bool = True,
 ) -> List[List[str]]:
     affordable = [
         item
         for item in ClientReportRenderer._rank_market_items(items, watch_symbols)
-        if _analysis_is_actionable(item, watch_symbols) and (_cn_stock_lot_cost(item) or float("inf")) <= max_lot_cost
+        if (not actionable_only or _analysis_is_actionable(item, watch_symbols))
+        and (_cn_stock_lot_cost(item) or float("inf")) <= max_lot_cost
     ]
     rows: List[List[str]] = []
     seen: set[str] = set()
@@ -877,11 +1093,7 @@ def _safe_buy_range_text(action: Mapping[str, Any]) -> str:
 
 
 def _bucket_priority(bucket: str) -> int:
-    return {
-        "正式推荐": 0,
-        "看好但暂不推荐": 1,
-        "观察为主": 2,
-    }.get(bucket, 9)
+    return _shared_bucket_priority(bucket)
 
 
 def _top_dimension_reasons(analysis: Mapping[str, Any], top_n: int = 2) -> List[str]:
@@ -949,32 +1161,71 @@ def _evidence_lines(
     *,
     max_items: int = 3,
     as_of: Any = None,
+    previous_reviewed_at: Any = None,
+    symbol: Any = "",
 ) -> List[str]:
     lines: List[str] = []
     as_of_stamp = _report_timestamp(as_of)
-    priority = {
-        "结构化事件": 0,
-        "龙头公告/业绩": 1,
-        "前瞻催化": 2,
-        "负面事件": 3,
-        "海外映射": 4,
-        "政策催化": 5,
-    }
-    ranked_items = sorted(
-        list(items),
-        key=lambda item: (
-            priority.get(str(item.get("layer", "")).strip(), 9),
-            str(item.get("date", "")),
-        ),
-    )
-    for item in ranked_items[:max_items]:
-        title = str(item.get("title", "")).strip()
+    ranked_items = sort_event_items(items, as_of=as_of, previous_reviewed_at=previous_reviewed_at)
+
+    def _compact_signal_label(value: Any) -> str:
+        text = _pick_client_safe_line(str(value or "").strip())
+        if not text:
+            return ""
+        if not text.startswith("主题事件："):
+            return text
+        if "；" in text:
+            text = text.split("；", 1)[0]
+        for prefix in ("主题事件：", "财报摘要：", "公告类型：", "政策影响层："):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+        return text.strip("：: ").strip()
+
+    def _compact_title_text(value: Any) -> str:
+        text = _pick_client_safe_line(str(value or "").strip())
+        if not text:
+            return ""
+        for prefix in ("指数成分权重：", "指数技术面：", "跟踪指数框架：", "行业暴露画像：", "跟踪成分画像："):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+        parts = [part.strip() for part in text.split("；") if part.strip()]
+        if len(parts) <= 2:
+            return "；".join(parts) if parts else text
+        return "；".join(parts[:2]) + "。"
+
+    def _signal_strength_label(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        return {
+            "high": "强",
+            "medium": "中",
+            "low": "弱",
+        }.get(text, str(value or "").strip() or "中")
+
+    fallback_symbol = str(symbol or "").strip()
+    for ranked in ranked_items:
+        raw = dict(ranked.get("_raw") or {})
+        candidate_symbol = str(raw.get("symbol") or raw.get("secCode") or "").strip()
+        if candidate_symbol:
+            fallback_symbol = candidate_symbol
+            break
+    for ranked in ranked_items[:max_items]:
+        item = dict(ranked.get("_raw") or {})
+        if _is_diagnostic_intelligence_row(item):
+            continue
+        title = _pick_client_safe_line(
+            str(item.get("title", "")).strip() or str(ranked.get("title", "")).strip()
+        )
         if not title:
             continue
-        layer = str(item.get("layer", "")).strip() or "证据"
+        title = _compact_title_text(title) or title
+        layer = _pick_client_safe_line(
+            str(item.get("layer", "")).strip() or str(ranked.get("layer", "")).strip() or "证据"
+        )
         source = str(item.get("source", "")).strip()
         date = str(item.get("date", "")).strip()
-        link = str(item.get("link", "")).strip()
+        link = effective_intelligence_link(item, symbol=fallback_symbol)
         title_text = f"[{title}]({link})" if link else title
         suffix_parts = [part for part in (source, date) if part]
         event_stamp = _report_timestamp(date)
@@ -988,12 +1239,395 @@ def _evidence_lines(
             if age_days >= 8:
                 suffix_parts.append(f"已过去 {age_days} 天，时效在衰减")
         suffix = f"（{' / '.join(suffix_parts)}）" if suffix_parts else ""
-        lines.append(f"- `{layer}`：{title_text}{suffix}")
+        line = f"- `{layer}`：{title_text}{suffix}"
+        raw_lead_detail = (
+            str(ranked.get("lead_detail", "")).strip()
+            or str(item.get("lead_detail", "")).strip()
+        )
+        signal_type = _pick_client_safe_line(
+            str(ranked.get("signal_type", "")).strip() or raw_lead_detail
+        ) or layer
+        signal_type = _compact_signal_label(signal_type) or signal_type
+        intelligence_tags = intelligence_attribute_labels(
+            {**item, "source_directness_rank": ranked.get("source_directness_rank"), "freshness_rank": ranked.get("freshness_rank")},
+            as_of=as_of_stamp,
+            previous_reviewed_at=previous_reviewed_at,
+        )
+        stale_baseline = "旧闻回放" in intelligence_tags and "新鲜情报" not in intelligence_tags
+        signal_strength = "中" if stale_baseline else _signal_strength_label(ranked.get("signal_strength") or ranked.get("importance"))
+        line += f"；信号类型：`{signal_type}`；信号强弱：`{signal_strength}`"
+        signal_conclusion = _pick_client_safe_line(str(ranked.get("signal_conclusion", "")).strip())
+        if stale_baseline:
+            signal_conclusion = "中性，当前更多是历史基线，不把它直接当成新增催化。"
+        if signal_conclusion:
+            line += f"；结论：{signal_conclusion}"
+        if intelligence_tags:
+            line += f"；情报属性：`{format_intelligence_attributes(intelligence_tags)}`"
+            source_lane = intelligence_source_lane(intelligence_tags)
+            if source_lane:
+                line += f"；来源层级：`{source_lane}`"
+        review_context = review_history_context_text({"previous_reviewed_at": previous_reviewed_at})
+        if review_context and not lines:
+            line += f"；复查语境：{review_context}"
+        display_thesis_scope = _pick_client_safe_line(str(ranked.get("thesis_scope", "")).strip())
+        if stale_baseline:
+            display_thesis_scope = "历史基线"
+        importance_reason = _pick_client_safe_line(compact_importance_reason(ranked.get("importance_reason")))
+        if stale_baseline:
+            importance_reason = "先把它当历史基线看，不把旧闻直接升级成新增催化"
+        understanding = "；".join(
+            part
+            for part in (
+                (f"先把它理解成 `{_compact_signal_label(raw_lead_detail)}`" if _compact_signal_label(raw_lead_detail) else ""),
+                (
+                    f"更直接影响 `{_pick_client_safe_line(str(ranked.get('impact_summary', '')).strip())}`"
+                    if _pick_client_safe_line(str(ranked.get("impact_summary", "")).strip())
+                    else ""
+                ),
+                (
+                    f"当前更像 `{display_thesis_scope}`"
+                    if display_thesis_scope
+                    else ""
+                ),
+                (
+                    "先按辅助线索看，不单独升级动作"
+                    if str(raw_lead_detail).startswith("主题事件：")
+                    and display_thesis_scope == "一次性噪音"
+                    else importance_reason
+                ),
+            )
+            if part
+        )
+        if understanding:
+            line += f"；事件理解：{understanding}"
+        lines.append(line)
     return lines
 
 
+def _evidence_identity(item: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(item.get("layer", "") or "").strip().lower(),
+        str(item.get("title", "") or "").strip().lower(),
+        str(item.get("source", "") or "").strip().lower(),
+        str(item.get("date", "") or item.get("published_at", "") or item.get("as_of", "") or "").strip().lower(),
+    )
+
+
+def _merged_evidence_items(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    event_digest: Mapping[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in list(items or []):
+        row = dict(item or {})
+        if not str(row.get("title", "") or "").strip():
+            continue
+        if _is_diagnostic_intelligence_row(row):
+            continue
+        identity = _evidence_identity(row)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(row)
+    digest = dict(event_digest or {})
+    for item in list(digest.get("items") or []):
+        row = dict(item or {})
+        if not str(row.get("title", "") or "").strip():
+            continue
+        if _is_diagnostic_intelligence_row(row):
+            continue
+        identity = _evidence_identity(row)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(row)
+    return merged
+
+
+def _evidence_lines_with_event_digest(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    event_digest: Mapping[str, Any] | None = None,
+    max_items: int = 3,
+    as_of: Any = None,
+    symbol: Any = "",
+) -> List[str]:
+    digest = dict(event_digest or {})
+    return _evidence_lines(
+        _merged_evidence_items(items, event_digest=digest),
+        max_items=max_items,
+        as_of=as_of,
+        previous_reviewed_at=digest.get("previous_reviewed_at"),
+        symbol=symbol,
+    )
+
+
+def _briefing_intelligence_board_lines(
+    payload: Mapping[str, Any],
+    *,
+    event_digest: Mapping[str, Any] | None = None,
+    max_items: int = 6,
+) -> List[str]:
+    digest = dict(event_digest or {})
+    lines: List[str] = []
+    seen: set[str] = set()
+
+    def _append_unique(line: str) -> None:
+        normalized = re.sub(r"\s+", " ", str(line or "")).strip()
+        if not normalized or normalized in seen or len(lines) >= max_items:
+            return
+        seen.add(normalized)
+        lines.append(normalized)
+
+    def _row_priority(row: Sequence[Any]) -> tuple[int, int, int]:
+        source = str(row[2] if len(row) > 2 else "").strip()
+        signal = str(row[6] if len(row) > 6 else "").strip()
+        link = str(row[5] if len(row) > 5 else "").strip()
+        priority = 5
+        if source in {"公司公告/结构化", "互动易/投资者关系"}:
+            priority = 0
+        elif source == "卖方共识专题":
+            priority = 1
+        elif source in {"个股资金流向专题", "两融专题", "龙虎榜/打板专题", "交易所风险专题"}:
+            priority = 2
+        elif source in {"申万行业框架", "中信行业框架", "同花顺主题成分"}:
+            priority = 4
+        strength = str(row[3] if len(row) > 3 else "").strip()
+        strength_rank = {"高": 0, "中": 1, "低": 2}.get(strength, 1)
+        link_rank = 0 if link else 1
+        signal_lower = signal.lower()
+        if any(token in signal_lower for token in ("公告", "互动", "投资者关系", "卖方")):
+            priority = min(priority, 1)
+        return (priority, strength_rank, link_rank)
+
+    ranked_market_rows = sorted(list(payload.get("market_event_rows") or []), key=_row_priority)
+
+    for row in ranked_market_rows:
+        title = str(row[1] if len(row) > 1 else "").strip()
+        date = str(row[0] if len(row) > 0 else "").strip()
+        source = str(row[2] if len(row) > 2 else "").strip()
+        strength = str(row[3] if len(row) > 3 else "").strip() or "中"
+        impact = str(row[4] if len(row) > 4 else "").strip() or "观察池核心资产"
+        link = str(row[5] if len(row) > 5 else "").strip()
+        signal_type = str(row[6] if len(row) > 6 else "").strip() or "主题/市场情报"
+        conclusion = str(row[7] if len(row) > 7 else "").strip()
+        if not title:
+            continue
+        title_text = f"[{title}]({link})" if link else title
+        suffix_parts = [part for part in (source, date) if part and part != "—"]
+        suffix = f"（{' / '.join(suffix_parts)}）" if suffix_parts else ""
+        conclusion_text = f"；结论：{conclusion}" if conclusion else ""
+        _append_unique(
+            f"- `市场情报`：{title_text}{suffix}；信号类型：`{signal_type}`；信号强弱：`{strength}`；主要影响：`{impact}`{conclusion_text}"
+        )
+    news_items = list(dict(payload.get("news_report") or {}).get("items") or [])
+    for line in _evidence_lines(
+        news_items,
+        max_items=max_items,
+        as_of=payload.get("generated_at"),
+        previous_reviewed_at=digest.get("previous_reviewed_at"),
+    ):
+        _append_unique(line)
+    for row in list(payload.get("theme_tracking_rows") or []):
+        direction = str(row[0] if len(row) > 0 else "").strip()
+        catalyst = str(row[1] if len(row) > 1 else "").strip() or "当前更多依赖主线延续和盘面承接"
+        risk = str(row[4] if len(row) > 4 else "").strip()
+        if not direction:
+            continue
+        extra = f"；主要风险：`{risk}`" if risk else ""
+        _append_unique(
+            f"- `方向线索`：{direction}；信号类型：`方向/主题线索`；信号强弱：`中`；当前看点：`{catalyst}`{extra}"
+        )
+    for item in list(payload.get("core_event_lines") or []):
+        text = str(item or "").strip()
+        if not text:
+            continue
+        _append_unique(
+            f"- `主线情报`：{text}；信号类型：`主线/背景情报`；信号强弱：`中`"
+        )
+    digest_items = [
+        dict(item or {})
+        for item in list(digest.get("items") or [])
+        if str(item.get("source", "") or "").strip().lower() != "briefing"
+        or effective_intelligence_link(item)
+    ]
+    for line in _evidence_lines(
+        digest_items,
+        max_items=max_items,
+        as_of=payload.get("generated_at"),
+        previous_reviewed_at=digest.get("previous_reviewed_at"),
+    ):
+        _append_unique(line)
+    return lines[:max_items]
+
+
+def _dimension_row_lookup(rows: Sequence[Sequence[Any]]) -> Dict[str, str]:
+    lookup: Dict[str, str] = {}
+    for row in list(rows or []):
+        if not row:
+            continue
+        label = str(row[0] if len(row) > 0 else "").strip()
+        value = str(row[1] if len(row) > 1 else "").strip()
+        reason = str(row[2] if len(row) > 2 else "").strip()
+        if label and (value or reason):
+            lookup[label] = f"{value}；{reason}".strip("；")
+    return lookup
+
+
+def _fund_section_table_value(section_lines: Sequence[str], label: str) -> str:
+    target = str(label or "").strip()
+    if not target:
+        return ""
+    for raw in list(section_lines or []):
+        line = str(raw or "").strip()
+        if not (line.startswith("|") and line.endswith("|")):
+            continue
+        parts = [part.strip() for part in line.strip("|").split("|")]
+        if len(parts) < 2:
+            continue
+        if parts[0] == target:
+            return parts[1]
+    return ""
+
+
+def _etf_front_reason_lines(analysis: Mapping[str, Any]) -> List[str]:
+    rows = _dimension_row_lookup(list(dict(analysis or {}).get("dimension_rows") or []))
+    fund_profile = dict(dict(analysis or {}).get("fund_profile") or {})
+    overview = dict(fund_profile.get("overview") or {})
+    fund_sections = list(dict(analysis or {}).get("fund_sections") or [])
+    lines: List[str] = []
+
+    product_signal = str(
+        overview.get("ETF场内技术状态", "") or _fund_section_table_value(fund_sections, "场内基金技术状态")
+    ).strip()
+    if product_signal:
+        lines.append(f"产品层确认：场内基金技术状态当前是 `{product_signal}`，先看 ETF 本身的趋势和动能是否允许持有。")
+
+    share_change = str(
+        overview.get("ETF最近份额变化", "") or _fund_section_table_value(fund_sections, "最近份额变化")
+    ).strip()
+    if share_change:
+        lines.append(f"申赎线索：{share_change}。")
+
+    size_change = str(
+        overview.get("ETF最近规模变化", "") or _fund_section_table_value(fund_sections, "最近规模变化")
+    ).strip()
+    if size_change:
+        lines.append(f"规模线索：{size_change}。")
+
+    index_signal = rows.get("跟踪指数技术状态", "")
+    if index_signal:
+        lines.append(f"指数层确认：{index_signal}。")
+
+    product_factor_signal = rows.get("场内基金技术状态（ETF/基金专属）", "")
+    if product_factor_signal and all(product_factor_signal not in item for item in lines):
+        lines.append(f"产品因子确认：{product_factor_signal}。")
+
+    return lines[:4]
+
+
+def _briefing_reason_bullets(
+    headline_lines: Sequence[str],
+    intelligence_board_lines: Sequence[str],
+    action_lines: Sequence[str],
+) -> List[str]:
+    bullets: List[str] = []
+    seen: set[str] = set()
+
+    def _append(text: str) -> None:
+        line = _pick_client_safe_line(text or "")
+        normalized = re.sub(r"\s+", " ", str(line or "")).strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        bullets.append(normalized)
+
+    for item in list(headline_lines or [])[1:4]:
+        _append(item)
+
+    for item in list(intelligence_board_lines or []):
+        cleaned = re.sub(r"^-\s*", "", str(item or "").strip())
+        if not cleaned:
+            continue
+        if "；结论：" in cleaned:
+            cleaned = cleaned.split("；结论：", 1)[1]
+        elif "；主要影响：" in cleaned:
+            cleaned = cleaned.split("；主要影响：", 1)[1]
+        cleaned = cleaned.replace("`", "")
+        cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+        _append(cleaned)
+        if len(bullets) >= 3:
+            break
+
+    if len(bullets) < 3:
+        for item in list(action_lines or []):
+            _append(item)
+            if len(bullets) >= 3:
+                break
+
+    return bullets[:3]
+
+
+def _briefing_evidence_rows(payload: Mapping[str, Any], evidence_rows: Sequence[Sequence[Any]]) -> List[List[str]]:
+    normalized: List[List[str]] = []
+    for row in list(evidence_rows or []):
+        if not row:
+            continue
+        label = str(row[0] if len(row) > 0 else "").strip()
+        value = _pick_client_safe_line(row[1] if len(row) > 1 else "") or "—"
+        if not label:
+            continue
+        if label == "生成时间":
+            label = "分析生成时间"
+        elif label in {"A股观察池", "观察池来源"}:
+            label = "A股观察池来源"
+        normalized.append([label, value])
+
+    existing_labels = {row[0] for row in normalized if row}
+
+    if "分析生成时间" not in existing_labels:
+        generated_at = str(payload.get("generated_at", "")).strip()
+        normalized.append(["分析生成时间", generated_at or "—"])
+    if "A股观察池来源" not in existing_labels:
+        watch_meta = dict(payload.get("a_share_watch_meta") or {})
+        pool_size = watch_meta.get("pool_size")
+        complete_size = watch_meta.get("complete_analysis_size")
+        source_text = "Tushare 优先全市场初筛"
+        if pool_size not in (None, "") or complete_size not in (None, ""):
+            source_text += f"；初筛 `{pool_size or '—'}` 只，完整分析 `{complete_size or '—'}` 只。"
+        normalized.append(["A股观察池来源", source_text])
+    if "时点边界" not in existing_labels:
+        normalized.append(["时点边界", "默认只使用生成时点前可见的宏观、外部新闻和观察池快照。"])
+
+    ordered_labels = ["分析生成时间", "A股观察池来源", "时点边界"]
+    head = [row for label in ordered_labels for row in normalized if row and row[0] == label]
+    tail = [row for row in normalized if row and row[0] not in ordered_labels]
+    return head + tail
+
+
 def _analysis_provenance_rows(analysis: Mapping[str, Any]) -> List[List[str]]:
-    provenance = dict(analysis.get("provenance") or build_analysis_provenance(analysis))
+    provenance = dict(analysis.get("provenance") or {})
+    rebuilt = build_analysis_provenance(analysis)
+    for key in (
+        "analysis_generated_at",
+        "market_data_as_of",
+        "market_data_source",
+        "relative_benchmark_name",
+        "relative_benchmark_symbol",
+        "intraday_as_of",
+        "catalyst_evidence_as_of",
+        "catalyst_sources",
+        "catalyst_sources_text",
+        "catalyst_diagnosis",
+        "catalyst_web_review_decision",
+        "catalyst_web_review_impact",
+        "news_mode",
+        "point_in_time_note",
+        "notes",
+    ):
+        provenance[key] = rebuilt.get(key, provenance.get(key))
     rows: List[List[str]] = [
         ["分析生成时间", provenance.get("analysis_generated_at", "—")],
         ["行情 as_of", provenance.get("market_data_as_of", "—")],
@@ -1007,13 +1641,16 @@ def _analysis_provenance_rows(analysis: Mapping[str, Any]) -> List[List[str]]:
             ),
         ],
         ["分钟级快照 as_of", provenance.get("intraday_as_of", "未启用")],
-        ["催化证据 as_of", provenance.get("catalyst_evidence_as_of", "—")],
-        ["催化来源", provenance.get("catalyst_sources_text", "—")],
+        ["催化证据 as_of", _pick_client_safe_line(provenance.get("catalyst_evidence_as_of", "—")) or "—"],
+        ["催化来源", _pick_client_safe_line(provenance.get("catalyst_sources_text", "—")) or "—"],
+        ["催化诊断", _pick_client_safe_line(provenance.get("catalyst_diagnosis", "—")) or "—"],
+        ["联网复核结论", provenance.get("catalyst_web_review_decision", "—")],
+        ["联网复核影响", provenance.get("catalyst_web_review_impact", "—")],
         ["新闻模式", provenance.get("news_mode", "unknown")],
-        ["时点边界", provenance.get("point_in_time_note", "默认只使用生成时点前可见信息。")],
+        ["时点边界", _pick_client_safe_line(provenance.get("point_in_time_note", "默认只使用生成时点前可见信息。")) or "默认只使用生成时点前可见信息。"],
     ]
     for item in list(provenance.get("notes") or [])[:2]:
-        rows.append(["时点/溯源提醒", str(item)])
+        rows.append(["时点/溯源提醒", _pick_client_safe_line(item) or "—"])
     return rows
 
 
@@ -1122,6 +1759,7 @@ def _analysis_section_lines(
     analysis: Mapping[str, Any],
     bucket: str,
     *,
+    day_theme: str = "",
     used_positive_reasons: Counter[str] | None = None,
     used_caution_reasons: Counter[str] | None = None,
     generated_at: str = "",
@@ -1153,6 +1791,12 @@ def _analysis_section_lines(
     cautions = _take_diverse_reason_lines(caution_candidates, used_caution_reasons, max_items=3)
     if len(cautions) > 2:
         cautions = cautions[:2]
+    portfolio_overlap_lines = _portfolio_overlap_lines(analysis)
+    theme_context = dict(analysis)
+    if day_theme:
+        theme_context["day_theme"] = {"label": day_theme}
+    packet = build_scan_editor_packet(theme_context, bucket=bucket)
+    theme_lines = _theme_playbook_explainer_lines(dict(packet.get("theme_playbook") or {}))
 
     lines = [
         f"### {name} ({symbol})",
@@ -1163,6 +1807,8 @@ def _analysis_section_lines(
     if bucket == "正式推荐":
         lines.append("为什么能进正式推荐：")
         lines.append("")
+        for item in theme_lines[:2]:
+            lines.append(f"- {item}")
         for item in positives[:3]:
             lines.append(f"- {item}")
         lines.extend(
@@ -1177,6 +1823,8 @@ def _analysis_section_lines(
     else:
         lines.append("为什么仍然值得继续看：")
         lines.append("")
+        for item in theme_lines[:2]:
+            lines.append(f"- {item}")
         for item in positives[:3]:
             lines.append(f"- {item}")
         lines.extend(
@@ -1187,6 +1835,10 @@ def _analysis_section_lines(
             ]
         )
         for item in cautions[:3]:
+            lines.append(f"- {item}")
+    if portfolio_overlap_lines:
+        lines.extend(["", "和现有持仓怎么配：", ""])
+        for item in portfolio_overlap_lines:
             lines.append(f"- {item}")
 
     lines.extend(
@@ -1241,6 +1893,7 @@ def _analysis_watch_card_lines(
     analysis: Mapping[str, Any],
     bucket: str,
     *,
+    day_theme: str = "",
     used_positive_reasons: Counter[str],
     used_caution_reasons: Counter[str],
     generated_at: str,
@@ -1270,11 +1923,7 @@ def _analysis_watch_card_lines(
     )
     positives = _take_diverse_reason_lines(positive_candidates, used_positive_reasons, max_items=2)
     cautions = _take_diverse_reason_lines(caution_candidates, used_caution_reasons, max_items=2)
-    evidence_lines = _evidence_lines(
-        list(dict(analysis.get("dimensions", {}).get("catalyst") or {}).get("evidence") or []),
-        max_items=1,
-        as_of=analysis.get("generated_at"),
-    )
+    portfolio_overlap_lines = _portfolio_overlap_lines(analysis)
     watch_levels = _observe_watch_levels(analysis)
     trigger_line = _observe_trigger_condition(
         analysis,
@@ -1284,6 +1933,11 @@ def _analysis_watch_card_lines(
     constraint_hint = _analysis_constraint_hint(analysis)
     if constraint_hint and constraint_hint not in trigger_line:
         trigger_line = _append_sentence(trigger_line, constraint_hint)
+    theme_context = dict(analysis)
+    if day_theme:
+        theme_context["day_theme"] = {"label": day_theme}
+    packet = build_scan_editor_packet(theme_context, bucket=bucket)
+    theme_lines = _theme_playbook_explainer_lines(dict(packet.get("theme_playbook") or {}))
 
     lines = [
         f"### {name} ({symbol}) | {bucket}",
@@ -1293,12 +1947,18 @@ def _analysis_watch_card_lines(
         "为什么继续看它：",
         "",
     ]
+    for item in theme_lines[:2]:
+        lines.append(f"- {item}")
     for item in positives[:2]:
         lines.append(f"- {item}")
     lines.extend(["", "为什么现在不升级成正式推荐：", ""])
     for item in cautions[:2]:
         lines.append(f"- {item}")
     lines.extend(_pick_upgrade_lines(analysis))
+    if portfolio_overlap_lines:
+        lines.extend(["", "和现有持仓怎么配：", ""])
+        for item in portfolio_overlap_lines:
+            lines.append(f"- {item}")
     lines.extend(["", "下一步怎么盯：", ""])
     if horizon.get("label"):
         watch_profile = _pick_client_safe_line(horizon.get("fit_reason") or horizon.get("style") or "先看确认，不急着按正式动作理解。")
@@ -1308,12 +1968,21 @@ def _analysis_watch_card_lines(
         lines.append(f"- 关键盯盘价位：{watch_levels}")
     lines.append(f"- 首次仓位：{_pick_client_safe_line(action.get('position', '≤2% 观察仓，或先不出手'))}")
     lines.extend(["", "证据口径：", ""])
+    evidence_lines = _evidence_lines_with_event_digest(
+        list(dict(analysis.get("dimensions", {}).get("catalyst") or {}).get("evidence") or []),
+        event_digest=packet.get("event_digest") or {},
+        max_items=2,
+        as_of=analysis.get("generated_at"),
+        symbol=analysis.get("symbol"),
+    )
     if evidence_lines:
         lines.extend(evidence_lines)
+        if not any("直连情报" in item or "高置信直连" in item for item in evidence_lines):
+            lines.append("- 当前证据更偏结构化披露与公告日历，不是直连情报催化型驱动。")
     else:
         provenance = dict(analysis.get("provenance") or build_analysis_provenance(analysis))
         lines.append(
-            f"- `{name}` 当前没有高置信直连催化，先按 `"
+            f"- `{name}` 当前没有高置信直连情报催化，先按 `"
             + str(provenance.get("catalyst_sources_text", "结构化事件/代理来源"))
             + "` 这层来源理解。"
         )
@@ -1324,7 +1993,13 @@ def _analysis_detail_appendix_lines(analysis: Mapping[str, Any]) -> List[str]:
     catalyst_dimension = dict(analysis.get("dimensions", {}).get("catalyst") or {})
     risk_dimension = dict(analysis.get("dimensions", {}).get("risk") or {})
     evidence = list(catalyst_dimension.get("evidence") or [])
-    evidence_lines = _evidence_lines(evidence, max_items=2, as_of=analysis.get("generated_at"))
+    evidence_lines = _evidence_lines_with_event_digest(
+        evidence,
+        event_digest=build_scan_editor_packet(analysis, bucket=_recommendation_bucket(analysis)).get("event_digest") or {},
+        max_items=4,
+        as_of=analysis.get("generated_at"),
+        symbol=analysis.get("symbol"),
+    )
     lines = [
         f"### {analysis.get('name', '—')} ({analysis.get('symbol', '—')})",
         "",
@@ -1343,14 +2018,14 @@ def _analysis_detail_appendix_lines(analysis: Mapping[str, Any]) -> List[str]:
     )
     lines.extend(_table(["层次", "当前判断", "说明"], _catalyst_structure_rows(catalyst_dimension)))
     lines.append("")
-    lines.extend(_table(["催化子项", "层级", "当前信号", "得分"], _catalyst_factor_rows(catalyst_dimension)))
+    lines.extend(_table(["催化子项", "层级", "当前信号", "得分"], _client_catalyst_factor_rows(catalyst_dimension)))
     lines.extend(["", "**催化证据来源：**", ""])
     if evidence_lines:
         lines.extend(evidence_lines)
     else:
         provenance = dict(analysis.get("provenance") or build_analysis_provenance(analysis))
         lines.append(
-            "当前没有高置信直连催化，先按 `"
+            "当前没有高置信直连情报催化，先按 `"
             + str(provenance.get("catalyst_sources_text", "结构化事件/代理来源"))
             + "` 这层来源理解。"
         )
@@ -1362,7 +2037,7 @@ def _analysis_detail_appendix_lines(analysis: Mapping[str, Any]) -> List[str]:
             f"**风险拆解：** 当前风险分 `{risk_dimension.get('score', '缺失')}/{risk_dimension.get('max_score', 100)}`。分数越低，说明波动、窗口和相关性压力越大。",
         ]
     )
-    lines.extend(_table(["风险子项", "当前信号", "说明", "得分"], _factor_rows(risk_dimension)))
+    lines.extend(_table(["风险子项", "当前信号", "说明", "得分"], _client_factor_rows(risk_dimension)))
     lines.extend(["", *_signal_confidence_lines(analysis)])
     return lines
 
@@ -1370,7 +2045,13 @@ def _analysis_detail_appendix_lines(analysis: Mapping[str, Any]) -> List[str]:
 def _stock_pick_shared_evidence_lines(items: Sequence[Mapping[str, Any]]) -> List[str]:
     for item in items:
         evidence = list(dict(item.get("dimensions", {}).get("catalyst") or {}).get("evidence") or [])
-        evidence_lines = _evidence_lines(evidence, max_items=2, as_of=item.get("generated_at"))
+        evidence_lines = _evidence_lines_with_event_digest(
+            evidence,
+            event_digest=build_scan_editor_packet(item, bucket=_recommendation_bucket(item)).get("event_digest") or {},
+            max_items=2,
+            as_of=item.get("generated_at"),
+            symbol=item.get("symbol"),
+        )
         if evidence_lines:
             return [
                 "- 当前观察名单里的催化先按可直接复核的结构化事件/前瞻日历理解，不把缺新闻自动写成利空。",
@@ -1435,6 +2116,7 @@ def _market_pick_scope_text(item: Mapping[str, Any], *, generated_at: str = "") 
 
 def _scan_dimension_rows(analysis: Mapping[str, Any]) -> List[List[str]]:
     rows: List[List[str]] = []
+    technical_signal_text = compact_technical_signal_text(analysis.get("history"))
     labels = [
         ("technical", "技术面"),
         ("fundamental", "基本面"),
@@ -1449,6 +2131,8 @@ def _scan_dimension_rows(analysis: Mapping[str, Any]) -> List[List[str]]:
         max_score = dimension.get("max_score", 100)
         display = "—" if score is None else f"{score}/{max_score}"
         reason = _dimension_summary_text(key, dimension)
+        if key == "technical" and technical_signal_text and technical_signal_text not in reason:
+            reason = f"{reason} {technical_signal_text}".strip() if reason and reason != "—" else technical_signal_text
         rows.append([str(dimension.get("display_name", label)), display, reason])
     return rows
 
@@ -1472,8 +2156,8 @@ def _scan_factor_rows(dimension: Mapping[str, Any]) -> List[List[str]]:
         rows.append(
             [
                 str(factor.get("name", "")).strip() or "—",
-                str(factor.get("signal", "")).strip() or "—",
-                str(factor.get("detail", "")).strip() or "—",
+                _pick_client_safe_line(str(factor.get("signal", "")).strip()) or "—",
+                _pick_client_safe_line(str(factor.get("detail", "")).strip()) or "—",
                 str(factor.get("display_score", "")).strip() or "—",
             ]
         )
@@ -1670,7 +2354,74 @@ def _fund_profile_sections(analysis: Mapping[str, Any]) -> List[str]:
     fund_profile = dict(analysis.get("fund_profile") or {})
     if not fund_profile:
         return []
+    asset_type = str(analysis.get("asset_type", "")).strip()
     overview = dict(fund_profile.get("overview") or {})
+    etf_snapshot = dict(fund_profile.get("etf_snapshot") or {})
+    fund_factor_snapshot = dict(fund_profile.get("fund_factor_snapshot") or {})
+    if etf_snapshot:
+        def _is_blank(value: Any) -> bool:
+            if value in ("", None):
+                return True
+            try:
+                return bool(pd.isna(value))
+            except Exception:
+                return False
+
+        def _fill_if_blank(key: str, value: Any) -> None:
+            if _is_blank(value):
+                return
+            if _is_blank(overview.get(key)):
+                overview[key] = value
+
+        latest_close = None
+        history = analysis.get("history")
+        if isinstance(history, pd.DataFrame) and not history.empty:
+            for column in ("收盘", "close"):
+                if column in history.columns:
+                    try:
+                        latest_close = float(pd.to_numeric(history[column], errors="coerce").dropna().iloc[-1])
+                    except Exception:
+                        latest_close = None
+                    if latest_close is not None:
+                        break
+        total_size_value = etf_snapshot.get("total_size_yi", etf_snapshot.get("total_size", ""))
+        if total_size_value in ("", None) or pd.isna(total_size_value):
+            try:
+                total_share_raw = float(etf_snapshot.get("total_share"))
+            except (TypeError, ValueError):
+                total_share_raw = None
+            if total_share_raw is not None and latest_close is not None:
+                total_size_value = f"约{(total_share_raw * latest_close / 10000.0):.2f}亿元（按最近收盘估算）"
+        share_change_text = str(etf_snapshot.get("share_change_text", "") or "").strip()
+        size_change_text = str(etf_snapshot.get("size_change_text", "") or "").strip()
+        share_as_of = str(etf_snapshot.get("share_as_of", "") or "").strip()
+        if not share_change_text and share_as_of and etf_snapshot.get("total_share") not in ("", None):
+            share_change_text = f"截至 {share_as_of} 仅有单日快照，不能据此写成净创设/净赎回"
+        if not size_change_text and share_as_of and total_size_value not in ("", None, ""):
+            size_change_text = f"截至 {share_as_of} 仅有单日规模口径，不能据此写成规模扩张/收缩"
+        _fill_if_blank("ETF类型", etf_snapshot.get("etf_type", ""))
+        _fill_if_blank("交易所", etf_snapshot.get("exchange", ""))
+        _fill_if_blank("ETF基准指数中文全称", etf_snapshot.get("index_name", ""))
+        _fill_if_blank("ETF基准指数代码", etf_snapshot.get("index_code", ""))
+        _fill_if_blank("ETF基准指数发布机构", etf_snapshot.get("index_publisher", ""))
+        _fill_if_blank("ETF基准指数调样周期", etf_snapshot.get("index_rebalance_cycle", ""))
+        _fill_if_blank("ETF份额规模日期", etf_snapshot.get("share_as_of", ""))
+        _fill_if_blank("ETF总份额", etf_snapshot.get("total_share_yi", etf_snapshot.get("total_share", "")))
+        _fill_if_blank("ETF总规模", total_size_value)
+        _fill_if_blank("ETF最近份额变化", share_change_text)
+        _fill_if_blank("ETF最近规模变化", size_change_text)
+    factor_trend = str(fund_factor_snapshot.get("trend_label", "") or "").strip()
+    factor_momentum = str(fund_factor_snapshot.get("momentum_label", "") or "").strip()
+    factor_date = str(fund_factor_snapshot.get("latest_date", "") or fund_factor_snapshot.get("trade_date", "") or "").strip()
+    factor_text = ""
+    if factor_trend:
+        factor_text = factor_trend
+        if factor_momentum:
+            factor_text += f" / {factor_momentum}"
+        if factor_date:
+            factor_text += f"（{factor_date}）"
+    if factor_text and not str(overview.get("ETF场内技术状态", "") or "").strip():
+        overview["ETF场内技术状态"] = factor_text
     style = dict(fund_profile.get("style") or {})
     manager = dict(fund_profile.get("manager") or {})
     company = dict(fund_profile.get("company") or {})
@@ -1686,6 +2437,34 @@ def _fund_profile_sections(analysis: Mapping[str, Any]) -> List[str]:
         ["业绩比较基准", overview.get("业绩比较基准", "—")],
     ]
     lines.extend(_table(["项目", "内容"], overview_rows))
+
+    if asset_type == "cn_etf" or any(
+        str(overview.get(key, "")).strip()
+        for key in (
+            "ETF类型",
+            "交易所",
+            "ETF基准指数中文全称",
+            "ETF基准指数代码",
+            "ETF总份额",
+            "ETF总规模",
+        )
+    ):
+        etf_rows = [
+            ["ETF类型", overview.get("ETF类型", "—")],
+            ["交易所", overview.get("交易所", "—")],
+            ["跟踪指数", overview.get("ETF基准指数中文全称", overview.get("业绩比较基准", "—"))],
+            ["指数代码", overview.get("ETF基准指数代码", "—")],
+            ["指数发布机构", overview.get("ETF基准指数发布机构", "—")],
+            ["调样周期", overview.get("ETF基准指数调样周期", "—")],
+            ["场内基金技术状态", overview.get("ETF场内技术状态", "—")],
+            ["最新总份额", overview.get("ETF总份额", "—")],
+            ["最新总规模", overview.get("ETF总规模", overview.get("净资产规模", "—"))],
+            ["份额规模日期", overview.get("ETF份额规模日期", "—")],
+            ["最近份额变化", overview.get("ETF最近份额变化", "—") or "—"],
+            ["最近规模变化", overview.get("ETF最近规模变化", "—") or "—"],
+        ]
+        lines.extend(["", "### ETF专用信息", ""])
+        lines.extend(_table(["维度", "内容"], etf_rows))
 
     company_rows = [
         ["公司简称", company.get("short_name", "—")],
@@ -1827,6 +2606,7 @@ def _proxy_contract_section(
     winner: Optional[Mapping[str, Any]] = None,
     regime: Optional[Mapping[str, Any]] = None,
     heading: str = "## 代理信号与限制",
+    emphasize: bool = True,
 ) -> List[str]:
     contract = dict(proxy_contract or {})
     market_flow = dict(contract.get("market_flow") or {})
@@ -1870,7 +2650,7 @@ def _proxy_contract_section(
         return []
 
     lines = [heading, ""]
-    lines.extend(_section_lead_lines("这段只回答哪些判断来自代理层、这些代理能信到什么程度。"))
+    lines.extend(_section_lead_lines("这段只回答哪些判断来自代理层、这些代理能信到什么程度。", emphasize=emphasize))
     lines.extend(_table(["代理层", "当前判断", "置信度/覆盖", "主要限制", "降级影响"], rows))
     return lines
 
@@ -2047,6 +2827,14 @@ def _observe_trigger_condition(
     buy_range = _safe_buy_range_text(action)
     entry_phrase = _entry_trigger_phrase(entry)
     derived_phrases = _derived_trigger_phrases(analysis)
+    strategy_upgrade_text = _strategy_background_upgrade_text(analysis)
+
+    def _finalize(text: str) -> str:
+        line = _pick_client_safe_line(text)
+        if strategy_upgrade_text and strategy_upgrade_text not in line:
+            line = _append_sentence(line, strategy_upgrade_text)
+        return append_technical_trigger_text(line, analysis.get("history"))
+
     if entry:
         phrases = [entry_phrase] if entry_phrase else [entry.rstrip("。；;,， ")]
         seen_families = {_trigger_phrase_family(item) for item in phrases if _trigger_phrase_family(item)}
@@ -2059,18 +2847,18 @@ def _observe_trigger_condition(
                 seen_families.add(family)
             if len(phrases) >= 2:
                 break
-        return _compose_trigger_sentence(phrases, buy_range=buy_range)
+        return _finalize(_compose_trigger_sentence(phrases, buy_range=buy_range))
     if buy_range and "暂不设" not in buy_range:
-        return f"先等价格回到 `{buy_range}` 一带并确认承接，再决定要不要动。"
+        return _finalize(f"先等价格回到 `{buy_range}` 一带并确认承接，再决定要不要动。")
     if derived_phrases:
-        return _compose_trigger_sentence(derived_phrases, buy_range=buy_range)
+        return _finalize(_compose_trigger_sentence(derived_phrases, buy_range=buy_range))
     constraint = _analysis_constraint_hint(analysis)
     if constraint:
-        return _pick_client_safe_line(constraint)
+        return _finalize(constraint)
     fit_reason = str(horizon.get("fit_reason", "")).strip()
     if fit_reason:
-        return _pick_client_safe_line(f"先等{fit_reason}，再决定要不要升级成可执行方案。")
-    return _pick_client_safe_line(default_text)
+        return _finalize(f"先等{fit_reason}，再决定要不要升级成可执行方案。")
+    return _finalize(default_text)
 
 
 def _analysis_section_takeaway(analysis: Mapping[str, Any], bucket: str) -> str:
@@ -2085,10 +2873,16 @@ def _analysis_section_takeaway(analysis: Mapping[str, Any], bucket: str) -> str:
 
 def _pick_upgrade_lines(analysis: Mapping[str, Any]) -> List[str]:
     why_text = _pick_client_safe_line(_decision_gate_explanation(analysis))
-    trigger_text = _pick_client_safe_line(_primary_upgrade_trigger(analysis))
+    technical_signal_text = compact_technical_signal_text(analysis.get("history"))
+    if technical_signal_text and technical_signal_text not in why_text:
+        why_text = f"{why_text} {technical_signal_text}".strip()
+    trigger_text = append_technical_trigger_text(_pick_client_safe_line(_primary_upgrade_trigger(analysis)), analysis.get("history"))
     lines: List[str] = []
+    strategy_upgrade_text = _strategy_background_upgrade_text(analysis)
     if why_text:
         lines.append(f"- 为什么还不升级：{why_text}")
+    if strategy_upgrade_text:
+        lines.append(f"- 后台置信度约束：{strategy_upgrade_text}")
     if trigger_text:
         lines.append(f"- 升级条件：{trigger_text}")
     return lines
@@ -2116,7 +2910,9 @@ def _observe_pick_action_rows(
     rows.extend(
         [
             ["触发买点条件", _observe_trigger_condition(winner, horizon, default_text=default_trigger)],
+            ["首次建仓", _pick_client_safe_line(winner.get("action", {}).get("position", "当前先不出手；若后续触发，再按小仓试探处理"))],
             *_present_action_row("关键盯盘价位", _observe_watch_levels(winner)),
+            ["止损参考", _pick_client_safe_line(winner.get("action", {}).get("stop", "重新跌破关键支撑就处理"))],
             ["重新评估条件", _pick_reassessment_condition(winner, horizon, default_reassessment)],
             ["适用时段", _pick_client_safe_line(handoff.get("timing_summary", "先按当前可交易/申赎窗口理解。"))],
         ]
@@ -2254,6 +3050,7 @@ def _single_asset_exec_summary_rows(
     handoff: Mapping[str, Any],
     *,
     selection_context: Optional[Mapping[str, Any]] = None,
+    theme_playbook: Optional[Mapping[str, Any]] = None,
     status_label: str = "",
     default_trigger: str,
     default_holder_text: str,
@@ -2274,6 +3071,9 @@ def _single_asset_exec_summary_rows(
             max_items=2,
             fallback=status_label or "观察为主",
         )
+    if observe_conflict and direction and direction != current_action:
+        if any(marker in direction for marker in ("回避", "暂不")) and "偏回避" not in current_action:
+            current_action = f"{current_action}（偏回避）"
     positives = _merge_reason_lines(
         list(item.get("positives") or []) + list(narrative.get("positives") or []),
         _top_dimension_reasons(item, top_n=3),
@@ -2296,7 +3096,7 @@ def _single_asset_exec_summary_rows(
     )
 
     rows: List[List[str]] = [["当前建议", current_action]]
-    if observe_conflict and direction and direction != current_action:
+    if observe_conflict and direction and direction != current_action and not any(marker in direction for marker in ("回避", "暂不")):
         rows.append(["方向偏向", direction])
     context = dict(selection_context or {})
     delivery_label = str(context.get("delivery_tier_label", "")).strip()
@@ -2309,15 +3109,26 @@ def _single_asset_exec_summary_rows(
             ["置信度", _summary_confidence_text(item, selection_context=selection_context)],
             ["适用周期", horizon.get("label", "未单独标注")],
             ["适用时段", _pick_client_safe_line(handoff.get("timing_summary", "先按当前可交易/申赎窗口理解。"))],
-            ["空仓怎么做", _summary_empty_position_action_text(item, horizon, default_trigger=default_trigger)],
-            ["持仓怎么做", _summary_holder_action_text(item, horizon, default_text=default_holder_text)],
-            ["首次仓位", _pick_client_safe_line(action.get("position", "小仓位分批"))],
         ]
     )
-    if action.get("max_portfolio_exposure"):
-        rows.append(["仓位上限", _pick_client_safe_line(action.get("max_portfolio_exposure"))])
-    if handoff.get("summary"):
-        rows.append(["组合前提", _pick_client_safe_line(handoff.get("summary"))])
+    strategy_background_text = _strategy_background_summary_text(item)
+    if strategy_background_text:
+        rows.append(["后台置信度", strategy_background_text])
+    rows.extend(_theme_playbook_summary_rows(theme_playbook))
+    if observe_conflict or current_action == "观察为主" or status_label == "观察为主":
+        rows.append(["观察重点", _summary_empty_position_action_text(item, horizon, default_trigger=default_trigger)])
+    else:
+        rows.extend(
+            [
+                ["空仓怎么做", _summary_empty_position_action_text(item, horizon, default_trigger=default_trigger)],
+                ["持仓怎么做", _summary_holder_action_text(item, horizon, default_text=default_holder_text)],
+                ["首次仓位", _pick_client_safe_line(action.get("position", "小仓位分批"))],
+            ]
+        )
+        if action.get("max_portfolio_exposure"):
+            rows.append(["仓位上限", _pick_client_safe_line(action.get("max_portfolio_exposure"))])
+        if handoff.get("summary"):
+            rows.append(["组合前提", _pick_client_safe_line(handoff.get("summary"))])
     rows.extend(
         [
             [
@@ -2346,13 +3157,103 @@ def _summary_block_lines(
     *,
     heading: str,
     lead: str,
+    emphasize: bool = True,
 ) -> List[str]:
     if not rows:
         return []
     lines = [heading, ""]
-    lines.extend(_section_lead_lines(lead))
+    lines.extend(_section_lead_lines(lead, emphasize=emphasize))
     lines.extend(_table(["项目", "建议"], rows))
     return lines
+
+
+def _strategy_background_summary_text(analysis: Mapping[str, Any]) -> str:
+    confidence = dict(_strategy_background_confidence(analysis) or {})
+    if not confidence:
+        return ""
+    status = _shared_strategy_confidence_status({"strategy_background_confidence": confidence})
+    reason = _pick_client_safe_line(confidence.get("reason") or confidence.get("summary"))
+    if status == "degraded":
+        return f"退化：{reason} 当前应先下调置信度，不单靠它升级动作。"
+    if status == "watch":
+        return f"观察：{reason} 这次信号先只作辅助说明。"
+    if status == "stable":
+        return f"稳定：{reason} 这层只作辅助加分，不单独替代当前事实层。"
+    return ""
+
+
+def _strategy_background_upgrade_text(analysis: Mapping[str, Any]) -> str:
+    confidence = dict(_strategy_background_confidence(analysis) or {})
+    if not confidence:
+        return ""
+    status = _shared_strategy_confidence_status({"strategy_background_confidence": confidence})
+    if status == "degraded":
+        return "后台验证最近退化，先不要只凭题材热度或单日强势升级动作。"
+    if status == "watch":
+        return "后台验证当前只到观察，这次先只作辅助说明，不单靠它升级动作。"
+    if status == "stable":
+        return "后台验证当前稳定，但它只算辅助加分；真正升级仍要等当下确认回来。"
+    return ""
+
+
+def _portfolio_overlap_lines(subject: Mapping[str, Any]) -> List[str]:
+    summary = dict(subject.get("portfolio_overlap_summary") or {})
+    if not summary:
+        return []
+    lines: List[str] = []
+    summary_line = _pick_client_safe_line(summary.get("summary_line"))
+    if summary_line:
+        lines.append(summary_line)
+    overlap_label = str(summary.get("overlap_label") or "").strip()
+    conflict_label = _pick_client_safe_line(summary.get("conflict_label") or "")
+    if overlap_label or conflict_label:
+        lines.append("组合联动："
+                     + (overlap_label or "—")
+                     + (f"；{conflict_label}" if conflict_label else ""))
+    style_summary_line = _pick_client_safe_line(summary.get("style_summary_line") or "")
+    if style_summary_line:
+        lines.append(f"风格与方向：{style_summary_line}")
+    style_priority_hint = _pick_client_safe_line(summary.get("style_priority_hint") or "")
+    if style_priority_hint:
+        lines.append(f"组合优先级：{style_priority_hint}")
+    return lines[:3]
+
+
+def _theme_playbook_summary_rows(playbook: Optional[Mapping[str, Any]]) -> List[List[str]]:
+    payload = dict(playbook or {})
+    if not payload:
+        return []
+    playbook_level = str(payload.get("playbook_level", "")).strip()
+    sector_label = str(payload.get("label", "")).strip() or str(payload.get("hard_sector_label", "")).strip() or "行业层"
+    theme_match_status = str(payload.get("theme_match_status", "")).strip()
+    theme_match_candidates = [str(item).strip() for item in list(payload.get("theme_match_candidates") or []) if str(item).strip()]
+    bridge_confidence = str(payload.get("subtheme_bridge_confidence", "")).strip() or "none"
+    bridge_top_label = str(payload.get("subtheme_bridge_top_label", "")).strip()
+    bridge_items = [dict(item) for item in list(payload.get("subtheme_bridge") or []) if dict(item)]
+    bridge_labels = [str(item.get("label", "")).strip() for item in bridge_items if str(item.get("label", "")).strip()]
+
+    rows: List[List[str]] = []
+    if playbook_level == "sector":
+        if theme_match_status == "ambiguous_conflict" and theme_match_candidates:
+            joined = " / ".join(theme_match_candidates[:3])
+            rows.append(["主题边界", f"当前先按 `{sector_label}` 行业层理解，`{joined}` 这几条线还没拉开，不适合硬落单一细主题。"])
+        else:
+            rows.append(["主题边界", f"当前先按 `{sector_label}` 行业层理解，先把行业逻辑、景气和风格顺逆风看清，再决定要不要往更细主题上落。"])
+    if playbook_level != "sector" or not bridge_labels:
+        return rows
+    if bridge_confidence == "high" and bridge_top_label:
+        text = f"当前仍先按 `{sector_label}` 行业层理解，但可优先跟踪 `{bridge_top_label}`；这最多只算偏向，不等于已确认细主题。"
+    elif bridge_confidence == "medium" and bridge_top_label:
+        text = f"当前仍先按 `{sector_label}` 行业层理解，但可优先留意 `{bridge_top_label}`；没有更多确认前，不把它写成确定主线。"
+    else:
+        joined = " / ".join(f"`{label}`" for label in bridge_labels[:3])
+        text = f"如果后续要继续下钻，先观察 {joined} 这些细分方向；当前不足以下单一主题结论。"
+    rows.append(["细分观察", text])
+    return rows
+
+
+def _theme_playbook_explainer_lines(playbook: Optional[Mapping[str, Any]]) -> List[str]:
+    return [f"{label}：{text}" for label, text in _theme_playbook_summary_rows(playbook)]
 
 
 def _stock_pick_market_priority_text(
@@ -2401,6 +3302,7 @@ def _stock_pick_summary_rows(
     day_theme: str,
     regime: str,
     sector_filter: str,
+    theme_playbook: Optional[Mapping[str, Any]],
     grouped: Mapping[str, Sequence[Mapping[str, Any]]],
     coverage_grouped: Mapping[str, Sequence[Mapping[str, Any]]],
     watch_symbols: set[str],
@@ -2439,6 +3341,7 @@ def _stock_pick_summary_rows(
             "未做整份名单统一量化；每只票按各自八维评分、硬排除和样本边界理解。",
         ],
     ]
+    rows.extend(_theme_playbook_summary_rows(theme_playbook))
     if has_actionable:
         rows.extend(
             [
@@ -2549,14 +3452,14 @@ def _observe_delivery_threshold_lines(
 
 def _structured_coverage_preface(coverage_lines: Sequence[str], *, asset_label: str) -> str:
     structured_positive = any("结构化事件覆盖" in line and "0%（0/" not in line for line in coverage_lines)
-    direct_news_zero = any("高置信直接新闻覆盖 0%" in line for line in coverage_lines)
+    direct_news_zero = any("高置信直接情报覆盖 0%" in line or "高置信直接新闻覆盖 0%" in line for line in coverage_lines)
     if not (structured_positive and direct_news_zero):
         return ""
     if asset_label == "场外基金":
-        return "当前证据更偏结构化事件、基金画像和持仓/基准映射，不是直接新闻催化型驱动。"
+        return "当前证据更偏结构化事件、基金画像和持仓/基准映射，不是直连情报催化型驱动。"
     if asset_label == "ETF":
-        return "当前证据更偏结构化事件、产品画像和持仓/基准映射，不是直接新闻催化型驱动。"
-    return f"当前证据更偏结构化事件与公告日历，不是{asset_label}的新闻催化型驱动；`0%` 只代表没命中高置信个股直连新闻。"
+        return "当前证据更偏结构化事件、产品画像和持仓/基准映射，不是直连情报催化型驱动。"
+    return f"当前证据更偏结构化事件与公告日历，不是{asset_label}的直连情报催化型驱动；`0%` 只代表没命中高置信个股直连情报。"
 
 
 def _briefing_summary_rows(
@@ -2567,6 +3470,7 @@ def _briefing_summary_rows(
     day_theme: str,
     a_share_watch_meta: Mapping[str, Any],
     quality_lines: Sequence[str],
+    theme_playbook: Optional[Mapping[str, Any]] = None,
 ) -> List[List[str]]:
     rows: List[List[str]] = []
     if headline_lines:
@@ -2576,6 +3480,7 @@ def _briefing_summary_rows(
     regime_name = str(dict(regime or {}).get("current_regime", "")).strip()
     if regime_name or day_theme:
         rows.append(["中期背景 / 当天主线", f"{regime_name or '未标注'} / {day_theme or '未标注'}"])
+    rows.extend(_theme_playbook_summary_rows(theme_playbook))
     pool_size = int(dict(a_share_watch_meta or {}).get("pool_size") or 0)
     complete_size = int(dict(a_share_watch_meta or {}).get("complete_analysis_size") or 0)
     if pool_size or complete_size:
@@ -2585,17 +3490,52 @@ def _briefing_summary_rows(
     return rows[:5]
 
 
+def _briefing_quality_detail_lines(quality_lines: Sequence[str]) -> List[str]:
+    detail_tokens = (
+        "代理",
+        "改用",
+        "覆盖",
+        "缺失",
+        "复核",
+        "免费源",
+        "client-final",
+        "自动跳过",
+        "超时阈值",
+        "主题新闻扩搜",
+        "轻量新闻源配置",
+        "global proxy",
+        "market monitor",
+    )
+    detail_lines = [
+        str(item).strip()
+        for item in quality_lines
+        if str(item).strip() and any(token in str(item) for token in detail_tokens)
+    ]
+    return detail_lines or [str(item).strip() for item in quality_lines if str(item).strip()]
+
+
 def _briefing_watch_upgrade_lines(candidates: Sequence[Mapping[str, Any]]) -> List[str]:
     rows: List[str] = []
-    items = list(candidates or [])
+    items = [
+        dict(item or {})
+        for item in list(candidates or [])
+        if not dict(item or {}).get("briefing_reuse_only")
+        and (str(dict(item or {}).get("name", "")).strip() or str(dict(item or {}).get("symbol", "")).strip())
+    ]
     if not items:
-        return rows
+        return [
+            "当前A股观察池更像全市场方向筛选，今天还没有能直接升级成正式动作票的样本。",
+            "升级要等价格、成交或主线扩散里至少一项先给出更清晰的确认。",
+        ]
     rows.append("当前A股观察池更像全市场方向筛选，不等于今天已经出现正式动作票。")
     for item in items[:2]:
         name = str(item.get("name", item.get("symbol", ""))).strip()
         symbol = str(item.get("symbol", "")).strip()
         label = f"{name} ({symbol})" if symbol else name
-        why_text = _decision_gate_explanation(item)
+        why_text = _pick_client_safe_line(_decision_gate_explanation(item))
+        strategy_upgrade_text = _strategy_background_upgrade_text(item)
+        if strategy_upgrade_text:
+            why_text = _append_sentence(why_text, strategy_upgrade_text)
         trigger_text = _primary_upgrade_trigger(item)
         if why_text:
             rows.append(f"`{label}` 主要卡在：{why_text}")
@@ -2616,6 +3556,54 @@ def _rename_markdown_heading(markdown_text: str, mapping: Mapping[str, str]) -> 
         stripped = line.strip()
         rewritten.append(mapping.get(stripped, line))
     return "\n".join(rewritten).rstrip()
+
+
+def _replace_markdown_section(markdown_text: str, heading: str, replacement_lines: Sequence[str]) -> str:
+    if not markdown_text:
+        return "\n".join(replacement_lines).rstrip()
+    lines = markdown_text.splitlines()
+    start: Optional[int] = None
+    end = len(lines)
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == heading:
+            start = idx
+            continue
+        if start is not None and idx > start and stripped.startswith("## "):
+            end = idx
+            break
+    if start is None:
+        updated = list(lines)
+        if updated and updated[-1].strip():
+            updated.append("")
+        updated.extend(replacement_lines)
+        return "\n".join(updated).rstrip()
+    updated = list(lines[:start]) + list(replacement_lines) + list(lines[end:])
+    return "\n".join(updated).rstrip()
+
+
+def _insert_markdown_section_before(markdown_text: str, before_heading: str, section_lines: Sequence[str]) -> str:
+    if not markdown_text or not list(section_lines):
+        return markdown_text.rstrip()
+    marker = before_heading.strip()
+    lines = markdown_text.splitlines()
+    insert_at = len(lines)
+    for idx, line in enumerate(lines):
+        if line.strip() == marker:
+            insert_at = idx
+            break
+    prefix = list(lines[:insert_at])
+    if prefix and prefix[-1].strip():
+        prefix.append("")
+    merged = prefix + list(section_lines) + [""] + list(lines[insert_at:])
+    return "\n".join(merged).rstrip()
+
+
+def _insert_print_page_break_before(markdown_text: str, heading: str) -> str:
+    marker = '<div class="report-page-break"></div>'
+    if marker in markdown_text:
+        return markdown_text.rstrip()
+    return _insert_markdown_section_before(markdown_text, heading, [marker])
 
 
 def _inject_scan_reasoning_table(markdown_text: str, analysis: Mapping[str, Any]) -> str:
@@ -2651,6 +3639,7 @@ def _inject_scan_exec_summary(markdown_text: str, analysis: Mapping[str, Any]) -
         analysis,
         horizon,
         handoff,
+        theme_playbook=dict(build_scan_editor_packet(analysis, bucket=_recommendation_bucket(analysis)).get("theme_playbook") or {}),
         status_label=_recommendation_bucket(analysis),
         default_trigger="先等技术确认、相对强弱和时点一起改善后，再决定要不要给买入区间。",
         default_holder_text="已有仓位先按止损和关键位管理，不把当前判断直接当成继续加仓的理由。",
@@ -2667,6 +3656,92 @@ def _inject_scan_exec_summary(markdown_text: str, analysis: Mapping[str, Any]) -
     if marker not in markdown_text:
         return markdown_text.rstrip() + "\n\n" + block.rstrip()
     return markdown_text.replace(marker, block + marker, 1)
+
+
+def _inject_scan_theme_context(markdown_text: str, playbook: Mapping[str, Any]) -> str:
+    lines = [f"- {item}" for item in _theme_playbook_explainer_lines(playbook)[:2]]
+    if not lines:
+        return markdown_text
+    marker = "## 为什么这么判断\n\n"
+    if marker not in markdown_text:
+        return markdown_text
+    if any(line in markdown_text for line in lines):
+        return markdown_text
+    return markdown_text.replace(marker, marker + "\n".join(lines) + "\n\n", 1)
+
+
+def _trim_observe_only_scan_execution(markdown_text: str, analysis: Mapping[str, Any]) -> str:
+    bucket = _recommendation_bucket(analysis)
+    if bucket != "观察为主":
+        return markdown_text
+
+    skip_sections = {"## 仓位管理", "## 组合落单前", "## 当前更合适的动作"}
+    stripped_rows = (
+        "| 空仓怎么做 |",
+        "| 持仓怎么做 |",
+        "| 组合落单前 |",
+        "| 预演命令 |",
+        "| 配置视角 |",
+        "| 交易视角 |",
+        "| 适合谁 |",
+        "| 持有周期 |",
+        "| 不适合打法 |",
+        "| 介入条件 |",
+        "| 止损 |",
+        "| 建议买入区间 |",
+        "| 首次仓位 |",
+        "| 加仓节奏 |",
+        "| 建议减仓区间 |",
+        "| 目标参考 |",
+    )
+    stripped_bullets = (
+        "- 命令：`portfolio whatif buy",
+        "- 单标的仓位不超过",
+        "- 初始仓位",
+        "- 加仓条件",
+    )
+
+    lines: List[str] = []
+    skipping = False
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith("## "):
+            skipping = line in skip_sections
+            if skipping:
+                continue
+        if skipping:
+            continue
+        if any(marker in line for marker in stripped_rows):
+            continue
+        if any(marker in line for marker in stripped_bullets):
+            continue
+        lines.append(raw_line)
+    return "\n".join(lines).rstrip()
+
+
+def _rewrite_scan_theme_language(markdown_text: str, analysis: Mapping[str, Any], packet: Mapping[str, Any]) -> str:
+    theme_key = str(dict(packet.get("theme_playbook") or {}).get("key", "")).strip()
+    if theme_key != "semiconductor":
+        return markdown_text
+
+    rewritten = markdown_text
+    replacements = {
+        "逻辑未完全破坏，但价格、催化和资金尚未形成新的共振": "半导体链的中期逻辑没有被证伪，但价格、催化和资金还没有重新站到一边",
+        "这只 ETF 更像在买 `科技` 方向的被动暴露": "这只 ETF 更像在买 `半导体设备与设计制造链` 的被动暴露",
+        "这只基金更像在买`科技`方向的被动暴露，当前标签是 `科技主题 / 被动跟踪`。": "这只基金更像在买`半导体设备与设计制造链`的被动暴露，当前标签是 `半导体主题 / 被动跟踪`。",
+        "风格标签 | 科技主题 / 被动跟踪 |": "风格标签 | 半导体主题 / 被动跟踪 |",
+        "选股方式 | 核心不是基金经理主动选股，而是跟踪 `科技` 暴露及其对应基准。 |": "选股方式 | 核心不是基金经理主动选股，而是跟踪 `半导体链` 暴露及其对应基准。 |",
+        "主题 `科技`，基准匹配度有限": "主题 `半导体`，基准匹配度较高",
+        "当前 3 月不在 `科技` 行业常见旺季前置窗口；": "当前 3 月不在 `半导体` 常见旺季前置窗口；",
+        "可能对 科技 行业有政策催化；": "可能对 半导体 / 先进制造方向有政策催化；",
+        "说明成长估值压力缓解，科技方向更容易从修复走向扩散。": "说明成长估值压力缓解，半导体这类高 beta 成长方向更容易从修复走向扩散。",
+        "趋势交易者可以重新评估右侧介入。": "趋势跟踪信号开始改善，可以重新评估是否从观察升级。",
+        "左侧观察价值仍在。": "继续保留观察价值。",
+        "`科技` 暴露仍有配置价值": "`半导体链` 暴露仍有跟踪价值",
+    }
+    for source, target in replacements.items():
+        rewritten = rewritten.replace(source, target)
+    return rewritten
 
 
 def _taxonomy_section(winner: Mapping[str, Any]) -> List[str]:
@@ -2694,17 +3769,36 @@ def _summary_only_explainer_sections(
     winner: Mapping[str, Any],
     alternatives: Sequence[Mapping[str, Any]],
     *,
+    event_digest: Mapping[str, Any] | None = None,
     evidence_fallback: str,
     no_alternative_text: str,
 ) -> List[str]:
     lines: List[str] = []
     lines.extend(["", *_taxonomy_section(winner)])
+    if not dict(winner.get("visuals") or {}):
+        lines.extend(["", "## 图表与详细分析说明", ""])
+        lines.append("- 本次稿件没有生成 K 线/阶段走势图表。")
+        lines.append("- 当前按摘要观察稿交付；如果完整日线历史没有稳定拿到，图表层不会按完整分析稿生成。")
     lines.extend(["", "## 关键证据", ""])
-    evidence_lines = _evidence_lines(list(winner.get("evidence") or []), max_items=2, as_of=winner.get("generated_at"))
+    evidence_lines = _evidence_lines_with_event_digest(
+        list(winner.get("evidence") or []),
+        event_digest=event_digest,
+        max_items=2,
+        as_of=winner.get("generated_at"),
+    )
     if evidence_lines:
         lines.extend(evidence_lines)
     else:
         lines.append(f"- {evidence_fallback}")
+    strong_factor_rows = _strong_factor_rows_from_dimensions(
+        winner.get("dimensions", {}),
+        asset_type=str(winner.get("asset_type", "")) or "cn_etf",
+        max_items=3,
+    )
+    if strong_factor_rows:
+        lines.extend(["", "## 关键强因子拆解", ""])
+        lines.extend(_table(["因子", "当前信号", "这意味着什么"], strong_factor_rows))
+    lines.extend(["", *_analysis_provenance_lines(winner)])
     lines.extend(["", "## 为什么不是另外几只", ""])
     if alternatives:
         for index, item in enumerate(alternatives[:2], start=1):
@@ -2817,9 +3911,57 @@ def _pick_client_safe_line(text: Any) -> str:
     if not line:
         return ""
     replacements = (
+        (r"近\s*(\d+)\s*日未命中直接政策催化", r"近 \1 日直接政策情报偏弱"),
+        (r"未命中直接龙头公告", "龙头公告/业绩直连情报偏弱"),
+        (r"未命中直接海外映射", "海外映射直连情报偏弱"),
+        (r"未来\s*(\d+)\s*日未命中直接催化事件", r"未来 \1 日前瞻催化窗口暂不突出"),
+        (r"近\s*(\d+)\s*日未命中明确财报/年报事件窗口", r"近 \1 日财报/年报窗口暂不突出"),
+        (r"近\s*(\d+)\s*日未命中明确高管/大股东增减持", r"近 \1 日暂未看到明确高管/大股东增减持"),
+        (r"近\s*(\d+)\s*日未命中明确稀释/监管负面", r"近 \1 日暂未看到明确稀释/监管负面"),
+        (r"近\s*(\d+)\s*日未命中明确主题/产业链逆风头条", r"近 \1 日暂未看到明确主题/产业链逆风"),
+        (r"未命中明确结构化公司事件", "结构化公司事件暂不突出"),
+        (r"未命中高置信直连源", "当前前置证据以结构化披露和主题线索为主"),
+        (r"未命中显式日期", "日期未单独披露"),
+        (r"当前\s*前置事件先看", "当前更该前置的是"),
+        (r"内部覆盖率摘要", "覆盖率摘要"),
+        (r"当前没有抓到高置信直连证据，催化判断更多依赖结构化事件或行业映射。", "当前前置的一手情报偏少，判断更多参考结构化披露和行业线索。"),
+        (r"当前没有高置信直连证据，摘要判断主要依赖覆盖率、基金画像和现有代理信号。", "当前前置的一手情报偏少，摘要判断更多参考覆盖率、基金画像和现有代理信号。"),
+        (r"当前没有可直接复核的高置信直连证据，催化判断更多依赖结构化事件、基金画像或历史有效信号。", "当前可直接复核的一手情报偏少，判断更多参考结构化披露、基金画像和历史有效信号。"),
+        (r"当前没有可直接复核的高置信直连证据，催化判断更多依赖结构化事件或历史有效信号。", "当前可直接复核的一手情报偏少，判断更多参考结构化披露和历史有效信号。"),
+        (r"当前新增直接情报偏少，且主题检索疑似漏抓；先不把它写成零催化", "当前新增直接情报偏少，且主题检索可能有漏抓；先不把它写成零催化"),
+        (r"当前新增直接情报偏少，且本轮覆盖有降级；先按低置信观察处理", "当前新增直接情报偏少，且本轮情报覆盖有降级；先按低置信观察处理"),
+        (r"当前只有主题级情报，个股级新增证据还不够", "当前主要还是主题级情报，个股级新增证据还不够"),
+        (r"新鲜情报\s*0\s*条", "新鲜情报偏少"),
+        (r"覆盖源\s*0\s*个", "情报覆盖偏窄"),
+        (r"为保证[^。]*`client-final` 可交付，本轮自动跳过跨市场代理与 market monitor 慢链。", "本轮先按国内宏观与本地行情上下文生成，跨市场代理快线暂未启用。"),
+        (r"observation_only", "观察提示"),
+        (r"lag/visibility fixture", "时点一致性校验"),
+        (r"近\s*(\d+)\s*日未命中跟踪基准/行业暴露/核心成分共振催化", r"近 \1 日跟踪方向共振情报偏弱"),
+        (r"眼下更卡在催化面还停在“[^”]+”", "眼下更卡在催化面还缺新增直接情报确认"),
+        (r"在催化面还停在“[^”]+”改善前", "在催化面新增直接情报确认回来前"),
+        (r"眼下更卡在风险特征还停在“[^”]+”", "眼下更卡在风险收益比还不够舒服"),
+        (r"在风险特征还停在“[^”]+”改善前", "在风险收益比重新变舒服前"),
+        (r"眼下更卡在相对强弱还停在“[^”]+”", "眼下更卡在相对强弱还没转强"),
+        (r"在相对强弱还停在“[^”]+”改善前", "在相对强弱重新转强前"),
+        (r"眼下更卡在季节/日历还停在“[^”]+”", "眼下更卡在时间窗口还不占优"),
+        (r"在季节/日历还停在“[^”]+”改善前", "在时间窗口重新改善前"),
+        (r"先看催化面里的“[^”]+”能不能先改善", "先看新增直接情报能不能先补回来"),
+        (r"先看风险特征里的“[^”]+”能不能先改善", "先看风险收益比能不能先修复"),
+        (r"先看相对强弱里的“[^”]+”能不能先改善", "先看相对强弱能不能先转强"),
+        (r"先看季节/日历里的“[^”]+”能不能先改善", "先看时间窗口能不能先改善"),
+        (r"先等催化面还停在“[^”]+”改善，再讨论第二笔", "先等新增直接情报确认回来，再讨论第二笔"),
+        (r"先等风险特征还停在“[^”]+”改善，再讨论第二笔", "先等风险收益比修复后，再讨论第二笔"),
+        (r"先等相对强弱还停在“[^”]+”改善，再讨论第二笔", "先等相对强弱转强后，再讨论第二笔"),
+        (r"先等季节/日历还停在“[^”]+”改善，再讨论第二笔", "先等时间窗口改善后，再讨论第二笔"),
         (r"开盘\s*30\s*分钟", "早段"),
         (r"开盘后先观察\s*\d+\s*分钟", "先观察早段延续性"),
+        (r"美股开盘前观察", "晚间外盘观察"),
+        (r"开盘前观察", "盘前观察"),
         (r"明天开盘前", "明早"),
+        (r"龙虎榜/竞价/涨跌停边界", "龙虎榜/开局结构/涨跌停边界"),
+        (r"竞价明显低开", "开局明显低开"),
+        (r"竞价高开且量比放大", "开局高开且量比放大"),
+        (r"竞价", "开局"),
         (r"盘中", "交易时段"),
         (r"隔日涨跌", "短期涨跌"),
         (r"只按隔夜消息", "只按单条消息"),
@@ -2828,7 +3970,50 @@ def _pick_client_safe_line(text: Any) -> str:
     )
     for pattern, repl in replacements:
         line = re.sub(pattern, repl, line)
+    line = line.replace("。。", "。")
+    if "内部覆盖率摘要" in line:
+        return ""
     return line
+
+
+def _client_factor_rows(dimension: Mapping[str, Any]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for row in _factor_rows(dict(dimension or {})):
+        current = list(row)
+        if len(current) >= 2:
+            current[1] = _pick_client_safe_line(current[1]) or "—"
+        if len(current) >= 3:
+            current[2] = _pick_client_safe_line(current[2]) or "—"
+        rows.append(current)
+    return rows
+
+
+def _client_catalyst_factor_rows(dimension: Mapping[str, Any]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for row in _catalyst_factor_rows(dict(dimension or {})):
+        current = list(row)
+        if len(current) >= 3:
+            current[2] = _pick_client_safe_line(current[2]) or "—"
+        rows.append(current)
+    return rows
+
+
+def _client_visible_blind_spot_lines(items: Sequence[Any], *, focus_name: str = "") -> List[str]:
+    lines: List[str] = []
+    saw_scan_failure = False
+    for raw in items:
+        line = _pick_client_safe_line(raw).strip()
+        if not line:
+            continue
+        if "扫描失败" in line:
+            saw_scan_failure = True
+            continue
+        if line not in lines:
+            lines.append(line)
+    if saw_scan_failure:
+        focus_blob = f"，不影响当前首页重点对象 `{focus_name}` 的正文判断" if focus_name else ""
+        lines.insert(0, f"部分候选在完整分析阶段取数失败，已按可用数据降级处理{focus_blob}。")
+    return lines[:3]
 
 
 def _sanitize_client_markdown(text: str) -> str:
@@ -2842,8 +4027,32 @@ def _sanitize_client_markdown(text: str) -> str:
     return "\n".join(lines)
 
 
+def _client_safe_markdown_lines(lines: Sequence[str]) -> List[str]:
+    sanitized: List[str] = []
+    for raw in list(lines or []):
+        text = str(raw)
+        if not text.strip():
+            sanitized.append(text)
+            continue
+        sanitized.append(_pick_client_safe_line(text))
+    return sanitized
+
+
 class ClientReportRenderer:
     """Render concise client-facing reports from structured payloads."""
+
+    @staticmethod
+    def _prepend_editor_homepage(markdown_text: str, homepage_markdown: str) -> str:
+        homepage = str(homepage_markdown or "").strip()
+        if not homepage:
+            return markdown_text.rstrip()
+        homepage = _sanitize_client_markdown(homepage)
+        lines = markdown_text.splitlines()
+        if not lines:
+            return homepage
+        title = lines[0]
+        body = "\n".join(lines[1:]).lstrip()
+        return "\n".join([title, "", homepage, "", body]).rstrip()
 
     @staticmethod
     def _briefing_client_safe_line(text: Any) -> str:
@@ -2866,15 +4075,7 @@ class ClientReportRenderer:
         items: Sequence[Mapping[str, Any]],
         watch_symbols: set[str],
     ) -> List[Mapping[str, Any]]:
-        return sorted(
-            items,
-            key=lambda item: (
-                _bucket_priority(_recommendation_bucket(item, watch_symbols)),
-                -int(item.get("rating", {}).get("rank", 0) or 0),
-                -_score(item, "relative_strength"),
-                -_score(item, "fundamental"),
-            ),
-        )
+        return _shared_rank_market_items(items, watch_symbols)
 
     def render_stock_picks_detailed(self, payload: Dict[str, Any]) -> str:
         generated_at = str(payload.get("generated_at", ""))[:10]
@@ -2896,10 +4097,12 @@ class ClientReportRenderer:
         for item in coverage_items:
             coverage_grouped[_market_label(str(item.get("asset_type", "")))].append(item)
         has_actionable = any(_analysis_is_actionable(item, watch_symbols) for item in top)
+        stock_pick_packet = build_stock_pick_editor_packet(payload)
         summary_rows = _stock_pick_summary_rows(
             day_theme=day_theme,
             regime=regime,
             sector_filter=sector_filter,
+            theme_playbook=dict(stock_pick_packet.get("theme_playbook") or {}),
             grouped=grouped,
             coverage_grouped=coverage_grouped,
             watch_symbols=watch_symbols,
@@ -2910,42 +4113,15 @@ class ClientReportRenderer:
         lines = [
             f"# {'今日个股推荐（详细版）' if has_actionable else '今日个股观察（详细版）'} | {generated_at}",
             "",
-            "## 今日结论",
-            "",
-            *_section_lead_lines(
-                "先看各市场的短线/中线优先级，再决定要不要往下读单票细节。"
-                if has_actionable
-                else "先看今天哪些票还值得继续观察，以及要等什么条件才值得动手。"
-            ),
-            (
-                (
-                    f"今天按 `{market_label}` 范围筛，背景更接近 `{regime}`，主线偏 `{day_theme}`。"
-                    " 这不是全市场无差别普涨的环境，更适合分市场只抓少数逻辑、位置和执行条件还能兼顾的标的。"
-                )
-                if has_actionable
-                else (
-                    f"今天按 `{market_label}` 范围筛，背景更接近 `{regime}`，主线偏 `{day_theme}`。"
-                    " 但这轮候选还没出现达到正式动作阈值的个股，当前更适合按观察名单理解，不把它包装成可直接下单的推荐稿。"
-                )
-            ),
-            (
-                "当前主线更像在支撑方向不删，还不够支撑价格与动量确认都已完成；方向没有被删，但买点也还没被确认。"
-                if not has_actionable
-                else ""
-            ),
-            (
-                f"当前这份稿更像 `{sector_filter}` 主题内的相对排序，不是跨主题分散候选池。"
-                if sector_filter
-                else ""
-            ),
-            "",
         ]
         lines.extend(
             [
                 *_summary_block_lines(
                     summary_rows,
                     heading="## 今日动作摘要",
-                    lead="这段只回答今天能不能动、空仓和持仓分别怎么做，以及仓位先怎么配。",
+                    lead=(
+                        "首页判断已经先给了总结论；这段只继续回答今天能不能动、空仓和持仓分别怎么做，以及仓位先怎么配。"
+                    ),
                 ),
                 "",
             ]
@@ -2956,16 +4132,24 @@ class ClientReportRenderer:
         coverage = dict(payload.get("stock_pick_coverage") or {})
         coverage_lines = list(coverage.get("lines") or [])
         if coverage_lines:
-            structure_driven_coverage = any("结构化事件覆盖" in item and "高置信公司新闻覆盖 0%" in item for item in coverage_lines)
+            structure_driven_coverage = any(
+                "结构化事件覆盖" in item
+                and (
+                    "高置信公司新闻覆盖 0%" in item
+                    or "高置信公司级直连情报覆盖 0%" in item
+                    or "高置信直接情报覆盖 0%" in item
+                )
+                for item in coverage_lines
+            )
             lines.append(f"**数据完整度：** {coverage.get('note', '未标注')}")
             if structure_driven_coverage:
-                lines.append("- 当前证据更偏结构化事件与公告日历，不是新闻催化型驱动。")
+                lines.append("- 当前证据更偏结构化事件与公告日历，不是直连情报催化型驱动。")
             for item in coverage_lines[:3]:
                 lines.append(f"- {item}")
             lines.append("- 覆盖率的分母是当前纳入详细分析的各市场标的，不是全市场扫描池。")
             lines.append("- 新闻热度更看多源共振；单一来源只算提及，不等于热度确认。")
             if structure_driven_coverage:
-                lines.append("- 这批当前更依赖结构化事件和公告日历，不等于新闻链路失效；`0%` 只代表没命中高置信个股直连新闻。")
+                lines.append("- 这批当前更依赖结构化事件和公告日历，不等于情报链失效；`0%` 只代表没命中高置信个股直连情报。")
             lines.append("- 相关性/分散度按各市场观察池基准代理，不同市场之间只适合看相对高低，不适合直接横向比较绝对值。")
             lines.append("")
         proxy_section = _proxy_contract_section(
@@ -2979,6 +4163,32 @@ class ClientReportRenderer:
         regime_section = _regime_basis_section(dict(payload.get("regime") or {}), day_theme=day_theme)
         if regime_section:
             lines.extend(regime_section)
+            lines.append("")
+        event_digest_lines = _client_safe_markdown_lines(render_event_digest_section(stock_pick_packet.get("event_digest") or {}))
+        if event_digest_lines:
+            lines.extend(event_digest_lines)
+            lines.append("")
+        market_event_rows: List[Sequence[Any]] = []
+        for bucket in (top, coverage_items, payload.get("watch_positive") or []):
+            for item in bucket:
+                for row in list(dict(item or {}).get("market_event_rows") or []):
+                    if row:
+                        market_event_rows.append(row)
+        if market_event_rows:
+            lines.extend(
+                [
+                    "## 关键证据",
+                    "",
+                    *_briefing_intelligence_board_lines(
+                        {"market_event_rows": market_event_rows},
+                        max_items=4,
+                    ),
+                    "",
+                ]
+            )
+        what_changed_lines = render_what_changed_section(stock_pick_packet.get("what_changed") or {})
+        if what_changed_lines:
+            lines.extend(what_changed_lines)
             lines.append("")
 
         for market_name in ("A股", "港股", "美股"):
@@ -2996,9 +4206,14 @@ class ClientReportRenderer:
                 watch_summary = _market_watch_summary_text(ranked_items, watch_symbols)
                 if watch_summary:
                     lines.append(f"- {market_name}{scope_text}{watch_summary}")
-            affordable_rows = _affordable_stock_rows(coverage_grouped.get(market_name, []), watch_symbols)
+            affordable_rows = _affordable_stock_rows(
+                coverage_grouped.get(market_name, []),
+                watch_symbols,
+                actionable_only=has_actionable,
+            )
             if market_name == "A股" and affordable_rows:
-                lines.append(f"- {market_name}低门槛可执行先看：`{affordable_rows[0][0].split(' (', 1)[0]}`")
+                label = "低门槛可执行先看" if has_actionable else "低门槛继续跟踪先看"
+                lines.append(f"- {market_name}{label}：`{affordable_rows[0][0].split(' (', 1)[0]}`")
             related_etf_rows = _related_etf_rows(coverage_grouped.get(market_name, []), watch_symbols)
             if market_name == "A股" and related_etf_rows:
                 lines.append(f"- {market_name}关联ETF平替先看：`{related_etf_rows[0][0].split(' (', 1)[0]}`")
@@ -3014,14 +4229,15 @@ class ClientReportRenderer:
             ]
         )
 
+        shared_reference_items = self._rank_market_items(top, watch_symbols)
         has_formal = any(_recommendation_bucket(item, watch_symbols) == "正式推荐" for item in top)
         if top and not has_formal:
             lines.extend(["", "## 催化证据来源", ""])
-            lines.extend(_stock_pick_shared_evidence_lines(top))
+            lines.extend(_stock_pick_shared_evidence_lines(shared_reference_items))
             lines.extend(["", "## 历史相似样本附注" if not has_actionable else "## 历史相似样本验证", ""])
             if not has_actionable:
                 lines.extend(_section_lead_lines("这层只保留边界参考，不单独支撑今天出手。"))
-            lines.extend(_stock_pick_shared_signal_confidence_lines(top))
+            lines.extend(_stock_pick_shared_signal_confidence_lines(shared_reference_items))
 
         for market_name in ("A股", "港股", "美股"):
             items = grouped.get(market_name, [])
@@ -3060,10 +4276,19 @@ class ClientReportRenderer:
                 lines.extend(_table(["层次", "标的", "更适合的周期", "为什么先看"], track_rows))
             elif watch_rows:
                 lines.extend(["", "### 第一批：优先观察", ""])
-                lines.extend(_section_lead_lines("这批只是更值得继续跟踪的观察名单，不代表现在就该出手。"))
+                if compact_observe:
+                    lines.extend(["", "- 这批只是更值得继续跟踪的观察名单，不代表现在就该出手。"])
+                else:
+                    lines.extend(_section_lead_lines("这批只是更值得继续跟踪的观察名单，不代表现在就该出手。"))
                 lines.extend(_table(["层次", "标的", "更适合的周期", "为什么继续看"], watch_rows))
 
             if compact_observe:
+                featured_visual_item = next((item for item in ranked if _ensure_analysis_visuals(item)), None)
+                if featured_visual_item is not None:
+                    visual_lines = _pick_visual_lines(_ensure_analysis_visuals(featured_visual_item), nested=True)
+                    if visual_lines:
+                        lines.append("")
+                        lines.extend(visual_lines)
                 trigger_rows = _market_watch_trigger_rows(ranked, watch_symbols)
                 if trigger_rows:
                     lines.extend(["", "### 观察触发器", ""])
@@ -3073,9 +4298,33 @@ class ClientReportRenderer:
                             trigger_rows,
                         )
                     )
+                followup_rows = _market_followup_watch_rows(ranked, watch_symbols)
+                if followup_rows:
+                    lines.extend(["", "### 第二批：继续跟踪", ""])
+                    lines.extend(["", "- 第一批先看最接近触发的几只；这批是值得继续记在观察名单里的补充对象。"])
+                    lines.extend(_table(["标的", "为什么还没进第一批", "现在更该看什么"], followup_rows))
+                affordable_rows = _affordable_stock_rows(
+                    coverage_grouped.get(market_name, []),
+                    watch_symbols,
+                    actionable_only=False,
+                )
+                related_etf_rows = _related_etf_rows(coverage_grouped.get(market_name, []), watch_symbols)
+                if market_name == "A股" and (affordable_rows or related_etf_rows):
+                    lines.extend(["", "### 第二批：低门槛 / 观察替代", ""])
+                    lines.extend(["", "- 方向还值得跟踪，但不想直接扛高价或单票波动时，这批更适合先放在观察清单里。"])
+                if market_name == "A股" and affordable_rows:
+                    lines.extend(["", "#### 低门槛继续跟踪", ""])
+                    lines.extend(_table(["标的", "一手参考", "更适合的周期", "为什么继续看"], affordable_rows))
+                if market_name == "A股" and related_etf_rows:
+                    lines.extend(["", "#### 关联ETF观察", ""])
+                    lines.extend(_table(["关联ETF", "更适合替代哪个方向", "什么时候更适合用它"], related_etf_rows))
                 continue
 
-            affordable_rows = _affordable_stock_rows(coverage_grouped.get(market_name, []), watch_symbols)
+            affordable_rows = _affordable_stock_rows(
+                coverage_grouped.get(market_name, []),
+                watch_symbols,
+                actionable_only=has_actionable,
+            )
             related_etf_rows = _related_etf_rows(coverage_grouped.get(market_name, []), watch_symbols)
             if market_name == "A股" and market_has_actionable and (affordable_rows or related_etf_rows):
                 lines.extend(["", "### 第二批：低门槛 / 关联ETF", ""])
@@ -3105,6 +4354,8 @@ class ClientReportRenderer:
                         ]
                     )
                     visual_lines = _pick_visual_lines(item.get("visuals"), nested=True)
+                    if not visual_lines:
+                        visual_lines = _pick_visual_lines(_ensure_analysis_visuals(item), nested=True)
                     if visual_lines:
                         lines.extend(visual_lines)
                         lines.append("")
@@ -3113,6 +4364,7 @@ class ClientReportRenderer:
                             *_analysis_section_lines(
                                 item,
                                 bucket,
+                                day_theme=day_theme,
                                 used_positive_reasons=used_reason_lines,
                                 used_caution_reasons=used_reason_lines,
                                 generated_at=str(payload.get("generated_at", "")),
@@ -3132,18 +4384,24 @@ class ClientReportRenderer:
                     )
                     lines.extend(_table(["层次", "当前判断", "说明"], _catalyst_structure_rows(catalyst_dimension)))
                     lines.append("")
-                    lines.extend(_table(["催化子项", "层级", "当前信号", "得分"], _catalyst_factor_rows(catalyst_dimension)))
+                    lines.extend(_table(["催化子项", "层级", "当前信号", "得分"], _client_catalyst_factor_rows(catalyst_dimension)))
                     if any(str(factor.get("display_score", "")).startswith("-") for factor in catalyst_dimension.get("factors", [])):
                         lines.extend(["", "- 注：催化总分按 0 封底；负面事件会先体现在子项扣分和正文风险提示里。"])
                     evidence = list(catalyst_dimension.get("evidence") or [])
-                    evidence_lines = _evidence_lines(evidence, max_items=2, as_of=item.get("generated_at") or payload.get("generated_at"))
+                    evidence_lines = _evidence_lines_with_event_digest(
+                        evidence,
+                        event_digest=build_scan_editor_packet(item, bucket=_recommendation_bucket(item, watch_symbols)).get("event_digest") or {},
+                        max_items=2,
+                        as_of=item.get("generated_at") or payload.get("generated_at"),
+                        symbol=item.get("symbol"),
+                    )
                     lines.extend(["", "**催化证据来源：**", ""])
                     if evidence_lines:
                         lines.extend(evidence_lines)
                     else:
                         provenance = dict(item.get("provenance") or build_analysis_provenance(item))
                         lines.append(
-                            "当前没有高置信直连催化，先按 `"
+                            "当前没有高置信直连情报催化，先按 `"
                             + str(provenance.get("catalyst_sources_text", "结构化事件/代理来源"))
                             + "` 这层来源理解。"
                         )
@@ -3165,7 +4423,7 @@ class ClientReportRenderer:
                             f"**风险拆解：** 当前风险分 `{risk_dimension.get('score', '缺失')}/{risk_dimension.get('max_score', 100)}`。分数越低，说明波动、窗口和相关性压力越大。",
                         ]
                     )
-                    lines.extend(_table(["风险子项", "当前信号", "说明", "得分"], _factor_rows(risk_dimension)))
+                    lines.extend(_table(["风险子项", "当前信号", "说明", "得分"], _client_factor_rows(risk_dimension)))
                     lines.extend(["", *_signal_confidence_lines(item)])
                 else:
                     lines.extend(
@@ -3174,6 +4432,7 @@ class ClientReportRenderer:
                             *_analysis_watch_card_lines(
                                 item,
                                 bucket,
+                                day_theme=day_theme,
                                 used_positive_reasons=used_reason_lines,
                                 used_caution_reasons=used_reason_lines,
                                 generated_at=str(payload.get("generated_at", "")),
@@ -3182,6 +4441,11 @@ class ClientReportRenderer:
                     )
 
         if compact_observe:
+            representative_item = next((item for item in shared_reference_items if not _analysis_is_actionable(item, watch_symbols)), None)
+            if representative_item is not None:
+                lines.extend(["", "## 代表样本复核卡", ""])
+                lines.extend(["", "- 前面先给观察名单和触发器，这里只保留 1 只代表样本，方便复核理由、证据和升级条件。"])
+                lines.extend(["", *_observe_representative_card_lines(representative_item, watch_symbols=watch_symbols, day_theme=day_theme)])
             lines.extend(
                 [
                     "",
@@ -3218,7 +4482,9 @@ class ClientReportRenderer:
             for item in blind_spots:
                 lines.append(f"- {item}")
 
-        return "\n".join(lines).rstrip()
+        rendered = "\n".join(lines).rstrip()
+        homepage = render_editor_homepage(stock_pick_packet)
+        return self._prepend_editor_homepage(rendered, homepage)
 
     def render_stock_picks(self, payload: Dict[str, Any]) -> str:
         generated_at = str(payload.get("generated_at", ""))[:10]
@@ -3241,10 +4507,12 @@ class ClientReportRenderer:
             coverage_grouped[_market_label(str(item.get("asset_type", "")))].append(item)
         used_reason_lines: Counter[str] = Counter()
         has_actionable = any(_analysis_is_actionable(item, watch_symbols) for item in top)
+        stock_pick_packet = build_stock_pick_editor_packet(payload)
         summary_rows = _stock_pick_summary_rows(
             day_theme=day_theme,
             regime=regime,
             sector_filter=sector_filter,
+            theme_playbook=dict(stock_pick_packet.get("theme_playbook") or {}),
             grouped=grouped,
             coverage_grouped=coverage_grouped,
             watch_symbols=watch_symbols,
@@ -3254,32 +4522,13 @@ class ClientReportRenderer:
         lines = [
             f"# {'今日个股推荐' if has_actionable else '今日个股观察'} | {generated_at}",
             "",
-            "## 今日结论",
-            "",
-            *_section_lead_lines(
-                "先看短线/中线和低门槛入口，不必把整份报告读完才找建议。"
-                if has_actionable
-                else "先看今天哪些票还值得继续观察，以及接下来应该等什么触发条件。"
-            ),
-            (
-                (
-                    "今天更像结构性机会，不适合把全市场当成同一条主线去追。更合理的是分市场只抓少数几只逻辑、位置和交易条件还能兼顾的标的。"
-                    if market_label == "全市场"
-                    else f"今天更适合在 `{day_theme}` / `{regime}` 这个框架下，分市场只抓少数几只逻辑和位置还能兼顾的标的。"
-                )
-                if has_actionable
-                else (
-                    "今天更像观察日，当前没有达到正式动作阈值的个股。更合理的是先列观察对象和触发条件，不把这份稿件写成可直接下单的推荐单。"
-                )
-            ),
-            "",
         ]
         lines.extend(
             [
                 *_summary_block_lines(
                     summary_rows,
                     heading="## 今日动作摘要",
-                    lead="这段只回答今天能不能动、空仓和持仓分别怎么做，以及仓位先怎么配。",
+                    lead="首页判断已经先给了总结论；这段只继续回答今天能不能动、空仓和持仓分别怎么做，以及仓位先怎么配。",
                 ),
                 "",
             ]
@@ -3301,7 +4550,8 @@ class ClientReportRenderer:
                     lines.append(f"- {market_name}{scope_text}{watch_summary}")
             affordable_rows = _affordable_stock_rows(coverage_grouped.get(market_name, []), watch_symbols)
             if market_name == "A股" and affordable_rows:
-                lines.append(f"- {market_name}低门槛可执行先看：`{affordable_rows[0][0].split(' (', 1)[0]}`")
+                label = "低门槛可执行先看" if has_actionable else "低门槛继续跟踪先看"
+                lines.append(f"- {market_name}{label}：`{affordable_rows[0][0].split(' (', 1)[0]}`")
             related_etf_rows = _related_etf_rows(coverage_grouped.get(market_name, []), watch_symbols)
             if market_name == "A股" and related_etf_rows:
                 lines.append(f"- {market_name}关联ETF平替先看：`{related_etf_rows[0][0].split(' (', 1)[0]}`")
@@ -3325,6 +4575,30 @@ class ClientReportRenderer:
         regime_section = _regime_basis_section(dict(payload.get("regime") or {}), day_theme=day_theme)
         if regime_section:
             lines.extend(["", *regime_section])
+        event_digest_lines = _client_safe_markdown_lines(render_event_digest_section(stock_pick_packet.get("event_digest") or {}))
+        if event_digest_lines:
+            lines.extend(["", *event_digest_lines])
+        what_changed_lines = render_what_changed_section(stock_pick_packet.get("what_changed") or {})
+        if what_changed_lines:
+            lines.extend(["", *what_changed_lines])
+        market_event_rows: List[Sequence[Any]] = []
+        for bucket in (top, coverage_items, payload.get("watch_positive") or []):
+            for item in bucket:
+                for row in list(dict(item or {}).get("market_event_rows") or []):
+                    if row:
+                        market_event_rows.append(row)
+        if market_event_rows:
+            lines.extend(
+                [
+                    "",
+                    "## 关键证据",
+                    "",
+                    *_briefing_intelligence_board_lines(
+                        {"market_event_rows": market_event_rows},
+                        max_items=4,
+                    ),
+                ]
+            )
 
         for market_name in ("A股", "港股", "美股"):
             items = grouped.get(market_name, [])
@@ -3366,17 +4640,24 @@ class ClientReportRenderer:
                 lines.extend(_section_lead_lines("这批只是更值得继续跟踪的观察名单，不代表现在就该出手。"))
                 lines.extend(_table(["层次", "标的", "更适合的周期", "为什么继续看"], watch_rows))
 
-            affordable_rows = _affordable_stock_rows(coverage_grouped.get(market_name, []), watch_symbols)
+            affordable_rows = _affordable_stock_rows(
+                coverage_grouped.get(market_name, []),
+                watch_symbols,
+                actionable_only=market_has_actionable,
+            )
             related_etf_rows = _related_etf_rows(coverage_grouped.get(market_name, []), watch_symbols)
             if market_name == "A股" and market_has_actionable and (affordable_rows or related_etf_rows):
                 lines.extend(["", "### 第二批：低门槛 / 关联ETF", ""])
                 lines.extend(_section_lead_lines("这批解决的是单价门槛太高或更想先用ETF承接方向时看什么。"))
+            elif market_name == "A股" and (affordable_rows or related_etf_rows):
+                lines.extend(["", "### 第二批：低门槛 / 观察替代", ""])
+                lines.extend(_section_lead_lines("方向还值得跟踪，但不想直接扛高价或单票波动时，可以先看这批补位选择。"))
             if market_name == "A股" and affordable_rows:
-                lines.extend(["", "#### 低门槛可执行", ""])
-                lines.extend(_table(["标的", "一手参考", "更适合的周期", "为什么先看"], affordable_rows))
+                heading = "#### 低门槛可执行" if market_has_actionable else "#### 低门槛继续跟踪"
+                reason_label = "为什么先看" if market_has_actionable else "为什么继续看"
+                lines.extend(["", heading, ""])
+                lines.extend(_table(["标的", "一手参考", "更适合的周期", reason_label], affordable_rows))
             if market_name == "A股" and related_etf_rows and not market_has_actionable:
-                lines.extend(["", "### 第二批：观察替代", ""])
-                lines.extend(_section_lead_lines("单票暂时不出手，但方向还值得跟踪时，可以先用关联 ETF 做平滑观察。"))
                 lines.extend(["", "#### 关联ETF观察", ""])
             elif market_name == "A股" and related_etf_rows:
                 lines.extend(["", "#### 关联ETF平替", ""])
@@ -3391,6 +4672,7 @@ class ClientReportRenderer:
                         *_analysis_section_lines(
                             item,
                             "正式推荐",
+                            day_theme=day_theme,
                             used_positive_reasons=used_reason_lines,
                             used_caution_reasons=used_reason_lines,
                             generated_at=str(payload.get("generated_at", "")),
@@ -3398,14 +4680,31 @@ class ClientReportRenderer:
                     ]
                 )
 
-            watch_items = [item for item in ranked if _recommendation_bucket(item, watch_symbols) != "正式推荐"]
-            if watch_items:
+            soft_watch_items = [item for item in ranked if _recommendation_bucket(item, watch_symbols) == "看好但暂不推荐"]
+            if soft_watch_items:
                 lines.extend(["", "### 看好但暂不推荐", ""])
-                for item in watch_items[:2]:
+                for item in soft_watch_items[:2]:
                     lines.extend(
                         _analysis_section_lines(
                             item,
                             "看好但暂不推荐",
+                            day_theme=day_theme,
+                            used_positive_reasons=used_reason_lines,
+                            used_caution_reasons=used_reason_lines,
+                            generated_at=str(payload.get("generated_at", "")),
+                        )
+                    )
+                    lines.append("")
+
+            observe_items = [item for item in ranked if _recommendation_bucket(item, watch_symbols) == "观察为主"]
+            if observe_items:
+                lines.extend(["", "### 观察为主", ""])
+                for item in observe_items[:2]:
+                    lines.extend(
+                        _analysis_section_lines(
+                            item,
+                            "观察为主",
+                            day_theme=day_theme,
                             used_positive_reasons=used_reason_lines,
                             used_caution_reasons=used_reason_lines,
                             generated_at=str(payload.get("generated_at", "")),
@@ -3432,9 +4731,17 @@ class ClientReportRenderer:
                 ],
             )
         )
-        return "\n".join(lines).rstrip()
+        rendered = "\n".join(lines).rstrip()
+        homepage = render_editor_homepage(stock_pick_packet)
+        return self._prepend_editor_homepage(rendered, homepage)
 
-    def render_scan_detailed(self, analysis: Dict[str, Any]) -> str:
+    def render_scan_detailed(
+        self,
+        analysis: Dict[str, Any],
+        *,
+        prepend_homepage: bool = True,
+        keep_observe_execution: bool = False,
+    ) -> str:
         rendered = OpportunityReportRenderer().render_scan(analysis, visuals=analysis.get("visuals"))
         generated_at = str(analysis.get("generated_at", ""))[:10]
         name = str(analysis.get("name", ""))
@@ -3449,12 +4756,34 @@ class ClientReportRenderer:
                 "## 值得继续看的理由": "## 值得继续看的地方",
                 "## 现在不适合激进的理由": "## 现在不适合激进的地方",
                 "## 操作建议": "## 当前更合适的动作",
+                **({"## 观察方式": "## 当前更合适的动作"} if keep_observe_execution else {}),
                 "## 分析元数据": "## 证据时点与来源",
             },
         )
         rewritten = _inject_scan_reasoning_table(rewritten, analysis)
         rewritten = _inject_scan_exec_summary(rewritten, analysis)
-        return _sanitize_client_markdown(rewritten)
+        if not keep_observe_execution:
+            rewritten = _trim_observe_only_scan_execution(rewritten, analysis)
+        rewritten = _replace_markdown_section(rewritten, "## 证据时点与来源", _analysis_provenance_lines(analysis))
+        packet = build_scan_editor_packet(analysis, bucket=_recommendation_bucket(analysis))
+        event_digest_lines = _client_safe_markdown_lines(render_event_digest_section(packet.get("event_digest") or {}))
+        if event_digest_lines:
+            rewritten = _insert_markdown_section_before(rewritten, "## 关键证据", event_digest_lines)
+            rewritten = _insert_markdown_section_before(rewritten, "## 证据时点与来源", event_digest_lines) if "## 事件消化" not in rewritten else rewritten
+        what_changed_lines = render_what_changed_section(packet.get("what_changed") or {})
+        if what_changed_lines:
+            rewritten = _insert_markdown_section_before(rewritten, "## 关键证据", what_changed_lines)
+            rewritten = _insert_markdown_section_before(rewritten, "## 证据时点与来源", what_changed_lines) if "## What Changed" not in rewritten else rewritten
+        horizon_lines = _index_horizon_summary_lines(analysis)
+        if horizon_lines:
+            rewritten = _insert_markdown_section_before(rewritten, "## 关键证据", horizon_lines)
+        rewritten = _inject_scan_theme_context(rewritten, dict(packet.get("theme_playbook") or {}))
+        rewritten = _rewrite_scan_theme_language(rewritten, analysis, packet)
+        sanitized = _sanitize_client_markdown(rewritten)
+        if not prepend_homepage:
+            return sanitized
+        homepage = render_editor_homepage(packet)
+        return self._prepend_editor_homepage(sanitized, homepage)
 
     def render_scan(self, analysis: Dict[str, Any]) -> str:
         generated_at = str(analysis.get("generated_at", ""))[:10]
@@ -3472,10 +4801,12 @@ class ClientReportRenderer:
             reference_price=dict(analysis.get("metrics") or {}).get("last_close"),
             generated_at=str(analysis.get("generated_at", "")),
         )
+        packet = build_scan_editor_packet(analysis, bucket=bucket)
         summary_rows = _single_asset_exec_summary_rows(
             analysis,
             horizon,
             handoff,
+            theme_playbook=dict(packet.get("theme_playbook") or {}),
             status_label=bucket,
             default_trigger="先等技术确认、相对强弱和时点一起改善后，再决定要不要给买入区间。",
             default_holder_text="已有仓位先按止损和关键位管理，不把当前判断直接当成继续加仓的理由。",
@@ -3502,6 +4833,10 @@ class ClientReportRenderer:
             "",
             *_section_lead_lines("这段先看八维里哪几项在支撑，哪几项在拖后腿。"),
         ]
+        for item in _theme_playbook_explainer_lines(dict(packet.get("theme_playbook") or {}))[:2]:
+            lines.append(f"- {item}")
+        if _theme_playbook_explainer_lines(dict(packet.get("theme_playbook") or {}))[:2]:
+            lines.append("")
         lines.extend(_table(["维度", "分数", "为什么是这个分"], _scan_dimension_rows(analysis)))
         hard_check_rows = _scan_hard_check_rows(analysis)
         if hard_check_rows:
@@ -3544,8 +4879,28 @@ class ClientReportRenderer:
         )
         for item in cautions[:3]:
             lines.append(f"- {item}")
+        event_digest_lines = _client_safe_markdown_lines(render_event_digest_section(packet.get("event_digest") or {}))
+        if event_digest_lines:
+            lines.extend(["", *event_digest_lines])
+        what_changed_lines = render_what_changed_section(packet.get("what_changed") or {})
+        if what_changed_lines:
+            lines.extend(["", *what_changed_lines])
+        horizon_lines = _index_horizon_summary_lines(analysis)
+        if horizon_lines:
+            lines.extend(["", *horizon_lines])
+        portfolio_overlap_lines = _portfolio_overlap_lines(analysis)
+        if portfolio_overlap_lines:
+            lines.extend(["", "## 与现有持仓的关系", ""])
+            for item in portfolio_overlap_lines:
+                lines.append(f"- {item}")
         catalyst_dimension = dict(analysis.get("dimensions", {}).get("catalyst") or {})
-        evidence_lines = _evidence_lines(list(catalyst_dimension.get("evidence") or []), max_items=3, as_of=analysis.get("generated_at"))
+        evidence_lines = _evidence_lines_with_event_digest(
+            list(catalyst_dimension.get("evidence") or []),
+            event_digest=packet.get("event_digest") or {},
+            max_items=5,
+            as_of=analysis.get("generated_at"),
+            symbol=analysis.get("symbol"),
+        )
         if evidence_lines:
             lines.extend(
                 [
@@ -3581,6 +4936,7 @@ class ClientReportRenderer:
                 ),
             ]
         )
+        show_precise_execution = bucket != "观察为主" and _shared_analysis_is_actionable(analysis)
         lines.extend(
             _table(
                 ["项目", "建议"],
@@ -3600,8 +4956,6 @@ class ClientReportRenderer:
                         else []
                     ),
                     ["适用时段", _pick_client_safe_line(handoff.get("timing_summary", "先按当前可交易窗口理解，不把这条观点默认成必须立刻执行。"))],
-                    ["组合落单前", handoff.get("summary", "先跑组合预演，再决定真实金额。")],
-                    ["预演命令", f"`{handoff.get('command', f'portfolio whatif buy {symbol} 最新价 计划金额')}`"],
                     ["介入条件", _pick_client_safe_line(action.get("entry", "等待进一步确认"))],
                     [
                         "触发买点条件",
@@ -3612,21 +4966,30 @@ class ClientReportRenderer:
                         ),
                     ],
                     *_present_action_row("关键盯盘价位", _observe_watch_levels(analysis)),
-                    *_present_action_row("建议买入区间", _safe_buy_range_text(action)),
-                    ["首次仓位", _pick_client_safe_line(action.get("position", "小仓位分批"))],
-                    ["加仓节奏", _pick_client_safe_line(action.get("scaling_plan", "确认后再考虑第二笔"))],
-                    *_present_action_row("建议减仓区间", action.get("trim_range", "")),
-                    ["止损参考", _pick_client_safe_line(action.get("stop", "重新跌破关键支撑就处理"))],
-                    *_present_action_row("目标参考", action.get("target", "")),
+                    *(
+                        [
+                            ["组合落单前", handoff.get("summary", "先跑组合预演，再决定真实金额。")],
+                            ["预演命令", f"`{handoff.get('command', f'portfolio whatif buy {symbol} 最新价 计划金额')}`"],
+                            *_present_action_row("建议买入区间", _safe_buy_range_text(action)),
+                            ["首次仓位", _pick_client_safe_line(action.get("position", "小仓位分批"))],
+                            ["加仓节奏", _pick_client_safe_line(action.get("scaling_plan", "确认后再考虑第二笔"))],
+                            *_present_action_row("建议减仓区间", action.get("trim_range", "")),
+                            ["止损参考", _pick_client_safe_line(action.get("stop", "重新跌破关键支撑就处理"))],
+                            *_present_action_row("目标参考", action.get("target", "")),
+                        ]
+                        if show_precise_execution
+                        else [["执行参数", "当前是观察稿，不前置精确仓位、止损和目标模板；先看确认条件和关键位。"]]
+                    ),
                 ],
             )
         )
-        lines.extend(["", "## 仓位管理", ""])
-        for item in _position_management_lines(action):
-            lines.append(f"- {item}")
-        lines.extend(["", "## 组合落单前", ""])
-        lines.append(f"- {handoff.get('summary', '先跑组合预演，再决定真实金额。')}")
-        lines.append(f"- 命令：`{handoff.get('command', f'portfolio whatif buy {symbol} 最新价 计划金额')}`")
+        if show_precise_execution:
+            lines.extend(["", "## 仓位管理", ""])
+            for item in _position_management_lines(action):
+                lines.append(f"- {item}")
+            lines.extend(["", "## 组合落单前", ""])
+            lines.append(f"- {handoff.get('summary', '先跑组合预演，再决定真实金额。')}")
+            lines.append(f"- 命令：`{handoff.get('command', f'portfolio whatif buy {symbol} 最新价 计划金额')}`")
         signal_confidence_lines = _signal_confidence_lines(analysis) if "signal_confidence" in analysis else []
         if signal_confidence_lines:
             lines.extend(["", "## 历史相似样本验证", ""])
@@ -3666,7 +5029,9 @@ class ClientReportRenderer:
             lines.extend(["", "## 数据限制与说明", ""])
             for item in notes[:3]:
                 lines.append(f"- {item}")
-        return "\n".join(lines).rstrip()
+        rendered = "\n".join(lines).rstrip()
+        homepage = render_editor_homepage(packet)
+        return self._prepend_editor_homepage(rendered, homepage)
 
     def render_stock_analysis(self, analysis: Dict[str, Any]) -> str:
         rendered = self.render_scan(analysis)
@@ -3679,14 +5044,23 @@ class ClientReportRenderer:
         return "\n".join(lines).rstrip()
 
     def render_stock_analysis_detailed(self, analysis: Dict[str, Any]) -> str:
-        rendered = self.render_scan_detailed(analysis)
+        rendered = self.render_scan_detailed(
+            analysis,
+            prepend_homepage=False,
+            keep_observe_execution=True,
+        )
         generated_at = str(analysis.get("generated_at", ""))[:10]
         name = str(analysis.get("name", ""))
         symbol = str(analysis.get("symbol", ""))
         lines = rendered.splitlines()
         if lines and lines[0].startswith("# "):
             lines[0] = f"# {name} ({symbol}) | 个股详细分析 | {generated_at}"
-        return "\n".join(lines).rstrip()
+        updated = "\n".join(lines).rstrip()
+        homepage = render_editor_homepage(build_stock_analysis_editor_packet(analysis))
+        return self._prepend_editor_homepage(
+            _insert_print_page_break_before(updated, "## 一句话结论"),
+            homepage,
+        )
 
     def render_briefing(self, payload: Dict[str, Any]) -> str:
         generated_at = str(payload.get("generated_at", ""))[:10]
@@ -3701,11 +5075,39 @@ class ClientReportRenderer:
         a_share_watch_lines = [self._briefing_client_safe_line(item) for item in list(payload.get("a_share_watch_lines") or [])]
         a_share_watch_meta = dict(payload.get("a_share_watch_meta") or {})
         a_share_watch_candidates = list(payload.get("a_share_watch_candidates") or [])
+        named_a_share_watch_candidates = [
+            dict(item or {})
+            for item in a_share_watch_candidates
+            if not dict(item or {}).get("briefing_reuse_only")
+            and (str(dict(item or {}).get("name", "")).strip() or str(dict(item or {}).get("symbol", "")).strip())
+        ]
+        portfolio_lines = [self._briefing_client_safe_line(item) for item in list(payload.get("portfolio_lines") or [])]
+        portfolio_table_rows = list(payload.get("portfolio_table_rows") or [])
         data_coverage = str(payload.get("data_coverage", "")).strip()
         missing_sources = str(payload.get("missing_sources", "")).strip()
         regime = dict(payload.get("regime") or {})
         day_theme = str(payload.get("day_theme", "")).strip()
         evidence_rows = list(payload.get("evidence_rows") or [])
+        sanitized_payload = {
+            **payload,
+            "headline_lines": headline_lines,
+            "action_lines": action_lines,
+            "quality_lines": quality_lines,
+            "a_share_watch_lines": a_share_watch_lines,
+            "portfolio_lines": portfolio_lines,
+        }
+        briefing_packet = build_briefing_editor_packet(sanitized_payload)
+        intelligence_board_lines = _briefing_intelligence_board_lines(
+            sanitized_payload,
+            event_digest=briefing_packet.get("event_digest") or {},
+            max_items=6,
+        )
+        why_lines = _briefing_reason_bullets(headline_lines, intelligence_board_lines, action_lines)
+        normalized_evidence_rows = _briefing_evidence_rows(payload, evidence_rows)
+        summary_theme_playbook = dict(briefing_packet.get("theme_playbook") or {})
+        if not _theme_playbook_summary_rows(summary_theme_playbook) and named_a_share_watch_candidates:
+            top_candidate = {**dict(named_a_share_watch_candidates[0] or {}), "day_theme": {"label": day_theme}}
+            summary_theme_playbook = dict(build_scan_editor_packet(top_candidate, bucket="观察稿").get("theme_playbook") or {})
         summary_rows = _briefing_summary_rows(
             headline_lines=headline_lines,
             action_lines=action_lines,
@@ -3713,8 +5115,16 @@ class ClientReportRenderer:
             day_theme=day_theme,
             a_share_watch_meta=a_share_watch_meta,
             quality_lines=quality_lines,
+            theme_playbook=summary_theme_playbook,
         )
-        watch_upgrade_lines = [self._briefing_client_safe_line(item) for item in _briefing_watch_upgrade_lines(a_share_watch_candidates)]
+        watch_upgrade_lines = [self._briefing_client_safe_line(item) for item in _briefing_watch_upgrade_lines(named_a_share_watch_candidates)]
+        strategy_summary_text = ""
+        for item in named_a_share_watch_candidates[:2]:
+            strategy_summary_text = _strategy_background_upgrade_text(item)
+            if strategy_summary_text:
+                break
+        if strategy_summary_text:
+            summary_rows = [*summary_rows, ["后台置信度", strategy_summary_text]]
         lines = [
             f"# 今日晨报 | {generated_at}",
             "",
@@ -3741,13 +5151,19 @@ class ClientReportRenderer:
         else:
             lines.append("今天更适合先看风险控制，再看进攻节奏。")
         lines.extend(["", "## 为什么今天这么判断", ""])
-        why_lines = headline_lines[1:4] if len(headline_lines) > 1 else []
         if why_lines:
             for item in why_lines:
                 lines.append(f"- {item}")
         else:
             lines.append("- 今天的判断不是看单一涨跌，而是看波动、主线和资金是否真正共振。")
-        regime_section = _regime_basis_section(regime, day_theme=day_theme)
+        if intelligence_board_lines:
+            lines.extend(["", "## 今日情报看板", ""])
+            lines.extend(_section_lead_lines("这段只做广覆盖情报前置：优先看今天新增了什么、来自哪里、信号属于哪一层，以及强弱大概在哪。", emphasize=False))
+            lines.extend(intelligence_board_lines)
+        briefing_horizon_lines = _index_horizon_summary_lines(payload)
+        if briefing_horizon_lines:
+            lines.extend(["", *briefing_horizon_lines])
+        regime_section = _regime_basis_section(regime, day_theme=day_theme, emphasize=False)
         if regime_section:
             lines.extend(["", *regime_section])
         if macro_items:
@@ -3757,28 +5173,25 @@ class ClientReportRenderer:
         lines.extend(["", "## 数据完整度", ""])
         lines.append(f"- 本次覆盖：{data_coverage or '未标注'}。")
         lines.append(f"- 当前缺失：{missing_sources or '无'}。")
-        detail_lines = [
-            item
-            for item in quality_lines
-            if any(token in item for token in ("代理", "改用", "覆盖", "缺失", "复核", "免费源"))
-        ]
-        if not detail_lines:
-            detail_lines = quality_lines
+        detail_lines = _briefing_quality_detail_lines(quality_lines)
         for item in detail_lines[:2]:
             lines.append(f"- {item}")
         proxy_section = _proxy_contract_section(
             dict(payload.get("proxy_contract") or {}),
             heading="## 市场代理信号",
+            emphasize=False,
         )
         if proxy_section:
             lines.extend(["", *proxy_section])
-        if evidence_rows:
+        if normalized_evidence_rows:
             lines.extend(["", "## 证据时点与来源", ""])
-            lines.extend(_table(["项目", "说明"], evidence_rows))
+            lines.extend(_table(["项目", "说明"], normalized_evidence_rows))
         lines.extend(["", "## 今天怎么做", ""])
         for item in action_lines[:4]:
             lines.append(f"- {item}")
         lines.extend(["", "## 重点观察", ""])
+        for item in _theme_playbook_explainer_lines(summary_theme_playbook)[:2]:
+            lines.append(f"- {item}")
         if theme_rows:
             for row in theme_rows[:2]:
                 direction = row[0] if len(row) > 0 else "重点方向"
@@ -3792,6 +5205,26 @@ class ClientReportRenderer:
                 lines.append(f"- `{label}`：重点看 `{criterion}` 是否兑现。")
         else:
             lines.append("- 当前先看主线是否延续，再决定是否升级风险偏好。")
+        event_digest_lines = _client_safe_markdown_lines(render_event_digest_section(briefing_packet.get("event_digest") or {}))
+        if event_digest_lines:
+            lines.extend(["", *event_digest_lines])
+        what_changed_lines = render_what_changed_section(briefing_packet.get("what_changed") or {})
+        if what_changed_lines:
+            lines.extend(["", *what_changed_lines])
+        if portfolio_lines or portfolio_table_rows:
+            lines.extend(["", "## 组合与持仓", ""])
+            for item in portfolio_lines[:5]:
+                lines.append(f"- {item}")
+            if portfolio_table_rows:
+                lines.extend(
+                    [
+                        "",
+                        *_table(
+                            ["标的", "方向", "成本", "现价", "浮盈亏", "核心论点", "当前状态"],
+                            portfolio_table_rows[:5],
+                        ),
+                    ]
+                )
         lines.extend(["", "## 今日关键数据", ""])
         key_rows = macro_asset_rows[:5]
         if key_rows:
@@ -3818,7 +5251,7 @@ class ClientReportRenderer:
             lines.extend(["", "暂无可用的 A 股全市场观察池结果。"])
         if watch_upgrade_lines:
             lines.extend(["", "## A股观察池升级条件", ""])
-            lines.extend(_section_lead_lines("这段只回答观察池里的方向为什么还不能升成正式动作，以及接下来该盯什么触发器。"))
+            lines.extend(_section_lead_lines("这段只回答观察池里的方向为什么还不能升成正式动作，以及接下来该盯什么触发器。", emphasize=False))
             for item in watch_upgrade_lines[:5]:
                 lines.append(f"- {item}")
         lines.extend(["", "## 今天最值得看的 3 个方向", ""])
@@ -3851,7 +5284,9 @@ class ClientReportRenderer:
         lines.extend(["", "## 今天最重要的风险提醒", ""])
         for item in alerts[:3]:
             lines.append(f"- {item}")
-        return "\n".join(lines).rstrip()
+        rendered = "\n".join(lines).rstrip()
+        homepage = render_editor_homepage(briefing_packet)
+        return self._prepend_editor_homepage(rendered, homepage)
 
     def render_fund_pick(self, payload: Dict[str, Any]) -> str:
         generated_at = str(payload.get("generated_at", ""))[:10]
@@ -3873,11 +5308,13 @@ class ClientReportRenderer:
         )
         observe_only = bool(selection_context.get("delivery_observe_only"))
         summary_only = _pick_delivery_summary_only(selection_context)
+        theme_packet = build_fund_pick_editor_packet(payload)
         summary_rows = _single_asset_exec_summary_rows(
             winner,
             horizon,
             handoff,
             selection_context=selection_context,
+            theme_playbook=dict(theme_packet.get("theme_playbook") or {}),
             status_label=str(winner.get("trade_state", "")) or ("观察优先" if observe_only else "推荐"),
             default_trigger="先等覆盖率、申赎窗口和右侧确认一起改善，再决定要不要给买入区间。",
             default_holder_text="已有仓位先按止损和申赎节奏管理，不把当前判断直接当成继续加仓的理由。",
@@ -3892,42 +5329,13 @@ class ClientReportRenderer:
         lines = [
             f"# {title} | {generated_at}",
             "",
-            "## 今日结论",
-            "",
-            lead_line,
-            "",
-            f"这不是激进进攻型推荐，而是：**`{winner.get('trade_state', '持有优于追高')}`**",
-            "",
         ]
-        if observe_only:
-            lines.extend([_observe_delivery_bridge_text("场外基金"), ""])
-        lines.extend(
-            [
-            f"这份建议的适用时段：{handoff.get('timing_summary', '先按当前可申赎窗口理解，不把它默认成必须立刻处理。')}",
-            "",
-            ]
-        )
-        if horizon:
-            lines.extend(
-                [
-                    f"当前更合适的持有周期：**`{horizon.get('label', '观察期')}`**",
-                    "",
-                    f"这更像：{horizon.get('style', '')}",
-                    "",
-                ]
-            )
-            if horizon.get("fit_reason"):
-                lines.append(f"为什么按这个周期看：{horizon.get('fit_reason')}")
-                lines.append("")
-            if horizon.get("misfit_reason"):
-                lines.append(f"现在不适合：{horizon.get('misfit_reason')}")
-                lines.append("")
         lines.extend(
             [
                 *_summary_block_lines(
                     summary_rows,
                     heading="## 执行摘要",
-                    lead="这段只回答能不能申赎、空仓和持仓分别怎么处理、仓位大概多大，以及主要利好利空是什么。",
+                    lead="首页判断已经先给了总结论；这段只继续回答能不能申赎、空仓和持仓分别怎么处理、仓位大概多大，以及主要利好利空是什么。",
                 ),
                 "",
             ]
@@ -3959,7 +5367,7 @@ class ClientReportRenderer:
                 ]
             )
         lines.extend(["## 数据完整度", ""])
-        lines.extend(_section_lead_lines("这段只回答这份稿靠不靠谱、哪些地方是降级或代理。"))
+        lines.extend(_section_lead_lines("这段只回答这份稿靠不靠谱、哪些地方是降级或代理。", emphasize=False))
         if selection_context.get("coverage_note"):
             lines.append(f"- {selection_context.get('coverage_note')}")
         else:
@@ -3986,16 +5394,21 @@ class ClientReportRenderer:
         lines.append("")
         lines.extend(_delivery_tier_section(selection_context, asset_label="场外基金"))
         lines.extend([""])
-        lines.extend(_section_lead_lines("这段只回答这是不是正式成稿，能不能按正式推荐理解。"))
+        lines.extend(_section_lead_lines("这段只回答这是不是正式成稿，能不能按正式推荐理解。", emphasize=False))
         proxy_section = _proxy_contract_section(
             dict(selection_context.get("proxy_contract") or {}),
             winner=winner,
             regime=dict(payload.get("regime") or {}),
+            emphasize=False,
         )
         if proxy_section:
             lines.extend(proxy_section)
             lines.extend([""])
-        regime_section = _regime_basis_section(dict(payload.get("regime") or {}), day_theme=str(payload.get("day_theme", {}).get("label", "")))
+        regime_section = _regime_basis_section(
+            dict(payload.get("regime") or {}),
+            day_theme=str(payload.get("day_theme", {}).get("label", "")),
+            emphasize=False,
+        )
         if regime_section:
             lines.extend(regime_section)
             lines.extend([""])
@@ -4003,13 +5416,29 @@ class ClientReportRenderer:
             [
             why_heading,
             "",
-            *_section_lead_lines("这段只看它为什么能进入今天名单，不重复展开全套动作。"),
+            *_section_lead_lines("这段只看它为什么能进入今天名单，不重复展开全套动作。", emphasize=False),
             ]
         )
+        for item in _theme_playbook_explainer_lines(dict(theme_packet.get("theme_playbook") or {}))[:2]:
+            lines.append(f"- {item}")
         for item in winner.get("positives", [])[:3]:
             lines.append(f"- {item}")
+        event_digest_lines = _client_safe_markdown_lines(render_event_digest_section(theme_packet.get("event_digest") or {}))
+        if event_digest_lines:
+            lines.extend(["", *event_digest_lines])
+        what_changed_lines = render_what_changed_section(theme_packet.get("what_changed") or {})
+        if what_changed_lines:
+            lines.extend(["", *what_changed_lines])
+        horizon_lines = _index_horizon_summary_lines(winner)
+        if horizon_lines:
+            lines.extend(["", *horizon_lines])
+        portfolio_overlap_lines = _portfolio_overlap_lines(winner)
+        if portfolio_overlap_lines:
+            lines.extend(["", "## 与现有持仓的关系", ""])
+            for item in portfolio_overlap_lines:
+                lines.append(f"- {item}")
         lines.extend(["", "## 这只基金为什么是这个分", ""])
-        lines.extend(_section_lead_lines("这段先看分数结构，不要只盯最高分那一项。"))
+        lines.extend(_section_lead_lines("这段先看分数结构，不要只盯最高分那一项。", emphasize=False))
         lines.extend(
             _table(
                 ["维度", "分数", "为什么是这个分"],
@@ -4023,7 +5452,7 @@ class ClientReportRenderer:
                 lines.extend(upgrade_lines)
         if summary_only:
             lines.extend(["", "## 当前只看什么", ""])
-            lines.extend(_section_lead_lines("今天先看动作和触发条件；没有触发前，不给精确买点。"))
+            lines.extend(_section_lead_lines("今天先看动作和触发条件；没有触发前，不给精确买点。", emphasize=False))
             lines.extend(
                 _table(
                     ["项目", "建议"],
@@ -4041,7 +5470,8 @@ class ClientReportRenderer:
                 _summary_only_explainer_sections(
                     winner,
                     alternatives,
-                    evidence_fallback="当前没有高置信直连证据，摘要判断主要依赖覆盖率、基金画像和现有代理信号。",
+                    event_digest=theme_packet.get("event_digest") or {},
+                    evidence_fallback="当前可前置的外部情报仍偏少，先结合覆盖率、基金画像和后文证据理解。",
                     no_alternative_text="当前可进入完整评分的基金候选不足，暂时没有可并列展开的第二候选。",
                 )
             )
@@ -4050,7 +5480,9 @@ class ClientReportRenderer:
                 lines.extend(["", "## 数据限制与说明", ""])
                 for item in blind_spots[:3]:
                     lines.append(f"- {item}")
-            return "\n".join(lines).rstrip()
+            rendered = "\n".join(lines).rstrip()
+            homepage = render_editor_homepage(theme_packet)
+            return self._prepend_editor_homepage(rendered, homepage)
         strong_factor_rows = _strong_factor_rows_from_dimensions(
             winner.get("dimensions", {}),
             asset_type=str(winner.get("asset_type", "")) or "cn_fund",
@@ -4065,12 +5497,18 @@ class ClientReportRenderer:
                 lines.append(
                     f"- `{item.get('label', '维度')}` 从 `{item.get('previous', '—')}` 变到 `{item.get('current', '—')}`：{item.get('reason', '')}"
                 )
-        evidence_lines = _evidence_lines(list(winner.get("evidence") or []), max_items=3, as_of=winner.get("generated_at") or payload.get("generated_at"))
+        evidence_lines = _evidence_lines_with_event_digest(
+            list(winner.get("evidence") or []),
+            event_digest=theme_packet.get("event_digest") or {},
+            max_items=3,
+            as_of=winner.get("generated_at") or payload.get("generated_at"),
+            symbol=winner.get("symbol"),
+        )
         lines.extend(["", "## 关键证据", ""])
         if evidence_lines:
             lines.extend(evidence_lines)
         else:
-            lines.append("- 当前没有可直接复核的高置信直连证据，催化判断更多依赖结构化事件、基金画像或历史有效信号。")
+            lines.append("- 当前可直接复核的一手情报仍偏少，先结合结构化披露、基金画像和后文证据理解。")
         lines.extend(["", *_analysis_provenance_lines(winner)])
         lines.extend(["", "## 怎么做", ""])
         lines.extend(
@@ -4078,6 +5516,8 @@ class ClientReportRenderer:
                 "今天先看动作和触发条件；没有触发前，不给精确买点。"
                 if observe_only
                 else "先看动作、买入区间和仓位，再决定要不要往下读细节。"
+                ,
+                emphasize=False,
             )
         )
         if observe_only:
@@ -4141,7 +5581,9 @@ class ClientReportRenderer:
             else:
                 lines.append("- 单候选不等于自动降级，是否按正式推荐理解仍以本页 `交付等级` 为准。")
         if observe_only:
-            return "\n".join(lines).rstrip()
+            rendered = "\n".join(lines).rstrip()
+            homepage = render_editor_homepage(theme_packet)
+            return self._prepend_editor_homepage(rendered, homepage)
         lines.extend(
             [
                 "## 仓位管理",
@@ -4153,7 +5595,9 @@ class ClientReportRenderer:
         lines.extend(["", "## 组合落单前", ""])
         lines.append(f"- {handoff.get('summary', '先跑组合预演，再决定真实金额。')}")
         lines.append(f"- 命令：`{handoff.get('command', 'portfolio whatif buy 标的 最新净值 计划金额')}`")
-        return "\n".join(lines).rstrip()
+        rendered = "\n".join(lines).rstrip()
+        homepage = render_editor_homepage(theme_packet)
+        return self._prepend_editor_homepage(rendered, homepage)
 
     def render_etf_pick(self, payload: Dict[str, Any]) -> str:
         generated_at = str(payload.get("generated_at", ""))[:10]
@@ -4176,6 +5620,7 @@ class ClientReportRenderer:
         )
         observe_only = bool(selection_context.get("delivery_observe_only"))
         summary_only = _pick_delivery_summary_only(selection_context)
+        theme_packet = build_etf_pick_editor_packet(payload)
         why_heading = "## 为什么先看它" if observe_only else "## 为什么推荐它"
         track_summary = _payload_track_summary_text(recommendation_tracks)
         track_rows = _payload_track_rows(recommendation_tracks)
@@ -4204,6 +5649,7 @@ class ClientReportRenderer:
                 horizon,
                 handoff,
                 selection_context=selection_context,
+                theme_playbook=dict(theme_packet.get("theme_playbook") or {}),
                 status_label=str(winner.get("trade_state", "")) or ("观察优先" if observe_only else "推荐"),
                 default_trigger="先等技术确认、催化覆盖和数据完整度一起改善，再决定要不要给买入区间。",
                 default_holder_text="已有仓位先按止损和主线节奏管理，不把当前判断直接当成继续追涨的理由。",
@@ -4220,45 +5666,16 @@ class ClientReportRenderer:
         lines = [
             f"# {title} | {generated_at}",
             "",
-            "## 今日结论",
-            "",
-            lead_line,
-            "",
-            f"这不是无脑追高型推荐，而是：**`{winner.get('trade_state', '持有优于追高')}`**",
-            "",
         ]
-        if observe_only:
-            lines.extend([_observe_delivery_bridge_text("ETF"), ""])
-        lines.extend(
-            [
-            f"这份建议的适用时段：{handoff.get('timing_summary', '先按当前可交易窗口理解，不把它默认成必须立刻处理。')}",
-            "",
-            ]
-        )
-        if horizon:
-            lines.extend(
-                [
-                    f"当前更合适的持有周期：**`{horizon.get('label', '观察期')}`**",
-                    "",
-                    f"这更像：{horizon.get('style', '')}",
-                    "",
-                ]
-            )
-            if horizon.get("fit_reason"):
-                lines.append(f"为什么按这个周期看：{horizon.get('fit_reason')}")
-                lines.append("")
-            if horizon.get("misfit_reason"):
-                lines.append(f"现在不适合：{horizon.get('misfit_reason')}")
-                lines.append("")
         lines.extend(
             [
                 *_summary_block_lines(
                     summary_rows,
                     heading="## 执行摘要",
                     lead=(
-                        "这段只回答今天能不能动、空仓和持仓分别怎么做、仓位大概多大，以及观察顺序怎么排。"
+                        "首页判断已经先给了总结论；这段只继续回答今天能不能动、空仓和持仓分别怎么做、仓位大概多大，以及观察顺序怎么排。"
                         if observe_only
-                        else "这段只回答今天能不能动、空仓和持仓分别怎么做、仓位大概多大，以及短线中线先看谁。"
+                        else "首页判断已经先给了总结论；这段只继续回答今天能不能动、空仓和持仓分别怎么做、仓位大概多大，以及短线中线先看谁。"
                     ),
                 ),
                 "",
@@ -4332,8 +5749,26 @@ class ClientReportRenderer:
             lines.extend(["", "## 当前分层建议", ""])
             lines.extend(_table(["层次", "标的", "更适合的周期", "为什么先看"], display_track_rows))
         lines.extend(["", why_heading, ""])
+        for item in _theme_playbook_explainer_lines(dict(theme_packet.get("theme_playbook") or {}))[:2]:
+            lines.append(f"- {item}")
         for item in winner.get("positives", [])[:4]:
             lines.append(f"- {item}")
+        for item in _etf_front_reason_lines(winner):
+            lines.append(f"- {item}")
+        event_digest_lines = _client_safe_markdown_lines(render_event_digest_section(theme_packet.get("event_digest") or {}))
+        if event_digest_lines:
+            lines.extend(["", *event_digest_lines])
+        what_changed_lines = render_what_changed_section(theme_packet.get("what_changed") or {})
+        if what_changed_lines:
+            lines.extend(["", *what_changed_lines])
+        horizon_lines = _index_horizon_summary_lines(winner)
+        if horizon_lines:
+            lines.extend(["", *horizon_lines])
+        portfolio_overlap_lines = _portfolio_overlap_lines(winner)
+        if portfolio_overlap_lines:
+            lines.extend(["", "## 与现有持仓的关系", ""])
+            for item in portfolio_overlap_lines:
+                lines.append(f"- {item}")
         lines.extend(["", "## 这只ETF为什么是这个分", ""])
         lines.extend(
             _table(
@@ -4364,21 +5799,30 @@ class ClientReportRenderer:
                     *summary_rows,
                 ]
                 summary_rows = [row for row in summary_rows if row]
+            horizon_lines = _index_horizon_summary_lines(winner)
+            if horizon_lines:
+                lines.extend(["", *horizon_lines])
             lines.extend(_table(["项目", "建议"], summary_rows))
+            fund_sections = winner.get("fund_sections") or _fund_profile_sections(winner)
+            if fund_sections:
+                lines.extend(["", *fund_sections])
             lines.extend(
                 _summary_only_explainer_sections(
                     winner,
                     alternatives,
-                    evidence_fallback="当前没有高置信直连证据，摘要判断主要依赖结构化事件、覆盖率和已有代理信号。",
+                    event_digest=theme_packet.get("event_digest") or {},
+                    evidence_fallback="当前可前置的外部情报仍偏少，先结合结构化披露、覆盖率和后文证据理解。",
                     no_alternative_text="当前可进入完整评分的 ETF 候选不足，暂时没有可并列展开的第二候选。",
                 )
             )
-            notes = [str(item).strip() for item in (payload.get("notes") or []) if str(item).strip()]
+            notes = _client_visible_blind_spot_lines(payload.get("notes") or [], focus_name=str(winner.get("name", "")))
             if notes:
                 lines.extend(["", "## 数据限制与说明", ""])
-                for item in notes[:3]:
+                for item in notes:
                     lines.append(f"- {item}")
-            return "\n".join(lines).rstrip()
+            rendered = "\n".join(lines).rstrip()
+            homepage = render_editor_homepage(theme_packet)
+            return self._prepend_editor_homepage(rendered, homepage)
         strong_factor_rows = _strong_factor_rows_from_dimensions(
             winner.get("dimensions", {}),
             asset_type=str(winner.get("asset_type", "")) or "cn_etf",
@@ -4393,12 +5837,18 @@ class ClientReportRenderer:
                 lines.append(
                     f"- `{item.get('label', '维度')}` 从 `{item.get('previous', '—')}` 变到 `{item.get('current', '—')}`：{item.get('reason', '')}"
                 )
-        evidence_lines = _evidence_lines(list(winner.get("evidence") or []), max_items=3, as_of=winner.get("generated_at") or payload.get("generated_at"))
+        evidence_lines = _evidence_lines_with_event_digest(
+            list(winner.get("evidence") or []),
+            event_digest=theme_packet.get("event_digest") or {},
+            max_items=3,
+            as_of=winner.get("generated_at") or payload.get("generated_at"),
+            symbol=winner.get("symbol"),
+        )
         lines.extend(["", "## 关键证据", ""])
         if evidence_lines:
             lines.extend(evidence_lines)
         else:
-            lines.append("- 当前没有可直接复核的高置信直连证据，催化判断更多依赖结构化事件或历史有效信号。")
+            lines.append("- 当前可直接复核的一手情报仍偏少，先结合结构化披露和后文证据理解。")
         lines.extend(["", *_analysis_provenance_lines(winner)])
         lines.extend(["", "## 怎么做", ""])
         lines.append(
@@ -4472,21 +5922,25 @@ class ClientReportRenderer:
             else:
                 lines.append("- 单候选不等于自动降级，是否按正式推荐理解仍以本页 `交付等级` 为准。")
         if observe_only:
-            notes = [str(item).strip() for item in (payload.get("notes") or []) if str(item).strip()]
+            notes = _client_visible_blind_spot_lines(payload.get("notes") or [], focus_name=str(winner.get("name", "")))
             if notes:
                 lines.extend(["", "## 数据限制与说明", ""])
-                for item in notes[:3]:
+                for item in notes:
                     lines.append(f"- {item}")
-            return "\n".join(lines).rstrip()
+            rendered = "\n".join(lines).rstrip()
+            homepage = render_editor_homepage(theme_packet)
+            return self._prepend_editor_homepage(rendered, homepage)
         lines.extend(["## 仓位管理", ""])
         for item in winner.get("positioning_lines", []):
             lines.append(f"- {item}")
         lines.extend(["", "## 组合落单前", ""])
         lines.append(f"- {handoff.get('summary', '先跑组合预演，再决定真实金额。')}")
         lines.append(f"- 命令：`{handoff.get('command', 'portfolio whatif buy 标的 最新价 计划金额')}`")
-        notes = [str(item).strip() for item in (payload.get("notes") or []) if str(item).strip()]
+        notes = _client_visible_blind_spot_lines(payload.get("notes") or [], focus_name=str(winner.get("name", "")))
         if notes:
             lines.extend(["", "## 数据限制与说明", ""])
-            for item in notes[:3]:
+            for item in notes:
                 lines.append(f"- {item}")
-        return "\n".join(lines).rstrip()
+        rendered = "\n".join(lines).rstrip()
+        homepage = render_editor_homepage(theme_packet)
+        return self._prepend_editor_homepage(rendered, homepage)

@@ -143,7 +143,7 @@ class BriefingRenderer:
 
         _append_block(lines, "1. 主线判断与行动")
         _append_subsection(lines, "1.1 今日主线", payload.get("headline_lines", []))
-        _append_subsection(lines, "1.2 今天怎么做", payload.get("action_lines", []))
+        _append_subsection(lines, str(payload.get("action_section_title", "1.2 今天怎么做")), payload.get("action_lines", []))
         if payload.get("regime_reasoning_lines"):
             _append_subsection(lines, "1.3 宏观判断依据", payload.get("regime_reasoning_lines", []))
 

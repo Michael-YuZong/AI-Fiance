@@ -148,8 +148,28 @@ def test_opportunity_renderer_scan_sections():
     assert "行情 as_of" in rendered
     assert "行情来源" in rendered
     assert "AKShare 日线回退" in rendered
+    assert "Yahoo" not in rendered
     assert "催化证据 as_of" in rendered
     assert "时点边界" in rendered
+    assert "当前图形标签：" in rendered
+    assert "技术上先看" in rendered
+    assert "未命中显式日期" not in rendered
+    assert "日期未单独披露" in rendered
+
+
+def test_opportunity_renderer_scan_surfaces_strategy_background_confidence_in_followup_section() -> None:
+    analysis = _sample_analysis("561380", "电网ETF")
+    analysis["strategy_background_confidence"] = {
+        "status": "stable",
+        "label": "稳定",
+        "reason": "最近验证仍稳定，先作辅助加分。",
+    }
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+
+    assert "## 后续观察重点" in rendered
+    assert "- 后台置信度：稳定：" in rendered
+    assert "只作辅助加分，不单独替代当前事实层" in rendered
 
 
 def test_opportunity_renderer_scan_hides_missing_perf_values_and_maps_check_status():
@@ -219,6 +239,42 @@ def test_opportunity_renderer_scan_rewrites_watch_headline_and_splits_catalyst_l
     assert "当前样本偏薄，只作辅助参考，不作为主结论依据。" in rendered
 
 
+def test_opportunity_renderer_scan_observe_only_hides_execution_template() -> None:
+    analysis = _sample_analysis("563360", "A500ETF华泰柏瑞")
+    analysis["delivery_observe_only"] = True
+    analysis["action"]["direction"] = "回避"
+    analysis["narrative"]["judgment"]["state"] = "观察为主"
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+
+    assert "# A500ETF华泰柏瑞 (563360) 观察型详细分析 | 2026-03-09" in rendered
+    assert "这份稿当前按观察型详细分析理解，先不展开正式仓位、止损和目标模板。" in rendered
+    assert "## 观察方式" in rendered
+    assert "- 观察重点：" in rendered
+    assert "| 仓位 |" not in rendered
+    assert "| 止损 |" not in rendered
+    assert "| 目标 |" not in rendered
+    assert "| 适合谁 |" not in rendered
+    assert "## 操作建议" not in rendered
+
+
+def test_opportunity_renderer_scan_auto_observe_only_from_action_state() -> None:
+    analysis = _sample_analysis("512480", "半导体ETF")
+    analysis.pop("delivery_observe_only", None)
+    analysis["action"]["direction"] = "回避"
+    analysis["action"]["position"] = "暂不出手"
+    analysis["narrative"]["judgment"]["state"] = "观察为主"
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+
+    assert "# 半导体ETF (512480) 观察型详细分析 | 2026-03-09" in rendered
+    assert "## 观察方式" in rendered
+    assert "## 操作建议" not in rendered
+    assert "这份稿当前按观察型详细分析理解，先不展开正式仓位、止损和目标模板。" in rendered
+    assert "| 仓位 |" not in rendered
+    assert "| 止损 |" not in rendered
+
+
 def test_opportunity_renderer_backfills_cautions_when_narrative_is_too_short():
     analysis = _sample_analysis("520840", "港股通恒生科技ETF")
     analysis["narrative"]["cautions"] = ["短线动能还需要确认。"]
@@ -258,6 +314,19 @@ def test_opportunity_renderer_scan_visual_section_skips_snapshot_fallback():
     assert "### 降级快照卡" not in rendered
     assert "### 阶段走势" not in rendered
     assert "### 技术指标总览" not in rendered
+
+
+def test_opportunity_renderer_scan_estimated_notes_strip_trailing_punctuation() -> None:
+    analysis = _sample_analysis("561380", "电网ETF")
+    analysis["notes"] = [
+        "全球代理数据已按运行配置关闭，本次先按国内宏观与本地行情上下文生成。",
+        "为保证单标的扫描稿 `client-final` 可交付，本轮自动跳过跨市场代理与 market monitor 慢链。",
+    ]
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+
+    assert "。；" not in rendered
+    assert "全球代理数据已按运行配置关闭，本次先按国内宏观与本地行情上下文生成；为保证单标的扫描稿 `client-final` 可交付，本轮自动跳过跨市场代理与 market monitor 慢链" in rendered
 
 
 def test_opportunity_renderer_scan_uses_dimension_display_names() -> None:
@@ -446,6 +515,42 @@ def test_opportunity_renderer_stock_picks_keeps_degraded_history_contract_rows()
     assert "样本质量" in rendered
 
 
+def test_opportunity_renderer_stock_picks_downgrades_observe_only_packaging() -> None:
+    analysis = _sample_analysis("300308", "中际旭创")
+    analysis["asset_type"] = "cn_stock"
+    analysis["rating"]["rank"] = 1
+    analysis["rating"]["label"] = "无信号"
+    analysis["rating"]["stars"] = "—"
+    analysis["action"].update(
+        {
+            "direction": "观察为主",
+            "position": "暂不出手",
+            "entry": "等量价重新确认后再看",
+            "stop": "跌破关键支撑重评",
+            "target": "先看前高",
+        }
+    )
+    payload = {
+        "generated_at": "2026-03-10 08:00:00",
+        "scan_pool": 12,
+        "passed_pool": 2,
+        "market_label": "A股",
+        "regime": {"current_regime": "stagflation"},
+        "day_theme": {"label": "AI算力"},
+        "top": [analysis],
+        "watch_positive": [analysis],
+    }
+
+    rendered = OpportunityReportRenderer().render_stock_picks(payload)
+
+    assert "# 个股观察池 TOP 1 | 2026-03-10" in rendered
+    assert "**观察重点：**" in rendered
+    assert "- 当前是观察稿，先不前置精确仓位、止损和目标模板。" in rendered
+    assert "## 继续观察名单" in rendered
+    assert "- 建议止损：" not in rendered
+    assert "- 目标参考：" not in rendered
+
+
 def test_opportunity_renderer_compare_uses_total_score_when_rank_ties():
     analysis_a = _sample_analysis("561380", "电网ETF")
     analysis_b = _sample_analysis("512400", "有色ETF")
@@ -480,6 +585,98 @@ def test_opportunity_renderer_compare_supports_multiple_analyses():
     assert "| 维度 | 561380 | 512400 | QQQM | 优势方 |" in compare
     assert "纳指ETF (QQQM)" in compare
     assert "如果你想优先押催化弹性" in compare
+
+
+def test_opportunity_renderer_compare_includes_etf_product_layer_table():
+    analysis_a = _sample_analysis("563360", "A500ETF华泰柏瑞")
+    analysis_b = _sample_analysis("512400", "有色ETF")
+    analysis_a["fund_profile"] = {
+        "overview": {"ETF基准指数中文全称": "中证A500指数"},
+        "etf_snapshot": {
+            "share_change_text": "净创设 +2.58亿份 (+0.84%)，较 2026-04-01",
+            "share_as_of": "2026-04-02",
+            "total_share": 3_087_198.74,
+        },
+        "fund_factor_snapshot": {
+            "trend_label": "趋势偏强",
+            "momentum_label": "动能改善",
+            "latest_date": "2026-04-02",
+        },
+    }
+    analysis_a["news_report"] = {
+        "items": [{"title": "A500权重调整后资金回流", "source": "财联社", "link": "https://example.com/a500"}]
+    }
+    analysis_b["fund_profile"] = {
+        "overview": {"ETF基准指数中文全称": "中证申万有色金属指数"},
+        "etf_snapshot": {
+            "share_as_of": "2026-04-02",
+            "total_share": 1_200_000.00,
+        },
+        "fund_factor_snapshot": {
+            "trend_label": "震荡",
+            "momentum_label": "动能偏弱",
+            "latest_date": "2026-04-02",
+        },
+    }
+    analysis_b["dimensions"]["catalyst"]["coverage"] = {"degraded": True}
+
+    compare = OpportunityReportRenderer().render_compare(
+        {
+            "generated_at": "2026-04-02 08:00:00",
+            "analyses": [analysis_a, analysis_b],
+            "best_symbol": "563360",
+        }
+    )
+
+    assert "## ETF产品层对比" in compare
+    assert "| 标的 | 跟踪指数 | 最近份额变化 | 场内基金技术状态 | 外部情报 |" in compare
+    assert "中证A500指数" in compare
+    assert "已接上 1 条可点击外部情报" in compare
+    assert "截至 2026-04-02 仅有单日快照" in compare
+    assert "当前外部情报仍偏薄" in compare
+
+
+def test_opportunity_renderer_compare_surfaces_strategy_confidence_and_linkage_summary():
+    analysis_a = _sample_analysis("561380", "电网ETF")
+    analysis_b = _sample_analysis("159611", "电力ETF")
+    analysis_a["strategy_background_confidence"] = {
+        "status": "stable",
+        "label": "稳定",
+        "reason": "最近验证仍稳定，先作辅助加分。",
+    }
+    analysis_b["strategy_background_confidence"] = {
+        "status": "watch",
+        "label": "观察",
+        "reason": "最近样本偏少，只能作辅助说明。",
+    }
+    compare = OpportunityReportRenderer().render_compare(
+        {
+            "generated_at": "2026-03-09 08:00:00",
+            "analyses": [analysis_a, analysis_b],
+            "best_symbol": "561380",
+            "compare_linkage_summary": {
+                "overlap_label": "同一行业主线对比",
+                "summary_line": "这组候选本质上都在比较 `电网` 这条线里的内部优先级。",
+                "region_line": "地区上都在 `CN`，地域分散度有限。",
+                "style_summary_line": "风格上都偏 `进攻`，更适合比较执行节奏。",
+                "style_priority_hint": "如果只选一个，优先看谁的确认条件更完整。",
+                "detail_lines": [
+                    "主线分布: `561380` 电网 / `159611` 电网",
+                    "地区分布: `561380` CN / `159611` CN",
+                    "风格分布: `561380` 进攻 / `159611` 进攻",
+                ],
+            },
+        }
+    )
+
+    assert "## 后台置信度" in compare
+    assert "| 标的 | 状态 | 说明 |" in compare
+    assert "稳定" in compare
+    assert "观察" in compare
+    assert "## 主线与风格联动" in compare
+    assert "重复度: `同一行业主线对比`" in compare
+    assert "- 如果只选一个，优先看谁的确认条件更完整。" in compare
+    assert "主线分布:" in compare
 
 
 def test_opportunity_renderer_includes_fund_profile_sections():
@@ -526,6 +723,36 @@ def test_opportunity_renderer_includes_fund_profile_sections():
     assert "### 前十大持仓" in rendered
 
 
+def test_opportunity_renderer_scan_surfaces_weekly_and_monthly_horizon_lines():
+    analysis = _sample_analysis("510300", "华泰柏瑞沪深300ETF")
+    analysis["index_topic_bundle"] = {
+        "index_snapshot": {"index_name": "沪深300"},
+        "history_snapshots": {
+            "weekly": {
+                "status": "matched",
+                "summary": "近 154周 +7.70%，最近一周 -1.37%，修复中，动能承压",
+                "trend_label": "修复中",
+                "momentum_label": "动能承压",
+                "latest_date": "2026-04-03",
+            },
+            "monthly": {
+                "status": "matched",
+                "summary": "近 96月 +18.45%，最近一月 -5.53%，修复中，动能偏弱",
+                "trend_label": "修复中",
+                "momentum_label": "动能偏弱",
+                "latest_date": "2026-04-03",
+            },
+        },
+    }
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+
+    assert "## 周月节奏" in rendered
+    assert "周线：沪深300" in rendered
+    assert "月线：沪深300" in rendered
+    assert "周月节奏同向偏强" in rendered
+
+
 def test_opportunity_renderer_includes_etf_profile_and_intraday_sections():
     analysis = _sample_analysis("159819", "人工智能ETF易方达")
     analysis["fund_profile"] = {
@@ -536,6 +763,13 @@ def test_opportunity_renderer_includes_etf_profile_and_intraday_sections():
             "净资产规模": "217.96亿元（截止至：2025年12月31日）",
             "成立日期/规模": "2020年07月27日 / 61.552亿份",
             "业绩比较基准": "中证人工智能主题指数收益率",
+            "ETF类型": "境内",
+            "交易所": "SZ",
+            "ETF基准指数中文全称": "中证人工智能主题指数",
+            "ETF基准指数代码": "930713.CSI",
+            "ETF总份额": "615520.00万份",
+            "ETF总规模": "2179600.00万元",
+            "ETF份额规模日期": "2026-03-31",
         },
         "asset_allocation": [{"资产类型": "股票", "仓位占比": 99.83}, {"资产类型": "现金", "仓位占比": 0.40}],
         "top_holdings": [{"股票代码": "300308", "股票名称": "中际旭创", "占净值比例": 10.57, "持仓市值": 230284.94, "季度": "2025年4季度股票投资明细"}],
@@ -544,6 +778,11 @@ def test_opportunity_renderer_includes_etf_profile_and_intraday_sections():
         "company": {"short_name": "易方达", "province": "广东", "city": "广州", "general_manager": "刘某", "website": "https://example.com"},
         "dividends": {"rows": [{"ann_date": "2025-10-18", "ex_date": "2025-10-22", "pay_date": "2025-10-24", "div_cash": 0.05, "progress": "实施"}]},
         "rating": {},
+        "fund_factor_snapshot": {
+            "trend_label": "趋势偏强",
+            "momentum_label": "动能改善",
+            "latest_date": "2026-04-01",
+        },
         "style": {
             "tags": ["科技主题", "被动跟踪"],
             "summary": "这只 ETF 更像在买人工智能方向的被动暴露。",
@@ -572,8 +811,36 @@ def test_opportunity_renderer_includes_etf_profile_and_intraday_sections():
     assert "## 今日盘中视角" in rendered
     assert "盘中价格弱于 VWAP" in rendered
     assert "## 基金画像" in rendered
+    assert "### ETF专用信息" in rendered
+    assert "930713.CSI" in rendered
+    assert "趋势偏强 / 动能改善（2026-04-01）" in rendered
     assert "### 经理任职补充" not in rendered
     assert "张湛 · 从业 2160 天 · 在管规模 1313.31 亿 · 最佳回报 57.16% · 任职起点 2020-07-27 · 硕士 / 中国" in rendered
     assert "### 基金公司补充" in rendered
     assert "### 分红记录" in rendered
     assert "中证人工智能主题指数收益率" in rendered
+
+
+def test_opportunity_renderer_labels_single_day_share_snapshot_as_observation_not_flow():
+    analysis = _sample_analysis("563360", "A500ETF华泰柏瑞")
+    analysis["history"] = pd.DataFrame([{"收盘": 1.24}])
+    analysis["fund_profile"] = {
+        "overview": {
+            "基金类型": "ETF / 境内",
+            "基金管理人": "华泰柏瑞基金",
+            "基金经理人": "柳军",
+            "业绩比较基准": "中证A500指数",
+        },
+        "etf_snapshot": {
+            "index_name": "中证A500指数",
+            "share_as_of": "2026-04-01",
+            "total_share": 3087198.74,
+            "total_share_yi": 308.719874,
+        },
+        "style": {},
+    }
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+
+    assert "不能据此写成净创设/净赎回" in rendered
+    assert "不能据此写成规模扩张/收缩" in rendered

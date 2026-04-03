@@ -14,6 +14,7 @@ class RegimeDetector:
         self.data = macro_data
 
     def detect_regime(self) -> Dict[str, object]:
+        basis_lines = self._basis_lines()
         explicit = self._explicit_regime()
         if explicit is not None:
             regime, reasons = explicit
@@ -21,6 +22,7 @@ class RegimeDetector:
                 "current_regime": regime,
                 "scores": {key: 1 if key == regime else 0 for key in ("recovery", "overheating", "stagflation", "deflation")},
                 "reasoning": reasons,
+                "basis_lines": basis_lines,
                 "preferred_assets": self._get_preferred_assets(regime),
             }
 
@@ -90,6 +92,7 @@ class RegimeDetector:
             "current_regime": best,
             "scores": scores,
             "reasoning": reasoning.get(best, []),
+            "basis_lines": basis_lines,
             "preferred_assets": self._get_preferred_assets(best),
         }
 
@@ -167,6 +170,52 @@ class RegimeDetector:
             "deflation": ["长债", "黄金", "防御板块", "高股息"],
         }
         return mapping.get(regime, [])
+
+    def _basis_lines(self) -> List[str]:
+        lines: List[str] = []
+        pmi = self.data.get("pmi")
+        if pmi is not None:
+            pmi_trend = str(self.data.get("pmi_trend", "stable"))
+            demand_state = str(self.data.get("demand_state", "stable"))
+            trend_label = {"rising": "回升", "falling": "走弱"}.get(pmi_trend, "持平")
+            demand_tail = ""
+            if demand_state == "improving":
+                demand_tail = "，新订单/生产分项偏改善"
+            elif demand_state == "weakening":
+                demand_tail = "，新订单/生产分项偏走弱"
+            lines.append(f"PMI {float(pmi):.1f}，景气端{trend_label}{demand_tail}。")
+        cpi = self.data.get("cpi")
+        ppi = self.data.get("ppi")
+        if cpi is not None or ppi is not None:
+            price_parts: List[str] = []
+            if cpi is not None:
+                price_parts.append(f"CPI {float(cpi):.1f}%")
+            if ppi is not None:
+                price_parts.append(f"PPI {float(ppi):.1f}%")
+            ppi_trend = str(self.data.get("ppi_trend", "stable"))
+            price_tail = {"rising": "，价格链条偏修复", "falling": "，价格链条仍偏弱"}.get(ppi_trend, "")
+            lines.append("、".join(price_parts) + price_tail + "。")
+        credit_impulse = str(self.data.get("credit_impulse", "")).strip()
+        m1_m2_spread = self.data.get("m1_m2_spread")
+        if credit_impulse or m1_m2_spread is not None:
+            credit_label = {
+                "expanding": "扩张",
+                "contracting": "收缩",
+                "stable": "中性",
+            }.get(credit_impulse, credit_impulse or "中性")
+            spread_text = ""
+            if m1_m2_spread is not None:
+                spread_text = f"，M1-M2 剪刀差 {float(m1_m2_spread):+.1f}pct"
+            lines.append(f"信用脉冲{credit_label}{spread_text}。")
+        dxy_state = str(self.data.get("dxy_state", "")).strip()
+        if dxy_state:
+            dollar_label = {
+                "strengthening": "偏强",
+                "weakening": "偏弱",
+                "stable": "中性",
+            }.get(dxy_state, dxy_state)
+            lines.append(f"美元{dollar_label}，外部流动性环境同步受影响。")
+        return lines
 
     def find_historical_analog(self, history_db: pd.DataFrame) -> Dict[str, object]:
         if history_db.empty:

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.storage.portfolio import PortfolioRepository
+from src.storage.portfolio import (
+    PortfolioRepository,
+    build_candidate_set_linkage_summary,
+    build_portfolio_overlap_summary,
+)
 
 
 def test_portfolio_log_trade_and_rebalance(tmp_path: Path):
@@ -89,3 +93,80 @@ def test_portfolio_repository_defaults_do_not_leak_between_repos(tmp_path: Path)
 
     assert len(first.list_holdings()) == 1
     assert second.list_holdings() == []
+
+
+def test_build_portfolio_overlap_summary_highlights_repeat_theme():
+    status = {
+        "base_currency": "CNY",
+        "total_value": 100.0,
+        "holdings": [
+            {"symbol": "561380", "name": "电网ETF", "sector": "电网", "region": "CN", "weight": 0.28},
+            {"symbol": "510300", "name": "沪深300ETF", "sector": "宽基", "region": "CN", "weight": 0.42},
+            {"symbol": "512480", "name": "创新药ETF", "sector": "医药", "region": "CN", "weight": 0.30},
+        ],
+        "sector_exposure": {"电网": 0.28, "宽基": 0.42, "医药": 0.30},
+        "region_exposure": {"CN": 1.0},
+    }
+
+    summary = build_portfolio_overlap_summary(
+        status,
+        candidate_symbol="563360",
+        candidate_name="电网ETF华泰柏瑞",
+        candidate_sector="电网",
+        candidate_region="CN",
+        projected_weight=0.34,
+        projected_sector_weight=0.40,
+        projected_region_weight=1.0,
+        suggested_max_weight=0.32,
+        sector_limit=0.35,
+        region_limit=0.95,
+    )
+
+    assert summary["overlap_label"] in {"同一行业主线加码", "主题/行业重复较高"}
+    assert "重复度" in summary["summary_line"] or "加码" in summary["summary_line"]
+    assert summary["conflict_label"]
+    assert any("同主题/行业持仓" in item for item in summary["detail_lines"])
+
+
+def test_build_portfolio_overlap_summary_surfaces_style_and_priority_hint():
+    status = {
+        "base_currency": "CNY",
+        "total_value": 100.0,
+        "holdings": [
+            {"symbol": "510300", "name": "沪深300ETF", "sector": "宽基", "region": "CN", "asset_type": "cn_etf", "weight": 0.55},
+            {"symbol": "510880", "name": "红利ETF", "sector": "红利", "region": "CN", "asset_type": "cn_etf", "weight": 0.25},
+            {"symbol": "512000", "name": "科技ETF", "sector": "科技", "region": "CN", "asset_type": "cn_etf", "weight": 0.20},
+        ],
+        "sector_exposure": {"宽基": 0.55, "红利": 0.25, "科技": 0.20},
+        "region_exposure": {"CN": 1.0},
+    }
+
+    summary = build_portfolio_overlap_summary(
+        status,
+        candidate_symbol="563360",
+        candidate_name="创新药ETF",
+        candidate_sector="创新药",
+        candidate_region="CN",
+        candidate_asset_type="cn_etf",
+    )
+
+    assert "风格" in summary["style_summary_line"]
+    assert summary["style_direction_label"] in {"防守偏重", "进攻偏重", "均衡"}
+    assert summary["candidate_style_bucket"] in {"防守", "进攻", "顺周期", "均衡", "中性"}
+    assert summary["style_priority_hint"]
+    assert any("风格暴露" in item for item in summary["detail_lines"])
+
+
+def test_build_candidate_set_linkage_summary_highlights_same_theme_internal_compare():
+    summary = build_candidate_set_linkage_summary(
+        [
+            {"symbol": "561380", "name": "电网ETF", "asset_type": "cn_etf", "metadata": {"sector": "电网"}},
+            {"symbol": "159611", "name": "电力ETF", "asset_type": "cn_etf", "metadata": {"sector": "电网"}},
+            {"symbol": "512400", "name": "有色ETF", "asset_type": "cn_etf", "metadata": {"sector": "有色"}},
+        ]
+    )
+
+    assert summary["overlap_label"] in {"同一行业主线对比", "部分同主线重合"}
+    assert "主线" in summary["summary_line"]
+    assert "风格" in summary["style_summary_line"]
+    assert any("主线分布" in item for item in summary["detail_lines"])

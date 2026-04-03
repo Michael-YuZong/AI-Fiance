@@ -30,3 +30,26 @@ def test_regime_detector_and_historical_analog():
     )
     analog = detector.find_historical_analog(history)
     assert analog["period"] == "2022Q3"
+
+
+def test_regime_detector_emits_basis_lines_with_macro_anchors() -> None:
+    detector = RegimeDetector(
+        {
+            "pmi": 49.0,
+            "pmi_trend": "falling",
+            "demand_state": "weakening",
+            "cpi": 0.4,
+            "ppi": -0.9,
+            "ppi_trend": "rising",
+            "credit_impulse": "stable",
+            "m1_m2_spread": -3.1,
+            "dxy_state": "strengthening",
+        }
+    )
+    result = detector.detect_regime()
+    lines = " ".join(result.get("basis_lines", []))
+    assert "PMI" in lines
+    assert "CPI" in lines
+    assert "PPI" in lines
+    assert "信用脉冲" in lines
+    assert "美元" in lines

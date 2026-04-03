@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from src.collectors import fund_profile as fund_profile_module
 from src.collectors.fund_profile import FundProfileCollector
@@ -146,6 +147,202 @@ def test_fund_profile_collects_holdings_and_manager_style(monkeypatch):
     assert profile["style"]["taxonomy"]["exposure_scope"] == "行业主题"
     assert profile["manager"]["name"] == "任桀"
     assert len(profile["top_holdings"]) == 5
+
+
+def test_fund_profile_prefers_etf_basic_index_and_share_size(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "get_overview", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_asset_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_portfolio_hold", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_industry_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_manager_directory", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_etf_basic_ts",
+        lambda symbol="": pd.DataFrame(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "csname": "沪深300ETF",
+                    "extname": "沪深300ETF华泰柏瑞",
+                    "cname": "华泰柏瑞沪深300ETF",
+                    "index_code": "000300.SH",
+                    "index_name": "沪深300指数",
+                    "setup_date": "20110718",
+                    "list_date": "20110802",
+                    "mgr_name": "华泰柏瑞基金",
+                    "custod_name": "中国银行",
+                    "mgt_fee": 0.15,
+                    "etf_type": "境内",
+                    "exchange": "SH",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_etf_index_ts",
+        lambda symbol="": pd.DataFrame(
+            [
+                {
+                    "ts_code": "000300.SH",
+                    "indx_name": "沪深300指数",
+                    "indx_csname": "沪深300",
+                    "pub_party_name": "中证指数有限公司",
+                    "pub_date": "20050408",
+                    "base_date": "20050408",
+                    "bp": 1000.0,
+                    "adj_circle": "半年",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_etf_share_size_ts",
+        lambda symbol, **kwargs: pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "trade_date": "2026-03-12",
+                    "ts_code": "510300.SH",
+                    "etf_name": "沪深300ETF",
+                    "total_share": 4_741_854.98,
+                    "total_size": 22_878_980.0,
+                    "nav": 4.8332,
+                    "close": 4.8500,
+                    "exchange": "SH",
+                }
+            ]
+        ),
+    )
+
+    profile = collector.collect_profile("510300", asset_type="cn_etf")
+    overview = profile["overview"]
+
+    assert overview["基金简称"] == "沪深300ETF"
+    assert overview["ETF基准指数代码"] == "000300.SH"
+    assert overview["ETF基准指数中文全称"] == "沪深300指数"
+    assert overview["ETF基准指数发布机构"] == "中证指数有限公司"
+    assert overview["ETF份额规模日期"] == "2026-03-12"
+    assert overview["ETF总份额"] == "4741854.98万份"
+    assert overview["ETF总规模"] == "22878980.00万元"
+    assert overview["净资产规模"] == "22878980.00万元（截止至：2026-03-12）"
+    assert overview["管理费率"] == "0.15%（每年）"
+
+
+def test_fund_profile_fund_factor_pro_reuses_process_cache_and_contracts(monkeypatch, tmp_path):
+    collector = FundProfileCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    calls = {"count": 0}
+
+    def fake_snapshot(*, ts_code: str = "", trade_date: str = "", start_date: str = "", end_date: str = "") -> pd.DataFrame:  # noqa: ARG001
+        calls["count"] += 1
+        assert ts_code == "510300.SH"
+        assert trade_date == "20260401"
+        return pd.DataFrame(
+            [
+                {"trade_date": "20260401", "ts_code": "510300.SH", "close": 4.05, "pct_change": 1.25, "ma_bfq_20": 4.01},
+                {"trade_date": "20260331", "ts_code": "510300.SH", "close": 4.00, "pct_change": 0.50, "ma_bfq_20": 3.99},
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_fund_factor_pro_snapshot", fake_snapshot)
+
+    frame1 = collector.get_fund_factor_pro_ts("510300", trade_date="2026-04-01")
+    frame2 = collector.get_fund_factor_pro_ts("510300", trade_date="2026-04-01")
+
+    assert calls["count"] == 1
+    assert list(frame1["trade_date"]) == ["2026-04-01", "2026-03-31"]
+    assert not frame2.empty
+    assert frame1.attrs["source"] == "tushare.fund_factor_pro"
+    assert frame1.attrs["latest_date"] == "2026-04-01"
+    assert frame1.attrs["is_fresh"] is True
+    assert frame1.attrs["fallback"] == "none"
+    assert "fund_factor_pro" in frame1.attrs["disclosure"]
+
+
+def test_get_etf_share_size_ts_auto_window_requests_recent_seven_open_dates(monkeypatch, tmp_path):
+    fund_profile_module._PROCESS_SHARED_FRAME_CACHE.clear()
+    collector = FundProfileCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    monkeypatch.setattr(collector, "_resolve_tushare_etf_code", lambda symbol, preferred_markets=("E", "O", "L"): "510300.SH")  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "_recent_open_trade_dates",
+        lambda lookback_days=14: [  # noqa: ARG005
+            "20260325",
+            "20260326",
+            "20260327",
+            "20260330",
+            "20260331",
+            "20260401",
+            "20260402",
+        ],
+    )
+
+    def fake_snapshot(*, ts_code: str = "", trade_date: str = "", start_date: str = "", end_date: str = "") -> pd.DataFrame:
+        assert ts_code == "510300.SH"
+        assert trade_date == ""
+        assert start_date == "20260325"
+        assert end_date == "20260402"
+        return pd.DataFrame(
+            [
+                {"trade_date": "20260402", "ts_code": "510300.SH", "total_share": 3_087_198.74, "total_size": 4_012_300.0},
+                {"trade_date": "20260401", "ts_code": "510300.SH", "total_share": 3_060_100.00, "total_size": 3_980_000.0},
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_etf_share_size_snapshot", fake_snapshot)
+
+    frame = collector.get_etf_share_size_ts("510300")
+
+    assert list(frame["trade_date"]) == ["2026-04-02", "2026-04-01"]
+
+
+def test_collect_profile_exposes_fund_factor_snapshot(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "get_overview", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_asset_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_portfolio_hold", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_industry_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_manager_directory", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_basic_ts", lambda symbol="": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_index_ts", lambda symbol="": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_share_size_ts", lambda symbol, **kwargs: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_fund_factor_pro_ts",
+        lambda symbol, **kwargs: pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "trade_date": "2026-04-01",
+                    "close": 4.05,
+                    "pct_change": 1.25,
+                    "ma_bfq_20": 4.01,
+                    "ma_bfq_60": 3.95,
+                    "macd_bfq": 0.12,
+                    "rsi_bfq_6": 66.5,
+                }
+            ]
+        ),
+    )
+
+    profile = collector.collect_profile("510300", asset_type="cn_etf")
+
+    assert profile["fund_factor_snapshot"]["trade_date"] == "2026-04-01"
+    assert profile["fund_factor_snapshot"]["trend_label"] == "趋势偏强"
+    assert profile["fund_factor_snapshot"]["momentum_label"] == "动能改善"
 
 
 def test_fund_profile_prefers_fund_benchmark_theme_over_manager_peer_funds(monkeypatch):
@@ -717,6 +914,207 @@ def test_fund_profile_commodity_etf_treats_cash_as_margin_structure(monkeypatch)
     assert "不等于主观空仓" in profile["style"]["positioning"]
     assert profile["style"]["taxonomy"]["product_form"] == "ETF"
     assert profile["style"]["taxonomy"]["vehicle_role"] == "场内ETF"
+
+
+def test_fund_profile_etf_snapshot_exposes_share_change(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "get_overview", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_asset_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_portfolio_hold", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_industry_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_manager_directory", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_etf_basic_ts",
+        lambda symbol="": pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "ts_code": "563360.SH",
+                    "csname": "A500ETF华泰柏瑞",
+                    "index_code": "000510.SH",
+                    "index_name": "中证A500指数",
+                    "list_date": "20241010",
+                    "setup_date": "20240930",
+                    "etf_type": "境内",
+                    "mgr_name": "华泰柏瑞基金",
+                    "custod_name": "中国银行",
+                    "list_status": "L",
+                    "exchange": "SH",
+                    "mgt_fee": 0.15,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_etf_index_ts",
+        lambda symbol="": pd.DataFrame(  # noqa: ARG005
+            [{"ts_code": "000510.SH", "indx_name": "中证A500指数", "indx_csname": "中证A500", "pub_party_name": "中证指数有限公司"}]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_etf_share_size_ts",
+        lambda symbol, **kwargs: pd.DataFrame(  # noqa: ARG005
+            [
+                {"trade_date": "2026-03-31", "ts_code": "563360.SH", "etf_name": "A500ETF华泰柏瑞", "total_share": 3_091_998.74, "total_size": 3_818_927.64, "exchange": "SSE"},
+                {"trade_date": "2026-03-30", "ts_code": "563360.SH", "etf_name": "A500ETF华泰柏瑞", "total_share": 3_066_198.74, "total_size": 3_833_361.66, "exchange": "SSE"},
+            ]
+        ),
+    )
+
+    profile = collector.collect_profile("563360", asset_type="cn_etf")
+    snapshot = profile["etf_snapshot"]
+
+    assert snapshot["index_code"] == "000510.SH"
+    assert snapshot["index_name"] == "中证A500指数"
+    assert snapshot["list_status"] == "L"
+    assert snapshot["total_share"] == 3_091_998.74
+    assert snapshot["total_size"] == 3_818_927.64
+    assert snapshot["etf_share_change"] == pytest.approx(2.58, rel=1e-6)
+    assert snapshot["etf_size_change"] == pytest.approx(-1.443402, rel=1e-6)
+
+
+def test_collect_profile_light_mode_keeps_etf_snapshot_without_heavy_profile_calls(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    def _unexpected(*args, **kwargs):  # noqa: ANN001, ARG001
+        raise AssertionError("heavy profile endpoint should not be called in light mode")
+
+    monkeypatch.setattr(collector, "get_overview", _unexpected)
+    monkeypatch.setattr(collector, "get_etf_basic_ts", lambda symbol="": pd.DataFrame([{"ts_code": "512890.SH", "index_code": "H30269.CSI", "index_name": "中证红利低波动指数", "exchange": "SH", "list_status": "L", "etf_type": "纯境内"}]))  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_index_ts", lambda symbol="": pd.DataFrame([{"ts_code": "H30269.CSI", "indx_csname": "中证红利低波", "pub_party_name": "中证指数有限公司"}]))  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_share_size_ts", lambda symbol, **kwargs: pd.DataFrame([{"trade_date": "2026-04-01", "ts_code": "512890.SH", "total_share": 2613411.08, "total_size": 3118767.355, "exchange": "SSE"}]))  # noqa: ARG005
+
+    monkeypatch.setattr(collector, "get_fund_manager_ts", _unexpected)
+    monkeypatch.setattr(collector, "get_fund_company_ts", _unexpected)
+    monkeypatch.setattr(collector, "get_fund_div_ts", _unexpected)
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", _unexpected)
+    monkeypatch.setattr(collector, "get_achievement", _unexpected)
+    monkeypatch.setattr(collector, "get_asset_allocation", _unexpected)
+    monkeypatch.setattr(collector, "get_portfolio_hold", _unexpected)
+    monkeypatch.setattr(collector, "get_industry_allocation", _unexpected)
+    monkeypatch.setattr(collector, "get_manager_directory", _unexpected)
+    monkeypatch.setattr(collector, "get_rating_table", _unexpected)
+
+    profile = collector.collect_profile("512890", asset_type="cn_etf", profile_mode="light")
+
+    assert profile["profile_mode"] == "light"
+    assert profile["etf_snapshot"]["index_code"] == "H30269.CSI"
+    assert profile["etf_snapshot"]["total_share"] == 2613411.08
+
+
+def test_collect_profile_etf_prefers_tushare_over_ak_overview(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+
+    def _unexpected(*args, **kwargs):  # noqa: ANN001, ARG001
+        raise AssertionError("AKShare overview should not run once ETF Tushare core data is available")
+
+    monkeypatch.setattr(collector, "get_overview", _unexpected)
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_asset_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_portfolio_hold", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_industry_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_manager_directory", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_basic_ts", lambda symbol="": pd.DataFrame([{"ts_code": "563360.SH", "csname": "A500ETF华泰柏瑞", "index_code": "000510.SH", "index_name": "中证A500指数", "exchange": "SH", "list_status": "L", "etf_type": "境内"}]))  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_index_ts", lambda symbol="": pd.DataFrame([{"ts_code": "000510.SH", "indx_name": "中证A500指数", "indx_csname": "中证A500", "pub_party_name": "中证指数有限公司"}]))  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_share_size_ts", lambda symbol, **kwargs: pd.DataFrame([{"trade_date": "2026-04-01", "ts_code": "563360.SH", "total_share": 3091998.74, "total_size": 3818927.64, "exchange": "SSE"}]))  # noqa: ARG005
+
+    profile = collector.collect_profile("563360", asset_type="cn_etf")
+
+    assert profile["overview"]["ETF基准指数中文全称"] == "中证A500指数"
+
+
+def test_collect_profile_etf_does_not_fallback_to_akshare_when_tushare_core_is_empty(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+    calls = {"overview": 0, "holdings": 0}
+
+    def fake_overview(*args, **kwargs):  # noqa: ANN001, ARG001
+        calls["overview"] += 1
+        return pd.DataFrame()
+
+    def fake_holdings(*args, **kwargs):  # noqa: ANN001, ARG001
+        calls["holdings"] += 1
+        return pd.DataFrame()
+
+    monkeypatch.setattr(collector, "get_overview", fake_overview)
+    monkeypatch.setattr(collector, "get_portfolio_hold", fake_holdings)
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_asset_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_industry_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_portfolio_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_manager_directory", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_basic_ts", lambda symbol="": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_index_ts", lambda symbol="": pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_share_size_ts", lambda symbol, **kwargs: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_factor_pro_ts", lambda symbol, **kwargs: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "_tushare_etf_basic_row", lambda symbol: {})  # noqa: ARG005
+    monkeypatch.setattr(collector, "_tushare_fund_basic_row", lambda symbol: {})  # noqa: ARG005
+
+    profile = collector.collect_profile("510300", asset_type="cn_etf")
+
+    assert calls == {"overview": 0, "holdings": 0}
+    assert profile["overview"] == {}
+    assert "基金概况缺失" in profile["notes"]
+
+
+def test_collect_profile_etf_uses_tushare_holdings_without_akshare_holdings(monkeypatch):
+    collector = FundProfileCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+
+    def _unexpected(*args, **kwargs):  # noqa: ANN001, ARG001
+        raise AssertionError("AKShare ETF holdings should not run once Tushare holdings and stock_basic are available")
+
+    monkeypatch.setattr(collector, "get_overview", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_achievement", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_asset_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_portfolio_hold", _unexpected)
+    monkeypatch.setattr(collector, "get_industry_allocation", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_manager_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_fund_company_ts", lambda: pd.DataFrame())
+    monkeypatch.setattr(collector, "get_fund_div_ts", lambda symbol: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "get_fund_portfolio_ts",
+        lambda symbol: pd.DataFrame(  # noqa: ARG005
+            [
+                {"symbol": "300308.SZ", "stk_mkv_ratio": 9.2, "stk_amount": 20.1, "stk_mkv": 2_110.0, "end_date": "20251231"},
+                {"symbol": "300738.SZ", "stk_mkv_ratio": 8.5, "stk_amount": 19.5, "stk_mkv": 1_980.0, "end_date": "20251231"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_stock_basic_ts",
+        lambda: pd.DataFrame(
+            [
+                {"ts_code": "300308.SZ", "symbol": "300308", "name": "中际旭创"},
+                {"ts_code": "300738.SZ", "symbol": "300738", "name": "奥飞数据"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(collector, "get_manager_directory", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_rating_table", lambda: pd.DataFrame())  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_basic_ts", lambda symbol="": pd.DataFrame([{"ts_code": "563360.SH", "csname": "A500ETF华泰柏瑞", "index_code": "000510.SH", "index_name": "中证A500指数", "exchange": "SH", "list_status": "L", "etf_type": "境内"}]))  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_index_ts", lambda symbol="": pd.DataFrame([{"ts_code": "000510.SH", "indx_name": "中证A500指数", "indx_csname": "中证A500", "pub_party_name": "中证指数有限公司"}]))  # noqa: ARG005
+    monkeypatch.setattr(collector, "get_etf_share_size_ts", lambda symbol, **kwargs: pd.DataFrame([{"trade_date": "2026-04-01", "ts_code": "563360.SH", "total_share": 3091998.74, "total_size": 3818927.64, "exchange": "SSE"}]))  # noqa: ARG005
+
+    profile = collector.collect_profile("563360", asset_type="cn_etf")
+
+    assert [row["股票名称"] for row in profile["top_holdings"][:2]] == ["中际旭创", "奥飞数据"]
 
 
 def test_standard_taxonomy_does_not_treat_etf_suffix_as_f_share_class() -> None:

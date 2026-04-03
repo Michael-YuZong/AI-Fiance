@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.processors.portfolio_actions import build_trade_plan
+from src.processors.portfolio_actions import build_candidate_portfolio_overlap_summary, build_trade_plan
 from src.storage.portfolio import PortfolioRepository
 from src.storage.thesis import ThesisRepository
 from src.utils.market import AssetContext
@@ -139,8 +139,75 @@ def test_build_trade_plan_estimates_budget_execution_and_provenance(monkeypatch,
     assert payload["decision_snapshot"]["factor_contract"]["families"]["J-1"] == 1
     assert payload["decision_snapshot"]["proxy_contract"]["market_flow"]["confidence_label"] == "中"
     assert payload["decision_snapshot"]["proxy_contract"]["social_sentiment"]["covered"] == 1
+    assert payload["portfolio_overlap"]["overlap_label"] in {"同一行业主线加码", "主题/行业重复较高", "重复度较低"}
+    assert payload["portfolio_overlap"]["style_direction_label"] in {"防守偏重", "进攻偏重", "均衡"}
+    assert payload["portfolio_overlap"]["style_priority_hint"]
+    assert payload["portfolio_overlap"]["detail_lines"]
     assert payload["horizon"]["code"] == "position_trade"
     assert payload["decision_snapshot"]["horizon"]["code"] == "position_trade"
     assert payload["current_risk"]["annual_vol"] >= 0
     assert payload["projected_risk"]["annual_vol"] >= 0
     assert "仓位" in payload["headline"]
+
+
+def test_build_candidate_portfolio_overlap_summary_highlights_same_sector_overlap(monkeypatch, tmp_path: Path) -> None:
+    repo = PortfolioRepository(
+        portfolio_path=tmp_path / "portfolio.json",
+        trade_log_path=tmp_path / "trade_log.json",
+    )
+    repo.log_trade(
+        action="buy",
+        symbol="510300",
+        name="沪深300ETF",
+        asset_type="cn_etf",
+        price=4.0,
+        amount=40_000.0,
+        region="CN",
+        sector="宽基",
+    )
+    repo.log_trade(
+        action="buy",
+        symbol="561380",
+        name="电网ETF",
+        asset_type="cn_etf",
+        price=2.0,
+        amount=25_000.0,
+        region="CN",
+        sector="电网",
+    )
+
+    histories = {
+        "510300": _history(4.0, drift=0.08, amount=800_000_000.0),
+        "561380": _history(2.0, drift=0.15, amount=250_000_000.0),
+        "600406": _history(6.5, drift=0.10, amount=400_000_000.0),
+    }
+
+    def fake_history(symbol, asset_type, config, period="3y"):  # noqa: ARG001
+        return histories[symbol]
+
+    monkeypatch.setattr("src.processors.portfolio_actions.fetch_asset_history", fake_history)
+    monkeypatch.setattr(
+        "src.processors.portfolio_actions.get_asset_context",
+        lambda symbol, asset_type, config: AssetContext(
+            symbol=symbol,
+            name="国电南瑞" if symbol == "600406" else symbol,
+            asset_type=asset_type,
+            source_symbol=symbol,
+            metadata={"region": "CN", "sector": "电网" if symbol in {"561380", "600406"} else "宽基"},
+        ),
+    )
+
+    summary = build_candidate_portfolio_overlap_summary(
+        {
+            "symbol": "600406",
+            "name": "国电南瑞",
+            "asset_type": "cn_stock",
+            "metadata": {"sector": "电网", "region": "CN"},
+        },
+        {},
+        repo=repo,
+    )
+
+    assert summary["overlap_label"] in {"同一行业主线加码", "主题/行业重复较高"}
+    assert "电网" in summary["summary_line"]
+    assert summary["style_summary_line"]

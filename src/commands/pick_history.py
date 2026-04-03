@@ -125,7 +125,7 @@ def grade_pick_delivery(
     elif discovery_mode == "realtime_universe":
         code = "realtime_snapshot_note"
         label = "盘中快照成稿"
-        notes.append("当前全市场初筛基于盘中实时/缓存快照，不是 Tushare 日终正式快照；这份产物已经是正式 final，但数据口径仍应按盘中快照理解。")
+        notes.append("当前全市场初筛基于盘中实时/缓存快照，不是 Tushare 日终正式快照；即使进入正式交付链，数据口径仍应按盘中快照理解。")
     elif discovery_mode == "watchlist_fallback":
         code = "proxy_watch_only"
         label = "代理观察稿"

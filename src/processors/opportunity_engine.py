@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import math
 import re
+import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stderr
@@ -23,6 +24,8 @@ from src.collectors import (
     EventsCollector,
     FundProfileCollector,
     GlobalFlowCollector,
+    IndustryIndexCollector,
+    IndexTopicCollector,
     MarketDriversCollector,
     MarketMonitorCollector,
     MarketPulseCollector,
@@ -30,13 +33,19 @@ from src.collectors import (
     SocialSentimentCollector,
     ValuationCollector,
 )
-from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot
+from src.processors.context import (
+    derive_regime_inputs,
+    global_proxy_runtime_enabled,
+    load_china_macro_snapshot,
+    load_global_proxy_snapshot,
+)
 from src.processors.factor_meta import FACTOR_REGISTRY, factor_meta_payload
 from src.processors.horizon import build_analysis_horizon_profile
 from src.processors.provenance import build_analysis_provenance
 from src.processors.regime import RegimeDetector
 from src.processors.signal_confidence import build_signal_confidence
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
+from src.output.theme_playbook import build_theme_playbook_context
 from src.utils.config import detect_asset_type, resolve_project_path
 from src.utils.data import load_watchlist, load_yaml
 from src.utils.fund_taxonomy import build_standard_fund_taxonomy
@@ -174,6 +183,7 @@ NEGATIVE_THEME_HEADWIND_KEYS = (
 NEGATIVE_EVENT_LOOKBACK_DAYS = 30
 FORWARD_EVENT_LOOKAHEAD_DAYS = 14
 DIRECT_COMPANY_NEWS_LOOKBACK_DAYS = 45
+CATALYST_FRESH_NEWS_DAYS = 3
 HOLDER_TRADE_LOOKBACK_DAYS = 90
 CAPITAL_RETURN_LOOKBACK_DAYS = 365
 STRUCTURED_EVENT_FULL_SCORE_DAYS = 45
@@ -228,6 +238,13 @@ HIGH_CONFIDENCE_COMPANY_SOURCES = (
     "bloomberg",
     "financial times",
     "ft",
+    "cninfo",
+    "巨潮资讯",
+    "上交所",
+    "深交所",
+    "sse",
+    "szse",
+    "公司公告",
     "business wire",
     "pr newswire",
     "globenewswire",
@@ -271,6 +288,31 @@ STRUCTURED_COMPANY_EVENT_KEYS = (
     "outlook",
     "results",
     "earnings",
+    "投资者关系",
+    "活动记录表",
+    "调研纪要",
+    "路演纪要",
+    "业绩说明会",
+    "交流纪要",
+    "电话会纪要",
+    "互动平台",
+    "互动易",
+    "投资者问答",
+    "e互动",
+)
+
+IR_INTERACTION_KEYS = (
+    "投资者关系",
+    "活动记录表",
+    "调研纪要",
+    "路演纪要",
+    "业绩说明会",
+    "交流纪要",
+    "电话会纪要",
+    "互动平台",
+    "互动易",
+    "投资者问答",
+    "e互动",
 )
 
 NON_POSITIVE_COMPANY_STATEMENT_KEYS = (
@@ -557,7 +599,19 @@ def _merge_metadata(
         f"{merged.get('name', symbol)} {merged.get('sector', '')}",
         str(merged.get("sector", "综合")),
     )
-    merged.setdefault("sector", normalized_sector)
+    current_sector = str(merged.get("sector", "")).strip()
+    known_sectors = _known_sector_buckets()
+    if (
+        not current_sector
+        or current_sector in {"综合", "待分类", "未分类"}
+        or (
+            current_sector not in known_sectors
+            and normalized_sector in known_sectors
+        )
+    ):
+        merged["sector"] = normalized_sector
+    else:
+        merged.setdefault("sector", normalized_sector)
     existing_chain_nodes = [str(item).strip() for item in merged.get("chain_nodes", []) if str(item).strip()]
     if _chain_nodes_are_generic(existing_chain_nodes):
         merged["chain_nodes"] = normalized_chain_nodes
@@ -570,10 +624,39 @@ def _merge_metadata(
 def _collect_fund_profile(symbol: str, asset_type: str, config: Mapping[str, Any]) -> Dict[str, Any]:
     if not symbol:
         return {}
-    if bool(dict(config or {}).get("skip_fund_profile")):
+    effective_config = dict(config or {})
+    if bool(effective_config.get("skip_fund_profile")):
         return {}
+    profile_mode = str(effective_config.get("fund_profile_mode", "") or "").strip().lower() or "full"
+    etf_profile_mode = str(effective_config.get("etf_fund_profile_mode", "") or "").strip().lower()
+    if asset_type == "cn_etf" and etf_profile_mode:
+        profile_mode = etf_profile_mode
+    timeout_seconds = float(effective_config.get("fund_profile_timeout_seconds", 0) or 0)
     try:
-        return FundProfileCollector(config).collect_profile(symbol, asset_type=asset_type)
+        return _timed_runtime_loader(
+            lambda: FundProfileCollector(config).collect_profile(symbol, asset_type=asset_type, profile_mode=profile_mode),
+            timeout_seconds=timeout_seconds,
+            fallback={
+                "overview": {},
+                "achievement": {},
+                "top_holdings": [],
+                "industry_allocation": [],
+                "asset_allocation": {},
+                "manager": {},
+                "company": {},
+                "dividends": {},
+                "rating": {},
+                "style": {},
+                "latest_quarter": "",
+                "etf_snapshot": {},
+                "fund_factor_snapshot": {},
+                "profile_mode": profile_mode,
+                "notes": [
+                    f"基金画像拉取超时（>{int(timeout_seconds)}s），本轮按缺失处理。"
+                ] if timeout_seconds > 0 else [],
+                "timeout": timeout_seconds > 0,
+            },
+        )
     except Exception:
         return {}
 
@@ -584,6 +667,7 @@ def _enrich_metadata_with_fund_profile(metadata: Dict[str, Any], fund_profile: M
     enriched = dict(metadata)
     overview = dict(fund_profile.get("overview") or {})
     style = dict(fund_profile.get("style") or {})
+    etf_snapshot = dict(fund_profile.get("etf_snapshot") or {})
     fund_name = str(overview.get("基金简称", "")).strip()
     if fund_name:
         enriched["name"] = fund_name
@@ -609,6 +693,79 @@ def _enrich_metadata_with_fund_profile(metadata: Dict[str, Any], fund_profile: M
     manager_name = str(overview.get("基金经理人", "")).strip()
     if manager_name:
         enriched["manager_name"] = manager_name
+    fund_factor_snapshot = dict(fund_profile.get("fund_factor_snapshot") or {})
+    if fund_factor_snapshot:
+        enriched["fund_factor_snapshot"] = fund_factor_snapshot
+        for source_key, target_key in (
+            ("trend_label", "fund_factor_trend_label"),
+            ("momentum_label", "fund_factor_momentum_label"),
+            ("signal_strength", "fund_factor_signal_strength"),
+            ("trade_date", "fund_factor_trade_date"),
+        ):
+            value = fund_factor_snapshot.get(source_key)
+            if value not in (None, "", []):
+                enriched[target_key] = value
+    for source_key, target_key in (
+        ("index_code", "index_code"),
+        ("index_name", "index_name"),
+        ("index_name", "benchmark_name"),
+        ("exchange", "exchange"),
+        ("list_status", "list_status"),
+        ("etf_type", "etf_type"),
+        ("total_share", "total_share"),
+        ("total_size", "total_size"),
+        ("share_as_of", "share_as_of"),
+        ("etf_share_change", "etf_share_change"),
+        ("etf_share_change_pct", "etf_share_change_pct"),
+        ("etf_size_change", "etf_size_change"),
+        ("etf_size_change_pct", "etf_size_change_pct"),
+    ):
+        value = etf_snapshot.get(source_key)
+        if value not in (None, "", []):
+            enriched[target_key] = value
+    if etf_snapshot.get("index_name") not in (None, "", []) and not str(enriched.get("benchmark", "")).strip():
+        enriched["benchmark"] = str(etf_snapshot.get("index_name", "")).strip()
+    if etf_snapshot.get("manager_name") not in (None, "", []):
+        enriched.setdefault("management", str(etf_snapshot.get("manager_name", "")).strip())
+    return enriched
+
+
+def _enrich_metadata_with_industry_index_snapshot(
+    metadata: Dict[str, Any],
+    snapshot: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if not snapshot:
+        return metadata
+    enriched = dict(metadata)
+    items = [dict(item) for item in list(snapshot.get("items") or []) if dict(item)]
+    if not items:
+        return enriched
+    preferred_labels = [
+        str(item.get("index_name", "")).strip()
+        for item in items
+        if str(item.get("level", "")).strip() in {"L3", "L2"} and str(item.get("index_name", "")).strip()
+    ]
+    if not preferred_labels:
+        preferred_labels = [
+            str(item.get("index_name", "")).strip()
+            for item in items
+            if str(item.get("index_name", "")).strip()
+        ]
+    current_chain = [str(item).strip() for item in enriched.get("chain_nodes", []) if str(item).strip()]
+    for label in preferred_labels[:4]:
+        if label and label not in current_chain:
+            current_chain.append(label)
+    if current_chain:
+        enriched["chain_nodes"] = current_chain
+    enriched["industry_index_snapshot"] = {
+        key: value
+        for key, value in dict(snapshot).items()
+        if key != "families"
+    }
+    if not str(enriched.get("industry_framework_label", "")).strip():
+        lead = next((item for item in preferred_labels if item), "")
+        if lead:
+            enriched["industry_framework_label"] = lead
     return enriched
 
 
@@ -650,6 +807,18 @@ FUND_NOISY_KEYWORDS = {
     "cloud",
     "software",
     "算力",
+    "成长股估值修复",
+    "新兴产业",
+}
+
+SEMICONDUCTOR_VALUATION_NOISY_KEYWORDS = {
+    "ai",
+    "AI",
+    "人工智能",
+    "科技",
+    "战略新兴",
+    "信息技术",
+    "通信",
     "成长股估值修复",
     "新兴产业",
 }
@@ -892,7 +1061,7 @@ def _pick_best_structured_item(
 
 def _top_positive_signals(factors: Sequence[Dict[str, str]], limit: int = 3) -> str:
     positives = [item["signal"] for item in factors if item.get("awarded", 0) > 0]
-    return " · ".join(positives[:limit]) if positives else "当前没有明确亮点"
+    return " · ".join(positives[:limit]) if positives else "当前没有新增直接情报亮点"
 
 
 def _top_material_signals(
@@ -946,7 +1115,10 @@ def _catalyst_core_signal(
     company_positive_pool: Sequence[Mapping[str, Any]],
     is_individual_stock: bool,
     asset_type: str,
+    catalyst_coverage: Mapping[str, Any] | None = None,
 ) -> str:
+    coverage = dict(catalyst_coverage or {})
+    diagnosis = str(coverage.get("diagnosis", "")).strip()
     negative_signal = next(
         (
             str(item.get("signal", "")).strip()
@@ -974,6 +1146,14 @@ def _catalyst_core_signal(
             density_signal = next((str(item.get("signal", "")).strip() for item in factors if item.get("name") == "研报/新闻密度"), "")
             extras = [density_signal] if density_signal else []
             return " · ".join([*company_titles, *extras[:1]])
+        if diagnosis == "suspected_search_gap":
+            return "当前新增直接情报偏少，且主题检索疑似漏抓；先不把它写成零催化"
+        if diagnosis == "proxy_degraded":
+            return "当前新增直接情报偏少，且本轮覆盖有降级；先按低置信观察处理"
+        if diagnosis == "theme_only_live":
+            return "当前只有主题级情报，个股级新增证据还不够"
+        if diagnosis == "stale_live_only":
+            return "当前能看到的多是旧闻回放，新增直接情报仍待确认"
     return _top_positive_signals(factors)
 
 
@@ -1074,9 +1254,11 @@ def build_market_context(
     def _load_global_proxy() -> tuple[Dict[str, Any], Optional[str]]:
         if market_context_cfg.get("skip_global_proxy"):
             return {}, "全球代理数据已按运行配置关闭，本次先按国内宏观与本地行情上下文生成。"
+        if not global_proxy_runtime_enabled(config):
+            return {}, "全球代理数据默认关闭，本次先按国内宏观与本地行情上下文生成。"
         try:
             with redirect_stderr(io.StringIO()):
-                return load_global_proxy_snapshot(), None
+                return load_global_proxy_snapshot(config), None
         except Exception as exc:
             return {}, _client_safe_issue("全球代理数据缺失", exc)
         finally:
@@ -1085,6 +1267,11 @@ def build_market_context(
     def _load_monitor_rows() -> tuple[List[Dict[str, Any]], Optional[str]]:
         if market_context_cfg.get("skip_market_monitor"):
             return [], "宏观资产监控已按运行配置关闭，本次不强行刷新跨市场监控快照。"
+        if not (
+            market_context_cfg.get("enable_market_monitor_runtime", False)
+            or config.get("enable_market_monitor_runtime", False)
+        ):
+            return [], "宏观资产监控默认关闭，本次不强行刷新跨市场监控快照。"
         try:
             return MarketMonitorCollector(config).collect(), None
         except Exception as exc:
@@ -1099,6 +1286,8 @@ def build_market_context(
             return [], f"事件日历缺失: {exc}"
 
     def _load_drivers() -> tuple[Dict[str, Any], Optional[str]]:
+        if market_context_cfg.get("skip_market_drivers"):
+            return {}, "板块驱动数据已按运行配置关闭，本次不强行刷新板块轮动与资金驱动快照。"
         try:
             return MarketDriversCollector(config).collect(), None
         except Exception as exc:
@@ -1524,9 +1713,658 @@ def _context_drivers(context: Mapping[str, Any], config: Mapping[str, Any]) -> D
     return dict(cache.get("value") or {})
 
 
+def _context_industry_index_snapshot(
+    metadata: Mapping[str, Any],
+    context: Mapping[str, Any],
+    *,
+    fund_profile: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    asset_type = str(metadata.get("asset_type", "")).strip()
+    cache = _runtime_cache_bucket(context, "industry_index_snapshot")
+    key = (
+        asset_type,
+        str(metadata.get("symbol", "")).strip(),
+        str(metadata.get("index_code", "")).strip(),
+        str(metadata.get("index_name", "")).strip(),
+        str(metadata.get("benchmark", "")).strip(),
+    )
+    if key not in cache:
+        collector = IndustryIndexCollector(dict(context.get("config", {})))
+        try:
+            if asset_type == "cn_stock":
+                cache[key] = collector.get_stock_industry_snapshot(
+                    str(metadata.get("symbol", "")).strip(),
+                    reference_date=_context_now(context),
+                )
+            elif asset_type == "cn_etf":
+                cache[key] = collector.get_etf_industry_snapshot(
+                    metadata,
+                    fund_profile=fund_profile,
+                    reference_date=_context_now(context),
+                )
+            else:
+                cache[key] = {}
+        except Exception as exc:
+            cache[key] = {
+                "status": "blocked",
+                "diagnosis": "fetch_error",
+                "items": [],
+                "fallback": "none",
+                "is_fresh": False,
+                "disclosure": f"标准行业/指数框架当前不可用，本轮按缺失处理：{exc}",
+            }
+    return dict(cache.get(key) or {})
+
+
+def _index_topic_code_candidates(
+    metadata: Mapping[str, Any],
+    *,
+    fund_profile: Optional[Mapping[str, Any]] = None,
+) -> List[str]:
+    overview = dict((fund_profile or {}).get("overview") or {})
+    etf_snapshot = dict((fund_profile or {}).get("etf_snapshot") or {})
+    candidates = [
+        metadata.get("index_code"),
+        metadata.get("benchmark_symbol"),
+        metadata.get("benchmark_code"),
+        etf_snapshot.get("index_code"),
+        overview.get("ETF基准指数代码"),
+    ]
+    if str(metadata.get("asset_type", "")).strip() == "cn_index":
+        candidates.append(metadata.get("symbol"))
+    return _unique_strings([str(item).strip() for item in candidates if str(item or "").strip()])
+
+
+def _index_topic_anchor_keywords(
+    metadata: Mapping[str, Any],
+    *,
+    fund_profile: Optional[Mapping[str, Any]] = None,
+) -> List[str]:
+    overview = dict((fund_profile or {}).get("overview") or {})
+    etf_snapshot = dict((fund_profile or {}).get("etf_snapshot") or {})
+    anchors = [
+        overview.get("跟踪标的"),
+        overview.get("业绩比较基准"),
+        overview.get("ETF基准指数中文全称"),
+        etf_snapshot.get("index_name"),
+        metadata.get("benchmark_name"),
+        metadata.get("benchmark"),
+        metadata.get("index_name"),
+    ]
+    return _unique_strings([str(item).strip() for item in anchors if str(item or "").strip()])
+
+
+def _index_topic_keyword_specificity(value: Any) -> int:
+    normalized = re.sub(r"[\s指数收益率价格主题（）()·*/+_-]+", "", str(value or "").strip().lower())
+    return len(normalized)
+
+
+def _context_index_topic_bundle(
+    metadata: Mapping[str, Any],
+    context: Mapping[str, Any],
+    *,
+    fund_profile: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    asset_type = str(metadata.get("asset_type", "")).strip()
+    if asset_type not in {"cn_stock", "cn_etf", "cn_fund", "cn_index"}:
+        return {}
+    if _runtime_feature_disabled(context, "skip_index_topic_bundle_runtime"):
+        return {
+            "index_snapshot": {},
+            "technical_snapshot": {
+                "status": "skipped",
+                "diagnosis": "runtime_skip",
+                "disclosure": "指数专题主链在 discovery 预筛阶段已跳过；如进入正式候选，会补完整指数/主题结构。",
+            },
+            "history_snapshots": {},
+            "constituent_weights": pd.DataFrame(),
+            "fallback": "runtime_skip",
+            "is_fresh": False,
+        }
+    code_candidates = _index_topic_code_candidates(metadata, fund_profile=fund_profile)
+    explicit_code = next((item for item in code_candidates if item), "")
+    keywords = _valuation_keywords(metadata, asset_type, fund_profile)
+    anchor_keywords = _index_topic_anchor_keywords(metadata, fund_profile=fund_profile)
+    if explicit_code and anchor_keywords:
+        keywords = _unique_strings(
+            [
+                *anchor_keywords,
+                *[
+                    item
+                    for item in keywords
+                    if item not in anchor_keywords and _index_topic_keyword_specificity(item) >= 4
+                ][:4],
+            ]
+        )
+    cache = _runtime_cache_bucket(context, "index_topic_bundle")
+    key = (
+        asset_type,
+        str(metadata.get("symbol", "")).strip(),
+        explicit_code,
+        tuple(keywords[:8]),
+    )
+    if key not in cache:
+        collector = IndexTopicCollector(dict(context.get("config", {})))
+        timeout_seconds = float(dict(context.get("config") or {}).get("index_topic_bundle_timeout_seconds", 0) or 0)
+        timeout_fallback = {
+            "index_snapshot": {},
+            "technical_snapshot": {
+                "status": "blocked",
+                "diagnosis": "timeout",
+                "disclosure": f"指数专题主链拉取超时（>{int(timeout_seconds)}s），本轮按缺失处理，不把它写成已确认趋势。"
+                if timeout_seconds > 0
+                else "指数专题主链当前不可用，本轮按缺失处理。",
+            },
+            "history_snapshots": {},
+            "constituent_weights": pd.DataFrame(),
+            "fallback": "timeout" if timeout_seconds > 0 else "none",
+            "is_fresh": False,
+        }
+        try:
+            cache[key] = _timed_runtime_loader(
+                lambda: collector.get_index_bundle(
+                    index_code=explicit_code,
+                    keywords=keywords,
+                    top_n=10,
+                    reference_date=_context_now(context),
+                ),
+                timeout_seconds=timeout_seconds,
+                fallback=timeout_fallback,
+            )
+        except Exception as exc:
+            cache[key] = {
+                "index_snapshot": {},
+                "technical_snapshot": {
+                    "status": "blocked",
+                    "diagnosis": "fetch_error",
+                    "disclosure": f"指数专题主链当前不可用，本轮按缺失处理：{exc}",
+                },
+                "constituent_weights": pd.DataFrame(),
+                "fallback": "none",
+                "is_fresh": False,
+            }
+    return dict(cache.get(key) or {})
+
+
+def _timed_runtime_loader(loader, *, timeout_seconds: float, fallback: Any) -> Any:
+    timeout = float(timeout_seconds or 0)
+    if timeout <= 0:
+        return loader()
+    state: Dict[str, Any] = {"value": fallback, "error": None}
+
+    def _run() -> None:
+        try:
+            state["value"] = loader()
+        except BaseException as exc:  # pragma: no cover - surfaced after join
+            state["error"] = exc
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        return fallback
+    if state["error"] is not None:
+        raise state["error"]
+    return state["value"]
+
+
+def _enrich_metadata_with_index_topic_bundle(
+    metadata: Mapping[str, Any],
+    bundle: Mapping[str, Any],
+) -> Dict[str, Any]:
+    enriched = dict(metadata)
+    snapshot = dict(bundle.get("index_snapshot") or {})
+    technical = dict(bundle.get("technical_snapshot") or {})
+    history_snapshots = dict(bundle.get("history_snapshots") or {})
+    weights = bundle.get("constituent_weights")
+    if snapshot:
+        index_name = str(snapshot.get("index_name", "")).strip()
+        index_code = str(snapshot.get("index_code", "")).strip()
+        if index_name:
+            enriched.setdefault("benchmark", index_name)
+            enriched.setdefault("benchmark_name", index_name)
+            enriched["index_framework_label"] = index_name
+        if index_code:
+            enriched.setdefault("benchmark_symbol", index_code)
+            enriched.setdefault("index_code", index_code)
+    if technical:
+        enriched["index_technical_snapshot"] = technical
+    if history_snapshots:
+        enriched["index_history_snapshots"] = history_snapshots
+    if isinstance(weights, pd.DataFrame) and not weights.empty:
+        top_weight = pd.to_numeric(weights.get("weight", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+        if not top_weight.empty:
+            enriched["index_top_weight_sum"] = float(top_weight.sum())
+        first = weights.iloc[0]
+        enriched["index_top_constituent_name"] = str(first.get("name", "")).strip()
+        enriched["index_top_constituent_symbol"] = str(first.get("symbol", "")).strip()
+    if bundle:
+        enriched["index_topic_bundle"] = bundle
+    return enriched
+
+
+def _index_history_signal_contract(
+    index_name: str,
+    snapshot: Mapping[str, Any],
+    *,
+    period: str,
+) -> Dict[str, Any]:
+    cleaned_name = str(index_name or "").strip()
+    cleaned_period = str(period or "").strip().lower()
+    period_label = {"weekly": "周线", "monthly": "月线"}.get(cleaned_period, cleaned_period or "历史")
+    source_label = f"指数{period_label}"
+    signal_type = f"{period_label}结构"
+    trend_label = str(snapshot.get("trend_label", "")).strip()
+    momentum_label = str(snapshot.get("momentum_label", "")).strip()
+    summary = str(snapshot.get("summary", "")).strip()
+    strength = str(snapshot.get("signal_strength", "")).strip() or "中"
+    if trend_label in {"趋势偏强", "修复中"}:
+        prefix = f"偏利多，先看 `{cleaned_name}` 的{period_label}是否继续 {trend_label}。"
+    elif trend_label == "趋势偏弱":
+        prefix = f"偏谨慎，先看 `{cleaned_name}` 的{period_label}是否继续承压。"
+    elif trend_label:
+        prefix = f"先按 `{cleaned_name}` 的{period_label}{trend_label}理解，不把单日波动误判成趋势。"
+    else:
+        prefix = f"先按 `{cleaned_name}` 的{period_label}结构理解，不把单日波动误判成趋势。"
+    if summary:
+        conclusion = f"{prefix} {summary}".strip()
+    else:
+        conclusion = prefix
+    if momentum_label and momentum_label != "动能中性":
+        conclusion = f"{conclusion}（{momentum_label}）"
+    return {
+        "source_label": source_label,
+        "signal_type": signal_type,
+        "strength": strength,
+        "conclusion": conclusion,
+        "trend_label": trend_label,
+        "momentum_label": momentum_label,
+        "summary": summary,
+    }
+
+
+def refresh_etf_analysis_report_fields(
+    analysis: Mapping[str, Any],
+    *,
+    config: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    updated = dict(analysis or {})
+    asset_type = str(updated.get("asset_type", "")).strip()
+    fund_profile = dict(updated.get("fund_profile") or {})
+    if asset_type not in {"cn_etf", "cn_fund"} or not fund_profile:
+        return updated
+
+    metadata = _enrich_metadata_with_fund_profile(dict(updated.get("metadata") or {}), fund_profile)
+    context = {
+        "config": dict(config or {}),
+        "as_of": str(updated.get("generated_at", "")).strip()[:10] or datetime.now().strftime("%Y-%m-%d"),
+        "drivers": {
+            "industry_spot": pd.DataFrame(),
+            "concept_spot": pd.DataFrame(),
+            "hot_rank": pd.DataFrame(),
+        },
+        "runtime_caches": {},
+        "fund_profile": fund_profile,
+    }
+    industry_snapshot = _context_industry_index_snapshot(metadata, context, fund_profile=fund_profile)
+    if industry_snapshot:
+        metadata = _enrich_metadata_with_industry_index_snapshot(metadata, industry_snapshot)
+    index_topic_bundle = _context_index_topic_bundle(metadata, context, fund_profile=fund_profile)
+    if index_topic_bundle:
+        metadata = _enrich_metadata_with_index_topic_bundle(metadata, index_topic_bundle)
+    updated["metadata"] = metadata
+
+    benchmark_name = str(metadata.get("benchmark_name", "")).strip() or str(metadata.get("benchmark", "")).strip()
+    benchmark_symbol = str(metadata.get("benchmark_symbol", "")).strip() or str(metadata.get("index_code", "")).strip()
+    if benchmark_name:
+        updated["benchmark_name"] = benchmark_name
+    if benchmark_symbol:
+        updated["benchmark_symbol"] = benchmark_symbol
+
+    refreshed_rows = _market_event_rows_from_context(metadata, context, fund_profile)
+    if refreshed_rows:
+        updated["market_event_rows"] = refreshed_rows
+    return updated
+
+
+def _index_topic_rows_from_bundle(
+    metadata: Mapping[str, Any],
+    bundle: Mapping[str, Any],
+    *,
+    as_of: str,
+) -> List[List[str]]:
+    snapshot = dict(bundle.get("index_snapshot") or {})
+    technical = dict(bundle.get("technical_snapshot") or {})
+    weights = bundle.get("constituent_weights")
+    if not snapshot and not technical:
+        return []
+
+    asset_type = str(metadata.get("asset_type", "")).strip()
+    symbol = str(metadata.get("symbol", "")).strip()
+    display_name = str(metadata.get("name", symbol)).strip() or symbol
+    index_name = str(snapshot.get("index_name", "") or metadata.get("benchmark_name", "") or metadata.get("benchmark", "")).strip()
+    if not index_name:
+        return []
+
+    pct_change = pd.to_numeric(pd.Series([technical.get("pct_change")]), errors="coerce").iloc[0]
+    strength = str(technical.get("signal_strength", "")).strip() or ("中" if pd.isna(pct_change) else ("高" if float(pct_change) >= 3 else "中" if float(pct_change) >= 1 else "低"))
+    rows: List[List[str]] = []
+
+    summary_bits: List[str] = []
+    pe_ttm = pd.to_numeric(pd.Series([snapshot.get("pe_ttm")]), errors="coerce").iloc[0]
+    pb = pd.to_numeric(pd.Series([snapshot.get("pb")]), errors="coerce").iloc[0]
+    if not pd.isna(pct_change):
+        summary_bits.append(f"{float(pct_change):+.2f}%")
+    if not pd.isna(pe_ttm):
+        summary_bits.append(f"PE {float(pe_ttm):.1f}x")
+    if not pd.isna(pb):
+        summary_bits.append(f"PB {float(pb):.1f}x")
+
+    if asset_type in {"cn_etf", "cn_fund"}:
+        title = f"跟踪指数框架：{display_name} 跟踪 {index_name}"
+        source_label = "跟踪指数/框架"
+        signal_type = "标准指数框架"
+    elif asset_type == "cn_index":
+        title = f"指数主链：{index_name}"
+        source_label = "指数主链"
+        signal_type = "标准指数框架"
+    else:
+        title = f"相关指数框架：{index_name}"
+        source_label = "相关指数/框架"
+        signal_type = "行业/指数映射"
+    if summary_bits:
+        title += f"（{' / '.join(summary_bits)}）"
+    trend_label = str(technical.get("trend_label", "")).strip()
+    conclusion = (
+        f"偏利多，先看 `{index_name}` 的标准指数框架是否继续支撑当前方向。"
+        if trend_label in {"趋势偏强", "修复中"}
+        else f"偏谨慎，先看 `{index_name}` 的指数主链是否继续承压。"
+        if trend_label
+        else f"先按 `{index_name}` 的标准指数框架理解，不把模糊板块词当主线。"
+    )
+    rows.append([as_of, title, source_label, strength, index_name, "", signal_type, conclusion])
+
+    history_snapshots = dict(bundle.get("history_snapshots") or {})
+    for period in ("monthly", "weekly"):
+        history_snapshot = dict(history_snapshots.get(period) or {})
+        if not history_snapshot or str(history_snapshot.get("status", "")).strip() != "matched":
+            continue
+        history_contract = _index_history_signal_contract(index_name, history_snapshot, period=period)
+        rows.append(
+            [
+                as_of,
+                f"指数{history_contract['source_label'].replace('指数', '')}：{index_name}"
+                + (f" {history_contract['trend_label']}" if history_contract["trend_label"] else ""),
+                history_contract["source_label"],
+                history_contract["strength"],
+                index_name,
+                "",
+                history_contract["signal_type"],
+                history_contract["conclusion"],
+            ]
+        )
+
+    if trend_label:
+        momentum_label = str(technical.get("momentum_label", "")).strip()
+        tech_detail = str(technical.get("detail", "")).strip()
+        tech_title = f"指数技术面：{index_name} {trend_label}"
+        if momentum_label:
+            tech_title += f" / {momentum_label}"
+        rows.append(
+            [
+                as_of,
+                tech_title,
+                "指数技术面",
+                strength,
+                index_name,
+                "",
+                "技术确认",
+                (f"优先按 `{trend_label}` 理解跟踪指数的相对强弱和节奏。" + (f" {tech_detail}" if tech_detail else "")).strip(),
+            ]
+        )
+
+    if isinstance(weights, pd.DataFrame) and not weights.empty:
+        working = weights.copy()
+        working["weight"] = pd.to_numeric(working.get("weight", pd.Series(dtype=float)), errors="coerce")
+        working = working.dropna(subset=["weight"])
+        matched = working[working.get("symbol", pd.Series("", index=working.index)).astype(str).str.strip() == symbol] if symbol else pd.DataFrame()
+        if asset_type == "cn_stock" and not matched.empty:
+            weight_value = float(matched.iloc[0]["weight"])
+            rows.append(
+                [
+                    as_of,
+                    f"指数权重位置：{display_name} 在 {index_name} 中权重约 {weight_value:.2f}%",
+                    "指数成分/权重",
+                    "中" if weight_value < 3 else "高",
+                    index_name,
+                    "",
+                    "龙头权重暴露",
+                    f"标准指数成分表显示 `{display_name}` 在 `{index_name}` 中具备明确权重位置，不再只靠关键词猜主线。",
+                ]
+            )
+        elif asset_type in {"cn_etf", "cn_fund", "cn_index"}:
+            top_concentration = float(working["weight"].sum()) if not working.empty else 0.0
+            leaders = "、".join(
+                f"{str(row.get('name', '')).strip() or str(row.get('symbol', '')).strip()} {float(row.get('weight', 0.0)):.1f}%"
+                for _, row in working.head(3).iterrows()
+            )
+            rows.append(
+                [
+                    as_of,
+                    f"指数成分权重：前十权重合计 {top_concentration:.1f}%"
+                    + (f"；核心成分 {leaders}" if leaders else ""),
+                    "指数成分/权重",
+                    "中" if top_concentration < 40 else "高",
+                    index_name,
+                    "",
+                    "成分权重结构",
+                    f"指数主链已明确 `{index_name}` 的核心成分和权重结构，推荐理由优先按标准指数暴露理解。",
+                ]
+            )
+    return rows
+
+
+def _etf_profile_proxy_rows(
+    metadata: Mapping[str, Any],
+    fund_profile: Mapping[str, Any],
+    *,
+    as_of: str,
+    has_index_weight_row: bool,
+    has_standard_industry_row: bool,
+) -> List[List[str]]:
+    asset_type = str(metadata.get("asset_type", "")).strip()
+    if asset_type not in {"cn_etf", "cn_fund"}:
+        return []
+
+    display_name = str(metadata.get("name", "")).strip() or str(metadata.get("symbol", "")).strip()
+    rows: List[List[str]] = []
+    etf_snapshot = dict((fund_profile or {}).get("etf_snapshot") or {})
+
+    share_change = pd.to_numeric(pd.Series([etf_snapshot.get("etf_share_change")]), errors="coerce").dropna()
+    share_change_pct = pd.to_numeric(pd.Series([etf_snapshot.get("etf_share_change_pct")]), errors="coerce").dropna()
+    share_as_of = str(etf_snapshot.get("share_as_of", "")).strip()
+    if not share_change.empty:
+        share_value = float(share_change.iloc[0])
+        pct_text = f" ({float(share_change_pct.iloc[0]):+.2f}%)" if not share_change_pct.empty else ""
+        if share_value > 0:
+            title = f"份额申赎确认：{display_name} 最近净创设 {share_value:+.2f} 亿份{pct_text}"
+            signal_type = "份额净创设"
+            strength = "高" if share_value >= 5 else "中"
+            conclusion = "偏利多，ETF 份额扩张说明场外申购在配合当前主线，不只是价格抬升。"
+        elif share_value < 0:
+            title = f"份额申赎提示：{display_name} 最近净赎回 {share_value:+.2f} 亿份{pct_text}"
+            signal_type = "份额净赎回"
+            strength = "高" if share_value <= -5 else "中"
+            conclusion = "偏谨慎，ETF 最近有净赎回，当前价格变化还没有完全得到份额流入确认。"
+        else:
+            title = f"份额申赎跟踪：{display_name} 最近份额基本持平"
+            signal_type = "份额中性"
+            strength = "低"
+            conclusion = "中性，当前 ETF 份额没有明显扩张或赎回，先继续看主线和价格确认。"
+        if share_as_of:
+            title += f"（{share_as_of}）"
+        rows.append(
+            [
+                as_of,
+                title,
+                "ETF份额规模",
+                strength,
+                display_name,
+                "",
+                signal_type,
+                conclusion,
+            ]
+        )
+
+    top_holdings = list((fund_profile or {}).get("top_holdings") or [])
+    if (not has_index_weight_row) and top_holdings:
+        holding_bits: List[str] = []
+        for item in top_holdings[:3]:
+            holding_name = str(item.get("股票名称", "")).strip() or str(item.get("股票代码", "")).strip()
+            weight_value = pd.to_numeric(pd.Series([item.get("占净值比例")]), errors="coerce").iloc[0]
+            if not holding_name:
+                continue
+            if pd.notna(weight_value):
+                holding_bits.append(f"{holding_name} {float(weight_value):.1f}%")
+            else:
+                holding_bits.append(holding_name)
+        if holding_bits:
+            rows.append(
+                [
+                    as_of,
+                    f"跟踪成分画像：{display_name} 最近披露持仓集中在 " + "、".join(holding_bits),
+                    "ETF持仓代理",
+                    "中",
+                    display_name,
+                    "",
+                    "成分画像",
+                    "当前未拿到可用 index_weight，先用 ETF 最近披露持仓做代理，不把它误写成实时指数权重。",
+                ]
+            )
+
+    industry_rows = list((fund_profile or {}).get("industry_allocation") or [])
+    if (not has_standard_industry_row) and industry_rows:
+        exposure_bits: List[str] = []
+        for item in industry_rows[:3]:
+            industry_name = str(item.get("行业类别", "")).strip()
+            ratio_value = pd.to_numeric(pd.Series([item.get("占净值比例")]), errors="coerce").iloc[0]
+            if not industry_name or industry_name in {"综合"}:
+                continue
+            if pd.notna(ratio_value):
+                exposure_bits.append(f"{industry_name} {float(ratio_value):.1f}%")
+            else:
+                exposure_bits.append(industry_name)
+        if exposure_bits:
+            rows.append(
+                [
+                    as_of,
+                    f"行业暴露画像：{display_name} 最近披露主要暴露在 " + "、".join(exposure_bits),
+                    "ETF行业代理",
+                    "中",
+                    display_name,
+                    "",
+                    "行业归属",
+                    "当前未拿到可用申万/中信行业指数链，先用 ETF 最近披露行业分布做代理，不把它误写成实时行业扩散。",
+                ]
+            )
+
+    return rows
+
+
+def _preferred_industry_index_items(
+    snapshot: Mapping[str, Any],
+    *,
+    limit: int = 1,
+) -> List[Dict[str, Any]]:
+    items = [dict(item) for item in list(snapshot.get("items") or []) if dict(item)]
+    if not items:
+        return []
+
+    def _sort_key(item: Mapping[str, Any]) -> tuple[int, int, float]:
+        family_rank = {"sw": 0, "ci": 1}.get(str(item.get("family", "")).strip(), 9)
+        level_rank = {"L2": 0, "L3": 1, "L1": 2}.get(str(item.get("level", "")).strip(), 9)
+        pct_value = pd.to_numeric(pd.Series([item.get("pct_change")]), errors="coerce").iloc[0]
+        strength_rank = abs(float(pct_value)) if not pd.isna(pct_value) else -1.0
+        return (family_rank, level_rank, -strength_rank)
+
+    selected: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in sorted(items, key=_sort_key):
+        identity = (
+            str(item.get("family", "")).strip(),
+            str(item.get("index_code", "")).strip(),
+            str(item.get("index_name", "")).strip(),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        selected.append(item)
+        if len(selected) >= max(int(limit), 1):
+            break
+    return selected
+
+
+def _industry_index_rows_from_snapshot(
+    metadata: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    *,
+    as_of: str,
+) -> List[List[str]]:
+    if str(snapshot.get("status", "")).strip() != "matched":
+        return []
+    asset_type = str(metadata.get("asset_type", "")).strip()
+    subject_name = str(metadata.get("name", "")).strip() or str(metadata.get("symbol", "")).strip()
+    if not subject_name:
+        return []
+
+    limit = 1 if asset_type == "cn_stock" else 2 if asset_type == "cn_etf" else 1
+    rows: List[List[str]] = []
+    for item in _preferred_industry_index_items(snapshot, limit=limit):
+        family_label = str(item.get("family_label", "")).strip() or ("申万" if str(item.get("family", "")).strip() == "sw" else "中信")
+        framework_label = str(item.get("framework_source", "")).strip() or f"{family_label}行业"
+        index_name = str(item.get("index_name", "")).strip()
+        if not index_name:
+            continue
+        pct_value = pd.to_numeric(pd.Series([item.get("pct_change")]), errors="coerce").iloc[0]
+        move_value = None if pd.isna(pct_value) else float(pct_value)
+        move_text = f"（{move_value:+.2f}%）" if move_value is not None else ""
+        strength = str(item.get("signal_strength", "")).strip() or "中"
+        if asset_type == "cn_etf":
+            signal_type = "行业/指数框架" if move_value is None or move_value >= 0 else "行业框架承压"
+            conclusion = (
+                f"偏利多，先按 `{framework_label}` 对应的 `{index_name}` 去理解它的相对强弱和行业扩散。"
+                if move_value is None or move_value >= 0
+                else f"偏谨慎，`{index_name}` 当前回落，先别把标准行业归属直接写成顺风催化。"
+            )
+            title = f"跟踪指数/行业框架：{subject_name} 对应 {framework_label}·{index_name}{move_text}"
+        else:
+            signal_type = "标准行业归因" if move_value is None or move_value >= 0 else "行业框架承压"
+            conclusion = (
+                f"偏利多，`{subject_name}` 先按 `{framework_label}` 的 `{index_name}` 去理解，而不是继续靠模糊板块词。"
+                if move_value is None or move_value >= 0
+                else f"偏谨慎，`{subject_name}` 虽属于 `{index_name}`，但对应标准行业指数当前本身在回落。"
+            )
+            title = f"标准行业框架：{subject_name} 属于 {framework_label}·{index_name}{move_text}"
+        rows.append(
+            [
+                as_of,
+                title,
+                f"{family_label}行业框架",
+                strength,
+                index_name,
+                "",
+                signal_type,
+                conclusion,
+            ]
+        )
+    return rows
+
+
 def _context_stock_news(symbol: str, context: Mapping[str, Any]) -> List[Mapping[str, Any]]:
     cleaned = str(symbol).strip()
     if not cleaned:
+        return []
+    if _runtime_feature_disabled(context, "skip_cn_stock_direct_news_runtime"):
         return []
     cache = _runtime_cache_bucket(context, "stock_news")
     if cleaned not in cache:
@@ -1601,15 +2439,59 @@ def _context_cn_index_proxy_candidates(
     return candidates
 
 
+def _concentration_proxy_from_index_topic_bundle(
+    bundle: Mapping[str, Any],
+    *,
+    symbol: str = "",
+) -> Dict[str, Any]:
+    weights = bundle.get("constituent_weights")
+    if not isinstance(weights, pd.DataFrame) or weights.empty:
+        return {}
+    working = weights.copy()
+    working["weight"] = pd.to_numeric(working.get("weight", pd.Series(dtype=float)), errors="coerce")
+    working = working.dropna(subset=["weight"])
+    if working.empty:
+        return {}
+
+    top5 = working.head(5).copy()
+    top_concentration = float(top5["weight"].sum())
+    if top_concentration <= 0:
+        return {}
+
+    cleaned_symbol = str(symbol).strip()
+    constituents = top5.to_dict("records")
+    matched_current_symbol = False
+    if cleaned_symbol:
+        matched_current_symbol = any(str(item.get("symbol", "")).strip() == cleaned_symbol for item in constituents)
+
+    return {
+        "top_concentration": top_concentration,
+        "coverage_weight": top_concentration,
+        "coverage_ratio": 1.0,
+        "coverage_count": len(constituents),
+        "constituents": constituents,
+        "matched_current_symbol": matched_current_symbol,
+        "index_snapshot": dict(bundle.get("index_snapshot") or {}),
+        "source": "index_topic_bundle",
+        "fallback": str(bundle.get("fallback", "none") or "none"),
+        "as_of": str(bundle.get("as_of", "")).strip(),
+        "disclosure": "机构集中度代理优先复用已命中的指数成分权重主链，不重复走慢速指数代理聚合。",
+    }
+
+
 def _context_cn_index_concentration_proxy(
     keywords: Sequence[str],
     *,
     symbol: str = "",
+    prefetched_bundle: Optional[Mapping[str, Any]] = None,
     context: Mapping[str, Any],
     config: Mapping[str, Any],
 ) -> Dict[str, Any]:
     cleaned_symbol = str(symbol).strip()
     cleaned_keywords = [str(item).strip() for item in keywords if str(item).strip()]
+    bundle_proxy = _concentration_proxy_from_index_topic_bundle(prefetched_bundle or {}, symbol=cleaned_symbol)
+    if bundle_proxy:
+        return bundle_proxy
     primary_candidates = _context_cn_index_proxy_candidates(cleaned_keywords, context=context, config=config)
     for snapshot in primary_candidates:
         proxies = _context_cn_index_financial_proxies(
@@ -1683,6 +2565,12 @@ def _valuation_keywords(
         industry_keys = _fund_industry_keywords(fund_profile)
         holdings_text = " ".join(_fund_top_holding_names(fund_profile))
         semis_exposed = any(token in holdings_text for token in ("寒武纪", "中芯", "北方华创", "澜起", "长电", "韦尔", "兆易", "芯片", "半导体"))
+        if semis_exposed:
+            theme_keywords = [
+                item
+                for item in theme_keywords
+                if str(item).strip() not in SEMICONDUCTOR_VALUATION_NOISY_KEYWORDS
+            ]
         if benchmark_keys:
             keywords.extend(benchmark_keys)
         if industry_keys:
@@ -1799,6 +2687,8 @@ def _board_keywords(metadata: Mapping[str, Any]) -> List[str]:
     sector = str(metadata.get("sector", "")).strip()
     name = str(metadata.get("name", "")).strip()
     chain_nodes = [str(item).strip() for item in metadata.get("chain_nodes", []) if str(item).strip()]
+    text_blob = " ".join([name, sector, *chain_nodes])
+    semiconductor_focused = _contains_any(text_blob, ["半导体", "芯片", "晶圆", "存储", "封装", "HBM", "Chiplet"])
     keywords = [
         *_valuation_keywords(metadata),
         *BOARD_MATCH_ALIASES.get(sector, []),
@@ -1806,6 +2696,25 @@ def _board_keywords(metadata: Mapping[str, Any]) -> List[str]:
         name,
         *chain_nodes,
     ]
+    if semiconductor_focused:
+        broad_sector_tokens = {"科技", "信息技术", "通信", "通信设备", "消费电子", "人工智能", "AI", "算力", "软件服务"}
+        keywords = [
+            keyword
+            for keyword in keywords
+            if str(keyword).strip() not in broad_sector_tokens or str(keyword).strip() == sector
+        ]
+        keywords = [
+            "半导体",
+            "芯片",
+            "半导体设备",
+            "芯片设备",
+            "集成电路",
+            "存储",
+            "晶圆",
+            "晶圆制造",
+            "半导体材料",
+            *keywords,
+        ]
     deduped: List[str] = []
     for keyword in keywords:
         cleaned = str(keyword).strip()
@@ -2133,11 +3042,442 @@ def _hot_rank_snapshot(metadata: Mapping[str, Any], drivers: Mapping[str, Any]) 
     }
 
 
+def _market_event_rows_from_context(
+    metadata: Mapping[str, Any],
+    context: Mapping[str, Any],
+    fund_profile: Optional[Mapping[str, Any]] = None,
+) -> List[List[str]]:
+    config = dict(context.get("config") or {})
+    drivers = _context_drivers(context, config)
+    rows: List[List[str]] = []
+    as_of = str(context.get("as_of", "")).strip()
+    board_metadata = dict(metadata or {})
+    if str(board_metadata.get("asset_type", "")).strip() in {"cn_etf", "cn_fund"} and fund_profile:
+        board_metadata["chain_nodes"] = _unique_strings(
+            [
+                *[str(item).strip() for item in board_metadata.get("chain_nodes", []) if str(item).strip()],
+                *_fund_theme_keywords(board_metadata, fund_profile)[:4],
+                *_fund_benchmark_keywords(fund_profile)[:3],
+                *_fund_industry_keywords(fund_profile)[:3],
+            ]
+        )
+
+    industry_index_snapshot = dict(board_metadata.get("industry_index_snapshot") or {})
+    if not industry_index_snapshot:
+        industry_index_snapshot = _context_industry_index_snapshot(board_metadata, context, fund_profile=fund_profile)
+    if industry_index_snapshot:
+        board_metadata = _enrich_metadata_with_industry_index_snapshot(board_metadata, industry_index_snapshot)
+        rows.extend(_industry_index_rows_from_snapshot(board_metadata, industry_index_snapshot, as_of=as_of))
+    index_topic_bundle = dict(board_metadata.get("index_topic_bundle") or {})
+    if not index_topic_bundle:
+        index_topic_bundle = _context_index_topic_bundle(board_metadata, context, fund_profile=fund_profile)
+    if index_topic_bundle:
+        board_metadata = _enrich_metadata_with_index_topic_bundle(board_metadata, index_topic_bundle)
+        rows.extend(_index_topic_rows_from_bundle(board_metadata, index_topic_bundle, as_of=as_of))
+    etf_proxy_rows: List[List[str]] = []
+    if str(board_metadata.get("asset_type", "")).strip() in {"cn_etf", "cn_fund"} and fund_profile:
+        etf_proxy_rows = _etf_profile_proxy_rows(
+            board_metadata,
+            fund_profile,
+            as_of=as_of,
+            has_index_weight_row=any(str(row[2] if len(row) > 2 else "").strip() == "指数成分/权重" for row in rows),
+            has_standard_industry_row=any(
+                str(row[2] if len(row) > 2 else "").strip() in {"申万行业框架", "中信行业框架"}
+                for row in rows
+            ),
+        )
+    standard_impacts = {
+        str(item.get("index_name", "")).strip()
+        for item in list(industry_index_snapshot.get("items") or [])
+        if str(item.get("index_name", "")).strip()
+    }
+    deferred_rows: List[List[str]] = []
+
+    board_row, frame, level = _matched_sector_spot_row(board_metadata, drivers)
+    if board_row is not None and frame is not None and not frame.empty:
+        name_col = _first_column(frame, ("板块名称", "名称", "概念名称"))
+        move_value = _row_number(board_row, ("涨跌幅", "今日涨跌幅"))
+        if name_col and move_value is not None:
+            board_name = str(board_row.get(name_col, "")).strip()
+            skip_generic_industry_row = (
+                level == "industry"
+                and board_name
+                and any(
+                    board_name == impact or board_name in impact or impact in board_name
+                    for impact in standard_impacts
+                )
+            )
+            leader_col = _first_column(frame, ("领涨股票", "领涨股", "领涨证券"))
+            leader_name = str(board_row.get(leader_col, "")).strip() if leader_col else ""
+            if not skip_generic_industry_row:
+                title_prefix = (
+                    "A股概念领涨"
+                    if move_value >= 0 and level == "concept"
+                    else "A股概念承压"
+                    if level == "concept"
+                    else "A股行业走强"
+                    if move_value >= 0
+                    else "A股行业承压"
+                )
+                source_label = "A股概念/盘面" if level == "concept" else "A股行业/盘面"
+                title = f"{title_prefix}：{board_name}（{move_value:+.2f}%）"
+                if leader_name:
+                    title += f"；领涨 {leader_name}"
+                abs_move = abs(move_value)
+                if abs_move >= 3:
+                    strength = "高"
+                elif abs_move >= 1:
+                    strength = "中"
+                else:
+                    strength = "低"
+                signal_type = "主线增强" if move_value >= 0 else "主线承压"
+                conclusion = (
+                    f"偏利多，先看 `{board_name}` 能否继续扩散。"
+                    if move_value >= 0
+                    else f"偏谨慎，先看 `{board_name}` 是否继续走弱。"
+                )
+                deferred_rows.append([as_of, title, source_label, strength, board_name, "", signal_type, conclusion])
+
+    hot_rank = _hot_rank_snapshot(board_metadata, drivers)
+    hot_name = str(hot_rank.get("name", "")).strip()
+    hot_rank_value = hot_rank.get("rank")
+    if hot_name and hot_rank_value is not None:
+        deferred_rows.append(
+            [
+                as_of,
+                f"A股热股前排：{hot_name}（热度排名 {int(hot_rank_value)}）",
+                "A股热股/盘面",
+                "中",
+                hot_name,
+                "",
+                "热度抬升",
+                f"偏利多，但先看 `{hot_name}` 能否把热度转成价格和成交确认。",
+            ]
+        )
+
+    if str(board_metadata.get("asset_type", "")).strip() == "cn_stock":
+        theme_membership = _cn_stock_theme_membership_snapshot(board_metadata, context)
+        for item in list(theme_membership.get("items") or [])[:2]:
+            board_name = str(item.get("board_name", "")).strip()
+            board_type_label = str(item.get("board_type_label", "题材")).strip() or "题材"
+            stock_name = str(board_metadata.get("name", "")).strip() or str(board_metadata.get("symbol", "")).strip()
+            if not board_name or not stock_name:
+                continue
+            pct_change = item.get("pct_change")
+            move_text = f"（{float(pct_change):+.2f}%）" if pct_change is not None else ""
+            signal_type = "主线归因" if pct_change is None or float(pct_change) >= 0 else "主题回落"
+            conclusion = (
+                f"偏利多，`{stock_name}` 属于 `{board_name}` 链路，当前可直接按主题成员去解释它的强弱。"
+                if signal_type == "主线归因"
+                else f"偏谨慎，`{stock_name}` 虽属 `{board_name}` 链路，但当前主题本身在回落。"
+            )
+            rows.append(
+                [
+                    as_of,
+                    f"A股{board_type_label}成员：{stock_name} 属于 {board_name}{move_text}",
+                    "同花顺主题成分",
+                    str(item.get("signal_strength", "中")).strip() or "中",
+                    board_name,
+                    "",
+                    signal_type,
+                    conclusion,
+                ]
+            )
+
+        regulatory_snapshot = _cn_stock_regulatory_risk_snapshot(board_metadata, context)
+        components = dict(regulatory_snapshot.get("components") or {})
+        stock_name = str(board_metadata.get("name", "")).strip() or str(board_metadata.get("symbol", "")).strip()
+        if bool(regulatory_snapshot.get("active_st")):
+            detail = str(dict(components.get("stock_st") or {}).get("detail", "")).strip() or str(regulatory_snapshot.get("detail", "")).strip()
+            rows.append(
+                [
+                    as_of,
+                    f"ST 风险提示：{stock_name} 当前仍在风险警示板名单",
+                    "交易所风险专题",
+                    "高",
+                    stock_name,
+                    "",
+                    "风险提示",
+                    detail or "偏谨慎，当前直接按 ST / *ST 高风险样本处理，不把热度写成可执行催化。",
+                ]
+            )
+        elif int(regulatory_snapshot.get("active_alert_count") or 0) > 0:
+            detail = str(dict(components.get("stk_alert") or {}).get("detail", "")).strip() or str(regulatory_snapshot.get("detail", "")).strip()
+            rows.append(
+                [
+                    as_of,
+                    f"交易所重点提示：{stock_name} 当前仍在重点提示证券名单",
+                    "交易所风险专题",
+                    "中",
+                    stock_name,
+                    "",
+                    "风险提示",
+                    detail or "偏谨慎，先按高波动/高关注样本管理仓位和节奏。",
+                ]
+            )
+        elif int(regulatory_snapshot.get("high_shock_count") or 0) > 0:
+            detail = str(dict(components.get("stk_high_shock") or {}).get("detail", "")).strip() or str(regulatory_snapshot.get("detail", "")).strip()
+            rows.append(
+                [
+                    as_of,
+                    f"异常波动提示：{stock_name} 近窗口命中过严重异常波动",
+                    "交易所风险专题",
+                    "中",
+                    stock_name,
+                    "",
+                    "风险提示",
+                    detail or "偏谨慎，先把它当成高波动样本，而不是普通趋势延续。",
+                ]
+            )
+
+        chip_snapshot = _cn_stock_chip_snapshot(board_metadata, context)
+        if str(chip_snapshot.get("status", "")).strip() == "matched" and bool(chip_snapshot.get("is_fresh")):
+            winner_rate = pd.to_numeric(pd.Series([chip_snapshot.get("winner_rate_pct")]), errors="coerce").dropna()
+            price_vs_avg = pd.to_numeric(pd.Series([chip_snapshot.get("price_vs_weight_avg_pct")]), errors="coerce").dropna()
+            above_price = pd.to_numeric(pd.Series([chip_snapshot.get("above_price_pct")]), errors="coerce").dropna()
+            if not winner_rate.empty and not price_vs_avg.empty and float(winner_rate.iloc[0]) >= 65 and float(price_vs_avg.iloc[0]) >= 0:
+                rows.append(
+                    [
+                        as_of,
+                        f"筹码确认：{stock_name} 胜率约 {float(winner_rate.iloc[0]):.1f}%，现价已回到平均成本上方",
+                        "筹码分布专题",
+                        "中",
+                        stock_name,
+                        "",
+                        "筹码确认",
+                        str(chip_snapshot.get("detail", "")).strip() or "偏利多，真实筹码分布开始配合价格修复。",
+                    ]
+                )
+            elif not above_price.empty and float(above_price.iloc[0]) >= 60:
+                rows.append(
+                    [
+                        as_of,
+                        f"筹码压力提示：{stock_name} 上方套牢盘约 {float(above_price.iloc[0]):.1f}%",
+                        "筹码分布专题",
+                        "中",
+                        stock_name,
+                        "",
+                        "筹码承压",
+                        str(chip_snapshot.get("detail", "")).strip() or "偏谨慎，真实筹码分布仍提示上方抛压偏重。",
+                    ]
+                )
+
+        capital_flow_snapshot = _cn_stock_capital_flow_snapshot(board_metadata, context)
+        flow_status = str(capital_flow_snapshot.get("status", "")).strip()
+        flow_is_fresh = bool(capital_flow_snapshot.get("is_fresh"))
+        direct_main_flow = pd.to_numeric(pd.Series([capital_flow_snapshot.get("direct_main_flow")]), errors="coerce").dropna()
+        board_main_flow = pd.to_numeric(pd.Series([capital_flow_snapshot.get("board_main_flow")]), errors="coerce").dropna()
+        if flow_is_fresh and flow_status in {"matched", "proxy"}:
+            if not direct_main_flow.empty and abs(float(direct_main_flow.iloc[0])) >= 50_000_000:
+                rows.append(
+                    [
+                        as_of,
+                        f"个股资金流确认：{stock_name} 当日主力净{'流入' if float(direct_main_flow.iloc[0]) >= 0 else '流出'} {_fmt_yi_number(float(direct_main_flow.iloc[0]))}",
+                        "个股资金流向专题",
+                        "中" if abs(float(direct_main_flow.iloc[0])) < 200_000_000 else "高",
+                        stock_name,
+                        "",
+                        "资金承接" if float(direct_main_flow.iloc[0]) >= 0 else "资金承压",
+                        str(capital_flow_snapshot.get("detail", "")).strip()
+                        or ("偏利多，个股主力资金开始给出直接承接。" if float(direct_main_flow.iloc[0]) >= 0 else "偏谨慎，个股主力资金仍在净流出。"),
+                    ]
+                )
+            elif not board_main_flow.empty and abs(float(board_main_flow.iloc[0])) >= 100_000_000:
+                board_name = str(capital_flow_snapshot.get("board_name", "")).strip() or "相关主题"
+                rows.append(
+                    [
+                        as_of,
+                        f"主题资金共振：{board_name} 主力净{'流入' if float(board_main_flow.iloc[0]) >= 0 else '流出'} {_fmt_yi_number(float(board_main_flow.iloc[0]))}",
+                        "个股资金流向专题",
+                        "中",
+                        board_name,
+                        "",
+                        "主题资金共振" if float(board_main_flow.iloc[0]) >= 0 else "主题资金回落",
+                        str(capital_flow_snapshot.get("detail", "")).strip()
+                        or ("偏利多，当前先由行业/概念资金流代理支撑。" if float(board_main_flow.iloc[0]) >= 0 else "偏谨慎，相关主题资金流仍在回落。"),
+                    ]
+                )
+
+        broker_snapshot = _cn_stock_broker_recommend_snapshot(board_metadata, context)
+        broker_status = str(broker_snapshot.get("status", "")).strip()
+        broker_count = int(broker_snapshot.get("latest_broker_count") or 0)
+        broker_delta = broker_snapshot.get("broker_delta")
+        broker_crowding = str(broker_snapshot.get("crowding_level", "")).strip()
+        broker_month = str(broker_snapshot.get("latest_date", "")).strip()
+        if bool(broker_snapshot.get("is_fresh")) and broker_status == "matched" and broker_count >= 2:
+            if broker_crowding == "high":
+                rows.append(
+                    [
+                        as_of,
+                        f"卖方预期过热：{stock_name} 本月获 {broker_count} 家券商金股推荐",
+                        "卖方共识专题",
+                        "中",
+                        stock_name,
+                        "",
+                        "卖方预期过热",
+                        str(broker_snapshot.get("detail", "")).strip()
+                        or "偏谨慎，卖方月度金股覆盖已经偏密，后续更需要业绩或订单验证，而不是只靠一致预期续推。",
+                    ]
+                )
+            else:
+                signal_label = "卖方共识升温" if broker_delta is not None and float(broker_delta) > 0 else "卖方覆盖提升"
+                signal_title = (
+                    f"卖方共识升温：{stock_name} 本月获 {broker_count} 家券商金股推荐"
+                    if signal_label == "卖方共识升温"
+                    else f"卖方覆盖提升：{stock_name} 本月获 {broker_count} 家券商金股推荐"
+                )
+                rows.append(
+                    [
+                        as_of,
+                        signal_title,
+                        "卖方共识专题",
+                        "高" if broker_count >= 5 else "中",
+                        stock_name,
+                        "",
+                        signal_label,
+                        str(broker_snapshot.get("detail", "")).strip()
+                        or "偏利多，卖方月度金股覆盖开始抬升，但这里只当共识热度参考，不替代公司级强催化。",
+                    ]
+                )
+        elif broker_status == "stale" and broker_month:
+            rows.append(
+                [
+                    as_of,
+                    f"卖方共识非当期：{stock_name} 最新券商金股仍停在 {broker_month}",
+                    "卖方共识专题",
+                    "低",
+                    stock_name,
+                    "",
+                    "卖方共识观察",
+                    str(broker_snapshot.get("detail", "")).strip()
+                    or "偏中性，卖方月度金股只命中历史月份，本轮不把旧共识写成本月 fresh 升温。",
+                ]
+            )
+
+        margin_snapshot = _cn_stock_margin_snapshot(board_metadata, context)
+        margin_level = str(margin_snapshot.get("crowding_level", "")).strip()
+        if bool(margin_snapshot.get("is_fresh")) and margin_level in {"high", "medium"}:
+            rows.append(
+                [
+                    as_of,
+                    f"两融拥挤提示：{stock_name} 当前融资盘{'升温明显' if margin_level == 'high' else '仍在升温'}",
+                    "两融专题",
+                    "高" if margin_level == "high" else "中",
+                    stock_name,
+                    "",
+                    "两融拥挤",
+                    str(margin_snapshot.get("detail", "")).strip()
+                    or "偏谨慎，融资盘一致性交易会放大短线波动。",
+                ]
+            )
+
+        board_action_snapshot = _cn_stock_board_action_snapshot(board_metadata, context)
+        if bool(board_action_snapshot.get("is_fresh")):
+            if bool(board_action_snapshot.get("has_positive_signal")):
+                rows.append(
+                    [
+                        as_of,
+                        f"打板信号确认：{stock_name} {'/'.join(list(board_action_snapshot.get('positive_bits') or [])[:2])}",
+                        "龙虎榜/打板专题",
+                        "中",
+                        stock_name,
+                        "",
+                        "龙虎榜确认",
+                        str(board_action_snapshot.get("detail", "")).strip() or "偏利多，微观交易结构开始配合。",
+                    ]
+                )
+            elif bool(board_action_snapshot.get("has_negative_signal")):
+                rows.append(
+                    [
+                        as_of,
+                        f"打板风险提示：{stock_name} {'/'.join(list(board_action_snapshot.get('negative_bits') or [])[:2])}",
+                        "龙虎榜/打板专题",
+                        "中",
+                        stock_name,
+                        "",
+                        "打板过热",
+                        str(board_action_snapshot.get("detail", "")).strip() or "偏谨慎，打板/情绪交易风险偏高。",
+                    ]
+                )
+
+    rows.extend(deferred_rows)
+    rows.extend(etf_proxy_rows)
+    return _trim_market_event_rows(rows, limit=5)
+
+
+def _trim_market_event_rows(rows: Sequence[Sequence[Any]], *, limit: int) -> List[List[Any]]:
+    normalized = [list(row) for row in rows if list(row)]
+    if len(normalized) <= limit:
+        return normalized
+
+    def _priority(row: Sequence[Any], index: int) -> tuple[int, int, int, int]:
+        source = str(row[2] if len(row) > 2 else "").strip()
+        signal = str(row[6] if len(row) > 6 else "").strip()
+        strength = str(row[3] if len(row) > 3 else "").strip()
+        source_rank = 5
+        if source in {"公司公告/结构化", "互动易/投资者关系"}:
+            source_rank = 0
+        elif source == "卖方共识专题":
+            source_rank = 1
+        elif source in {"交易所风险专题", "个股资金流向专题", "两融专题", "龙虎榜/打板专题", "筹码分布专题"}:
+            source_rank = 2
+        elif source in {"申万行业框架", "中信行业框架", "同花顺主题成分"}:
+            source_rank = 4
+        elif source in {"相关指数/框架", "指数技术面", "指数成分/权重"}:
+            source_rank = 5
+        signal_rank = 1
+        if signal in {"管理层口径确认", "公司级直接情报", "卖方共识升温", "卖方覆盖提升", "卖方共识观察"}:
+            signal_rank = 0
+        strength_rank = {"高": 0, "中": 1, "低": 2}.get(strength, 1)
+        return (source_rank, signal_rank, strength_rank, index)
+
+    ranked = sorted(enumerate(normalized), key=lambda item: _priority(item[1], item[0]))
+    selected = [row for _, row in ranked[:limit]]
+    overflow = [row for _, row in ranked[limit:]]
+    has_risk = any(str(row[2] if len(row) > 2 else "").strip() == "交易所风险专题" for row in selected)
+    if has_risk:
+        return selected
+
+    risk_row = next(
+        (row for row in overflow if str(row[2] if len(row) > 2 else "").strip() == "交易所风险专题"),
+        None,
+    )
+    if not risk_row:
+        return selected
+
+    def _replace_first(predicate) -> bool:
+        for idx in range(len(selected) - 1, -1, -1):
+            if predicate(selected[idx]):
+                selected[idx] = risk_row
+                return True
+        return False
+
+    replaced = (
+        _replace_first(lambda row: str(row[2] if len(row) > 2 else "").strip() == "相关指数/框架")
+        or _replace_first(lambda row: str(row[2] if len(row) > 2 else "").strip() == "指数成分/权重")
+        or _replace_first(lambda row: str(row[2] if len(row) > 2 else "").strip() == "指数技术面")
+    )
+    if not replaced:
+        selected[-1] = risk_row
+    return selected
+
+
+@lru_cache(maxsize=8)
 @lru_cache(maxsize=8)
 def _load_catalyst_profiles(path_value: str) -> Dict[str, Any]:
     path = resolve_project_path(path_value)
     payload = load_yaml(path, default={"profiles": {}}) or {"profiles": {}}
     return dict(payload.get("profiles", {}))
+
+
+@lru_cache(maxsize=1)
+def _known_sector_buckets() -> set[str]:
+    profiles = _load_catalyst_profiles("config/catalyst_profiles.yaml")
+    return {
+        *[str(item).strip() for item in GENERIC_CATALYST_PROFILES if str(item).strip()],
+        *[str(item).strip() for item in BOARD_MATCH_ALIASES if str(item).strip()],
+        *[str(item).strip() for item in profiles if str(item).strip()],
+    }
 
 
 def _catalyst_profile(
@@ -2364,6 +3704,13 @@ def _derived_catalyst_profile(metadata: Mapping[str, Any]) -> Dict[str, Any]:
         profile["sector_hint"] = "科技"
         return profile
 
+    exact_sector_profile = dict(_load_catalyst_profiles("config/catalyst_profiles.yaml").get(sector, {}))
+    if exact_sector_profile:
+        profile = _merge_catalyst_profiles(GENERIC_CATALYST_PROFILES.get(sector, {}), exact_sector_profile)
+        profile["profile_name"] = sector
+        profile.setdefault("sector_hint", sector)
+        return profile
+
     if sector in GENERIC_CATALYST_PROFILES:
         profile = dict(GENERIC_CATALYST_PROFILES[sector])
         profile["profile_name"] = sector
@@ -2408,6 +3755,31 @@ def _catalyst_keywords(metadata: Mapping[str, Any]) -> List[str]:
         return stock_base + ["nasdaq", "纳斯达克", "纳指", "big tech", "earnings", "guidance", "ai"]
     result = _metadata_news_keys(metadata)
     return stock_base + [k for k in result if k not in stock_base]
+
+
+def _theme_news_expansion_terms(metadata: Mapping[str, Any], profile: Mapping[str, Any]) -> List[str]:
+    text = " ".join(
+        [
+            str(metadata.get("name", "")).strip(),
+            str(metadata.get("sector", "")).strip(),
+            str(metadata.get("industry", "")).strip(),
+            " ".join(str(item).strip() for item in metadata.get("chain_nodes", []) if str(item).strip()),
+            str(profile.get("profile_name", "")).strip(),
+            " ".join(str(item).strip() for item in profile.get("themes", []) if str(item).strip()),
+        ]
+    )
+    terms: List[str] = []
+    if _contains_any(text, ["半导体", "芯片", "晶圆", "存储", "封装", "HBM", "Chiplet"]):
+        terms.extend(["资本开支", "先进封装", "HBM", "Chiplet", "晶圆厂", "AI服务器", "先进制程", "封测", "设备链", "存储"])
+    if _contains_any(text, ["黄金", "有色", "铜", "铝", "资源"]):
+        terms.extend(["金价", "铜价", "铝价", "矿业资本开支", "供给扰动", "避险"])
+    if _contains_any(text, ["原油", "煤炭", "能源", "油气"]):
+        terms.extend(["油价", "煤价", "天然气", "OPEC", "地缘风险", "供给扰动"])
+    if _contains_any(text, ["创新药", "医药", "CRO", "CXO", "临床"]):
+        terms.extend(["临床", "ASCO", "ESMO", "license-out", "首付款", "里程碑"])
+    if _contains_any(text, ["恒生科技", "港股科技", "平台", "互联网"]):
+        terms.extend(["南下资金", "AI应用", "平台竞争", "广告", "电商", "云业务"])
+    return _unique_strings(terms)
 
 
 def _dedupe_news_items(items: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
@@ -2456,6 +3828,88 @@ def _catalyst_search_terms(metadata: Mapping[str, Any], profile: Mapping[str, An
     if profile_name not in {"科技", "半导体", "纳斯达克", "港股科技"}:
         cleaned = _strict_relevance_tokens(profile, cleaned)
     return cleaned[:8]
+
+
+def _catalyst_search_groups(metadata: Mapping[str, Any], profile: Mapping[str, Any]) -> List[List[str]]:
+    terms = _catalyst_search_terms(metadata, profile)
+    name = str(metadata.get("name", "")).strip()
+    sector = str(metadata.get("sector", "")).strip()
+    chain_nodes = [str(item).strip() for item in metadata.get("chain_nodes", []) if str(item).strip()]
+    groups: List[List[str]] = []
+    if name:
+        groups.append([name])
+        if sector and sector != name:
+            groups.append([name, sector])
+    if sector and terms:
+        groups.append([sector, terms[0]])
+    if len(terms) >= 2:
+        groups.append(list(terms[:2]))
+    if len(chain_nodes) >= 2:
+        groups.append(list(chain_nodes[:2]))
+    elif chain_nodes:
+        groups.append([chain_nodes[0]])
+    if len(terms) >= 4:
+        groups.append([terms[0], terms[2], terms[3]])
+    deduped: List[List[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for group in groups:
+        cleaned = tuple(str(item).strip() for item in group if str(item).strip())
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append(list(cleaned))
+    return deduped[:6]
+
+
+HOT_THEME_CATALYST_PROFILES = {
+    "科技",
+    "半导体",
+    "纳斯达克",
+    "港股科技",
+    "创新药",
+    "黄金",
+    "有色",
+    "能源",
+    "电网",
+    "军工",
+    "消费",
+    "白酒",
+    "宽基",
+}
+
+
+def _expected_high_newsflow(metadata: Mapping[str, Any], profile: Mapping[str, Any]) -> bool:
+    profile_name = str(profile.get("profile_name", "")).strip()
+    if profile_name in HOT_THEME_CATALYST_PROFILES:
+        return True
+    text = " ".join(
+        [
+            str(metadata.get("name", "")),
+            str(metadata.get("sector", "")),
+            str(metadata.get("industry", "")),
+            " ".join(str(item) for item in metadata.get("chain_nodes", []) or []),
+        ]
+    )
+    return _contains_any(
+        text,
+        [
+            "半导体",
+            "芯片",
+            "算力",
+            "创新药",
+            "港股科技",
+            "黄金",
+            "有色",
+            "煤炭",
+            "电网",
+            "白酒",
+            "红利",
+            "沪深300",
+            "中证A500",
+            "中证500",
+            "创业板",
+        ],
+    )
 
 
 def _strict_relevance_tokens(profile: Mapping[str, Any], tokens: Sequence[str]) -> List[str]:
@@ -2543,11 +3997,14 @@ def _fundamental_proxy_labels(asset_type: str) -> Dict[str, str]:
 
 def _preferred_catalyst_sources(metadata: Mapping[str, Any], profile: Mapping[str, Any]) -> List[str]:
     region = str(metadata.get("region", "")).upper().strip()
+    asset_type = str(metadata.get("asset_type", "")).strip()
     profile_name = str(profile.get("profile_name", "")).strip()
     if region == "US" or profile_name == "纳斯达克":
         return ["Reuters", "Investor Relations", "SEC", "Bloomberg", "Financial Times"]
     if region == "HK" or profile_name == "港股科技":
         return ["Reuters", "HKEXnews", "Investor Relations", "Bloomberg", "Financial Times"]
+    if asset_type == "cn_stock":
+        return ["CNINFO", "SSE", "SZSE", "Investor Relations", "财联社", "证券时报", "Reuters", "Bloomberg"]
     return ["财联社", "证券时报", "Reuters", "Bloomberg"]
 
 
@@ -2617,6 +4074,9 @@ def _is_low_signal_company_page(item: Mapping[str, Any]) -> bool:
 def _is_high_confidence_company_news(item: Mapping[str, Any]) -> bool:
     if _is_low_signal_company_page(item):
         return False
+    category = str(item.get("category", "")).strip().lower()
+    if category in {"stock_announcement", "repurchase", "dividend"}:
+        return True
     source_text = " ".join(
         [
             str(item.get("source", "")),
@@ -2643,6 +4103,9 @@ def _is_high_confidence_company_news(item: Mapping[str, Any]) -> bool:
             "globenewswire.com",
             "hkexnews.hk",
             "sec.gov",
+            "cninfo.com.cn",
+            "sse.com.cn",
+            "szse.cn",
             ".gov",
             "investor.",
         )
@@ -2682,14 +4145,19 @@ def _stock_name_tokens(metadata: Mapping[str, Any]) -> List[str]:
 
 
 def _context_now(context: Mapping[str, Any]) -> datetime:
-    candidate = context.get("as_of")
-    if isinstance(candidate, datetime):
-        return candidate
-    if candidate not in (None, ""):
-        parsed = pd.to_datetime(candidate, errors="coerce")
-        if not pd.isna(parsed):
-            return parsed.to_pydatetime()
+    for key in ("as_of", "now"):
+        candidate = context.get(key)
+        if isinstance(candidate, datetime):
+            return candidate
+        if candidate not in (None, ""):
+            parsed = pd.to_datetime(candidate, errors="coerce")
+            if not pd.isna(parsed):
+                return parsed.to_pydatetime()
     return datetime.now()
+
+
+def _runtime_feature_disabled(context: Mapping[str, Any], flag: str) -> bool:
+    return bool(dict(context.get("config") or {}).get(flag, False))
 
 
 def _is_disclosure_like_item(item: Mapping[str, Any], stock_name_tokens: Sequence[str] = ()) -> bool:
@@ -2703,6 +4171,19 @@ def _is_disclosure_like_item(item: Mapping[str, Any], stock_name_tokens: Sequenc
     return has_period_marker and has_result_marker
 
 
+def _is_ir_interaction_item(item: Mapping[str, Any]) -> bool:
+    blob = " ".join(
+        [
+            str(item.get("title", "")),
+            str(item.get("note", "")),
+            str(item.get("lead_detail", "")),
+            str(item.get("configured_source", "")),
+            str(item.get("source", "")),
+        ]
+    ).lower()
+    return _contains_any(blob, IR_INTERACTION_KEYS)
+
+
 def _is_structured_company_event_item(item: Mapping[str, Any], stock_name_tokens: Sequence[str] = ()) -> bool:
     category = str(item.get("category", "")).strip().lower()
     if category == "earnings_calendar":
@@ -2711,6 +4192,8 @@ def _is_structured_company_event_item(item: Mapping[str, Any], stock_name_tokens
     if stock_name_tokens and category != "stock_announcement" and not _contains_any(text, stock_name_tokens):
         return False
     if _is_disclosure_like_item(item, stock_name_tokens if category != "stock_announcement" else ()):
+        return True
+    if _is_ir_interaction_item(item):
         return True
     if category == "stock_announcement" and _contains_any(text, STRUCTURED_COMPANY_EVENT_KEYS):
         return True
@@ -3100,11 +4583,22 @@ def _cn_holder_concentration_snapshot(metadata: Mapping[str, Any], context: Mapp
 
 
 def _cn_pledge_risk_snapshot(metadata: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
-    if str(metadata.get("asset_type", "")) != "cn_stock":
+    asset_type = str(metadata.get("asset_type", "")).strip()
+    if asset_type and asset_type != "cn_stock":
         return {}
     symbol = str(metadata.get("symbol", "")).strip()
     if not symbol:
         return {}
+    if _runtime_feature_disabled(context, "skip_cn_stock_pledge_risk_runtime"):
+        return {
+            "status": "ℹ️",
+            "detail": "股权质押专题在 discovery 预筛阶段已跳过；如进入正式候选，会补完整 pledge_stat / pledge_detail 校验。",
+            "fallback": "runtime_skip",
+            "disclosure": "股权质押专题在预筛阶段已跳过，本轮不把缺口误写成质押风险通过。",
+            "pledge_ratio": 0.0,
+            "active_holder_ratio": 0.0,
+            "active_count": 0,
+        }
     collector = ValuationCollector(dict(context.get("config", {})))
     try:
         stat_rows = collector.get_cn_stock_pledge_stat(symbol)
@@ -3166,6 +4660,329 @@ def _cn_pledge_risk_snapshot(metadata: Mapping[str, Any], context: Mapping[str, 
         "active_holder_ratio": round(active_holder_ratio, 4),
         "active_count": active_count,
     }
+
+
+def _cn_stock_unlock_pressure_snapshot(metadata: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+    asset_type = str(metadata.get("asset_type", "")).strip()
+    if asset_type and asset_type != "cn_stock":
+        return {}
+    symbol = str(metadata.get("symbol", "") or metadata.get("code", "")).strip()
+    if not symbol:
+        return {}
+    if _runtime_feature_disabled(context, "skip_cn_stock_unlock_pressure_runtime"):
+        return {
+            "status": "ℹ️",
+            "detail": "限售解禁专题在 discovery 预筛阶段已跳过；如进入正式候选，会补完整 share_float 校验。",
+            "fallback": "runtime_skip",
+            "disclosure": "限售解禁专题在预筛阶段已跳过，本轮不把缺口误写成解禁压力通过。",
+            "source": "tushare.share_float",
+        }
+    cache = _runtime_cache_bucket(context, "stock_unlock_pressure_snapshot")
+    if symbol not in cache:
+        try:
+            cache[symbol] = ChinaMarketCollector(dict(context.get("config", {}))).get_unlock_pressure(symbol)
+        except Exception:
+            cache[symbol] = {
+                "status": "ℹ️",
+                "detail": "Tushare share_float 当前不可用，解禁压力暂未纳入本轮检查",
+                "fallback": "none",
+                "source": "tushare.share_float",
+            }
+    return dict(cache.get(symbol) or {})
+
+
+def _cn_stock_regulatory_risk_snapshot(metadata: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return {}
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return {}
+    if _runtime_feature_disabled(context, "skip_cn_stock_regulatory_risk_runtime"):
+        return {
+            "status": "ℹ️",
+            "detail": "交易所风险专题在 discovery 预筛阶段已跳过；如进入正式候选，会补完整 ST/异常波动/重点提示校验。",
+            "components": {},
+            "active_st": False,
+            "high_shock_count": 0,
+            "alert_count": 0,
+            "active_alert_count": 0,
+            "fallback": "runtime_skip",
+            "disclosure": "交易所风险专题在预筛阶段已跳过，本轮不把缺口误写成通过。",
+        }
+    cache = _runtime_cache_bucket(context, "stock_regulatory_risk")
+    if symbol not in cache:
+        collector = ChinaMarketCollector(dict(context.get("config", {})))
+        try:
+            cache[symbol] = collector.get_stock_regulatory_risk_snapshot(
+                symbol,
+                as_of=_context_now(context).strftime("%Y-%m-%d"),
+                display_name=str(metadata.get("name", "")).strip(),
+            )
+        except Exception as exc:
+            cache[symbol] = {
+                "status": "ℹ️",
+                "detail": f"股票风险专题当前不可用，本轮按缺失处理：{exc}",
+                "components": {},
+                "active_st": False,
+                "high_shock_count": 0,
+                "alert_count": 0,
+                "active_alert_count": 0,
+                "fallback": "none",
+                "disclosure": "股票风险专题当前不可用，本轮不把缺口误写成通过。",
+            }
+    return dict(cache.get(symbol) or {})
+
+
+def _cn_stock_theme_membership_snapshot(metadata: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return {}
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return {}
+    cache = _runtime_cache_bucket(context, "stock_theme_membership")
+    if symbol not in cache:
+        collector = MarketDriversCollector(dict(context.get("config", {})))
+        try:
+            cache[symbol] = collector.get_stock_theme_membership(
+                symbol,
+                reference_date=_context_now(context),
+            )
+        except Exception as exc:
+            cache[symbol] = {
+                "status": "blocked",
+                "diagnosis": "fetch_error",
+                "items": [],
+                "disclosure": f"同花顺主题成员当前不可用，本轮按缺失处理：{exc}",
+                "fallback": "none",
+                "is_fresh": False,
+            }
+    return dict(cache.get(symbol) or {})
+
+
+def _cn_stock_chip_snapshot(
+    metadata: Mapping[str, Any],
+    context: Mapping[str, Any],
+    history: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return {}
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return {}
+    if _runtime_feature_disabled(context, "skip_cn_stock_chip_snapshot_runtime"):
+        return {
+            "status": "skipped",
+            "diagnosis": "runtime_skip",
+            "detail": "真实筹码分布在 discovery 预筛阶段已跳过；如进入正式候选，会补完整 cyq_perf / cyq_chips。",
+            "disclosure": "真实筹码分布在预筛阶段已跳过，本轮不把缺口误写成承接确认。",
+            "fallback": "runtime_skip",
+            "is_fresh": False,
+            "source": "tushare.cyq_perf+tushare.cyq_chips",
+        }
+    current_price = None
+    if history is not None and not history.empty and "close" in history.columns:
+        try:
+            current_price = float(pd.to_numeric(history["close"], errors="coerce").dropna().iloc[-1])
+        except Exception:
+            current_price = None
+    cache = _runtime_cache_bucket(context, "stock_chip_snapshot")
+    key = (symbol, round(current_price, 4) if current_price is not None else None)
+    if key not in cache:
+        collector = ValuationCollector(dict(context.get("config", {})))
+        try:
+            cache[key] = collector.get_cn_stock_chip_snapshot(
+                symbol,
+                as_of=_context_now(context).strftime("%Y-%m-%d"),
+                current_price=current_price,
+            )
+        except Exception as exc:
+            cache[key] = {
+                "status": "blocked",
+                "diagnosis": "fetch_error",
+                "detail": f"Tushare cyq_perf / cyq_chips 当前不可用，本轮按缺失处理：{exc}",
+                "disclosure": "真实筹码分布当前不可用，本轮不把缺口误写成承接确认。",
+                "fallback": "none",
+                "is_fresh": False,
+                "source": "tushare.cyq_perf+tushare.cyq_chips",
+            }
+    return dict(cache.get(key) or {})
+
+
+def _cn_stock_capital_flow_snapshot(
+    metadata: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return {}
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return {}
+    if _runtime_feature_disabled(context, "skip_cn_stock_capital_flow_runtime"):
+        return {
+            "status": "skipped",
+            "diagnosis": "runtime_skip",
+            "detail": "个股/行业/概念资金流在 discovery 预筛阶段已跳过；如进入正式候选，会补完整承接链。",
+            "disclosure": "个股/行业/概念资金流在预筛阶段已跳过，本轮不把缺口误写成主力承接已确认。",
+            "fallback": "runtime_skip",
+            "is_fresh": False,
+            "source": "tushare.moneyflow+tushare.ths_member+tushare.moneyflow_ind_ths+tushare.moneyflow_cnt_ths",
+        }
+    cache = _runtime_cache_bucket(context, "stock_capital_flow")
+    if symbol not in cache:
+        collector = MarketDriversCollector(dict(context.get("config", {})))
+        try:
+            cache[symbol] = collector.get_stock_capital_flow_snapshot(
+                symbol,
+                reference_date=_context_now(context),
+                display_name=str(metadata.get("name", "")).strip(),
+                sector=str(metadata.get("sector", "")).strip(),
+                chain_nodes=[str(item).strip() for item in metadata.get("chain_nodes", []) if str(item).strip()],
+            )
+        except Exception as exc:
+            cache[symbol] = {
+                "status": "blocked",
+                "diagnosis": "fetch_error",
+                "detail": f"Tushare 个股/行业/概念资金流当前不可用，本轮按缺失处理：{exc}",
+                "disclosure": "个股/行业/概念资金流当前不可用，本轮不把缺口误写成主力承接已经确认。",
+                "fallback": "none",
+                "is_fresh": False,
+                "source": "tushare.moneyflow+tushare.ths_member+tushare.moneyflow_ind_ths+tushare.moneyflow_cnt_ths",
+            }
+    return dict(cache.get(symbol) or {})
+
+
+def _cn_stock_broker_recommend_snapshot(
+    metadata: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return {}
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return {}
+    if _runtime_feature_disabled(context, "skip_cn_stock_broker_recommend_runtime"):
+        return {
+            "status": "skipped",
+            "diagnosis": "runtime_skip",
+            "detail": "券商月度金股专题在 discovery 预筛阶段已跳过；如进入正式候选，会补完整卖方覆盖快照。",
+            "disclosure": "券商月度金股专题在预筛阶段已跳过，本轮不把缺口误写成零覆盖或低拥挤。",
+            "fallback": "runtime_skip",
+            "is_fresh": False,
+            "source": "tushare.broker_recommend",
+            "latest_broker_count": 0,
+            "crowding_level": "",
+        }
+    cache = _runtime_cache_bucket(context, "stock_broker_recommend_snapshot")
+    if symbol not in cache:
+        collector = MarketDriversCollector(dict(context.get("config", {})))
+        try:
+            cache[symbol] = collector.get_stock_broker_recommend_snapshot(
+                symbol,
+                reference_date=_context_now(context),
+                display_name=str(metadata.get("name", "")).strip(),
+            )
+        except Exception as exc:
+            cache[symbol] = {
+                "status": "blocked",
+                "diagnosis": "fetch_error",
+                "detail": f"Tushare broker_recommend 当前不可用，本轮按缺失处理：{exc}",
+                "disclosure": "券商月度金股专题当前不可用，本轮不把缺口误写成零覆盖或低拥挤。",
+                "fallback": "none",
+                "is_fresh": False,
+                "source": "tushare.broker_recommend",
+                "latest_broker_count": 0,
+                "crowding_level": "",
+            }
+    return dict(cache.get(symbol) or {})
+
+
+def _cn_stock_margin_snapshot(
+    metadata: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return {}
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return {}
+    if _runtime_feature_disabled(context, "skip_cn_stock_margin_runtime"):
+        return {
+            "status": "ℹ️",
+            "diagnosis": "runtime_skip",
+            "detail": "个股两融明细在 discovery 预筛阶段已跳过；如进入正式候选，会补完整拥挤度判断。",
+            "disclosure": "个股两融明细在预筛阶段已跳过，本轮不把缺口误写成融资盘已经退潮。",
+            "fallback": "runtime_skip",
+            "is_fresh": False,
+            "source": "tushare.margin_detail",
+        }
+    cache = _runtime_cache_bucket(context, "stock_margin_snapshot")
+    if symbol not in cache:
+        collector = ChinaMarketCollector(dict(context.get("config", {})))
+        try:
+            cache[symbol] = collector.get_stock_margin_snapshot(
+                symbol,
+                as_of=_context_now(context).strftime("%Y-%m-%d"),
+                display_name=str(metadata.get("name", "")).strip(),
+            )
+        except Exception as exc:
+            cache[symbol] = {
+                "status": "ℹ️",
+                "diagnosis": "fetch_error",
+                "detail": f"Tushare margin_detail 当前不可用，本轮按缺失处理：{exc}",
+                "disclosure": "个股两融明细当前不可用，本轮不把缺口误写成融资盘已经退潮。",
+                "fallback": "none",
+                "is_fresh": False,
+                "source": "tushare.margin_detail",
+            }
+    return dict(cache.get(symbol) or {})
+
+
+def _cn_stock_board_action_snapshot(
+    metadata: Mapping[str, Any],
+    context: Mapping[str, Any],
+    history: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    if str(metadata.get("asset_type", "")) != "cn_stock":
+        return {}
+    symbol = str(metadata.get("symbol", "")).strip()
+    if not symbol:
+        return {}
+    if _runtime_feature_disabled(context, "skip_cn_stock_board_action_runtime"):
+        return {
+            "status": "ℹ️",
+            "detail": "龙虎榜/竞价/涨跌停专题在 discovery 预筛阶段已跳过；如进入正式候选，会补完整微观交易结构。",
+            "disclosure": "打板专题在预筛阶段已跳过，本轮不把缺口误写成没有龙虎榜或情绪风险。",
+            "fallback": "runtime_skip",
+            "is_fresh": False,
+            "source": "tushare.top_list+tushare.top_inst+tushare.stk_auction+tushare.stk_limit+tushare.limit_list_d",
+        }
+    current_price = None
+    if history is not None and not history.empty and "close" in history.columns:
+        try:
+            current_price = float(pd.to_numeric(history["close"], errors="coerce").dropna().iloc[-1])
+        except Exception:
+            current_price = None
+    cache = _runtime_cache_bucket(context, "stock_board_action_snapshot")
+    key = (symbol, round(current_price, 4) if current_price is not None else None)
+    if key not in cache:
+        collector = MarketPulseCollector(dict(context.get("config", {})))
+        try:
+            cache[key] = collector.get_stock_board_action_snapshot(
+                symbol,
+                reference_date=_context_now(context),
+                display_name=str(metadata.get("name", "")).strip(),
+                current_price=current_price,
+            )
+        except Exception as exc:
+            cache[key] = {
+                "status": "ℹ️",
+                "detail": f"龙虎榜/竞价/涨跌停专题当前不可用，本轮按缺失处理：{exc}",
+                "disclosure": "打板专题当前不可用，本轮不把缺口误写成没有龙虎榜或情绪风险。",
+                "fallback": "none",
+                "is_fresh": False,
+                "source": "tushare.top_list+tushare.top_inst+tushare.stk_auction+tushare.stk_limit+tushare.limit_list_d",
+            }
+    return dict(cache.get(key) or {})
 
 
 def _cn_capital_return_items(metadata: Mapping[str, Any], context: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -3254,6 +5071,56 @@ def _item_datetime(item: Mapping[str, Any], reference: datetime) -> Optional[dat
         return timestamp.to_pydatetime()
     title = str(item.get("title", "")).strip()
     return _extract_event_date_from_text(title, reference) if title else None
+
+
+def _is_fresh_intelligence_item(
+    item: Mapping[str, Any],
+    reference: datetime,
+    *,
+    fresh_days: int = CATALYST_FRESH_NEWS_DAYS,
+) -> bool:
+    event_date = _item_datetime(item, reference)
+    if event_date is None:
+        freshness_bucket = str(item.get("freshness_bucket", "")).strip().lower()
+        if freshness_bucket:
+            if freshness_bucket == "unknown":
+                return True
+            return freshness_bucket in {"fresh", "recent"}
+        # A large share of repo test fixtures and structured payloads do not carry
+        # explicit publish timestamps. Treat these as usable current intelligence
+        # unless another freshness signal explicitly marks them stale.
+        return True
+    age_days = (reference - event_date).total_seconds() / 86400.0
+    return -1 <= age_days <= max(int(fresh_days), 1)
+
+
+def _is_within_lookback(
+    item: Mapping[str, Any],
+    reference: datetime,
+    *,
+    lookback_days: int,
+) -> bool:
+    event_date = _item_datetime(item, reference)
+    if event_date is None:
+        return True
+    age_days = (reference - event_date).total_seconds() / 86400.0
+    return -1 <= age_days <= max(int(lookback_days), 1)
+
+
+def _filter_fresh_intelligence(
+    items: Sequence[Mapping[str, Any]],
+    reference: datetime,
+    *,
+    fresh_days: int = CATALYST_FRESH_NEWS_DAYS,
+) -> List[Mapping[str, Any]]:
+    return [item for item in items if _is_fresh_intelligence_item(item, reference, fresh_days=fresh_days)]
+
+
+def _latest_intelligence_at(items: Sequence[Mapping[str, Any]], reference: datetime) -> str:
+    stamps = [stamp for stamp in (_item_datetime(item, reference) for item in items) if stamp is not None]
+    if not stamps:
+        return ""
+    return max(stamps).strftime("%Y-%m-%d")
 
 
 def _negative_event_penalty(item: Mapping[str, Any], reference: datetime) -> tuple[int, str]:
@@ -3416,17 +5283,52 @@ def _pick_best_news_item(
     items: Sequence[Mapping[str, Any]],
     primary_keywords: Sequence[str],
     bonus_keywords: Sequence[str],
+    *,
+    reference_time: Optional[datetime] = None,
 ) -> Optional[Mapping[str, Any]]:
     if not items:
         return None
+    ref = reference_time or datetime.now()
 
-    def _score(item: Mapping[str, Any]) -> tuple[int, int]:
+    def _score(item: Mapping[str, Any]) -> tuple[int, int, int, int, str]:
         text = _headline_text(item)
         primary = sum(1 for keyword in primary_keywords if str(keyword).strip() and str(keyword).lower() in text)
         bonus = sum(1 for keyword in bonus_keywords if str(keyword).strip() and str(keyword).lower() in text)
-        return (primary, bonus)
+        direct = 1 if _is_high_confidence_company_news(item) else 0
+        freshness = 1 if _is_fresh_intelligence_item(item, ref) else 0
+        date_text = _latest_intelligence_at([item], ref)
+        return (primary, bonus, direct, freshness, date_text)
 
     return max(items, key=_score)
+
+
+def _pick_top_news_items(
+    items: Sequence[Mapping[str, Any]],
+    primary_keywords: Sequence[str],
+    bonus_keywords: Sequence[str],
+    *,
+    limit: int = 2,
+    reference_time: Optional[datetime] = None,
+) -> List[Mapping[str, Any]]:
+    remaining = [dict(item) for item in items]
+    chosen: List[Mapping[str, Any]] = []
+    while remaining and len(chosen) < max(int(limit), 1):
+        best = _pick_best_news_item(
+            remaining,
+            primary_keywords,
+            bonus_keywords,
+            reference_time=reference_time,
+        )
+        if not best:
+            break
+        chosen.append(best)
+        best_key = (str(best.get("title", "")).strip(), str(best.get("source", "")).strip())
+        remaining = [
+            item
+            for item in remaining
+            if (str(item.get("title", "")).strip(), str(item.get("source", "")).strip()) != best_key
+        ]
+    return chosen
 
 
 def _find_related_news(items: Sequence[Mapping[str, Any]], metadata: Mapping[str, Any]) -> List[Mapping[str, Any]]:
@@ -3536,11 +5438,31 @@ def _hard_checks(
         exclusion_reasons.append("上市不满 60 个交易日")
 
     if asset_type == "cn_stock":
-        stock_name = str(metadata.get("name", ""))
-        is_st = stock_name.upper().startswith(("ST", "*ST"))
-        checks.append({"name": "ST 风险", "status": "❌" if is_st else "✅", "detail": f"{'ST / *ST 股票' if is_st else '非 ST 股票'}"})
-        if is_st:
+        regulatory_snapshot = _cn_stock_regulatory_risk_snapshot(metadata, context)
+        components = dict(regulatory_snapshot.get("components") or {})
+        stock_st_component = dict(components.get("stock_st") or {})
+        st_component = dict(components.get("st") or {})
+        high_shock_component = dict(components.get("stk_high_shock") or {})
+        alert_component = dict(components.get("stk_alert") or {})
+
+        st_detail = str(stock_st_component.get("detail", "")).strip() or str(st_component.get("detail", "")).strip() or "当前未拿到 ST 风险警示板名单"
+        st_status = str(stock_st_component.get("status", "")).strip() or str(st_component.get("status", "ℹ️")).strip() or "ℹ️"
+        checks.append({"name": "ST 风险", "status": st_status, "detail": st_detail})
+        if bool(regulatory_snapshot.get("active_st")):
             exclusion_reasons.append("ST / *ST 股票，退市风险较高")
+            warnings.append("⚠️ 当前仍处于 ST / *ST 风险警示板，不能把盘面热度直接写成可执行机会。")
+
+        high_shock_status = str(high_shock_component.get("status", "ℹ️")).strip() or "ℹ️"
+        high_shock_detail = str(high_shock_component.get("detail", "当前未拿到严重异常波动记录")).strip() or "当前未拿到严重异常波动记录"
+        checks.append({"name": "严重异常波动", "status": high_shock_status, "detail": high_shock_detail})
+        if high_shock_status in {"⚠️", "❌"}:
+            warnings.append("⚠️ 近窗口命中过交易所严重异常波动，短线波动和情绪反转风险都更高。")
+
+        alert_status = str(alert_component.get("status", "ℹ️")).strip() or "ℹ️"
+        alert_detail = str(alert_component.get("detail", "当前未拿到交易所重点提示记录")).strip() or "当前未拿到交易所重点提示记录"
+        checks.append({"name": "交易所重点提示", "status": alert_status, "detail": alert_detail})
+        if alert_status in {"⚠️", "❌"}:
+            warnings.append("⚠️ 当前仍在交易所重点提示证券名单或近窗口曾被重点提示，执行上需要更保守。")
 
     floor_status, fundamental_floor_detail, floor_exclusion, floor_warning = _fundamental_floor_snapshot(
         asset_type,
@@ -3557,19 +5479,34 @@ def _hard_checks(
     valuation_extreme = bool(fundamental_dimension.get("valuation_extreme"))
     pe_ttm = valuation_snapshot.get("pe_ttm")
     valuation_label = "个股估值" if asset_type == "cn_stock" else str(valuation_snapshot.get("display_label", "真实指数估值"))
+    valuation_match_quality = str(valuation_snapshot.get("match_quality", "")).strip()
     if valuation_extreme and pe_ttm is not None:
-        checks.append(
-            {
-                "name": "估值极端",
-                "status": "⚠️",
-                "detail": (
-                    f"{valuation_snapshot.get('index_name', '相关指数')} "
-                    f"{valuation_snapshot.get('metric_label', '滚动PE')} {float(pe_ttm):.1f}x，已进入极高估值区"
-                ),
-            }
-        )
-        exclusion_reasons.append(f"{valuation_label}处于极高区间")
-        warnings.append(f"⚠️ {valuation_label}已处于极高区间，后续更需要靠盈利兑现来消化估值")
+        if valuation_match_quality == "theme_proxy":
+            checks.append(
+                {
+                    "name": "估值极端",
+                    "status": "⚠️",
+                    "detail": (
+                        f"{valuation_snapshot.get('index_name', '相关指数')} "
+                        f"{valuation_snapshot.get('metric_label', '滚动PE')} {float(pe_ttm):.1f}x，"
+                        "当前只作为最接近主题估值代理，提示位置偏贵。"
+                    ),
+                }
+            )
+            warnings.append("⚠️ 当前估值代理提示位置偏贵，但因未命中精确基准，只把它当作辅助约束。")
+        else:
+            checks.append(
+                {
+                    "name": "估值极端",
+                    "status": "⚠️",
+                    "detail": (
+                        f"{valuation_snapshot.get('index_name', '相关指数')} "
+                        f"{valuation_snapshot.get('metric_label', '滚动PE')} {float(pe_ttm):.1f}x，已进入极高估值区"
+                    ),
+                }
+            )
+            exclusion_reasons.append(f"{valuation_label}处于极高区间")
+            warnings.append(f"⚠️ {valuation_label}已处于极高区间，后续更需要靠盈利兑现来消化估值")
     elif price_percentile >= 0.90:
         checks.append({"name": "估值极端", "status": "⚠️", "detail": f"价格位置代理分位 {price_percentile:.0%}，接近极端高位"})
         exclusion_reasons.append("价格位置代理已处于极端高位")
@@ -3580,16 +5517,10 @@ def _hard_checks(
     if asset_type in {"cn_fund", "cn_etf", "cn_index"}:
         checks.append({"name": "解禁压力", "status": "✅", "detail": "基金/指数产品不适用限售股解禁压力"})
     elif asset_type == "cn_stock":
-        unlock_snapshot = {
+        unlock_snapshot = _cn_stock_unlock_pressure_snapshot(metadata, context) or {
             "status": "ℹ️",
             "detail": "Tushare share_float 当前不可用，解禁压力暂未纳入本轮检查",
         }
-        symbol = str(metadata.get("symbol", "") or metadata.get("code", "")).strip()
-        if symbol:
-            try:
-                unlock_snapshot = ChinaMarketCollector(dict(context.get("config", {}))).get_unlock_pressure(symbol)
-            except Exception:
-                pass
         checks.append(
             {
                 "name": "解禁压力",
@@ -4099,6 +6030,7 @@ def _j5_etf_fund_factors(
     overview = dict((fund_profile or {}).get("overview") or {})
     manager_info = dict((fund_profile or {}).get("manager") or {})
     rating = dict((fund_profile or {}).get("rating") or {})
+    fund_factor_snapshot = dict((fund_profile or {}).get("fund_factor_snapshot") or {})
 
     tags = list(style.get("tags") or [])
     is_passive = "被动跟踪" in tags or bool(metadata.get("is_passive_fund"))
@@ -4187,6 +6119,52 @@ def _j5_etf_fund_factors(
                 display_score="信息项",
                 factor_id="j5_etf_share_change",
             ))
+
+    fund_factor_trend = str(fund_factor_snapshot.get("trend_label", "")).strip()
+    fund_factor_momentum = str(fund_factor_snapshot.get("momentum_label", "")).strip()
+    fund_factor_detail = str(fund_factor_snapshot.get("detail", "")).strip()
+    fund_factor_date = str(fund_factor_snapshot.get("latest_date", "") or fund_factor_snapshot.get("trade_date", "")).strip()
+    if fund_factor_trend:
+        if fund_factor_trend == "趋势偏强" and fund_factor_momentum == "动能改善":
+            ff_award = 10
+        elif fund_factor_trend in {"趋势偏强", "修复中"} and fund_factor_momentum != "动能偏弱":
+            ff_award = 8
+        elif fund_factor_trend == "震荡":
+            ff_award = 5
+        else:
+            ff_award = 2
+        ff_signal = f"场内基金技术因子 {fund_factor_trend}"
+        if fund_factor_momentum:
+            ff_signal += f" / {fund_factor_momentum}"
+        if fund_factor_date:
+            ff_signal += f"（{fund_factor_date}）"
+        ff_detail = "场内基金技术状态来自 Tushare fund_factor_pro（收盘后技术因子）；优先用来确认产品层趋势与动能。"
+        if fund_factor_detail:
+            ff_detail += f" {fund_factor_detail}"
+        raw += ff_award
+        available += 10
+        factors.append(
+            _factor_row(
+                "场内基金技术状态",
+                ff_signal,
+                ff_award,
+                10,
+                ff_detail,
+                factor_id="j5_fund_factor_pro",
+            )
+        )
+    elif is_etf:
+        factors.append(
+            _factor_row(
+                "场内基金技术状态",
+                "fund_factor_pro 数据缺失",
+                None,
+                10,
+                "场内基金技术面因子当前缺失；不把产品层技术状态伪装成已确认。数据源：Tushare fund_factor_pro。",
+                display_score="信息项",
+                factor_id="j5_fund_factor_pro",
+            )
+        )
 
     # J5.2: 跟踪误差 (ETF + 被动基金, daily_close, direct — j5_tracking_error)
     # 优先使用实际年化跟踪误差数值；数据缺失时降级为基准清晰度代理（proxy 分扣减）。
@@ -4426,6 +6404,10 @@ def _fundamental_dimension(
     financial_proxy: Dict[str, Any] = {}
     sector_flow = {}
     commodity_like_fund = _is_commodity_like_fund(asset_type, metadata, fund_profile)
+    index_topic_bundle = dict(metadata.get("index_topic_bundle") or {})
+    prefetched_index_snapshot = dict(index_topic_bundle.get("index_snapshot") or {})
+    fund_profile_mode = str((fund_profile or {}).get("profile_mode") or "").strip().lower()
+    is_light_etf_profile = asset_type == "cn_etf" and fund_profile_mode == "light"
 
     if commodity_like_fund:
         overview = dict((fund_profile or {}).get("overview") or {})
@@ -4533,25 +6515,28 @@ def _fundamental_dimension(
 
     if asset_type in {"cn_etf", "cn_index", "cn_fund"}:
         collector = ValuationCollector(config)
-        try:
-            valuation_snapshot = collector.get_cn_index_snapshot(_valuation_keywords(metadata, asset_type, fund_profile))
-        except Exception:
-            valuation_snapshot = None
-        if valuation_snapshot:
+        valuation_snapshot = dict(prefetched_index_snapshot) if prefetched_index_snapshot else None
+        if not valuation_snapshot:
+            try:
+                valuation_snapshot = collector.get_cn_index_snapshot(_valuation_keywords(metadata, asset_type, fund_profile))
+            except Exception:
+                valuation_snapshot = None
+        if valuation_snapshot and not is_light_etf_profile:
             try:
                 valuation_history = collector.get_cn_index_value_history(str(valuation_snapshot.get("index_code", "")))
             except Exception:
                 valuation_history = pd.DataFrame()
-        try:
-            if asset_type in {"cn_fund", "cn_etf"} and fund_profile:
-                financial_proxy = _fund_financial_proxy(collector, fund_profile)
-            elif valuation_snapshot:
-                financial_proxy = collector.get_cn_index_financial_proxies(str(valuation_snapshot.get("index_code", "")), top_n=5)
-        except Exception:
-            financial_proxy = {}
+        if not is_light_etf_profile:
+            try:
+                if asset_type in {"cn_fund", "cn_etf"} and fund_profile:
+                    financial_proxy = _fund_financial_proxy(collector, fund_profile)
+                elif valuation_snapshot:
+                    financial_proxy = collector.get_cn_index_financial_proxies(str(valuation_snapshot.get("index_code", "")), top_n=5)
+            except Exception:
+                financial_proxy = {}
         if asset_type in {"cn_fund", "cn_etf"} and fund_profile and valuation_snapshot:
             match_quality = str(valuation_snapshot.get("match_quality", "")).strip()
-            if match_quality == "exact_no_pe":
+            if match_quality in {"exact_no_pe", "benchmark_no_proxy"}:
                 holdings_proxy = _fund_holdings_valuation_proxy(collector, fund_profile, top_n=5)
                 if holdings_proxy:
                     for key, value in holdings_proxy.items():
@@ -4567,10 +6552,14 @@ def _fundamental_dimension(
                         "pe_ttm": float(holdings_pe),
                         "metric_label": "前五大重仓加权PE",
                         "display_label": "真实基准重仓股PE代理",
-                        "match_quality": "exact_holdings_proxy",
+                        "match_quality": "exact_holdings_proxy" if match_quality == "exact_no_pe" else "benchmark_holdings_proxy",
                         "match_note": (
-                            f"估值库已命中 `{benchmark_name}`，但缺少直接滚动PE；"
-                            f"当前改用最近一期前五大重仓加权PE代理（覆盖约 {coverage_weight:.1f}% 持仓）。"
+                            (
+                                f"估值库已命中 `{benchmark_name}`，但缺少直接滚动PE；"
+                                if match_quality == "exact_no_pe"
+                                else f"估值库未直接命中 `{benchmark_name}`，"
+                            )
+                            + f"当前改用最近一期前五大重仓加权PE代理（覆盖约 {coverage_weight:.1f}% 持仓）。"
                         ),
                     }
         try:
@@ -4684,10 +6673,14 @@ def _fundamental_dimension(
             match_quality = str(valuation_snapshot.get("match_quality", "")).strip()
             if match_quality == "exact_holdings_proxy":
                 detail = "估值库已命中精确基准，但直接滚动PE缺失；当前改用最近一期前五大重仓加权PE代理，价格位置另算，不与估值分位混用。"
+            elif match_quality == "benchmark_holdings_proxy":
+                detail = "估值库未直接命中精确宽基基准；当前改用最近一期前五大重仓加权PE代理，价格位置另算，不与估值分位混用。"
             elif match_quality == "exact":
                 detail = "当前接入的是目标基准的滚动 PE；价格位置另算，不与估值分位混用。"
             elif match_quality == "theme_proxy":
                 detail = "当前接入的是最接近主题指数的滚动 PE；价格位置另算，不与估值分位混用。"
+            elif match_quality == "benchmark_no_proxy":
+                detail = "估值库未直接命中精确宽基基准；为避免错配，不再回退到不相干主题代理。"
             else:
                 detail = "当前接入的是目标基准或最接近主题指数的滚动 PE；价格位置另算，不与估值分位混用。"
         raw += pe_award
@@ -4920,7 +6913,8 @@ def _fundamental_dimension(
     flow_award: Optional[int] = None
     flow_detail = "ETF 份额 / 行业资金流代理暂缺"
     flow_signal = "ETF 份额 / 资金流向"
-    if asset_type == "cn_etf":
+    flow_display_score: Optional[str] = None
+    if asset_type == "cn_etf" and not is_light_etf_profile:
         try:
             fund_flow = ChinaMarketCollector(config).get_etf_fund_flow(symbol)
             flow_series = pd.to_numeric(fund_flow.get("净流入", pd.Series(dtype=float)), errors="coerce").dropna()
@@ -4944,7 +6938,15 @@ def _fundamental_dimension(
             f"ETF 份额缺失，改用行业资金流代理；主力净占比 "
             f"{format_pct(float(main_ratio) / 100) if main_ratio is not None and abs(float(main_ratio)) > 1 else format_pct(float(main_ratio)) if main_ratio is not None else '缺失'}。"
         )
-    factors.append(_factor_row("资金承接", flow_signal, flow_award, 10, flow_detail))
+    elif asset_type == "cn_etf" and flow_award is None:
+        flow_award = -2
+        flow_signal = "ETF 份额 / 资金流向缺失"
+        if is_light_etf_profile:
+            flow_detail = "ETF discovery 轻量模式当前跳过份额申赎慢链；若行业资金流也缺失，则先按轻度保守分处理。"
+        else:
+            flow_detail = "ETF 份额与行业资金流代理都缺失；为避免因缺数据而抬高基本面分，这里保守按轻度负分处理。"
+        flow_display_score = "-2/10（缺失保守）"
+    factors.append(_factor_row("资金承接", flow_signal, flow_award, 10, flow_detail, display_score=flow_display_score))
     if flow_award is not None:
         raw += flow_award
         available += 10
@@ -5033,7 +7035,11 @@ def _catalyst_dimension(
     news_mode = str(news_report.get("mode") or ("live" if news_report else "unknown"))
     news_items = news_report.get("all_items") or news_report.get("items", [])
     stock_news_items: List[Mapping[str, Any]] = []
-    if asset_type_str == "cn_stock" and news_mode == "live":
+    if (
+        asset_type_str == "cn_stock"
+        and news_mode != "proxy"
+        and not _runtime_feature_disabled(context, "skip_cn_stock_direct_news_runtime")
+    ):
         stock_news_items = _context_stock_news(str(metadata.get("symbol", "")), context)
     sector = str(metadata.get("sector", ""))
     keyword_keys = _metadata_news_keys(metadata)
@@ -5057,28 +7063,50 @@ def _catalyst_dimension(
         if _category_item_is_relevant(item, metadata, profile, allowed_categories, related_tokens, strict_tokens)
     ]
     dynamic_related_news: List[Mapping[str, Any]] = []
+    dynamic_search_attempted = False
+    dynamic_search_groups = _catalyst_search_groups(metadata, profile)
+    attempted_search_groups = list(dynamic_search_groups)
+    dynamic_search_enabled = bool(config.get("news_topic_search_enabled", True)) and not bool(
+        config.get("skip_catalyst_dynamic_search_runtime", False)
+    )
     if (
+        dynamic_search_enabled
+        and dynamic_search_groups
+        and
         len(strict_related_news) + len(category_related_news) < 2
         and not commodity_like_fund
         and not calendar_forward_events
         and not stock_news_items
-        and news_mode == "live"
+        and news_mode in {"live", "proxy"}
     ):
+        dynamic_search_attempted = True
+        if asset_type_str in {"cn_etf", "cn_fund", "cn_index"} and news_mode == "proxy":
+            attempted_search_groups = dynamic_search_groups[:2]
         try:
-            dynamic_related_news = NewsCollector(config).search_by_keywords(
-                _catalyst_search_terms(metadata, profile),
+            collector = NewsCollector(config)
+            dynamic_related_news = collector.search_by_keyword_groups(
+                attempted_search_groups,
                 preferred_sources=_preferred_catalyst_sources(metadata, profile),
-                limit=6,
+                limit=4 if asset_type_str in {"cn_etf", "cn_fund", "cn_index"} else 6,
                 recent_days=7,
             )
+            if not dynamic_related_news:
+                dynamic_related_news = collector.search_by_keywords(
+                    _catalyst_search_terms(metadata, profile),
+                    preferred_sources=_preferred_catalyst_sources(metadata, profile),
+                    limit=4 if asset_type_str in {"cn_etf", "cn_fund", "cn_index"} else 6,
+                    recent_days=7,
+                )
         except Exception:
             dynamic_related_news = []
-    news_pool = _dedupe_news_items([*strict_related_news, *category_related_news, *dynamic_related_news])
+    all_news_pool = _dedupe_news_items([*strict_related_news, *category_related_news, *dynamic_related_news])
 
     # For cn_stock: inject per-stock news from akshare (东方财富个股新闻).
     if asset_type_str == "cn_stock":
         if stock_news_items:
-            news_pool = _dedupe_news_items([*news_pool, *stock_news_items])
+            all_news_pool = _dedupe_news_items([*all_news_pool, *stock_news_items])
+    fresh_news_pool = _filter_fresh_intelligence(all_news_pool, reference_now)
+    stale_news_pool = [item for item in all_news_pool if item not in fresh_news_pool]
 
     related_events = []
     for event in context.get("events", []):
@@ -5098,9 +7126,13 @@ def _catalyst_dimension(
         asset_type=asset_type_str,
         is_individual_stock=bool(stock_name_tokens),
     )
+    stock_specific_pool_all = (
+        [item for item in all_news_pool if _contains_any(_headline_text(item), stock_name_tokens)]
+        if stock_name_tokens else all_news_pool
+    )
     stock_specific_pool = (
-        [item for item in news_pool if _contains_any(_headline_text(item), stock_name_tokens)]
-        if stock_name_tokens else news_pool
+        [item for item in fresh_news_pool if _contains_any(_headline_text(item), stock_name_tokens)]
+        if stock_name_tokens else fresh_news_pool
     )
     existing_forward_events = _dedupe_news_items(
         [
@@ -5108,7 +7140,7 @@ def _catalyst_dimension(
             *_company_forward_events(
                 metadata,
                 context,
-                news_items=stock_specific_pool if stock_specific_pool else news_pool,
+                news_items=stock_specific_pool_all if stock_specific_pool_all else all_news_pool,
             ),
         ]
     )
@@ -5116,7 +7148,12 @@ def _catalyst_dimension(
     # broad market news does not already produce high-confidence company evidence.
     company_positive_pool = stock_specific_pool
     if asset_type_str in {"hk", "us"} and stock_name_tokens:
-        company_positive_pool = [item for item in stock_specific_pool if _is_high_confidence_company_news(item)]
+        company_positive_pool = [
+            item
+            for item in stock_specific_pool_all
+            if _is_high_confidence_company_news(item)
+            and _is_within_lookback(item, reference_now, lookback_days=DIRECT_COMPANY_NEWS_LOOKBACK_DAYS)
+        ]
         if not company_positive_pool:
             try:
                 hk_us_news = _search_high_confidence_company_news(
@@ -5128,14 +7165,22 @@ def _catalyst_dimension(
             except Exception:
                 hk_us_news = []
             if hk_us_news:
-                news_pool = _dedupe_news_items([*news_pool, *hk_us_news])
-                stock_specific_pool = [item for item in news_pool if _contains_any(_headline_text(item), stock_name_tokens)]
-                company_positive_pool = [item for item in stock_specific_pool if _is_high_confidence_company_news(item)]
+                all_news_pool = _dedupe_news_items([*all_news_pool, *hk_us_news])
+                fresh_news_pool = _filter_fresh_intelligence(all_news_pool, reference_now)
+                stale_news_pool = [item for item in all_news_pool if item not in fresh_news_pool]
+                stock_specific_pool_all = [item for item in all_news_pool if _contains_any(_headline_text(item), stock_name_tokens)]
+                stock_specific_pool = [item for item in fresh_news_pool if _contains_any(_headline_text(item), stock_name_tokens)]
+                company_positive_pool = [
+                    item
+                    for item in stock_specific_pool_all
+                    if _is_high_confidence_company_news(item)
+                    and _is_within_lookback(item, reference_now, lookback_days=DIRECT_COMPANY_NEWS_LOOKBACK_DAYS)
+                ]
     company_specific_news_available = bool(company_positive_pool) if asset_type_str in {"hk", "us"} and stock_name_tokens else True
 
     policy_items = [
         item
-        for item in news_pool
+        for item in fresh_news_pool
         if (
             str(item.get("category", "")).lower() in {"china_macro", "china_macro_domestic"}
             or str(item.get("source", "")).strip() in {"财联社", "证券时报", "Reuters"}
@@ -5143,10 +7188,15 @@ def _catalyst_dimension(
         and _contains_any(_headline_text(item), policy_keys)
         and _contains_any(_headline_text(item), strict_tokens)
     ]
-    policy_pick = _pick_best_news_item(policy_items, policy_keys, keyword_keys)
+    policy_pick = _pick_best_news_item(policy_items, policy_keys, keyword_keys, reference_time=reference_now)
     if asset_type_str in {"hk", "us"} and stock_name_tokens:
         specific_policy_items = [item for item in policy_items if item in company_positive_pool]
-        policy_pick = _pick_best_news_item(specific_policy_items, policy_keys, stock_name_tokens or keyword_keys)
+        policy_pick = _pick_best_news_item(
+            specific_policy_items,
+            policy_keys,
+            stock_name_tokens or keyword_keys,
+            reference_time=reference_now,
+        )
         policy_award = 10 if specific_policy_items else 0
     elif is_individual_stock and stock_name_tokens:
         # cn_stock: full 30pts only when the policy news names the company directly;
@@ -5168,7 +7218,7 @@ def _catalyst_dimension(
     policy_signal = (
         "未命中高置信个股直连新闻，个股催化暂不计分"
         if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available)
-        else (policy_pick["title"] if policy_award > 0 and policy_pick else "近 7 日未命中直接政策催化")
+        else (policy_pick["title"] if policy_award > 0 and policy_pick else "近 7 日直接政策情报偏弱")
     )
     policy_detail = "当前未命中 Reuters/Bloomberg/FT/公司公告 这类高置信个股直连标题，避免把市场级新闻误记成个股催化。" if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available) else "政策原文和一级媒体优先"
     factors.append(_factor_row("政策催化", policy_signal, policy_award, _policy_max, policy_detail))
@@ -5177,7 +7227,7 @@ def _catalyst_dimension(
 
     leader_items = [
         item
-        for item in news_pool
+        for item in fresh_news_pool
         if (
             str(item.get("category", "")).lower() in {"china_market_domestic", "earnings", "semiconductor"}
             and _contains_any(_headline_text(item), domestic_leaders)
@@ -5190,7 +7240,12 @@ def _catalyst_dimension(
         and not _is_non_positive_company_statement(item)
     ]
     stock_specific_leader_items: List[Mapping[str, Any]] = []
-    leader_pick = _pick_best_news_item(leader_items, [*domestic_leaders, *strict_event_keys], keyword_keys)
+    leader_pick = _pick_best_news_item(
+        leader_items,
+        [*domestic_leaders, *strict_event_keys],
+        keyword_keys,
+        reference_time=reference_now,
+    )
     if is_individual_stock and company_positive_pool:
         stock_specific_leader_items = [
             item
@@ -5227,7 +7282,12 @@ def _catalyst_dimension(
             and not _is_non_positive_company_statement(item)
         ]
         if stock_specific_leader_items:
-            leader_pick = _pick_best_news_item(stock_specific_leader_items, [*keyword_keys, *strict_event_keys], stock_name_tokens or keyword_keys)
+            leader_pick = _pick_best_news_item(
+                stock_specific_leader_items,
+                [*keyword_keys, *strict_event_keys],
+                stock_name_tokens or keyword_keys,
+                reference_time=reference_now,
+            )
     _leader_default_max = 15 if (asset_type_str == "cn_stock" and stock_name_tokens) else 25
     _leader_max = catalyst_maxima.get("leader", _leader_default_max)
     if asset_type_str in {"hk", "us"} and stock_name_tokens:
@@ -5246,7 +7306,7 @@ def _catalyst_dimension(
     leader_signal = (
         "未命中高置信个股直连新闻，个股催化暂不计分"
         if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available)
-        else (leader_pick["title"] if leader_award > 0 and leader_pick else "未命中直接龙头公告")
+        else (leader_pick["title"] if leader_award > 0 and leader_pick else "直接龙头公告/业绩情报偏弱")
     )
     leader_detail = "当前未命中 Reuters/Bloomberg/FT/公司公告 这类高置信业绩/公告标题，避免把行业级消息误映射到单一个股。" if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available) else "优先看订单、扩产、回购、并购或超预期业绩"
     factors.append(_factor_row("龙头公告/业绩", leader_signal, leader_award, _leader_max, leader_detail))
@@ -5256,7 +7316,7 @@ def _catalyst_dimension(
     structured_event_pool = _structured_company_event_items(
         metadata,
         context,
-        news_items=company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool if stock_specific_pool else news_pool),
+        news_items=company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool_all if stock_specific_pool_all else all_news_pool),
         stock_news_items=stock_news_items,
     )
     structured_non_negative_pool = [
@@ -5283,13 +7343,16 @@ def _catalyst_dimension(
         structured_pick
         and (str(structured_pick.get("title", "")).strip(), str(structured_pick.get("source", "")).strip()) in structured_direct_keys
     )
+    is_ir_structured = bool(structured_pick and _is_ir_interaction_item(structured_pick))
     if structured_pick:
         structured_award, freshness_detail = _structured_event_award(
             structured_pick,
             reference_now,
-            strong_event=is_direct_structured,
+            strong_event=is_direct_structured and not is_ir_structured,
         )
-        if structured_award > 0 and is_direct_structured:
+        if structured_award > 0 and is_ir_structured:
+            structured_detail = f"当前命中互动平台/投资者关系口径，先按补充证据处理，不替代订单、财报或正式公告。{freshness_detail}"
+        elif structured_award > 0 and is_direct_structured:
             structured_detail = f"先看公告、财报、订单、回购、合作这类结构化公司事件；这类证据比泛行业新闻更接近可执行催化。{freshness_detail}"
         elif structured_award > 0:
             structured_detail = f"当前只命中财报日历/披露窗口等结构化事件，属于催化线索已出现，但还没到强催化共识。{freshness_detail}"
@@ -5300,6 +7363,7 @@ def _catalyst_dimension(
         structured_detail = "当前未命中结构化公司事件；这里按信息不足处理，不直接等于个股没有催化。"
     _structured_max = catalyst_maxima.get("structured", 15)
     structured_award = _rescale_catalyst_award(structured_award, 15, _structured_max)
+    effective_structured_event = bool(structured_pick and structured_award > 0)
     raw += structured_award
     available += _structured_max
     factors.append(
@@ -5313,6 +7377,122 @@ def _catalyst_dimension(
     )
     if structured_award > 0 and structured_pick:
         evidence_rows.append(_evidence_row(layer="结构化事件", item=structured_pick))
+
+    if asset_type_str == "cn_stock":
+        broker_snapshot = _cn_stock_broker_recommend_snapshot(metadata, context)
+        broker_status = str(broker_snapshot.get("status", "")).strip()
+        broker_count = int(broker_snapshot.get("latest_broker_count") or 0)
+        broker_delta = broker_snapshot.get("broker_delta")
+        broker_detail = str(broker_snapshot.get("detail", "")).strip() or str(broker_snapshot.get("disclosure", "")).strip()
+        if bool(broker_snapshot.get("is_fresh")) and broker_status == "matched" and broker_count >= 2:
+            if broker_delta is not None and float(broker_delta) > 0:
+                broker_award = 8 if broker_count >= 5 or float(broker_delta) >= 2 else 5
+                broker_signal = f"本月 {broker_count} 家券商金股推荐，较上月增加 {int(broker_delta)} 家"
+            elif broker_count >= 4:
+                broker_award = 5
+                broker_signal = f"本月 {broker_count} 家券商金股推荐，卖方覆盖维持高位"
+            else:
+                broker_award = 3
+                broker_signal = f"本月 {broker_count} 家券商金股推荐"
+            raw += broker_award
+            available += 8
+            factors.append(
+                _factor_row(
+                    "卖方覆盖/一致预期",
+                    broker_signal,
+                    broker_award,
+                    8,
+                    broker_detail or "券商月度金股覆盖只当卖方共识热度参考，不替代公司公告、订单或财报催化。",
+                )
+            )
+        elif broker_status == "stale":
+            available += 8
+            factors.append(
+                _factor_row(
+                    "卖方覆盖/一致预期",
+                    f"最新卖方金股仍停在 {str(broker_snapshot.get('latest_date', '')).strip() or '历史月份'}",
+                    0,
+                    8,
+                    broker_detail or "卖方月度金股当前只命中历史月份，本轮不把旧共识写成本月 fresh 卖方升温。",
+                    display_score="观察",
+                )
+            )
+        elif broker_status == "empty":
+            available += 8
+            factors.append(
+                _factor_row(
+                    "卖方覆盖/一致预期",
+                    "本月未命中明确券商金股推荐",
+                    0,
+                    8,
+                    broker_detail or "当前月份未命中券商月度金股名单，不把空结果误写成卖方已经明确看空。",
+                    display_score="信息项",
+                )
+            )
+        else:
+            factors.append(
+                _factor_row(
+                    "卖方覆盖/一致预期",
+                    "缺失",
+                    None,
+                    8,
+                    broker_detail or "当前未拿到可稳定使用的券商月度金股专题，不把缺口误写成零覆盖。",
+                )
+            )
+
+        board_action_snapshot = _cn_stock_board_action_snapshot(metadata, context)
+        board_detail = str(board_action_snapshot.get("detail", "")).strip() or "打板专题当前未提供有效结论。"
+        if bool(board_action_snapshot.get("is_fresh")) and bool(board_action_snapshot.get("has_positive_signal")):
+            board_positive_bits = [str(item).strip() for item in list(board_action_snapshot.get("positive_bits") or []) if str(item).strip()]
+            board_award = 12 if str(board_action_snapshot.get("lhb_reason", "")).strip() or bool(board_action_snapshot.get("in_strong_pool")) else 6
+            raw += board_award
+            available += 12
+            factors.append(
+                _factor_row(
+                    "龙虎榜/打板确认",
+                    " / ".join(board_positive_bits[:2]) or "龙虎榜/打板结构偏正面",
+                    board_award,
+                    12,
+                    board_detail + " 这类微观交易结构只当短线催化/风险偏好确认，不替代基本面与产业逻辑。",
+                )
+            )
+        elif bool(board_action_snapshot.get("is_fresh")) and bool(board_action_snapshot.get("has_negative_signal")):
+            board_negative_bits = [str(item).strip() for item in list(board_action_snapshot.get("negative_bits") or []) if str(item).strip()]
+            board_penalty = 6 if bool(board_action_snapshot.get("in_dt_pool")) else 4
+            raw -= board_penalty
+            available += 12
+            factors.append(
+                _factor_row(
+                    "龙虎榜/打板确认",
+                    " / ".join(board_negative_bits[:2]) or "龙虎榜/打板结构偏负面",
+                    -board_penalty,
+                    12,
+                    board_detail + " 微观交易结构转弱时，短线催化更容易先被情绪风险打断。",
+                    display_score=f"-{board_penalty}",
+                )
+            )
+        elif board_action_snapshot:
+            available += 12
+            factors.append(
+                _factor_row(
+                    "龙虎榜/打板确认",
+                    "未命中明确龙虎榜/打板确认",
+                    0,
+                    12,
+                    board_detail or "当前未命中可稳定使用的龙虎榜/打板专题信号。",
+                    display_score="信息项",
+                )
+            )
+        else:
+            factors.append(
+                _factor_row(
+                    "龙虎榜/打板确认",
+                    "缺失",
+                    None,
+                    12,
+                    "当前未拿到可稳定使用的龙虎榜/竞价/涨跌停专题，不把缺口误写成没有短线催化。",
+                )
+            )
 
     if is_individual_stock:
         negative_pick: Optional[Mapping[str, Any]] = None
@@ -5412,7 +7592,7 @@ def _catalyst_dimension(
 
     themed_negative_items = [
         item
-        for item in news_pool
+        for item in all_news_pool
         if _contains_any(_title_source_text(item), NEGATIVE_THEME_HEADWIND_KEYS)
         and (
             _contains_any(_title_source_text(item), [*keyword_keys, *strict_event_keys])
@@ -5423,6 +7603,7 @@ def _catalyst_dimension(
         themed_negative_items,
         [*NEGATIVE_THEME_HEADWIND_KEYS, *keyword_keys, *strict_event_keys],
         [sector, *profile.get("themes", [])],
+        reference_time=reference_now,
     )
     theme_negative_penalty = 10 if theme_negative_pick else 0
     raw -= theme_negative_penalty
@@ -5461,7 +7642,7 @@ def _catalyst_dimension(
     foreign_sources = {"reuters", "bloomberg", "financial times", "ft"}
     overseas_items = [
         item
-        for item in news_pool
+        for item in fresh_news_pool
         if (
             str(item.get("category", "")).lower() in {"earnings", "ai", "semiconductor", "fed"}
             and str(item.get("source", "")).strip().lower() in foreign_sources
@@ -5474,7 +7655,12 @@ def _catalyst_dimension(
             and _contains_any(_title_source_text(item), [*earnings_keys, *strict_event_keys, *overseas_keyword_map.get(sector, [])])
         )
     ]
-    overseas_pick = _pick_best_news_item(overseas_items, [*overseas_leaders, *earnings_keys, *strict_event_keys], [*keyword_keys, *overseas_keyword_map.get(sector, [])])
+    overseas_pick = _pick_best_news_item(
+        overseas_items,
+        [*overseas_leaders, *earnings_keys, *strict_event_keys],
+        [*keyword_keys, *overseas_keyword_map.get(sector, [])],
+        reference_time=reference_now,
+    )
     _overseas_max = catalyst_maxima.get("overseas", 20)
     overseas_award = 20 if overseas_items else 0
     if asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available:
@@ -5486,7 +7672,7 @@ def _catalyst_dimension(
     overseas_signal = (
         "未命中高置信个股直连新闻，海外映射暂不计分"
         if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available)
-        else (overseas_pick["title"] if overseas_award > 0 and overseas_pick else "未命中直接海外映射")
+        else (overseas_pick["title"] if overseas_award > 0 and overseas_pick else "直接海外映射情报偏弱")
     )
     overseas_detail = "当前未命中与公司直接相关的高置信海外映射新闻，避免把行业级海外消息直接算成个股催化。" if (asset_type_str in {"hk", "us"} and stock_name_tokens and not company_specific_news_available) else "重点看海外龙头财报/指引或模型产品催化"
     factors.append(_factor_row("海外映射", overseas_signal, overseas_award, _overseas_max, overseas_detail))
@@ -5494,7 +7680,7 @@ def _catalyst_dimension(
         evidence_rows.append(_evidence_row(layer="海外映射", item=overseas_pick))
 
     if asset_type_str in {"cn_etf", "cn_fund"}:
-        directional_snapshot = _fund_directional_catalyst_signal(news_pool, fund_profile)
+        directional_snapshot = _fund_directional_catalyst_signal(all_news_pool, fund_profile)
         directional_award = int(directional_snapshot.get("award", 0) or 0)
         directional_item = directional_snapshot.get("item")
         matched_groups = list(directional_snapshot.get("matched_groups") or [])
@@ -5532,24 +7718,29 @@ def _catalyst_dimension(
 
     # For individual stocks: density and heat only count articles that directly mention the stock.
     # This prevents sector-level news (e.g. broad AI/tech news) from inflating density scores.
-    density_pool = company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool if (is_individual_stock and stock_name_tokens) else news_pool)
+    density_pool = company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool if (is_individual_stock and stock_name_tokens) else fresh_news_pool)
     density_count = len(density_pool)
-    density_label = f"个股相关头条 {density_count} 条（行业头条 {len(news_pool)} 条）" if (is_individual_stock and stock_name_tokens) else f"相关头条 {len(news_pool)} 条"
+    density_label = (
+        f"个股新增直接情报 {density_count} 条（主题/行业情报 {len(fresh_news_pool)} 条）"
+        if (is_individual_stock and stock_name_tokens)
+        else f"新增情报 {len(fresh_news_pool)} 条"
+    )
     _density_max = catalyst_maxima.get("news_density", 10)
     density_award = 10 if density_count >= 2 else (5 if density_count >= 1 else 0)
     density_award = _rescale_catalyst_award(density_award, 10, _density_max)
     raw += density_award
     available += _density_max
-    factors.append(_factor_row("研报/新闻密度", density_label, density_award, _density_max, "个股直接提及的一级媒体头条密度"))
+    factors.append(_factor_row("研报/新闻密度", density_label, density_award, _density_max, "这里优先统计近 3 日新增情报，不把旧闻回放直接算成新催化。"))
 
-    heat_pool = company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool if (is_individual_stock and stock_name_tokens) else news_pool)
+    heat_pool = company_positive_pool if (asset_type_str in {"hk", "us"} and stock_name_tokens) else (stock_specific_pool if (is_individual_stock and stock_name_tokens) else fresh_news_pool)
     source_count = len({str(item.get("source", "")) for item in heat_pool if item.get("source")})
     _heat_max = catalyst_maxima.get("news_heat", 10)
     heat_award = 10 if source_count >= 2 else 0
     heat_award = _rescale_catalyst_award(heat_award, 10, _heat_max)
     raw += heat_award
     available += _heat_max
-    factors.append(_factor_row("新闻热度", f"覆盖源 {source_count} 个", heat_award, _heat_max, "从少量提及到多源同步，是热度拐点的代理"))
+    heat_signal = f"覆盖源 {source_count} 个" if source_count >= 1 else "情报覆盖偏窄"
+    factors.append(_factor_row("新闻热度", heat_signal, heat_award, _heat_max, "从少量提及到多源同步，是热度拐点的代理"))
     if density_award > 0 or heat_award > 0:
         existing_titles = {str(item.get("title", "")).strip() for item in evidence_rows if str(item.get("title", "")).strip()}
         for item in _dedupe_news_items(list(heat_pool))[:2]:
@@ -5568,7 +7759,7 @@ def _catalyst_dimension(
     factors.append(
         _factor_row(
             "前瞻催化",
-            forward_events[0]["title"] if forward_events else f"未来 {FORWARD_EVENT_LOOKAHEAD_DAYS} 日未命中直接催化事件",
+            forward_events[0]["title"] if forward_events else f"未来 {FORWARD_EVENT_LOOKAHEAD_DAYS} 日前瞻催化窗口暂不突出",
             forward_award,
             _forward_max,
             "未来财报/发布会/事件窗口已纳入；HK/US 个股优先读取公司级财报日历。",
@@ -5577,22 +7768,113 @@ def _catalyst_dimension(
     if forward_award > 0 and forward_events:
         evidence_rows.append(_evidence_row(layer="前瞻催化", item=forward_events[0]))
 
-    score = _normalize_dimension(raw, available, 100)
+    theme_news_rows: List[Dict[str, str]] = []
+    if asset_type_str in {"cn_etf", "cn_fund", "cn_index"}:
+        evidence_keys = {
+            (str(item.get("title", "")).strip(), str(item.get("source", "")).strip())
+            for item in evidence_rows
+            if str(item.get("title", "")).strip()
+        }
+        theme_expansion_terms = _theme_news_expansion_terms(metadata, profile)
+        theme_terms = _unique_strings(
+            [
+                sector,
+                str(profile.get("profile_name", "")).strip(),
+                *[str(item).strip() for item in profile.get("themes", []) if str(item).strip()],
+                *[str(item).strip() for item in catalyst_keys if str(item).strip()],
+                *[str(item).strip() for item in keyword_keys if str(item).strip()],
+                *[str(item).strip() for item in _catalyst_search_terms(metadata, profile) if str(item).strip()],
+                *theme_expansion_terms,
+            ]
+        )
+        theme_scope_pool = _dedupe_news_items([*all_news_pool, *dynamic_related_news])
+        theme_candidates = [
+            item
+            for item in theme_scope_pool
+            if (str(item.get("title", "")).strip(), str(item.get("source", "")).strip()) not in evidence_keys
+            and (
+                _category_item_is_relevant(item, metadata, profile, allowed_categories, related_tokens, strict_tokens)
+                or _contains_any(_title_source_text(item), theme_terms)
+            )
+        ]
+        theme_news_items = _pick_top_news_items(
+            theme_candidates,
+            primary_keywords=theme_terms,
+            bonus_keywords=[sector, *[str(item) for item in profile.get("themes", [])]],
+            limit=2,
+            reference_time=reference_now,
+        )
+        theme_news_rows = [
+            _evidence_row(layer="主题级关键新闻", item=item)
+            for item in theme_news_items
+        ]
+
+    direct_intelligence_available = bool(company_positive_pool or effective_structured_event or forward_events)
+    stale_live_only = (
+        news_mode == "live"
+        and bool(all_news_pool or theme_news_rows)
+        and not fresh_news_pool
+        and not direct_intelligence_available
+    )
+    theme_only_live = (
+        news_mode == "live"
+        and bool(theme_news_rows)
+        and not direct_intelligence_available
+        and not company_positive_pool
+    )
+    search_gap_suspected = (
+        asset_type_str in {"cn_stock", "cn_etf", "cn_fund"}
+        and
+        news_mode == "live"
+        and dynamic_search_attempted
+        and not dynamic_related_news
+        and not effective_structured_event
+        and not forward_events
+        and not company_positive_pool
+        and _expected_high_newsflow(metadata, profile)
+    )
+    score = None if search_gap_suspected else _normalize_dimension(raw, available, 100)
     catalyst_coverage = {
         "news_mode": news_mode,
         "high_confidence_company_news": bool(company_positive_pool),
         "structured_event": bool(structured_event_pool),
+        "effective_structured_event": effective_structured_event,
         "forward_event": bool(forward_events),
-        "news_pool_count": len(news_pool),
-        "direct_news_count": len(company_positive_pool) if (asset_type_str in {"hk", "us"} and stock_name_tokens) else len(stock_specific_pool if stock_specific_pool else news_pool),
+        "news_pool_count": len(all_news_pool),
+        "fresh_news_pool_count": len(fresh_news_pool),
+        "stale_news_pool_count": len(stale_news_pool),
+        "direct_news_count": len(company_positive_pool) if (asset_type_str in {"hk", "us"} and stock_name_tokens) else len(stock_specific_pool if stock_specific_pool else fresh_news_pool),
+        "fresh_direct_news_count": len(company_positive_pool) if (asset_type_str in {"hk", "us"} and stock_name_tokens) else len(stock_specific_pool if stock_specific_pool else fresh_news_pool),
         "source_count": source_count,
+        "latest_news_at": _latest_intelligence_at(all_news_pool, reference_now),
         "degraded": news_mode != "live",
+        "search_attempted": dynamic_search_attempted,
+        "search_groups": attempted_search_groups,
+        "search_result_count": len(dynamic_related_news),
+        "diagnosis": (
+            "suspected_search_gap"
+            if search_gap_suspected
+            else "stale_live_only"
+            if stale_live_only
+            else "theme_only_live"
+            if theme_only_live
+            else "proxy_degraded"
+            if news_mode != "live"
+            else "confirmed_live"
+        ),
+        "ai_web_search_recommended": search_gap_suspected,
     }
-    if score is None:
+    if search_gap_suspected:
+        summary = "当前实时情报检索未命中高置信新增证据；对这类高关注方向更像搜索覆盖不足，本次催化维度暂按待 AI 联网复核处理，不直接记成零催化。"
+    elif stale_live_only:
+        summary = "当前能命中的多是旧闻回放或背景线索，新增催化仍不足；本次不把旧闻直接记成新催化。"
+    elif theme_only_live:
+        summary = "当前主要是主题级情报，尚未命中公司/产品级直接催化；先按背景支持而不是动作触发处理。"
+    elif score is None:
         summary = "ℹ️ 催化面数据缺失，本次评级未纳入该维度"
-    elif structured_event_pool and score < 40:
+    elif effective_structured_event and score < 40:
         summary = "结构化事件已出现，但高质量公司级新闻确认还不够，当前更像事件在前、市场共识在后。"
-    elif is_individual_stock and not structured_event_pool and not company_positive_pool and score < 40:
+    elif is_individual_stock and not effective_structured_event and not company_positive_pool and score < 40:
         summary = "当前未抓到高质量公司级新闻或结构化事件，先按信息不足处理，不直接视为利空。"
     else:
         summary = _dimension_summary(score, "催化明确，市场有理由重新定价。", "有催化苗头，但强度还不够形成一致预期。", "催化不足，当前更像静态博弈。", "ℹ️ 催化面数据缺失，本次评级未纳入该维度")
@@ -5602,11 +7884,19 @@ def _catalyst_dimension(
         "max_score": 100,
         "summary": summary,
         "factors": factors,
-        "core_signal": _catalyst_core_signal(factors, stock_specific_pool, company_positive_pool, is_individual_stock, asset_type_str),
+        "core_signal": _catalyst_core_signal(
+            factors,
+            stock_specific_pool,
+            company_positive_pool,
+            is_individual_stock,
+            asset_type_str,
+            catalyst_coverage,
+        ),
         "missing": score is None,
         "profile_name": profile.get("profile_name", sector),
         "coverage": catalyst_coverage,
         "evidence": _dedupe_news_items(evidence_rows),
+        "theme_news": _dedupe_news_items(theme_news_rows),
     }
 
 
@@ -5773,6 +8063,98 @@ def _relative_strength_dimension(
             )
         )
 
+    if asset_type in {"cn_etf", "cn_fund", "cn_index"}:
+        index_bundle = _context_index_topic_bundle(metadata, context, fund_profile=context.get("fund_profile"))
+        history_snapshots = dict(index_bundle.get("history_snapshots") or {})
+        for period, max_award in (("monthly", 6), ("weekly", 4)):
+            history_snapshot = dict(history_snapshots.get(period) or {})
+            if not history_snapshot or str(history_snapshot.get("status", "")).strip() != "matched":
+                continue
+            trend_label = str(history_snapshot.get("trend_label", "")).strip()
+            momentum_label = str(history_snapshot.get("momentum_label", "")).strip()
+            summary = str(history_snapshot.get("summary", "")).strip()
+            period_label = {"weekly": "周线", "monthly": "月线"}.get(period, period)
+            if trend_label in {"趋势偏强", "修复中"}:
+                award = max_award
+            elif trend_label == "趋势偏弱":
+                award = -max_award
+            else:
+                award = 0
+            if momentum_label == "动能偏强":
+                award = min(award + 1, max_award)
+            elif momentum_label == "动能偏弱":
+                award = max(award - 1, -max_award)
+            if trend_label or summary:
+                raw += award
+                available += max_award
+                benchmark_label = str(
+                    dict(index_bundle.get("index_snapshot") or {}).get("index_name")
+                    or metadata.get("benchmark_name")
+                    or metadata.get("benchmark")
+                    or benchmark_name
+                ).strip() or benchmark_name
+                factors.append(
+                    _factor_row(
+                        f"指数{period_label}结构",
+                        f"{benchmark_label} {trend_label}" + (f" / {momentum_label}" if momentum_label else ""),
+                        award,
+                        max_award,
+                        (
+                            f"标准指数主链已接入 `{benchmark_label}` 的 {period_label} 行情结构；"
+                            + (f" {summary}" if summary else "")
+                            + " 指数型产品的节奏先按更高频的结构确认。"
+                        ).strip(),
+                    )
+                )
+        technical_snapshot = dict(index_bundle.get("technical_snapshot") or {})
+        trend_label = str(technical_snapshot.get("trend_label", "")).strip()
+        momentum_label = str(technical_snapshot.get("momentum_label", "")).strip()
+        pct_change = pd.to_numeric(pd.Series([technical_snapshot.get("pct_change")]), errors="coerce").iloc[0]
+        if technical_snapshot and str(technical_snapshot.get("status", "")).strip() == "matched" and trend_label:
+            benchmark_label = str(
+                dict(index_bundle.get("index_snapshot") or {}).get("index_name")
+                or metadata.get("benchmark_name")
+                or metadata.get("benchmark")
+                or benchmark_name
+            ).strip() or benchmark_name
+            if trend_label == "趋势偏强":
+                index_award = 10
+            elif trend_label == "修复中":
+                index_award = 6
+            elif trend_label == "趋势偏弱":
+                index_award = -6
+            else:
+                index_award = 0
+            if momentum_label == "动能偏强":
+                index_award = min(index_award + 2, 10)
+            elif momentum_label == "动能偏弱":
+                index_award = max(index_award - 2, -8)
+            raw += index_award
+            available += 10
+            factors.append(
+                _factor_row(
+                    "跟踪指数技术状态",
+                    f"{benchmark_label} {trend_label}" + (f" / {momentum_label}" if momentum_label else ""),
+                    index_award,
+                    10,
+                    (
+                        f"标准指数主链已接入 `{benchmark_label}` 的 idx_factor_pro 技术状态；"
+                        + (f" 当日涨跌幅 {float(pct_change):+.2f}% ." if not pd.isna(pct_change) else "")
+                        + " ETF/指数型产品的相对强弱先按跟踪指数确认。"
+                    ).strip(),
+                )
+            )
+        else:
+            factors.append(
+                _factor_row(
+                    "跟踪指数技术状态",
+                    "缺失",
+                    None,
+                    10,
+                    "当前未拿到可用 idx_factor_pro 跟踪指数状态，不把缺口误写成趋势已确认。",
+                )
+            )
+
     board_move = _sector_board_match(metadata, context.get("drivers", {}))
     if board_move is not None:
         # Lowered threshold: 0.3% sector gain already qualifies as meaningful breadth.
@@ -5901,33 +8283,73 @@ def _relative_strength_dimension(
     factors.append(_factor_row("跨市场比价", "港股估值压力缓和" if ah_award else "该项不适用或暂无明显优势", ah_award, 10, "仅港股相关标的适用"))
 
     score = _normalize_dimension(raw, available, 100)
+    proxy_only = board_move is not None and (advance_ratio is None or leader_up is None)
+    if score is None:
+        summary = "ℹ️ 相对强弱数据缺失，本次评级未纳入该维度"
+    elif proxy_only:
+        if score >= 40:
+            summary = "相对强弱有改善，但行业宽度/龙头确认仍缺失，先按低置信代理理解。"
+        else:
+            summary = "相对强弱偏弱，且行业宽度/龙头确认仍缺失，更适合当成背景观察。"
+    else:
+        summary = _dimension_summary(
+            score,
+            "轮动已经轮到它，具备主线扩散条件。",
+            "相对强弱有改善，但还不是最典型的扩散点。",
+            "轮动还没轮到它，更多是背景观察。",
+            "ℹ️ 相对强弱数据缺失，本次评级未纳入该维度",
+        )
     return {
         "name": "相对强弱",
         "score": score,
         "max_score": 100,
-        "summary": _dimension_summary(score, "轮动已经轮到它，具备主线扩散条件。", "相对强弱有改善，但还不是最典型的扩散点。", "轮动还没轮到它，更多是背景观察。", "ℹ️ 相对强弱数据缺失，本次评级未纳入该维度"),
+        "summary": summary,
         "factors": factors,
         "core_signal": _top_material_signals(factors),
         "missing": score is None,
+        "proxy_only": proxy_only,
         "benchmark_name": benchmark_name,
         "benchmark_symbol": benchmark_symbol,
     }
 
 
-def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], context: Mapping[str, Any], config: Mapping[str, Any]) -> Dict[str, Any]:
+def _sector_proxy_signal_label(metadata: Mapping[str, Any], matched_name: Any) -> str:
+    matched = str(matched_name or "").strip()
+    sector = str(metadata.get("sector") or "").strip()
+    theme = str(metadata.get("theme") or "").strip()
+    focus = sector or theme or matched or "相关行业/概念"
+    if matched and matched != focus and matched not in focus:
+        return f"相关行业/概念代理：{focus}（当前命中 {matched}）"
+    if matched:
+        return f"相关行业/概念代理：{matched}"
+    return f"相关行业/概念代理：{focus}"
+
+
+def _chips_dimension(
+    symbol: str,
+    asset_type: str,
+    metadata: Mapping[str, Any],
+    context: Mapping[str, Any],
+    config: Mapping[str, Any],
+    history: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
     factors: List[Dict[str, Any]] = []
     raw = 0
     available = 0
     display_name = "筹码结构（辅助项）" if asset_type in {"cn_etf", "cn_index", "cn_fund"} else "筹码结构"
-    commodity_like_fund = _is_commodity_like_fund(asset_type, metadata, context.get("fund_profile"))
+    fund_profile = dict(context.get("fund_profile") or {})
+    commodity_like_fund = _is_commodity_like_fund(asset_type, metadata, fund_profile)
+    fund_profile_mode = str(fund_profile.get("profile_mode") or "").strip().lower()
+    is_light_etf_profile = asset_type == "cn_etf" and fund_profile_mode == "light"
     drivers = dict(context.get("drivers", {}))
     sector_flow = _sector_flow_snapshot(metadata, drivers)
     northbound = _northbound_sector_snapshot(metadata, drivers)
     hot_rank = _hot_rank_snapshot(metadata, drivers)
     concentration_proxy: Dict[str, Any] = {}
-    if asset_type in {"cn_etf", "cn_index", "cn_fund"} and not commodity_like_fund:
+    if asset_type in {"cn_etf", "cn_index", "cn_fund"} and not commodity_like_fund and not is_light_etf_profile:
         concentration_proxy = _context_cn_index_concentration_proxy(
             _valuation_keywords(metadata),
+            prefetched_bundle=metadata.get("index_topic_bundle"),
             context=context,
             config=config,
         )
@@ -5935,9 +8357,13 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
         concentration_proxy = _context_cn_index_concentration_proxy(
             _board_keywords(metadata),
             symbol=symbol,
+            prefetched_bundle=metadata.get("index_topic_bundle"),
             context=context,
             config=config,
         )
+    chip_snapshot = _cn_stock_chip_snapshot(metadata, context, history) if asset_type == "cn_stock" else {}
+    capital_flow_snapshot = _cn_stock_capital_flow_snapshot(metadata, context) if asset_type == "cn_stock" else {}
+    margin_snapshot = _cn_stock_margin_snapshot(metadata, context) if asset_type == "cn_stock" else {}
 
     heat_rank = hot_rank.get("rank") if not commodity_like_fund else None
     if heat_rank is not None:
@@ -5957,19 +8383,116 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
         crowding_award = 30 if main_flow > 0 else -6 if main_flow < 0 else 0
         raw += crowding_award
         available += 30
+        sector_proxy_label = _sector_proxy_signal_label(metadata, sector_flow.get("name"))
         factors.append(
             _factor_row(
                 "公募/热度代理",
-                f"所属行业/概念代理：{sector_flow.get('name') or metadata.get('sector', '行业')} 主力净{'流入' if (sector_flow.get('main_flow') or 0) > 0 else '流出'} {_fmt_yi_number(sector_flow.get('main_flow'))}",
+                f"{sector_proxy_label} 主力净{'流入' if (sector_flow.get('main_flow') or 0) > 0 else '流出'} {_fmt_yi_number(sector_flow.get('main_flow'))}",
                 crowding_award,
                 30,
-                "热门榜缺失时，改用行业主力资金流方向代理当前拥挤度与配置方向。",
+                "热门榜缺失时，改用相关行业资金流做低置信代理，主要用来观察配置方向，不把它当成个股自身热度已经确认。",
             )
         )
     else:
         factors.append(_factor_row("公募/热度代理", "缺失", None, 30, "公募低配/热度代理暂缺"))
 
     if asset_type == "cn_stock":
+        chip_status = str(chip_snapshot.get("status", "")).strip()
+        chip_is_fresh = bool(chip_snapshot.get("is_fresh"))
+        if chip_status == "matched" and chip_is_fresh:
+            winner_rate_pct = pd.to_numeric(pd.Series([chip_snapshot.get("winner_rate_pct")]), errors="coerce").dropna()
+            price_vs_avg_pct = pd.to_numeric(pd.Series([chip_snapshot.get("price_vs_weight_avg_pct")]), errors="coerce").dropna()
+            above_price_pct = pd.to_numeric(pd.Series([chip_snapshot.get("above_price_pct")]), errors="coerce").dropna()
+            near_price_pct = pd.to_numeric(pd.Series([chip_snapshot.get("near_price_pct")]), errors="coerce").dropna()
+            peak_price = pd.to_numeric(pd.Series([chip_snapshot.get("peak_price")]), errors="coerce").dropna()
+            peak_percent = pd.to_numeric(pd.Series([chip_snapshot.get("peak_percent")]), errors="coerce").dropna()
+            avg_cost = pd.to_numeric(pd.Series([chip_snapshot.get("weight_avg")]), errors="coerce").dropna()
+
+            if not winner_rate_pct.empty:
+                winner_value = float(winner_rate_pct.iloc[0])
+                winner_award = 20 if winner_value >= 70 else 12 if winner_value >= 55 else -12 if winner_value < 35 else -6 if winner_value < 45 else 0
+                raw += winner_award
+                available += 20
+                factors.append(
+                    _factor_row(
+                        "筹码胜率",
+                        f"盈利筹码约 {winner_value:.1f}%",
+                        winner_award,
+                        20,
+                        "真实筹码胜率越高，说明更多存量筹码已经处在盈利区，更容易形成趋势承接。",
+                        factor_id="j3_chip_winner",
+                    )
+                )
+            else:
+                factors.append(_factor_row("筹码胜率", "缺失", None, 20, "真实筹码胜率当前缺失。", factor_id="j3_chip_winner"))
+
+            if not price_vs_avg_pct.empty and not avg_cost.empty:
+                cost_gap = float(price_vs_avg_pct.iloc[0])
+                avg_cost_value = float(avg_cost.iloc[0])
+                cost_award = 15 if cost_gap >= 0.05 else 8 if cost_gap >= 0 else -12 if cost_gap <= -0.08 else -6 if cost_gap < 0 else 0
+                raw += cost_award
+                available += 15
+                factors.append(
+                    _factor_row(
+                        "平均成本位置",
+                        f"现价相对加权平均成本 {cost_gap:+.1%}（均价约 {avg_cost_value:.2f} 元）",
+                        cost_award,
+                        15,
+                        "现价站在平均成本上方，通常意味着新增承接更容易延续；反之说明存量套牢盘还没完全消化。",
+                        factor_id="j3_chip_cost_basis",
+                    )
+                )
+            else:
+                factors.append(_factor_row("平均成本位置", "缺失", None, 15, "当前未拿到可稳定使用的平均成本位置。", factor_id="j3_chip_cost_basis"))
+
+            if not above_price_pct.empty:
+                above_value = float(above_price_pct.iloc[0])
+                overhang_award = 15 if above_value <= 25 else 5 if above_value <= 40 else -10 if above_value >= 60 else -5 if above_value >= 45 else 0
+                raw += overhang_award
+                available += 15
+                factors.append(
+                    _factor_row(
+                        "套牢盘压力",
+                        f"现价上方筹码约 {above_value:.1f}%",
+                        overhang_award,
+                        15,
+                        "上方筹码越多，反弹越容易先碰到解套卖压；这项直接回答当前位置是不是还要先磨筹码。",
+                        factor_id="j3_chip_overhang",
+                    )
+                )
+            else:
+                factors.append(_factor_row("套牢盘压力", "缺失", None, 15, "当前未拿到可稳定使用的上方套牢盘占比。", factor_id="j3_chip_overhang"))
+
+            if not peak_price.empty and not peak_percent.empty:
+                peak_price_value = float(peak_price.iloc[0])
+                peak_percent_value = float(peak_percent.iloc[0])
+                near_value = float(near_price_pct.iloc[0]) if not near_price_pct.empty else 0.0
+                distribution_award = 10 if near_value >= 30 else 5 if near_value >= 20 else -6 if peak_percent_value >= 15 and not price_vs_avg_pct.empty and float(price_vs_avg_pct.iloc[0]) < 0 else 0
+                raw += distribution_award
+                available += 10
+                factors.append(
+                    _factor_row(
+                        "筹码密集区",
+                        f"主筹码密集区约 {peak_price_value:.2f} 元 / 单价位占比 {peak_percent_value:.1f}%",
+                        distribution_award,
+                        10,
+                        "主筹码如果已经聚到现价附近，更像在做换手确认；如果密集区明显压在现价上方，短线更像先消化抛压。",
+                        factor_id="j3_chip_distribution",
+                    )
+                )
+            else:
+                factors.append(_factor_row("筹码密集区", "缺失", None, 10, "当前未拿到可稳定使用的筹码密集区。", factor_id="j3_chip_distribution"))
+        else:
+            chip_display = "缺失" if chip_status in {"empty", "blocked"} else "观察"
+            if chip_status == "matched":
+                chip_signal = f"真实筹码分布非当期（最新 {chip_snapshot.get('latest_date') or '未知'}）"
+            elif chip_status in {"empty", "blocked"}:
+                chip_signal = "真实筹码分布缺失"
+            else:
+                chip_signal = "真实筹码分布未启用"
+            chip_detail = str(chip_snapshot.get("detail", "")).strip() or str(chip_snapshot.get("disclosure", "")).strip() or "真实筹码分布当前缺失，本轮先不把代理信号写成资金确认。"
+            factors.append(_factor_row("真实筹码分布", chip_signal, None, 20, chip_detail, display_score=chip_display, factor_id="j3_real_chip_snapshot"))
+
         holdertrade = _cn_holdertrade_snapshot(metadata, context)
         if holdertrade:
             direction = str(holdertrade.get("direction", ""))
@@ -6040,13 +8563,14 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
             north_award = 20 if north_value is not None and north_float > 0 else -8 if north_value is not None and north_float < 0 else 0
             raw += north_award
             available += 20
+            northbound_proxy_label = _sector_proxy_signal_label(metadata, northbound.get("name"))
             factors.append(
                 _factor_row(
                     "北向/南向",
-                    f"所属行业/概念代理：{northbound.get('name') or metadata.get('sector', '板块')} 北向增持估计 {_fmt_yi_number(north_value)}",
+                    f"{northbound_proxy_label} 北向增持估计 {_fmt_yi_number(north_value)}",
                     north_award,
                     20,
-                    "这里使用行业/概念板块北向增持排行，不是单一个股的北向持仓变动。",
+                    "这里使用相关行业/概念板块北向增持排行，只能提示大致配置方向，不等于单一个股出现了明确北向增持。",
                 )
             )
         else:
@@ -6063,25 +8587,35 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
                         )
                     )
                 else:
-                    flow = ChinaMarketCollector(config).get_north_south_flow()
-                    value = 0.0
-                    if not flow.empty and {"日期", "北向资金净流入"}.issubset(flow.columns):
-                        latest = flow.sort_values("日期").iloc[-1]
-                        value = float(
-                            pd.to_numeric(pd.Series([latest.get("北向资金净流入")]), errors="coerce").fillna(0.0).iloc[0]
+                    if is_light_etf_profile:
+                        factors.append(
+                            _factor_row(
+                                "北向/南向",
+                                "行业北向缺失，当前不再回退全市场北向总量",
+                                0,
+                                0,
+                                "ETF 轻量预筛阶段优先保留行业/指数主链，不再为了全市场北向总量额外触发慢链。",
+                                display_score="信息项",
+                            )
                         )
-                    north_award = 20 if value > 0 else -8 if value < 0 else 0
-                    raw += north_award
-                    available += 20
-                    factors.append(
-                        _factor_row(
-                            "北向/南向",
-                            f"北向净买额约 {_fmt_yi_number(value)}",
-                            north_award,
-                            20,
-                            "行业北向缺失，回退到全市场方向代理；该项更多用于 ETF/市场方向，不直接解释成单一个股优势。",
+                    else:
+                        flow = ChinaMarketCollector(config).get_north_south_flow()
+                        value = 0.0
+                        if not flow.empty and {"日期", "北向资金净流入"}.issubset(flow.columns):
+                            latest = flow.sort_values("日期").iloc[-1]
+                            value = float(
+                                pd.to_numeric(pd.Series([latest.get("北向资金净流入")]), errors="coerce").fillna(0.0).iloc[0]
+                            )
+                        factors.append(
+                            _factor_row(
+                                "北向/南向",
+                                f"北向净买额约 {_fmt_yi_number(value)}",
+                                0,
+                                0,
+                                "行业北向缺失，当前只披露全市场方向代理；它可以提示市场风险偏好，但不能直接给单一 ETF 的筹码结构加分。",
+                                display_score="信息项",
+                            )
                         )
-                    )
             except Exception as exc:
                 factors.append(_factor_row("北向/南向", "缺失", None, 20, f"北向/南向数据缺失: {exc}"))
     elif asset_type in {"hk", "hk_index"}:
@@ -6092,25 +8626,27 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
     if asset_type == "cn_etf":
         chips_award: Optional[int] = None
         try:
-            flow = ChinaMarketCollector(config).get_etf_fund_flow(symbol)
-            series = pd.to_numeric(flow.get("净流入", pd.Series(dtype=float)), errors="coerce").dropna()
-            if not series.empty:
-                tail_flow = float(series.tail(5).sum())
-                chips_award = 10 if tail_flow > 0 else -5 if tail_flow < 0 else 0
-                raw += chips_award
-                available += 10
-                flow_signal = "ETF 近 5 个样本净流入为正" if tail_flow > 0 else "ETF 近 5 个样本净流出" if tail_flow < 0 else "ETF 流入没有持续为正"
-                factors.append(_factor_row("机构资金承接", flow_signal, chips_award, 10, "用 ETF 资金流做筹码代理"))
+            if not is_light_etf_profile:
+                flow = ChinaMarketCollector(config).get_etf_fund_flow(symbol)
+                series = pd.to_numeric(flow.get("净流入", pd.Series(dtype=float)), errors="coerce").dropna()
+                if not series.empty:
+                    tail_flow = float(series.tail(5).sum())
+                    chips_award = 10 if tail_flow > 0 else -5 if tail_flow < 0 else 0
+                    raw += chips_award
+                    available += 10
+                    flow_signal = "ETF 近 5 个样本净流入为正" if tail_flow > 0 else "ETF 近 5 个样本净流出" if tail_flow < 0 else "ETF 流入没有持续为正"
+                    factors.append(_factor_row("机构资金承接", flow_signal, chips_award, 10, "用 ETF 资金流做筹码代理"))
         except Exception as exc:
             if sector_flow and not commodity_like_fund:
                 main_flow = float(sector_flow.get("main_flow") or 0.0)
                 chips_award = 10 if main_flow > 0 else -5 if main_flow < 0 else 0
                 raw += chips_award
                 available += 10
+                sector_proxy_label = _sector_proxy_signal_label(metadata, sector_flow.get("name"))
                 factors.append(
                     _factor_row(
                         "机构资金承接",
-                        f"{sector_flow.get('name') or metadata.get('sector', '行业')} 主力净{'流入' if (sector_flow.get('main_flow') or 0) > 0 else '流出'} {_fmt_yi_number(sector_flow.get('main_flow'))}",
+                        f"{sector_proxy_label} 主力净{'流入' if (sector_flow.get('main_flow') or 0) > 0 else '流出'} {_fmt_yi_number(sector_flow.get('main_flow'))}",
                         chips_award,
                         10,
                         f"ETF 流数据缺失，改用行业资金流代理: {exc}",
@@ -6118,23 +8654,149 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
                 )
             else:
                 factors.append(_factor_row("机构资金承接", "缺失", None, 10, f"ETF 资金流数据缺失: {exc}"))
+        if chips_award is None and not is_light_etf_profile:
+            if sector_flow and not commodity_like_fund:
+                main_flow = float(sector_flow.get("main_flow") or 0.0)
+                chips_award = 10 if main_flow > 0 else -5 if main_flow < 0 else 0
+                raw += chips_award
+                available += 10
+                sector_proxy_label = _sector_proxy_signal_label(metadata, sector_flow.get("name"))
+                factors.append(
+                    _factor_row(
+                        "机构资金承接",
+                        f"{sector_proxy_label} 主力净{'流入' if (sector_flow.get('main_flow') or 0) > 0 else '流出'} {_fmt_yi_number(sector_flow.get('main_flow'))}",
+                        chips_award,
+                        10,
+                        "ETF 资金流主链当前为空表，先用行业资金流代理承接方向，避免静默丢掉资金流判断。",
+                    )
+                )
+            else:
+                factors.append(
+                    _factor_row(
+                        "机构资金承接",
+                        "ETF 资金流主链当前为空表",
+                        None,
+                        10,
+                        "这轮没有拿到可用的 ETF 资金流样本，先显式按缺失处理，不静默吞掉该模块。",
+                    )
+                )
+        if chips_award is None and is_light_etf_profile:
+            if sector_flow and not commodity_like_fund:
+                main_flow = float(sector_flow.get("main_flow") or 0.0)
+                chips_award = 10 if main_flow > 0 else -5 if main_flow < 0 else 0
+                raw += chips_award
+                available += 10
+                sector_proxy_label = _sector_proxy_signal_label(metadata, sector_flow.get("name"))
+                factors.append(
+                    _factor_row(
+                        "机构资金承接",
+                        f"{sector_proxy_label} 主力净{'流入' if (sector_flow.get('main_flow') or 0) > 0 else '流出'} {_fmt_yi_number(sector_flow.get('main_flow'))}",
+                        chips_award,
+                        10,
+                        "ETF discovery 轻量模式当前跳过 ETF 资金流慢链，先用行业资金流代理承接方向。",
+                    )
+                )
+            else:
+                factors.append(
+                    _factor_row(
+                        "机构资金承接",
+                        "ETF 轻量预筛阶段未拉取资金流慢链",
+                        None,
+                        10,
+                        "本轮先按标准行业/指数框架与产品结构预筛；如进入正式候选，再补完整 ETF 资金流。",
+                        display_score="观察提示",
+                    )
+                )
     elif asset_type == "cn_stock":
-        if sector_flow:
+        flow_status = str(capital_flow_snapshot.get("status", "")).strip()
+        flow_is_fresh = bool(capital_flow_snapshot.get("is_fresh"))
+        direct_main_flow = pd.to_numeric(pd.Series([capital_flow_snapshot.get("direct_main_flow")]), errors="coerce").dropna()
+        direct_5d_flow = pd.to_numeric(pd.Series([capital_flow_snapshot.get("direct_5d_main_flow")]), errors="coerce").dropna()
+        proxy_main_flow = pd.to_numeric(pd.Series([capital_flow_snapshot.get("board_main_flow")]), errors="coerce").dropna()
+        if flow_is_fresh and flow_status == "matched" and not direct_main_flow.empty:
+            direct_today = float(direct_main_flow.iloc[0])
+            direct_window = float(direct_5d_flow.iloc[0]) if not direct_5d_flow.empty else direct_today
+            chips_award_stock = 15 if direct_today > 0 and direct_window > 0 else 10 if direct_today > 0 else -8 if direct_today < 0 and direct_window < 0 else -5 if direct_today < 0 else 0
+            raw += chips_award_stock
+            available += 15
+            factors.append(
+                _factor_row(
+                    "机构资金承接",
+                    f"个股主力净{'流入' if direct_today >= 0 else '流出'} {_fmt_yi_number(direct_today)}"
+                    + (f" / 近 5 日累计 {_fmt_yi_number(direct_window)}" if not direct_5d_flow.empty else ""),
+                    chips_award_stock,
+                    15,
+                    str(capital_flow_snapshot.get("detail", "")).strip()
+                    or ("当前已接到个股级 moneyflow，不再只靠行业代理判断资金承接。" if direct_today >= 0 else "当前个股级 moneyflow 仍显示净流出，不把题材热度误写成承接确认。"),
+                )
+            )
+        elif flow_is_fresh and flow_status == "proxy" and not proxy_main_flow.empty:
+            proxy_today = float(proxy_main_flow.iloc[0])
+            chips_award_stock = 10 if proxy_today > 0 else -5 if proxy_today < 0 else 0
+            raw += chips_award_stock
+            available += 10
+            proxy_board_name = str(capital_flow_snapshot.get("board_name", "")).strip() or str(sector_flow.get("name", "")).strip()
+            factors.append(
+                _factor_row(
+                    "机构资金承接",
+                    f"{_sector_proxy_signal_label(metadata, proxy_board_name)} 主力净{'流入' if proxy_today >= 0 else '流出'} {_fmt_yi_number(proxy_today)}",
+                    chips_award_stock,
+                    10,
+                    str(capital_flow_snapshot.get("detail", "")).strip()
+                    or "个股资金流当前未命中 fresh，先用行业/概念资金流做代理，不把它当成公司自身资金已经形成明确承接。",
+                )
+            )
+        elif sector_flow:
             main_flow = float(sector_flow.get("main_flow") or 0.0)
             chips_award_stock = 10 if main_flow > 0 else -5 if main_flow < 0 else 0
             raw += chips_award_stock
             available += 10
+            sector_proxy_label = _sector_proxy_signal_label(metadata, sector_flow.get("name"))
             factors.append(
                 _factor_row(
                     "机构资金承接",
-                    f"{sector_flow.get('name') or metadata.get('sector', '行业')} 主力净{'流入' if (sector_flow.get('main_flow') or 0) > 0 else '流出'} {_fmt_yi_number(sector_flow.get('main_flow'))}",
+                    f"{sector_proxy_label} 主力净{'流入' if (sector_flow.get('main_flow') or 0) > 0 else '流出'} {_fmt_yi_number(sector_flow.get('main_flow'))}",
                     chips_award_stock,
                     10,
-                    "个股资金流用所属行业主力资金流方向代理。",
+                    "个股资金流当前只用相关行业主力资金流做低置信代理，不把它当成公司自身资金已经形成明确承接。",
                 )
             )
         else:
             factors.append(_factor_row("机构资金承接", "缺失", None, 10, "个股所属行业资金流数据缺失"))
+
+        margin_level = str(margin_snapshot.get("crowding_level", "")).strip()
+        if bool(margin_snapshot.get("is_fresh")) and margin_level:
+            if margin_level == "high":
+                margin_signal = "融资盘升温明显，短线拥挤度偏高"
+            elif margin_level == "medium":
+                margin_signal = "融资盘仍在升温，需防一致性交易"
+            elif margin_level == "relieved":
+                margin_signal = "融资盘近窗口回落，拥挤度有所释放"
+            else:
+                margin_signal = "融资盘暂未见明显拥挤式抬升"
+            factors.append(
+                _factor_row(
+                    "两融拥挤度",
+                    margin_signal,
+                    None,
+                    0,
+                    str(margin_snapshot.get("detail", "")).strip() or "个股两融明细只作拥挤度观察，不把它直接写成确定性利多/利空。",
+                    display_score="观察提示",
+                    factor_id="j3_margin_crowding",
+                )
+            )
+        else:
+            factors.append(
+                _factor_row(
+                    "两融拥挤度",
+                    "两融明细缺失，暂不判断融资盘拥挤",
+                    None,
+                    0,
+                    str(margin_snapshot.get("detail", "")).strip() or "当前未拿到可稳定使用的个股两融明细，不把缺口误写成融资盘已经退潮。",
+                    display_score="观察提示",
+                    factor_id="j3_margin_crowding",
+                )
+            )
     else:
         factors.append(_factor_row("机构资金承接", "该项不适用", None, 10, "当前只对 A 股 ETF 接稳定资金流代理"))
 
@@ -6143,13 +8805,18 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
         concentration_award = 15 if float(top_concentration) >= 35 else 8 if float(top_concentration) >= 25 else 0
         raw += concentration_award
         available += 15
+        concentration_source = str(concentration_proxy.get("source", "")).strip()
+        if concentration_source == "index_topic_bundle":
+            concentration_detail = "直接复用已命中的指数成分权重主链估算前五大集中度，不重复走慢速指数财务代理聚合。"
+        else:
+            concentration_detail = f"用指数前五大成分股权重集中度代理共识程度；财务覆盖权重约 {concentration_proxy.get('coverage_weight', 0.0):.1f}%。"
         factors.append(
             _factor_row(
                 "机构集中度代理",
                 f"前五大成分股权重合计 {float(top_concentration):.1f}%",
                 concentration_award,
                 15,
-                f"用指数前五大成分股权重集中度代理共识程度；财务覆盖权重约 {concentration_proxy.get('coverage_weight', 0.0):.1f}%。",
+                concentration_detail,
             )
         )
     else:
@@ -6181,8 +8848,35 @@ def _chips_dimension(symbol: str, asset_type: str, metadata: Mapping[str, Any], 
     if score is not None and proxy_only_individual:
         score = min(score, 55)
     summary = _dimension_summary(score, "聪明钱方向偏正面。", "筹码结构没有形成明确增量共识。", "聪明钱没有明显站在这一边。", "ℹ️ 筹码结构数据缺失，本次评级未纳入该维度")
-    if proxy_only_individual and score is not None:
-        summary += " 当前更多是行业/市场级筹码代理，不把它当成单一个股已经被资金充分确认。"
+    chip_winner_factor = next((factor for factor in factors if factor.get("name") == "筹码胜率"), {})
+    chip_cost_factor = next((factor for factor in factors if factor.get("name") == "平均成本位置"), {})
+    chip_pressure_factor = next((factor for factor in factors if factor.get("name") == "套牢盘压力"), {})
+    chip_distribution_factor = next((factor for factor in factors if factor.get("name") == "筹码密集区"), {})
+    has_real_chip_signals = any(
+        str(factor.get("signal", "")).strip() and str(factor.get("display_score", "")).strip() != "缺失"
+        for factor in (chip_winner_factor, chip_cost_factor, chip_pressure_factor, chip_distribution_factor)
+        if factor
+    )
+    stock_like_proxy_signal = asset_type in {"cn_stock", "hk", "us"} and any(
+        "相关行业/概念代理" in str(factor.get("signal", ""))
+        for factor in factors
+    )
+    if asset_type == "cn_stock" and has_real_chip_signals and score is not None:
+        if int(chip_pressure_factor.get("awarded", 0) or 0) < 0 or int(chip_cost_factor.get("awarded", 0) or 0) < 0:
+            summary = "真实筹码分布偏谨慎：平均成本或上方套牢盘压力还没完全消化，当前更像先磨筹码。"
+        elif int(chip_winner_factor.get("awarded", 0) or 0) > 0 and int(chip_cost_factor.get("awarded", 0) or 0) >= 0:
+            summary = "真实筹码分布开始配合价格：胜率和平均成本位置都偏正面，不只是行业代理在支撑。"
+        else:
+            summary = "真实筹码分布仍在拉锯：现价与平均成本接近，筹码换手还没走到明确一边。"
+    elif proxy_only_individual and score is not None:
+        if score >= 60:
+            summary = "筹码代理偏正面，但当前更多来自行业/市场级信号，不把它当成单一个股已经被资金充分确认。"
+        elif score >= 40:
+            summary = "筹码代理没有形成明确增量共识，当前更多是行业/市场级观察信号。"
+        else:
+            summary = "筹码代理暂未显示明确承接，且当前更多来自行业/市场级信号，不把它当成公司资金面已经显著转强。"
+    elif stock_like_proxy_signal and score is not None and score < 60:
+        summary = "筹码代理暂未显示明确承接，当前更多来自行业/市场级信号，不把它当成公司资金面已经显著转强。"
     if asset_type in {"cn_etf", "cn_index", "cn_fund"}:
         if available <= 0:
             summary = "当前 ETF/基金 的筹码代理缺口较大，本轮主排序未使用该维度，先只作辅助披露。"
@@ -6328,6 +9022,215 @@ def _risk_dimension(
         available += 10
         factors.append(_factor_row("组合分散", f"与 {peer} 相关性 {corr:.2f}", div_award, 10, "相关性越低，越有真正分散价值"))
 
+    if asset_type == "cn_stock":
+        regulatory_snapshot = _cn_stock_regulatory_risk_snapshot(metadata, context)
+        if regulatory_snapshot:
+            status = str(regulatory_snapshot.get("status", "")).strip()
+            detail = str(regulatory_snapshot.get("detail", "")).strip() or "交易所风险专题当前未提供有效结论。"
+            if status == "❌":
+                penalty = 20
+                raw -= penalty
+                available += 20
+                factors.append(
+                    _factor_row(
+                        "交易所风险提示",
+                        "当前仍处于 ST / *ST 高风险状态",
+                        0,
+                        penalty,
+                        detail,
+                        display_score=f"-{penalty}",
+                    )
+                )
+            elif status == "⚠️":
+                penalty = 12 if int(regulatory_snapshot.get("active_alert_count") or 0) > 0 and int(regulatory_snapshot.get("high_shock_count") or 0) > 0 else 8
+                raw -= penalty
+                available += 20
+                factors.append(
+                    _factor_row(
+                        "交易所风险提示",
+                        "近窗口存在异常波动或重点提示",
+                        0,
+                        penalty,
+                        detail,
+                        display_score=f"-{penalty}",
+                    )
+                )
+            elif status == "✅":
+                award = 10
+                raw += award
+                available += 20
+                factors.append(
+                    _factor_row(
+                        "交易所风险提示",
+                        "近窗口未命中交易所高风险专题",
+                        award,
+                        20,
+                        detail,
+                    )
+                )
+            else:
+                factors.append(
+                    _factor_row(
+                        "交易所风险提示",
+                        "缺失",
+                        None,
+                        20,
+                        detail,
+                    )
+                )
+
+        margin_snapshot = _cn_stock_margin_snapshot(metadata, context)
+        margin_level = str(margin_snapshot.get("crowding_level", "")).strip()
+        margin_detail = str(margin_snapshot.get("detail", "")).strip() or "个股两融明细当前未提供有效结论。"
+        if bool(margin_snapshot.get("is_fresh")) and margin_level == "high":
+            penalty = 12
+            raw -= penalty
+            available += 12
+            factors.append(
+                _factor_row(
+                    "两融拥挤",
+                    "融资盘升温明显，短线拥挤度偏高",
+                    0,
+                    penalty,
+                    margin_detail,
+                    display_score=f"-{penalty}",
+                )
+            )
+        elif bool(margin_snapshot.get("is_fresh")) and margin_level == "medium":
+            penalty = 8
+            raw -= penalty
+            available += 12
+            factors.append(
+                _factor_row(
+                    "两融拥挤",
+                    "融资盘仍在升温，需防一致性交易",
+                    0,
+                    penalty,
+                    margin_detail,
+                    display_score=f"-{penalty}",
+                )
+            )
+        elif bool(margin_snapshot.get("is_fresh")) and margin_level == "relieved":
+            award = 4
+            raw += award
+            available += 12
+            factors.append(
+                _factor_row(
+                    "两融拥挤",
+                    "融资盘近窗口回落，拥挤度有所释放",
+                    award,
+                    12,
+                    margin_detail,
+                )
+            )
+        else:
+            factors.append(
+                _factor_row(
+                    "两融拥挤",
+                    "缺失" if not margin_snapshot else "当前两融信号不构成明确拥挤结论",
+                    None if not margin_snapshot else 0,
+                    12,
+                    margin_detail,
+                    display_score="信息项" if margin_snapshot else "",
+                )
+            )
+
+        broker_snapshot = _cn_stock_broker_recommend_snapshot(metadata, context)
+        broker_status = str(broker_snapshot.get("status", "")).strip()
+        broker_crowding = str(broker_snapshot.get("crowding_level", "")).strip()
+        broker_count = int(broker_snapshot.get("latest_broker_count") or 0)
+        broker_consecutive = int(broker_snapshot.get("consecutive_months") or 0)
+        broker_detail = str(broker_snapshot.get("detail", "")).strip() or "券商月度金股专题当前未提供有效结论。"
+        if bool(broker_snapshot.get("is_fresh")) and broker_status == "matched" and broker_crowding == "high":
+            penalty = 8 if broker_count >= 6 or broker_consecutive >= 4 else 5
+            raw -= penalty
+            available += 8
+            factors.append(
+                _factor_row(
+                    "卖方一致预期过热",
+                    "券商月度金股覆盖偏密，需防一致预期过热",
+                    0,
+                    penalty,
+                    broker_detail,
+                    display_score=f"-{penalty}",
+                )
+            )
+        elif bool(broker_snapshot.get("is_fresh")) and broker_status == "matched" and broker_crowding == "medium":
+            penalty = 4
+            raw -= penalty
+            available += 8
+            factors.append(
+                _factor_row(
+                    "卖方一致预期过热",
+                    "券商月度金股覆盖升温，需防预期先行交易",
+                    0,
+                    penalty,
+                    broker_detail,
+                    display_score=f"-{penalty}",
+                )
+            )
+        else:
+            factors.append(
+                _factor_row(
+                    "卖方一致预期过热",
+                    "缺失" if not broker_snapshot else "当前卖方共识不构成明确过热结论",
+                    None if not broker_snapshot else 0,
+                    8,
+                    broker_detail,
+                    display_score="信息项" if broker_snapshot else "",
+                )
+            )
+
+        board_action_snapshot = _cn_stock_board_action_snapshot(metadata, context, history)
+        board_detail = str(board_action_snapshot.get("detail", "")).strip() or "打板专题当前未提供有效结论。"
+        negative_board = bool(board_action_snapshot.get("has_negative_signal"))
+        limit_times = pd.to_numeric(pd.Series([board_action_snapshot.get("limit_times")]), errors="coerce").dropna()
+        strong_pool_hit = bool(board_action_snapshot.get("in_strong_pool"))
+        dt_pool_hit = bool(board_action_snapshot.get("in_dt_pool"))
+        near_up_limit = pd.to_numeric(pd.Series([board_action_snapshot.get("up_limit_gap_pct")]), errors="coerce").dropna()
+        if bool(board_action_snapshot.get("is_fresh")) and negative_board:
+            penalty = 10 if dt_pool_hit else 6
+            raw -= penalty
+            available += 10
+            factors.append(
+                _factor_row(
+                    "打板情绪风险",
+                    "龙虎榜/跌停/竞价信号偏负面",
+                    0,
+                    penalty,
+                    board_detail,
+                    display_score=f"-{penalty}",
+                )
+            )
+        elif bool(board_action_snapshot.get("is_fresh")) and (
+            (strong_pool_hit and not limit_times.empty and float(limit_times.iloc[0]) >= 2)
+            or (not near_up_limit.empty and float(near_up_limit.iloc[0]) <= 0.005)
+        ):
+            penalty = 5
+            raw -= penalty
+            available += 10
+            factors.append(
+                _factor_row(
+                    "打板情绪风险",
+                    "情绪交易升温，需防打板过热",
+                    0,
+                    penalty,
+                    board_detail,
+                    display_score=f"-{penalty}",
+                )
+            )
+        else:
+            factors.append(
+                _factor_row(
+                    "打板情绪风险",
+                    "缺失" if not board_action_snapshot else "当前未见明确打板过热风险",
+                    None if not board_action_snapshot else 0,
+                    10,
+                    board_detail,
+                    display_score="信息项" if board_action_snapshot else "",
+                )
+            )
+
     if asset_type in {"cn_stock", "hk", "us"}:
         stock_name_tokens = _stock_name_tokens(metadata)
         disclosure_pool: List[Mapping[str, Any]] = []
@@ -6380,7 +9283,7 @@ def _risk_dimension(
         "name": "风险特征",
         "score": score,
         "max_score": 100,
-        "summary": _dimension_summary(score, "下行空间和组合风险都还可控。", "风险可控但没有特别便宜。", "风险收益比不占优，需更严控节奏。", "ℹ️ 风险特征数据缺失，本次评级未纳入该维度"),
+        "summary": _dimension_summary(score, "下行空间和组合风险都还可控。", "风险和估值都不算轻松，仍要留足安全边际。", "风险收益比不占优，需更严控节奏。", "ℹ️ 风险特征数据缺失，本次评级未纳入该维度"),
         "factors": factors,
         "core_signal": _top_positive_signals(factors),
         "missing": score is None,
@@ -6447,12 +9350,18 @@ def _seasonality_dimension(metadata: Mapping[str, Any], history: pd.DataFrame, c
     # 前置观察期：前一个月（12/3/6/9月）
     earnings_core_months = {1, 4, 7, 10}
     earnings_pre_months = {12, 3, 6, 9}
+    earnings_window_labels = {
+        1: "年报/业绩预告",
+        4: "年报和一季报",
+        7: "中报预告/业绩快报",
+        10: "三季报",
+    }
     if month in earnings_core_months:
         # 财报密集期：博弈窗口，正负双向
         # 对成长/科技类加分（业绩超预期概率更高），对高股息/防御类中性
         earnings_award = 15 if sector in {"科技", "医药", "消费", "军工"} else 8
-        earnings_signal = f"当前处于 Q{(month // 3) % 4 + 1} 财报密集期，{sector} 行业业绩博弈窗口"
-        earnings_detail = "财报密集期是双向博弈窗口：业绩超预期可以加速上涨，不及预期则容易杀估值；当前只做正向加分，不做负向惩罚（负向由催化维度处理）。"
+        earnings_signal = f"当前更接近 `{earnings_window_labels.get(month, '财报')}` 披露窗口，{sector} 行业业绩预期博弈升温"
+        earnings_detail = "这是披露窗口代理，重点提示业绩预期博弈可能升温；它只能说明波动窗口更近，不等于公司一定会超预期。"
     elif month in earnings_pre_months:
         earnings_award = 5
         earnings_signal = "处于财报前置观察期，业绩预期博弈开始升温"
@@ -6913,6 +9822,8 @@ def _headline_core(
     dimensions: Mapping[str, Mapping[str, Any]],
     metrics: Mapping[str, float],
     technical: Mapping[str, Any],
+    *,
+    asset_type: str = "",
 ) -> str:
     tech = _dimension_score(dimensions, "technical") or 0
     catalyst = _dimension_score(dimensions, "catalyst") or 0
@@ -6920,6 +9831,20 @@ def _headline_core(
     macro = _dimension_score(dimensions, "macro") or 0
     price_percentile = float(metrics.get("price_percentile_1y", 0.5))
     rsi = float(technical.get("rsi", {}).get("RSI", 50.0))
+    catalyst_dimension = dict(dimensions.get("catalyst") or {})
+    coverage = dict(catalyst_dimension.get("coverage") or {})
+    diagnosis = str(coverage.get("diagnosis", "")).strip()
+    has_direct_company_evidence = bool(coverage.get("high_confidence_company_news")) or bool(
+        coverage.get("effective_structured_event")
+    )
+
+    if asset_type == "cn_stock" and not has_direct_company_evidence and diagnosis in {
+        "suspected_search_gap",
+        "proxy_degraded",
+        "theme_only_live",
+        "stale_live_only",
+    }:
+        return "个股级新增证据还不够，当前更多只能先按行业背景和修复线索观察"
 
     if macro >= 30 and relative >= 60 and tech < 50:
         return "防守逻辑或主线顺风仍在，但趋势与动能还没有重新同步"
@@ -6984,17 +9909,39 @@ def _build_narrative(
         "下行修复": "短期承压，仍在修复阶段",
         "震荡整理": "逻辑未破，但节奏一般",
     }.get(phase_label, "逻辑未破，但节奏一般")
-    headline = f"这是一个**{phase_headline}**的标的。当前核心不是没逻辑，而是**{_headline_core(dimensions, metrics, technical)}**。"
+    headline = f"这是一个**{phase_headline}**的标的。当前核心不是没逻辑，而是**{_headline_core(dimensions, metrics, technical, asset_type=asset_type)}**。"
 
     sector = str(metadata.get("sector", "综合"))
     theme = str(context.get("day_theme", {}).get("label", "背景宏观主导"))
+    theme_context = build_theme_playbook_context(
+        metadata.get("name"),
+        metadata.get("benchmark"),
+        metadata.get("benchmark_name"),
+        metadata.get("sector"),
+        metadata.get("chain_nodes"),
+        theme,
+        dict(fund_profile or {}).get("overview", {}).get("业绩比较基准", ""),
+        dict(fund_profile or {}).get("style", {}).get("summary", ""),
+        dict(fund_profile or {}).get("style", {}).get("benchmark_note", ""),
+    )
+    playbook_label = str(theme_context.get("label", "")).strip()
+    focus_exposure = str(metadata.get("industry_framework_label", "")).strip() or playbook_label or sector
+    explicit_theme = theme if theme and theme != "背景宏观主导" else ""
     regime = str(context.get("regime", {}).get("current_regime", "unknown"))
     macro_score = _dimension_score(dimensions, "macro") or 0
+    chips_dimension = dict(dimensions.get("chips") or {})
     chips_score = _dimension_score(dimensions, "chips")
+    relative = dimensions["relative_strength"]
     relative_score = _dimension_score(dimensions, "relative_strength") or 0
     tech_score = _dimension_score(dimensions, "technical") or 0
     risk_score = _dimension_score(dimensions, "risk") or 0
     catalyst_score = _dimension_score(dimensions, "catalyst") or 0
+    catalyst_dimension = dict(dimensions.get("catalyst") or {})
+    catalyst_coverage = dict(catalyst_dimension.get("coverage") or {})
+    catalyst_diagnosis = str(catalyst_coverage.get("diagnosis", "")).strip()
+    has_direct_company_evidence = bool(catalyst_coverage.get("high_confidence_company_news")) or bool(
+        catalyst_coverage.get("effective_structured_event")
+    )
     fundamental_score = _dimension_score(dimensions, "fundamental") or 0
     fundamental_dimension = dimensions["fundamental"]
     valuation_snapshot = dict(fundamental_dimension.get("valuation_snapshot") or {})
@@ -7024,21 +9971,51 @@ def _build_narrative(
     _support_label, support_level = _nearest_support_reference(history, technical)
     _, _, nearest_pressure_level = _pressure_signals(history, technical)
     macro_tilt = "偏顺风" if macro_score >= 28 else "大体中性" if macro_score >= 16 else "偏逆风"
+    chip_winner_factor = _find_factor(chips_dimension, "筹码胜率")
+    chip_cost_factor = _find_factor(chips_dimension, "平均成本位置")
+    chip_pressure_factor = _find_factor(chips_dimension, "套牢盘压力")
+    chip_distribution_factor = _find_factor(chips_dimension, "筹码密集区")
+    capital_flow_factor = _find_factor(chips_dimension, "机构资金承接")
+    margin_crowding_factor = _find_factor(chips_dimension, "两融拥挤度")
+    broker_consensus_factor = _find_factor(dimensions["catalyst"], "卖方覆盖/一致预期")
+    board_catalyst_factor = _find_factor(dimensions["catalyst"], "龙虎榜/打板确认")
+    margin_risk_factor = _find_factor(dimensions["risk"], "两融拥挤")
+    broker_crowding_factor = _find_factor(dimensions["risk"], "卖方一致预期过热")
+    board_risk_factor = _find_factor(dimensions["risk"], "打板情绪风险")
+    broker_consensus_signal = str(broker_consensus_factor.get("signal", "")).strip()
+    broker_crowding_signal = str(broker_crowding_factor.get("signal", "")).strip()
+    margin_risk_signal = str(margin_risk_factor.get("signal", "")).strip()
+    board_risk_signal = str(board_risk_factor.get("signal", "")).strip()
+    has_real_chip_signal = any(
+        str(factor.get("signal", "")).strip() and str(factor.get("display_score", "")).strip() != "缺失"
+        for factor in (chip_winner_factor, chip_cost_factor, chip_pressure_factor, chip_distribution_factor)
+        if factor
+    )
 
-    if theme and theme != "背景宏观主导":
+    if explicit_theme:
         macro_driver = (
-            f"中期背景仍按 `{regime}` 处理，当天交易主线更偏 `{theme}`。对 `{sector}` 方向来说，宏观与主线整体{macro_tilt}，"
+            f"中期背景仍按 `{regime}` 处理，当天交易主线更偏 `{explicit_theme}`。对 `{focus_exposure}` 方向来说，宏观与主线整体{macro_tilt}，"
             f"问题不在于故事是否完全失效，而在于这种环境能否继续转化成新的价格确认。"
         )
     else:
         macro_driver = (
-            f"当前中期背景更偏 `{regime}`。对 `{sector}` 方向来说，宏观整体{macro_tilt}，"
+            f"当前中期背景更偏 `{regime}`。对 `{focus_exposure}` 方向来说，宏观整体{macro_tilt}，"
             f"问题不在于故事是否完全失效，而在于这种环境能否继续转化成新的价格确认。"
         )
-    if _asset_note(metadata, asset_type):
-        macro_driver += f" {_asset_note(metadata, asset_type)}"
+    asset_note = _asset_note(metadata, asset_type).strip()
+    if asset_note:
+        macro_driver += f" {asset_note}"
     if asset_type == "cn_fund" and fund_profile:
         style_summary = str(dict(fund_profile.get("style") or {}).get("summary", "")).strip()
+        if style_summary:
+            if asset_note and "被动暴露" in asset_note and "被动暴露" in style_summary:
+                label_tail = re.search(r"(当前标签是.+)$", style_summary)
+                style_summary = label_tail.group(1).strip() if label_tail else ""
+            if style_summary:
+                normalized_asset_note = re.sub(r"[\s`，。；;,、:：]", "", asset_note)
+                normalized_style_summary = re.sub(r"[\s`，。；;,、:：]", "", style_summary)
+                if normalized_style_summary and normalized_style_summary in normalized_asset_note:
+                    style_summary = ""
         if style_summary:
             macro_driver += f" {style_summary}"
     if commodity_like_fund:
@@ -7050,12 +10027,53 @@ def _build_narrative(
         flow_driver = "资金面已经开始给出确认，说明这条线不只是讲故事，而是有增量资金在承接。"
     else:
         flow_driver = "资金面暂时没有形成明确共振，所以现阶段更多还是看方向和结构，而不是看资金追买。"
+    if has_real_chip_signal:
+        chip_clues = [
+            str(factor.get("signal", "")).strip()
+            for factor in (chip_winner_factor, chip_cost_factor, chip_pressure_factor, chip_distribution_factor)
+            if str(factor.get("signal", "")).strip() and str(factor.get("display_score", "")).strip() != "缺失"
+        ]
+        if int(chip_pressure_factor.get("awarded", 0) or 0) < 0 or int(chip_cost_factor.get("awarded", 0) or 0) < 0:
+            flow_driver = "真实筹码分布还在提示资金面没有完全站到这边，短线先按消化平均成本和上方套牢盘理解。"
+        elif chips_score is not None and chips_score >= 60:
+            flow_driver = "真实筹码分布已经开始配合价格，不只是行业代理在支撑，说明增量承接比之前更实。"
+        else:
+            flow_driver = "真实筹码分布还在拉锯，说明这条线不是没逻辑，而是筹码换手还没完全走到一边。"
+        if chip_clues:
+            flow_driver += f" 当前先盯 `{chip_clues[0]}`"
+            if len(chip_clues) > 1:
+                flow_driver += f" 和 `{chip_clues[1]}`"
+            flow_driver += "。"
+    capital_flow_signal = str(capital_flow_factor.get("signal", "")).strip()
+    capital_flow_award = int(capital_flow_factor.get("awarded", 0) or 0)
+    if asset_type == "cn_stock" and capital_flow_signal and capital_flow_signal != "缺失":
+        if "个股主力净" in capital_flow_signal and capital_flow_award > 0:
+            flow_driver = f"个股级资金流已经开始给出直接承接，不再只是行业代理在支撑。当前先看 `{capital_flow_signal}`。"
+        elif "个股主力净" in capital_flow_signal and capital_flow_award < 0:
+            flow_driver = f"个股级资金流仍在净流出，说明这条线短线更像逻辑在、资金没完全站过来。当前先看 `{capital_flow_signal}`。"
+        elif capital_flow_award > 0:
+            flow_driver += f" 目前还能看到 `{capital_flow_signal}`。"
+    board_catalyst_signal = str(board_catalyst_factor.get("signal", "")).strip()
+    board_catalyst_award = int(board_catalyst_factor.get("awarded", 0) or 0)
+    if asset_type == "cn_stock" and board_catalyst_signal and board_catalyst_signal not in {"缺失", "未命中明确龙虎榜/打板确认"}:
+        if board_catalyst_award > 0:
+            flow_driver += f" 短线微观结构上，`{board_catalyst_signal}` 也在配合。"
+        elif board_catalyst_award < 0:
+            flow_driver += f" 但 `龙虎榜/打板确认` 当前显示 `{board_catalyst_signal}`，说明催化很容易先被情绪风险打断。"
+    if asset_type == "cn_stock" and broker_consensus_signal and broker_consensus_signal not in {"缺失", "本月未命中明确券商金股推荐"} and "最新卖方金股仍停在" not in broker_consensus_signal:
+        flow_driver += f" 卖方侧当前还能看到 `{broker_consensus_signal}`，但这里只把它当共识热度参考，不替代公司级强催化。"
     if asset_type == "cn_fund" and fund_profile:
         positioning = str(dict(fund_profile.get("style") or {}).get("positioning", "")).strip()
         if positioning:
             flow_driver += f" {positioning}"
 
-    if relative_score >= 70:
+    relative_proxy_only = bool(relative.get("proxy_only"))
+    if relative_proxy_only:
+        if relative_score >= 40:
+            relative_driver = "相对强弱有改善，但行业宽度和龙头确认仍缺失，当前更适合作为低置信代理去看，而不是把它写成完整扩散确认。"
+        else:
+            relative_driver = "相对强弱偏弱，且行业宽度和龙头确认仍缺失，更适合先当成背景观察，而不是把它当成轮动已经回来的证明。"
+    elif relative_score >= 70:
         relative_driver = "相对强弱仍占优，说明资金没有彻底离开这条线；即使短线有波动，也更像强势方向内部的节奏调整。"
     elif relative_score >= 40:
         relative_driver = "相对强弱处在中间地带，说明它还没有被市场完全放弃，但也不是当前最强的扩散方向。"
@@ -7093,6 +10111,11 @@ def _build_narrative(
             technical_driver += f" 同时上方还要先消化 `{pressure_signal}`，所以反弹更像先处理承压，而不是直接进入顺畅加速。"
         elif pressure_award > 0 and "上方最近明确压力不近" in pressure_signal:
             technical_driver += " 上方最近没有很近的压制位，说明一旦动能修复，价格还有继续试探的空间。"
+    if asset_type == "cn_stock" and board_catalyst_signal and board_catalyst_signal not in {"缺失", "未命中明确龙虎榜/打板确认"}:
+        if board_catalyst_award > 0:
+            technical_driver += f" 盘后微观结构还出现 `{board_catalyst_signal}`，说明情绪面和交易席位也在给短线确认。"
+        elif board_catalyst_award < 0:
+            technical_driver += f" 但微观结构显示 `{board_catalyst_signal}`，短线更要防情绪交易先反噬。"
     if asset_type == "cn_fund" and fund_profile:
         selection = str(dict(fund_profile.get("style") or {}).get("selection", "")).strip()
         if selection:
@@ -7100,10 +10123,25 @@ def _build_narrative(
 
     if macro_score >= 30 and relative_score >= 60 and tech_score < 50:
         contradiction = "中期逻辑偏正面，但短线动能还没有重新修复，因此更适合等待确认，而不是直接追价。"
+    elif asset_type == "cn_stock" and (
+        "融资盘升温明显" in margin_risk_signal
+        or "情绪交易升温" in board_risk_signal
+        or "龙虎榜/跌停/竞价信号偏负面" in board_risk_signal
+    ):
+        contradiction = "题材和交易结构并不是完全没亮点，但两融/打板情绪已经开始升温，导致‘看对方向’和‘执行节奏舒服’之间出现了新的矛盾。"
+    elif asset_type == "cn_stock" and broker_crowding_signal and broker_crowding_signal not in {"缺失", "当前卖方共识不构成明确过热结论"}:
+        contradiction = "卖方共识并不弱，但券商月度金股覆盖已经开始变密，导致‘逻辑在升温’和‘赔率是否还舒服’之间出现了新的矛盾。"
     elif catalyst_score >= 50 and (price_percentile >= 0.80 or (valuation_pe is not None and float(valuation_pe) >= 45)):
         contradiction = "催化并不弱，但市场已经提前交易了大半预期，所以现在的核心矛盾不是‘有没有故事’，而是‘还有没有足够好的赔率’。"
     elif price_percentile >= 0.85 and (relative_score >= 55 or macro_score >= 30):
         contradiction = "方向并不差，但价格已经处在偏高位置，导致‘逻辑正确’和‘位置舒服’之间出现了明显错位。"
+    elif asset_type == "cn_stock" and not has_direct_company_evidence and catalyst_diagnosis in {
+        "suspected_search_gap",
+        "proxy_degraded",
+        "theme_only_live",
+        "stale_live_only",
+    }:
+        contradiction = "当前最大的矛盾不是价格先坏了，而是个股级新增证据还不够，只能先按行业背景和修复线索观察。"
     elif catalyst_score < 30 and tech_score >= 45:
         contradiction = "价格结构不算差，但缺少新的催化去推动第二阶段上涨，所以现在更像磨时间，而不是直接加速。"
     else:
@@ -7111,10 +10149,10 @@ def _build_narrative(
 
     positives: List[str] = []
     if macro_score >= 30:
-        if theme and theme != "背景宏观主导":
-            positives.append(f"中期 `{regime}` 背景仍在，当天主线 `{theme}` 也没有把这个方向推成纯宏观逆风。")
+        if explicit_theme:
+            positives.append(f"中期 `{regime}` 背景仍在，当天主线 `{explicit_theme}` 也没有把这个方向推成纯宏观逆风。")
         else:
-            positives.append(f"当前 `{regime}` 背景下，这个方向至少没有明显宏观逆风。")
+            positives.append(f"当前 `{regime}` 背景下，`{focus_exposure}` 这条线至少没有明显宏观逆风。")
     if relative_score >= 60:
         positives.append("相对强弱仍占优，说明它不是市场最先被放弃的方向。")
     if risk_score >= 60:
@@ -7123,6 +10161,14 @@ def _build_narrative(
         positives.append(f"价格靠近 `{support_signal}`，说明下方不是完全没有承接。")
     if pressure_award > 0 and pressure_signal and "上方最近明确压力不近" in pressure_signal:
         positives.append("上方最近明确压力不近，说明反弹不是一抬头就先撞线。")
+    if has_real_chip_signal and int(chip_cost_factor.get("awarded", 0) or 0) >= 0 and int(chip_pressure_factor.get("awarded", 0) or 0) >= 0:
+        positives.append("真实筹码分布没有显示明显套牢盘压制，价格修复时更容易形成顺畅承接。")
+    if asset_type == "cn_stock" and capital_flow_award > 0 and capital_flow_signal:
+        positives.append(f"个股/主题资金流开始给出承接，当前能看到 `{capital_flow_signal}`。")
+    if asset_type == "cn_stock" and broker_consensus_signal and broker_consensus_signal not in {"缺失", "本月未命中明确券商金股推荐"} and "最新卖方金股仍停在" not in broker_consensus_signal:
+        positives.append(f"卖方覆盖没有掉线，当前还能看到 `{broker_consensus_signal}`。")
+    if asset_type == "cn_stock" and board_catalyst_award > 0 and board_catalyst_signal:
+        positives.append(f"微观交易结构开始配合，`{board_catalyst_signal}` 说明短线催化不只是口头逻辑。")
     if not positives:
         positives.append("当前仍保留一定观察价值，主要因为趋势并未被彻底破坏。")
 
@@ -7139,10 +10185,19 @@ def _build_narrative(
         cautions.append("短线已经偏拥挤，即使逻辑不坏，追高的盈亏比也不优。")
     if pressure_award < 0 and pressure_signal:
         cautions.append(f"上方还要先消化 `{pressure_signal}`，反弹不等于已经进入顺畅加速。")
+    if has_real_chip_signal and (int(chip_pressure_factor.get("awarded", 0) or 0) < 0 or int(chip_cost_factor.get("awarded", 0) or 0) < 0):
+        cautions.append("真实筹码分布仍提示平均成本压制或上方套牢盘偏重，反弹先按消化抛压理解。")
+    if asset_type == "cn_stock" and ("融资盘升温明显" in margin_risk_signal or "融资盘仍在升温" in margin_risk_signal):
+        cautions.append("两融资金正在升温，一旦共识反转，融资盘会先放大短线回撤。")
+    if asset_type == "cn_stock" and broker_crowding_signal and broker_crowding_signal not in {"缺失", "当前卖方共识不构成明确过热结论"}:
+        cautions.append("券商月度金股覆盖已经偏密，后续更需要新的业绩/订单验证，而不是只靠卖方共识续推。")
+    if asset_type == "cn_stock" and ("情绪交易升温" in board_risk_signal or "龙虎榜/跌停/竞价信号偏负面" in board_risk_signal):
+        cautions.append("龙虎榜/打板结构提示情绪交易风险抬升，短线更要防高开低走或次日承接不足。")
     if not cautions:
         cautions.append("当前最大问题不是方向，而是节奏，仍要防止追在情绪高点。")
 
     external_risk_map = {
+        "半导体": "需要继续盯利率、美元、AI 资本开支、晶圆厂 capex 和存储价格周期；一旦高估值逻辑失去新增验证，回撤会来得很快。",
         "黄金": "需要继续盯美元、实际利率和地缘溢价；一旦美元转强且避险交易降温，价格回吐会很快。",
         "科技": "需要继续盯利率、美元和风险偏好；只要波动率抬升，估值就容易再受压。",
         "电网": "需要继续盯政策节奏、商品价格和风险偏好；若主线切走，强势方向也可能进入获利了结。",
@@ -7150,8 +10205,16 @@ def _build_narrative(
         "有色": "需要继续盯美元、商品价格和全球增长预期；外部需求转弱时弹性会明显收缩。",
         "农业": "需要继续盯天气、粮价、化肥成本和政策节奏；如果粮食安全和农资价格主线降温，主题溢价回吐也会很快。",
     }
+    company_name = str(metadata.get("name", analysis_seed.get("symbol")))
+    stock_like = asset_type in {"cn_stock", "hk", "us"}
+    company_specific_fundamental_risk = stock_like and fundamental_score <= 25
     risk_points = {
-        "fundamental": f"真正的基本面风险不在 {metadata.get('name', analysis_seed.get('symbol'))} 本身，而在其所暴露的 `{sector}` 景气如果不及预期，估值支撑会继续下移。",
+        "fundamental": (
+            f"{company_name} 自身的盈利质量、兑现节奏和估值承压已经是当前基本面风险的一部分；即使 `{focus_exposure}` 景气没有继续恶化，"
+            "公司端如果拿不出更强的经营兑现，估值支撑也会继续下移。"
+            if company_specific_fundamental_risk
+            else f"真正的基本面风险不在 {company_name} 本身，而在其所暴露的 `{focus_exposure}` 景气如果不及预期，估值支撑会继续下移。"
+        ),
         "valuation": (
             f"当前{('个股估值' if asset_type in {'cn_stock', 'hk', 'us'} else valuation_snapshot.get('display_label', '真实指数估值'))}参考为 `{valuation_snapshot.get('index_name', '相关指数')}` "
             f"{valuation_snapshot.get('metric_label', '滚动PE')} `{float(valuation_pe):.1f}x`，"
@@ -7160,8 +10223,16 @@ def _build_narrative(
             else f"当前价格位置大约在近一年 `{price_percentile:.0%}` 分位。{valuation_note}"
         ),
         "crowding": "如果这条线继续成为市场共识，短线资金拥挤会放大波动；如果共识撤退，回撤也会更陡。" if (relative_score >= 60 or rsi > 65) else "当前拥挤风险不算极端，但一旦没有增量资金确认，走势容易反复。",
-        "external": external_risk_map.get(sector, "还要继续盯利率、美元、商品价格和市场风格切换，这类外部变量往往会比基本面更快改写短线定价。"),
+        "external": external_risk_map.get(playbook_label or sector, external_risk_map.get(sector, "还要继续盯利率、美元、商品价格和市场风格切换，这类外部变量往往会比基本面更快改写短线定价。")),
     }
+    if has_real_chip_signal and int(chip_pressure_factor.get("awarded", 0) or 0) < 0:
+        risk_points["crowding"] = "真实筹码分布显示上方套牢盘仍偏重，一旦承接转弱，回撤容易被解套盘放大。"
+    if asset_type == "cn_stock" and ("融资盘升温明显" in margin_risk_signal or "融资盘仍在升温" in margin_risk_signal):
+        risk_points["crowding"] = "两融资金正在升温，融资盘一致性交易会放大波动；一旦主线回撤，短线更容易被被动卖压放大。"
+    if asset_type == "cn_stock" and broker_crowding_signal and broker_crowding_signal not in {"缺失", "当前卖方共识不构成明确过热结论"}:
+        risk_points["crowding"] = "券商月度金股覆盖已经偏密，卖方一致预期过热时，后续更需要新的订单/业绩验证；否则更容易先交易共识回落。"
+    if asset_type == "cn_stock" and ("情绪交易升温" in board_risk_signal or "龙虎榜/跌停/竞价信号偏负面" in board_risk_signal):
+        risk_points["crowding"] = "打板/龙虎榜结构提示短线情绪交易偏热或偏负面，次日承接一旦不足，波动会先被情绪盘放大。"
     if commodity_like_fund:
         risk_points["fundamental"] = (
             f"真正的基本面风险不在 {metadata.get('name', analysis_seed.get('symbol'))} 本身，而在其跟踪的商品/期货指数方向、"
@@ -7176,8 +10247,24 @@ def _build_narrative(
         f"关键支撑是否有效：重点看 `{support_signal}` 附近是否出现企稳，而不是继续失守。",
         f"近端压力是否消化：重点看 `{pressure_signal or '上方近端压力'}` 能否被放量突破，而不是一反弹就遇阻回落。",
         "资金是否重新形成共振：ETF 份额、主力资金或相关配置资金是否重新转正。",
-        f"主线变量是否延续：继续观察 `{theme}` 是否强化，以及它对应的宏观变量是否继续配合。",
+        (
+            f"主线变量是否延续：继续观察 `{explicit_theme}` 是否强化，以及它对应的宏观变量是否继续配合。"
+            if explicit_theme
+            else (
+                f"主线变量是否延续：继续观察 `{focus_exposure}` 这条线是否重新强化，以及它对应的订单、估值和风格变量是否继续配合。"
+                if playbook_label
+                else f"主线变量是否延续：继续观察 `{theme}` 是否强化，以及它对应的宏观变量是否继续配合。"
+            )
+        ),
     ]
+    if has_real_chip_signal:
+        watch_points[3] = "真实筹码结构是否继续改善：重点看平均成本能否继续回到现价下方、上方套牢盘占比是否继续收敛。"
+    elif asset_type == "cn_stock" and capital_flow_signal:
+        watch_points[3] = f"个股资金是否继续承接：重点看 `{capital_flow_signal}` 能否延续，而不是只剩行业代理在支撑。"
+    if asset_type == "cn_stock" and ("融资盘升温明显" in margin_risk_signal or "融资盘仍在升温" in margin_risk_signal):
+        watch_points[3] = "两融拥挤度是否降温：重点看融资余额增速和融资买入/偿还比能否回落，避免融资盘继续堆高短线拥挤。"
+    if asset_type == "cn_stock" and broker_consensus_signal and broker_consensus_signal not in {"缺失", "本月未命中明确券商金股推荐"}:
+        watch_points.append("卖方覆盖是否继续扩散：重点看下月券商金股新增覆盖能否延续，而不是只剩旧共识堆积。")
 
     validation_points = [
         {
@@ -7208,12 +10295,27 @@ def _build_narrative(
         },
         {
             "watch": "资金是否回流",
-            "judge": "近 5 个可用样本里，ETF净流入/主力净流入至少 3 次转正",
+            "judge": (
+                "近 5 个可用样本里，个股主力净流入/行业主力净流入至少 3 次转正"
+                if asset_type == "cn_stock"
+                else "近 5 个可用样本里，ETF份额/主力净流入至少 3 次转正"
+                if asset_type in {"cn_etf", "cn_fund"}
+                else "近 5 个可用样本里，相关配置资金至少 3 次转正"
+            ),
             "bull": "说明不只是逻辑在，资金也开始重新确认。",
             "bear": "说明还是存量博弈，价格容易反复。",
         },
     ]
-    if sector == "科技":
+    if playbook_label == "半导体":
+        validation_points.append(
+            {
+                "watch": "成长估值逆风是否缓和",
+                "judge": "VIX 回落到 25 以下，且 DXY 5日不再继续走强",
+                "bull": "说明成长估值压力缓解，半导体这类高 beta 成长方向更容易从修复走向扩散。",
+                "bear": "说明宏观仍逆风，高估值半导体方向继续受压。",
+            }
+        )
+    elif sector == "科技":
         validation_points.append(
             {
                 "watch": "宏观逆风是否缓和",
@@ -7265,8 +10367,17 @@ def _build_narrative(
         "defensive": "如果你更在意舒服的位置，那现在更合理的是先观察，等趋势、支撑和资金至少确认两项再动手。",
     }
 
+    summary_intro = (
+        f"总体来看，`{metadata.get('name', analysis_seed.get('symbol'))}` 的核心逻辑在于 `{explicit_theme}` 主线下的 `{focus_exposure}` 暴露仍有跟踪价值；"
+        if explicit_theme
+        else (
+            f"总体来看，`{metadata.get('name', analysis_seed.get('symbol'))}` 的核心逻辑在于 `{focus_exposure}` 这条线的中期逻辑仍未完全失效；"
+            if playbook_label
+            else f"总体来看，`{metadata.get('name', analysis_seed.get('symbol'))}` 的核心逻辑在于 `{theme}` 背景下的 `{sector}` 暴露仍有配置价值；"
+        )
+    )
     summary_lines = [
-        f"总体来看，`{metadata.get('name', analysis_seed.get('symbol'))}` 的核心逻辑在于 `{theme}` 背景下的 `{sector}` 暴露仍有配置价值；",
+        summary_intro,
         f"短期制约在于 `{contradiction}`",
         f"因此当前更合理的动作是 **{trade_state}**，而不是简单地把它归类成“买”或“不买”。",
     ]
@@ -7620,6 +10731,16 @@ def analyze_opportunity(
     runtime_context["fund_profile"] = fund_profile
     if fund_profile:
         metadata = _enrich_metadata_with_fund_profile(metadata, fund_profile)
+    industry_index_snapshot: Dict[str, Any] = {}
+    if asset_type in {"cn_stock", "cn_etf"}:
+        industry_index_snapshot = _context_industry_index_snapshot(metadata, runtime_context, fund_profile=fund_profile)
+        if industry_index_snapshot:
+            metadata = _enrich_metadata_with_industry_index_snapshot(metadata, industry_index_snapshot)
+    index_topic_bundle: Dict[str, Any] = {}
+    if asset_type in {"cn_stock", "cn_etf", "cn_fund", "cn_index"}:
+        index_topic_bundle = _context_index_topic_bundle(metadata, runtime_context, fund_profile=fund_profile)
+        if index_topic_bundle:
+            metadata = _enrich_metadata_with_index_topic_bundle(metadata, index_topic_bundle)
     notes: List[str] = [
         str(item).strip()
         for item in (fund_profile.get("notes") or [])
@@ -7693,7 +10814,7 @@ def analyze_opportunity(
         "fundamental": _fundamental_dimension(symbol, asset_type, metadata, metrics, config, fund_profile, runtime_context),
         "catalyst": _catalyst_dimension(metadata, runtime_context, fund_profile),
         "relative_strength": _relative_strength_dimension(symbol, asset_type, metadata, metrics, asset_returns, runtime_context),
-        "chips": _chips_dimension(symbol, asset_type, metadata, runtime_context, config),
+        "chips": _chips_dimension(symbol, asset_type, metadata, runtime_context, config, history),
         "risk": _risk_dimension(symbol, asset_type, metadata, history, asset_returns, runtime_context, correlation_pair),
         "seasonality": _seasonality_dimension(metadata, history, runtime_context),
         "macro": _macro_dimension(metadata, runtime_context),
@@ -7754,13 +10875,16 @@ def analyze_opportunity(
         runtime_context,
         fund_profile,
     )
-    proxy_signals = _analysis_proxy_signals(
-        symbol=symbol,
-        metrics=metrics,
-        technical=technical,
-        runtime_context=runtime_context,
-        config=config,
-    )
+    if bool(dict(config).get("skip_analysis_proxy_signals_runtime", False)):
+        proxy_signals = {}
+    else:
+        proxy_signals = _analysis_proxy_signals(
+            symbol=symbol,
+            metrics=metrics,
+            technical=technical,
+            runtime_context=runtime_context,
+            config=config,
+        )
 
     result = {
         "symbol": symbol,
@@ -7768,6 +10892,10 @@ def analyze_opportunity(
         "asset_type": asset_type,
         "metadata": metadata,
         "fund_profile": fund_profile,
+        "industry_index_snapshot": industry_index_snapshot,
+        "index_topic_bundle": index_topic_bundle,
+        "news_report": dict(runtime_context.get("news_report") or {}),
+        "market_event_rows": _market_event_rows_from_context(metadata, runtime_context, fund_profile),
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "history": history,
         "benchmark_symbol": benchmark_symbol,
@@ -7891,7 +11019,18 @@ def _action_guidance_hint(analysis: Mapping[str, Any]) -> Dict[str, str]:
     _, label, phrase = candidates[0]
     if len(phrase) > 36:
         phrase = phrase[:36].rstrip("，；。 ") + "..."
-    focus = f"{label}还停在“{phrase}”"
+    if label == "催化面" and any(token in phrase for token in ("情报偏弱", "窗口暂不突出", "事件暂不突出", "情报覆盖偏窄", "情报偏少")):
+        focus = "催化面还缺新增直接情报确认"
+    elif label == "相对强弱" and any(token in phrase for token in ("跑输", "弱", "扩散", "没有明显下一棒")):
+        focus = "相对强弱还没转强"
+    elif label == "技术面" and any(token in phrase for token in ("未金叉", "未站回", "背离", "跌破", "偏弱")):
+        focus = "技术面还缺右侧确认"
+    elif label == "风险特征" and any(token in phrase for token in ("高点", "高估值", "高波动", "回撤", "分位")):
+        focus = "风险收益比还不够舒服"
+    elif label == "季节/日历" and any(token in phrase for token in ("窗口", "不在", "样本")):
+        focus = "时间窗口还不占优"
+    else:
+        focus = f"{label}还停在“{phrase}”"
     return {
         "fit": f"眼下更卡在{focus}。",
         "misfit": f"在{focus}改善前，不要把观察仓误解成趋势已经重启。",
@@ -8522,6 +11661,13 @@ def build_default_pool(
             elif exposure_scope == "宽基":
                 score += 4.0
             score += min(float(row.get(amount_col, 0.0) or 0.0) / 100_000_000.0, 20.0)
+            total_size = pd.to_numeric(pd.Series([row.get("total_size")]), errors="coerce").dropna()
+            if not total_size.empty:
+                score += min(float(total_size.iloc[0]) / 1_000_000.0, 10.0)
+            if str(row.get("index_name", "") or row.get("benchmark", "")).strip():
+                score += 4.0
+            if str(row.get("list_status", "")).strip().upper() == "L":
+                score += 2.0
             if pd.notna(row.get("_list_date")):
                 listed_days = max((pd.Timestamp(datetime.now()) - pd.Timestamp(row["_list_date"])).days, 0)
                 if listed_days >= 365:
@@ -8567,7 +11713,15 @@ def build_default_pool(
                         "fund_type": str(row.get("fund_type", "") or ""),
                         "invest_type": str(row.get("invest_type", "") or ""),
                         "management": str(row.get("management", "") or ""),
+                        "index_code": str(row.get("index_code", "") or ""),
+                        "index_name": str(row.get("index_name", "") or ""),
+                        "exchange": str(row.get("exchange", "") or ""),
+                        "list_status": str(row.get("list_status", "") or ""),
+                        "etf_type": str(row.get("etf_type", "") or ""),
                         "trade_date": str(row.get("trade_date", "") or ""),
+                        "share_as_of": str(row.get("trade_date_share", "") or row.get("trade_date", "") or ""),
+                        "total_share": float(row.get("total_share", 0.0) or 0.0) if pd.notna(row.get("total_share")) else None,
+                        "total_size": float(row.get("total_size", 0.0) or 0.0) if pd.notna(row.get("total_size")) else None,
                         "taxonomy": taxonomy,
                     },
                 )
@@ -9159,6 +12313,7 @@ def discover_opportunities(config: Mapping[str, Any], top_n: int = 5, theme_filt
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "scan_pool": len(pool),
         "passed_pool": passed,
+        "runtime_context": context,
         "regime": context.get("regime", {}),
         "day_theme": context.get("day_theme", {}),
         "data_coverage": coverage,
@@ -9299,11 +12454,26 @@ def discover_fund_opportunities(
 
 
 def compare_opportunities(symbols: Sequence[str], config: Mapping[str, Any]) -> Dict[str, Any]:
+    from src.storage.portfolio import build_candidate_set_linkage_summary
+    from src.storage.strategy import StrategyRepository
+
     asset_types = [detect_asset_type_for_compare(symbol, config) for symbol in symbols]
     context = build_market_context(config, relevant_asset_types=list(dict.fromkeys(asset_types + ["cn_etf", "futures"])))
     rows: List[Dict[str, Any]] = []
+    try:
+        strategy_repository = StrategyRepository()
+    except Exception:
+        strategy_repository = None
     for symbol, asset_type in zip(symbols, asset_types):
-        rows.append(analyze_opportunity(symbol, asset_type, config, context=context))
+        analysis = analyze_opportunity(symbol, asset_type, config, context=context)
+        if strategy_repository is not None:
+            try:
+                confidence = dict(strategy_repository.summarize_background_confidence(symbol) or {})
+            except Exception:
+                confidence = {}
+            if confidence:
+                analysis["strategy_background_confidence"] = confidence
+        rows.append(analysis)
     best = max(
         rows,
         key=lambda item: (
@@ -9311,7 +12481,12 @@ def compare_opportunities(symbols: Sequence[str], config: Mapping[str, Any]) -> 
             sum((dimension.get("score") or 0) for dimension in item["dimensions"].values()),
         ),
     )
-    return {"generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "analyses": rows, "best_symbol": best["symbol"]}
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "analyses": rows,
+        "best_symbol": best["symbol"],
+        "compare_linkage_summary": build_candidate_set_linkage_summary(rows),
+    }
 
 
 def detect_asset_type_for_compare(symbol: str, config: Mapping[str, Any]) -> str:
@@ -9449,7 +12624,7 @@ def build_stock_pool(
                     name = str(row[name_col])
                     # Get real industry classification from EM
                     industry = str(row[industry_col]) if industry_col and pd.notna(row.get(industry_col)) else ""
-                    if not industry:
+                    if not industry and not bool(dict(config).get("stock_pool_skip_industry_lookup_runtime", False)):
                         try:
                             industry = ChinaMarketCollector(config).get_stock_industry(symbol)
                         except Exception:
@@ -9695,7 +12870,7 @@ def discover_stock_opportunities(
                 continue
             confidence_targets.append(analysis)
             seen_symbols.add(symbol)
-    if attach_signal_confidence:
+    if attach_signal_confidence and not bool(dict(config).get("skip_signal_confidence_runtime", False)):
         _attach_signal_confidence(confidence_targets, config, limit=len(confidence_targets))
     market_labels = {"cn": "A 股", "hk": "港股", "us": "美股", "all": "全市场"}
     return {

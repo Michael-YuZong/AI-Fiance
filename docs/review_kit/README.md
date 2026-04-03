@@ -12,6 +12,17 @@
 - finding 不能只留在评论里，要沉淀到 prompt / rule / test / backlog
 - review 记录要能被索引、追踪、审计
 
+如果你要把这套能力交给别的项目或别的 Agent 直接复现，优先看仓库里的可移植打包件：
+
+- [kits/external_review_system/README.md](../../kits/external_review_system/README.md)
+- [kits/external_review_system/SKILL.md](../../kits/external_review_system/SKILL.md)
+
+也可以直接导出一份独立目录：
+
+```bash
+python -m src.commands.export_review_kit --out tmp/external_review_system_kit --archive
+```
+
 ## 默认读法
 
 1. 先看 [docs/prompts/README.md](../prompts/README.md)

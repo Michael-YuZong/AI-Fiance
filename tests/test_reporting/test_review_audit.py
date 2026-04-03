@@ -690,6 +690,795 @@ def test_review_audit_flags_briefing_manifest_missing_proxy_contract(tmp_path: P
     assert "manifest 缺少 proxy_contract" in titles
 
 
+def test_review_audit_flags_manifest_missing_theme_playbook_contract(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/scans/etfs/final/scan_159981_2026-03-28_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    manifest_path = tmp_path / "reports/reviews/scans/etfs/final/scan_159981_2026-03-28_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "scan",
+                "artifacts": {"symbol": "159981"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "scan_round1.md",
+        "\n".join(
+            [
+                "# Scan",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "manifest 缺少 theme_playbook_contract" in titles
+
+
+def test_review_audit_flags_incomplete_theme_playbook_contract(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/stocks/final/stock_analysis_300308_2026-03-28_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    manifest_path = tmp_path / "reports/reviews/stocks/final/stock_analysis_300308_2026-03-28_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "stock_analysis",
+                "artifacts": {
+                    "theme_playbook_contract": {
+                        "label": "信息技术",
+                        "playbook_level": "sector",
+                        "theme_match_status": "ambiguous_conflict",
+                        "subtheme_bridge_confidence": "high",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "stock_analysis_round1.md",
+        "\n".join(
+            [
+                "# Stock Analysis",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "theme_playbook_contract 缺少冲突候选主题" in titles
+    assert "theme_playbook_contract 缺少下钻主线" in titles
+
+
+def test_review_audit_flags_manifest_missing_event_digest_contract(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/scans/etfs/final/scan_159981_2026-03-28_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    manifest_path = tmp_path / "reports/reviews/scans/etfs/final/scan_159981_2026-03-28_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "scan",
+                "artifacts": {"theme_playbook_contract": {"label": "信息技术", "playbook_level": "sector"}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "scan_event_digest_round1.md",
+        "\n".join(
+            [
+                "# Scan",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "manifest 缺少 event_digest_contract" in titles
+
+
+def test_review_audit_flags_incomplete_event_digest_contract(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/stocks/final/stock_analysis_300308_2026-03-28_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    manifest_path = tmp_path / "reports/reviews/stocks/final/stock_analysis_300308_2026-03-28_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "stock_analysis",
+                "artifacts": {
+                    "event_digest_contract": {
+                        "status": "已消化",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "stock_analysis_event_digest_round1.md",
+        "\n".join(
+            [
+                "# Stock Analysis",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "event_digest_contract 信息不完整" in titles
+    assert "event_digest_contract 缺少有效事件分层" in titles
+
+
+def test_review_audit_flags_partial_event_digest_deep_fields(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/stocks/final/stock_analysis_300308_2026-03-28_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    manifest_path = tmp_path / "reports/reviews/stocks/final/stock_analysis_300308_2026-03-28_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "stock_analysis",
+                "artifacts": {
+                    "event_digest_contract": {
+                        "status": "已消化",
+                        "lead_layer": "公告",
+                        "lead_detail": "公告类型：中标/订单",
+                        "changed_what": "把研究重点推进到公司级执行层。",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "stock_analysis_event_digest_round2.md",
+        "\n".join(
+            [
+                "# Stock Analysis",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "event_digest_contract 深度字段不完整" in titles
+
+
+def test_review_audit_flags_event_digest_missing_importance_reason(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/stocks/final/stock_analysis_300308_2026-03-28_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    manifest_path = tmp_path / "reports/reviews/stocks/final/stock_analysis_300308_2026-03-28_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "stock_analysis",
+                "artifacts": {
+                    "event_digest_contract": {
+                        "status": "已消化",
+                        "lead_layer": "公告",
+                        "lead_detail": "公告类型：中标/订单",
+                        "impact_summary": "盈利 / 景气",
+                        "thesis_scope": "thesis变化",
+                        "changed_what": "把研究重点推进到公司级执行层。",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "stock_analysis_event_digest_round3.md",
+        "\n".join(
+            [
+                "# Stock Analysis",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "event_digest_contract 深度字段不完整" in titles
+
+
+def test_review_audit_flags_manifest_missing_what_changed_contract(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/scans/etfs/final/scan_159981_2026-03-28_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    manifest_path = tmp_path / "reports/reviews/scans/etfs/final/scan_159981_2026-03-28_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "scan",
+                "artifacts": {
+                    "event_digest_contract": {
+                        "status": "已消化",
+                        "lead_layer": "公告",
+                        "changed_what": "把研究重点推进到公司级执行层。",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "scan_what_changed_round1.md",
+        "\n".join(
+            [
+                "# Scan",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "manifest 缺少 what_changed_contract" in titles
+
+
+def test_review_audit_flags_incomplete_what_changed_contract(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/stocks/final/stock_analysis_300308_2026-03-28_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    manifest_path = tmp_path / "reports/reviews/stocks/final/stock_analysis_300308_2026-03-28_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "stock_analysis",
+                "artifacts": {
+                    "what_changed_contract": {
+                        "previous_view": "核心假设是 `种业政策催化兑现`。",
+                        "change_summary": "事件状态从 `待补充` 升到 `已消化`。",
+                        "conclusion_label": "升级",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "stock_analysis_what_changed_round1.md",
+        "\n".join(
+            [
+                "# Stock Analysis",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "what_changed_contract 缺少当前事件理解" in titles
+    assert "what_changed_contract 缺少状态触发" in titles
+    assert "what_changed_contract 缺少状态解释" not in titles
+
+
+def test_review_audit_accepts_complete_what_changed_contract(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/scans/etfs/final/scan_159981_2026-03-29_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    manifest_path = tmp_path / "reports/reviews/scans/etfs/final/scan_159981_2026-03-29_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "scan",
+                "artifacts": {
+                    "what_changed_contract": {
+                        "previous_view": "核心假设是 `800G 光模块放量兑现`。",
+                        "change_summary": "事件状态从 `待补充` 升到 `已消化`。",
+                        "conclusion_label": "升级",
+                        "current_event_understanding": "公告类型：一般公告；更直接影响 `盈利 / 估值`；当前更像 `thesis变化`",
+                        "state_trigger": "事件完成消化",
+                        "state_summary": "当前事件已完成消化并更新主导事件，thesis 可以按更高确定性理解。",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "scan_what_changed_complete_round1.md",
+        "\n".join(
+            [
+                "# Scan",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "what_changed_contract 缺少状态触发" not in titles
+    assert "what_changed_contract 缺少状态解释" not in titles
+
+
+def test_review_audit_flags_missing_what_changed_state_summary(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/scans/etfs/final/scan_159981_2026-03-29_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    manifest_path = tmp_path / "reports/reviews/scans/etfs/final/scan_159981_2026-03-29_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "scan",
+                "artifacts": {
+                    "what_changed_contract": {
+                        "previous_view": "核心假设是 `800G 光模块放量兑现`。",
+                        "change_summary": "事件状态从 `待补充` 升到 `已消化`。",
+                        "conclusion_label": "升级",
+                        "current_event_understanding": "公告类型：一般公告；更直接影响 `盈利 / 估值`；当前更像 `thesis变化`",
+                        "state_trigger": "事件完成消化",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "scan_what_changed_missing_state_summary_round1.md",
+        "\n".join(
+            [
+                "# Scan",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "what_changed_contract 缺少状态解释" in titles
+
+
+def test_review_audit_flags_incomplete_catalyst_web_review_from_manifest(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports/scans/etfs/final/scan_512480_2026-03-26_client_final.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# demo", encoding="utf-8")
+    catalyst_review = tmp_path / "reports/scans/etfs/internal/scan_512480_2026-03-26_catalyst_web_review.md"
+    catalyst_review.parent.mkdir(parents=True, exist_ok=True)
+    catalyst_review.write_text(
+        "\n".join(
+            [
+                "# Catalyst Web Review | scan | 2026-03-26",
+                "",
+                "## 1. 半导体ETF (512480)",
+                "",
+                "### 复核结论",
+                "",
+                "- 结论：待补",
+                "",
+                "### 关键证据",
+                "",
+                "- 待补",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "reports/reviews/scans/etfs/final/scan_512480_2026-03-26_client_final__release_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_type": "scan",
+                "artifacts": {
+                    "editor_artifacts": {
+                        "catalyst_web_review": str(catalyst_review),
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_review(
+        tmp_path / "scan_round1.md",
+        "\n".join(
+            [
+                "# Scan",
+                "",
+                f"- 审稿对象：[{report_path.name}]({report_path})",
+                "- 适用 prompt：`docs/prompts/external_financial_reviewer.md`",
+                "",
+                "## 结论",
+                "",
+                "`go`",
+                "",
+                "## 主要问题",
+                "",
+                "1. `P3`：无阻塞。",
+                "",
+                "## 框架外问题",
+                "",
+                "1. 当前没有新的实质性框架外阻塞问题。",
+                "",
+                "## 零提示发散审",
+                "",
+                "1. 零提示复核后，没有新的高优先级问题。",
+                "",
+                "## 建议沉淀",
+                "",
+                "- workflow",
+                "  - 维持现有协议。",
+                "",
+                "## 收敛结论",
+                "",
+                "- round：1",
+                "- 状态：PASS",
+                "- 本轮新增 P0/P1：否",
+                "- 上一轮 P0/P1 是否已关闭：是",
+                "- 本轮是否收敛：是",
+                "- 是否建议继续下一轮：否",
+                "- 允许作为成稿交付：是",
+            ]
+        ),
+    )
+
+    audit = build_review_audit(tmp_path)
+    titles = {item["title"] for item in audit["findings"]}
+    assert "催化联网复核仍停留在待补模板" in titles
+
+
 def test_review_audit_flags_missing_split_review_roles(tmp_path: Path) -> None:
     _write_review(
         tmp_path / "demo_round1.md",

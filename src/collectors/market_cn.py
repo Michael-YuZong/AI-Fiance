@@ -1,4 +1,4 @@
-"""China market data collector — Tushare-first, AKShare/yfinance fallback."""
+"""China market data collector — Tushare-first, AKShare only for realtime / uncovered side paths."""
 
 from __future__ import annotations
 
@@ -9,16 +9,12 @@ import numpy as np
 import pandas as pd
 
 from .base import BaseCollector
+from .index_topic import IndexTopicCollector
 
 try:
     import akshare as ak
 except ImportError:  # pragma: no cover - optional dependency during bootstrap
     ak = None
-
-try:
-    import yfinance as yf
-except ImportError:  # pragma: no cover
-    yf = None
 
 try:
     import efinance as ef
@@ -27,7 +23,7 @@ except ImportError:  # pragma: no cover
 
 
 class ChinaMarketCollector(BaseCollector):
-    """A 股 ETF 行情与技术数据采集。Tushare 优先，AKShare/yfinance 兜底。"""
+    """China market collector with Tushare-first research paths."""
 
     def _retry_tushare_history(self, fetcher: Callable[[], pd.DataFrame | None], attempts: int = 2) -> pd.DataFrame | None:
         last_exc: Exception | None = None
@@ -50,12 +46,6 @@ class ChinaMarketCollector(BaseCollector):
         tagged.attrs["history_source_label"] = label
         return tagged
 
-    def _yahoo_symbol(self, symbol: str) -> str:
-        if len(symbol) == 6 and symbol.isdigit():
-            suffix = ".SS" if symbol[0] in {"5", "6", "9"} else ".SZ"
-            return f"{symbol}{suffix}"
-        return symbol
-
     def _ak_function(self, name: str) -> Callable[..., Any]:
         if ak is None:
             raise RuntimeError("akshare is not installed")
@@ -66,6 +56,9 @@ class ChinaMarketCollector(BaseCollector):
 
     def _date_str(self, offset_days: int = 0) -> str:
         return (datetime.now() + timedelta(days=offset_days)).strftime("%Y%m%d")
+
+    def _index_topic_collector(self) -> IndexTopicCollector:
+        return IndexTopicCollector(self.config)
 
     # ── A 股个股日 K ──────────────────────────────────────────
 
@@ -88,37 +81,7 @@ class ChinaMarketCollector(BaseCollector):
                 return self._tag_history_frame(frame, "tushare", "Tushare 日线")
         except Exception:
             pass
-
-        # ── AKShare (fallback 1) ──
-        try:
-            fetcher = self._ak_function("stock_zh_a_hist")
-            frame = self.cached_call(
-                f"cn_market:stock_daily:{symbol}:{period}:{adjust}:{start}:{end}",
-                fetcher,
-                symbol=symbol,
-                period=period,
-                start_date=start,
-                end_date=end,
-                adjust=adjust,
-            )
-            return self._tag_history_frame(frame, "akshare", "AKShare 日线回退")
-        except Exception as primary_exc:
-            market_cfg = dict(self.config or {}).get("market", {})
-            allow_yahoo_fallback = bool(market_cfg.get("enable_yahoo_fallback_for_cn_stock", False))
-            if yf is None or not allow_yahoo_fallback:
-                raise primary_exc
-            ticker = self._yahoo_symbol(symbol)
-            try:
-                frame = self.cached_call(
-                    f"cn_market:yahoo_stock_daily:{ticker}:{period}",
-                    yf.Ticker(ticker).history,
-                    period="3y" if period == "daily" else period,
-                    interval="1d",
-                    auto_adjust=False,
-                )
-                return self._tag_history_frame(frame, "yahoo", "Yahoo Finance 日线回退")
-            except Exception:
-                raise primary_exc
+        return pd.DataFrame()
 
     def get_stock_auction(self, symbol: str, trade_date: str = "") -> pd.DataFrame:
         """A股集合竞价快照。Tushare stk_auction 优先。"""
@@ -237,48 +200,14 @@ class ChinaMarketCollector(BaseCollector):
         start_date: str = "",
         end_date: str = "",
     ) -> pd.DataFrame:
-        """ETF 日 K 线。Tushare fund_daily 优先。"""
+        """ETF 日 K 线。研究主链统一使用 Tushare fund_daily。"""
         start = start_date or self._date_str(-365 * 3)
         end = end_date or self._date_str()
 
-        # ── Tushare (primary) ──
-        try:
-            frame = self._retry_tushare_history(lambda: self._ts_etf_daily(symbol, start, end, adjust))
-            if frame is not None and not frame.empty:
-                return self._tag_history_frame(frame, "tushare", "Tushare 日线")
-        except Exception:
-            pass
-
-        # ── AKShare (fallback 1) ──
-        try:
-            fetcher = self._ak_function("fund_etf_hist_em")
-            frame = self.cached_call(
-                f"cn_market:etf_daily:{symbol}:{period}:{adjust}:{start}:{end}",
-                fetcher,
-                symbol=symbol,
-                period=period,
-                start_date=start,
-                end_date=end,
-                adjust=adjust,
-            )
-            return self._tag_history_frame(frame, "akshare", "AKShare 日线回退")
-        except Exception as primary_exc:
-            market_cfg = dict(self.config or {}).get("market", {})
-            allow_yahoo_fallback = bool(market_cfg.get("enable_yahoo_fallback_for_cn_etf", False))
-            if yf is None or not allow_yahoo_fallback:
-                raise primary_exc
-            ticker = self._yahoo_symbol(symbol)
-            try:
-                frame = self.cached_call(
-                    f"cn_market:yahoo_etf_daily:{ticker}:{period}",
-                    yf.Ticker(ticker).history,
-                    period="3y" if period == "daily" else period,
-                    interval="1d",
-                    auto_adjust=False,
-                )
-                return self._tag_history_frame(frame, "yahoo", "Yahoo Finance 日线回退")
-            except Exception:
-                raise primary_exc
+        frame = self._retry_tushare_history(lambda: self._ts_etf_daily(symbol, start, end, adjust))
+        if frame is not None and not frame.empty:
+            return self._tag_history_frame(frame, "tushare", "Tushare 日线")
+        raise RuntimeError(f"Tushare ETF 日线当前不可用：{symbol}")
 
     def _ts_etf_daily(self, symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame | None:
         """Tushare fund_daily → ETF OHLCV。"""
@@ -296,7 +225,9 @@ class ChinaMarketCollector(BaseCollector):
             raw["amount"] = pd.to_numeric(raw["amount"], errors="coerce") * 1000.0
 
         if adjust in ("qfq", "hfq"):
-            adj = self._ts_call("adj_factor", ts_code=ts_code, start_date=start, end_date=end)
+            adj = self._ts_fund_adj_snapshot(ts_code=ts_code, start_date=start, end_date=end)
+            if adj is None or getattr(adj, "empty", False):
+                adj = self._ts_call("adj_factor", ts_code=ts_code, start_date=start, end_date=end)
             if adj is not None and not adj.empty:
                 raw = raw.merge(adj[["trade_date", "adj_factor"]], on="trade_date", how="left")
                 raw["adj_factor"] = raw["adj_factor"].ffill().bfill()
@@ -320,10 +251,12 @@ class ChinaMarketCollector(BaseCollector):
     def get_etf_universe_snapshot(self, trade_date: str = "") -> pd.DataFrame:
         """Tushare-first ETF universe snapshot for the latest open trade date.
 
-        Returns a merged frame of ``fund_basic(market='E')`` and ``fund_daily(trade_date=...)``
+        Returns a merged frame of ETF metadata, ETF share size and ``fund_daily(trade_date=...)``
         with yuan-denominated turnover and normalized symbol/date fields.
         """
-        basic = self._ts_fund_basic_snapshot("E")
+        basic = self._ts_etf_basic_snapshot()
+        if basic is None or getattr(basic, "empty", False):
+            basic = self._ts_fund_basic_snapshot("E")
         if basic is None or getattr(basic, "empty", False):
             return pd.DataFrame()
         basic_frame = basic.copy()
@@ -342,6 +275,10 @@ class ChinaMarketCollector(BaseCollector):
             if daily is None or getattr(daily, "empty", False):
                 continue
 
+            share_size = self._ts_etf_share_size_snapshot(trade_date=latest_trade_date)
+            if share_size is None or getattr(share_size, "empty", False):
+                share_size = None
+
             daily_frame = daily.copy()
             if "amount" in daily_frame.columns:
                 daily_frame["amount"] = pd.to_numeric(daily_frame["amount"], errors="coerce") * 1000.0
@@ -357,7 +294,58 @@ class ChinaMarketCollector(BaseCollector):
             if merged.empty:
                 continue
 
+            if share_size is not None and not share_size.empty and "ts_code" in share_size.columns:
+                share_frame = share_size.copy()
+                if "trade_date" in share_frame.columns:
+                    share_frame["trade_date"] = share_frame["trade_date"].map(self._normalize_date_text)
+                for column in ("total_share", "total_size", "nav", "close"):
+                    if column in share_frame.columns:
+                        share_frame[column] = pd.to_numeric(share_frame[column], errors="coerce")
+                merged = merged.merge(
+                    share_frame,
+                    on="ts_code",
+                    how="left",
+                    suffixes=("", "_share"),
+                )
+
             merged["symbol"] = merged["ts_code"].astype(str).str.split(".").str[0]
+            if "csname" in merged.columns:
+                merged["name"] = merged.get("name", pd.Series("", index=merged.index))
+                merged["name"] = merged["name"].where(
+                    merged["name"].astype(str).str.strip().ne(""),
+                    merged["csname"].astype(str),
+                )
+            if "extname" in merged.columns:
+                merged["name"] = merged["name"].where(
+                    merged["name"].astype(str).str.strip().ne(""),
+                    merged["extname"].astype(str),
+                )
+            if "cname" in merged.columns:
+                merged["name"] = merged["name"].where(
+                    merged["name"].astype(str).str.strip().ne(""),
+                    merged["cname"].astype(str),
+                )
+            if "index_name" in merged.columns:
+                merged["benchmark"] = merged.get("benchmark", pd.Series("", index=merged.index))
+                merged["benchmark"] = merged["benchmark"].where(
+                    merged["benchmark"].astype(str).str.strip().ne(""),
+                    merged["index_name"].astype(str),
+                )
+            if "mgr_name" in merged.columns:
+                merged["management"] = merged.get("management", pd.Series("", index=merged.index))
+                merged["management"] = merged["management"].where(
+                    merged["management"].astype(str).str.strip().ne(""),
+                    merged["mgr_name"].astype(str),
+                )
+            if "etf_type" in merged.columns:
+                merged["fund_type"] = merged.get("fund_type", pd.Series("", index=merged.index))
+                merged["fund_type"] = merged["fund_type"].where(
+                    merged["fund_type"].astype(str).str.strip().ne(""),
+                    merged["etf_type"].astype(str),
+                )
+            if "total_share" in merged.columns and "total_size" in merged.columns:
+                merged["ETF总份额"] = pd.to_numeric(merged["total_share"], errors="coerce")
+                merged["ETF总规模"] = pd.to_numeric(merged["total_size"], errors="coerce")
             for column in (
                 "pre_close",
                 "open",
@@ -376,7 +364,7 @@ class ChinaMarketCollector(BaseCollector):
                 if column in merged.columns:
                     merged[column] = pd.to_numeric(merged[column], errors="coerce")
 
-            for column in ("found_date", "list_date", "issue_date", "delist_date"):
+            for column in ("found_date", "list_date", "issue_date", "delist_date", "setup_date"):
                 if column in merged.columns:
                     merged[column] = merged[column].map(self._normalize_date_text)
 
@@ -400,54 +388,23 @@ class ChinaMarketCollector(BaseCollector):
 
         # ── Tushare (primary) ──
         try:
-            frame = self._ts_index_daily(symbol, start, end)
-            if frame is not None and not frame.empty:
-                return self._tag_history_frame(frame, "tushare", "Tushare 指数日线")
-        except Exception:
-            pass
-
-        # ── AKShare (fallback) ──
-        try:
-            fetcher = self._ak_function("index_zh_a_hist")
-            frame = self.cached_call(
-                f"cn_market:index_daily:{symbol}:{period}:{start}:{end}",
-                fetcher,
-                symbol=symbol,
+            frame = self._index_topic_collector().get_index_history(
+                symbol,
                 period=period,
                 start_date=start,
                 end_date=end,
             )
-            return self._tag_history_frame(frame, "akshare", "AKShare 指数日线回退")
-        except Exception as primary_exc:
-            if proxy_symbol and proxy_symbol != symbol:
-                try:
-                    frame = self.get_etf_daily(proxy_symbol, period="daily", adjust="qfq", start_date=start, end_date=end)
-                    return self._tag_history_frame(frame, "proxy_etf", f"代理 ETF 日线回退（{proxy_symbol}）")
-                except Exception:
-                    pass
-            raise primary_exc
-
-    def _ts_index_daily(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
-        """Tushare index_daily。指数代码需要按指数规则尝试 SH/SZ 后缀。"""
-        for ts_code in self._ts_index_code_candidates(symbol):
-            cache_key = f"cn_market:ts_index_daily:{ts_code}:{start}:{end}"
-            cached = self._load_cache(cache_key)
-            if cached is not None:
-                return cached
-
-            raw = self._ts_call("index_daily", ts_code=ts_code, start_date=start, end_date=end)
-            if raw is None or raw.empty:
-                continue
-
-            frame = raw.rename(columns={
-                "trade_date": "日期", "open": "开盘", "high": "最高",
-                "low": "最低", "close": "收盘", "vol": "成交量", "amount": "成交额",
-            })
-            frame["日期"] = pd.to_datetime(frame["日期"], format="%Y%m%d")
-            frame = frame.sort_values("日期").reset_index(drop=True)
-            self._save_cache(cache_key, frame)
-            return frame
-        return None
+            if frame is not None and not frame.empty:
+                return frame
+        except Exception:
+            pass
+        if proxy_symbol and proxy_symbol != symbol:
+            try:
+                frame = self.get_etf_daily(proxy_symbol, period="daily", adjust="qfq", start_date=start, end_date=end)
+                return self._tag_history_frame(frame, "proxy_etf", f"代理 ETF 日线回退（{proxy_symbol}）")
+            except Exception:
+                pass
+        return pd.DataFrame()
 
     # ── 开放式基金净值 ────────────────────────────────────────
 
@@ -467,25 +424,13 @@ class ChinaMarketCollector(BaseCollector):
         except Exception:
             pass
 
-        # ── AKShare (fallback) ──
-        try:
-            fetcher = self._ak_function("fund_open_fund_info_em")
-            frame = self.cached_call(
-                f"cn_market:open_fund:{symbol}:{indicator}:{period}",
-                fetcher,
-                symbol=symbol,
-                indicator=indicator,
-                period=period,
-            )
-            return self._tag_history_frame(self._normalize_open_fund_nav(frame), "akshare", "AKShare 基金净值回退")
-        except Exception as primary_exc:
-            if proxy_symbol and proxy_symbol != symbol:
-                try:
-                    frame = self.get_etf_daily(proxy_symbol)
-                    return self._tag_history_frame(frame, "proxy_etf", f"代理 ETF 日线回退（{proxy_symbol}）")
-                except Exception:
-                    pass
-            raise primary_exc
+        if proxy_symbol and proxy_symbol != symbol:
+            try:
+                frame = self.get_etf_daily(proxy_symbol)
+                return self._tag_history_frame(frame, "proxy_etf", f"代理 ETF 日线回退（{proxy_symbol}）")
+            except Exception:
+                pass
+        return pd.DataFrame()
 
     def _ts_fund_nav(self, symbol: str) -> pd.DataFrame | None:
         """Tushare fund_nav → 基金净值历史。"""
@@ -713,16 +658,6 @@ class ChinaMarketCollector(BaseCollector):
                     return str(industry)
         except Exception:
             pass
-
-        # AKShare fallback
-        try:
-            fetcher = self._ak_function("stock_individual_info_em")
-            df = self.cached_call(f"cn_market:stock_info:{symbol}", fetcher, symbol=symbol, ttl_hours=24)
-            row = df[df["item"] == "行业"]
-            if not row.empty:
-                return str(row.iloc[0]["value"])
-        except Exception:
-            pass
         return ""
 
     def get_etf_realtime(self) -> pd.DataFrame:
@@ -767,11 +702,7 @@ class ChinaMarketCollector(BaseCollector):
                 return frame
         except Exception:
             pass
-
-        # ── AKShare (fallback) ──
-        fetcher = self._ak_function("stock_hsgt_fund_flow_summary_em")
-        raw = self.cached_call("cn_market:north_south_flow:v2", fetcher, ttl_hours=0)
-        return self._normalize_north_south_flow_frame(raw, source="akshare")
+        return pd.DataFrame()
 
     def _ts_north_south_flow(self) -> pd.DataFrame | None:
         """Tushare moneyflow_hsgt — 沪深港通资金流向。"""
@@ -800,15 +731,459 @@ class ChinaMarketCollector(BaseCollector):
                 return frame
         except Exception:
             pass
-
-        # ── AKShare (fallback) ──
-        try:
-            frame = self._ak_margin_summary()
-            if frame is not None and not frame.empty:
-                return frame
-        except Exception:
-            pass
         return pd.DataFrame()
+
+    def get_stock_regulatory_risk_snapshot(
+        self,
+        symbol: str,
+        *,
+        as_of: str = "",
+        lookback_days: int = 30,
+        display_name: str = "",
+    ) -> dict[str, Any]:
+        """Unified Tushare-first stock risk snapshot for ST / high-shock / alert signals."""
+        cleaned_symbol = str(symbol).strip()
+        ts_code = self._to_ts_code(cleaned_symbol)
+        as_of_ts = pd.Timestamp(as_of or datetime.now().strftime("%Y-%m-%d")).normalize()
+        as_of_text = f"{as_of_ts.strftime('%Y-%m-%d')} 00:00:00"
+        latest_trade_date = ""
+        for trade_date in reversed(self._recent_open_trade_dates(lookback_days=max(int(lookback_days), 20))):
+            normalized = self._normalize_date_text(trade_date)
+            if normalized and normalized <= as_of_ts.strftime("%Y-%m-%d"):
+                latest_trade_date = trade_date
+                break
+        if not latest_trade_date:
+            latest_trade_date = as_of_ts.strftime("%Y%m%d")
+        latest_trade_text = self._normalize_date_text(latest_trade_date)
+        window_start = (as_of_ts - timedelta(days=max(int(lookback_days), 1))).strftime("%Y%m%d")
+        window_end = as_of_ts.strftime("%Y%m%d")
+        fallback_name_st = str(display_name or "").strip().upper().startswith(("ST", "*ST"))
+
+        components: dict[str, dict[str, Any]] = {}
+        active_st = False
+        st_events: list[dict[str, Any]] = []
+        high_shock_events: list[dict[str, Any]] = []
+        alert_events: list[dict[str, Any]] = []
+
+        st_daily_error: BaseException | None = None
+        try:
+            st_daily_raw = self._ts_stock_st_snapshot(latest_trade_date)
+        except Exception as exc:  # noqa: BLE001
+            st_daily_raw = None
+            st_daily_error = exc
+        st_daily_frame = self._normalize_stock_st_snapshot(st_daily_raw, trade_date=latest_trade_date)
+        st_daily_match = st_daily_frame[st_daily_frame["ts_code"] == ts_code].reset_index(drop=True) if not st_daily_frame.empty else pd.DataFrame()
+        st_daily_diagnosis = "live"
+        st_daily_fallback = "none"
+        if st_daily_error is not None:
+            st_daily_diagnosis = self._tushare_failure_diagnosis(st_daily_error)
+        elif st_daily_raw is None:
+            st_daily_diagnosis = "unavailable"
+        elif st_daily_frame.empty:
+            st_daily_diagnosis = "empty"
+        if not st_daily_match.empty:
+            active_st = True
+            row = st_daily_match.iloc[0]
+            detail = f"{latest_trade_text} 仍在 `{str(row.get('type_name', '') or row.get('type', 'ST')).strip()}` 名单内"
+            status = "❌"
+            disclosure = "Tushare stock_st 命中当前 ST 风险警示板名单。"
+        elif st_daily_diagnosis == "empty":
+            detail = f"{latest_trade_text} 未命中 ST 风险警示板名单"
+            status = "✅"
+            disclosure = "Tushare stock_st 当前未命中该股票。"
+        else:
+            st_daily_fallback = "name_prefix_only" if fallback_name_st else "none"
+            detail = (
+                "名称前缀仍显示 ST / *ST，本轮先按保守口径处理"
+                if fallback_name_st
+                else "当前未拿到 ST 风险警示板日度名单"
+            )
+            status = "❌" if fallback_name_st else "ℹ️"
+            disclosure = self._blocked_disclosure(st_daily_diagnosis, source="Tushare stock_st")
+        components["stock_st"] = {
+            "source": "tushare.stock_st",
+            "as_of": latest_trade_text,
+            "fallback": st_daily_fallback,
+            "diagnosis": st_daily_diagnosis,
+            "disclosure": disclosure,
+            "status": status,
+            "detail": detail,
+            "active": bool(active_st or (status == "❌" and st_daily_fallback == "name_prefix_only")),
+            "items": st_daily_match.to_dict("records") if not st_daily_match.empty else [],
+        }
+
+        st_error: BaseException | None = None
+        try:
+            st_raw = self._ts_st_events(ts_code)
+        except Exception as exc:  # noqa: BLE001
+            st_raw = None
+            st_error = exc
+        st_frame = self._normalize_st_events(st_raw)
+        st_window = pd.DataFrame()
+        st_diagnosis = "live"
+        if st_error is not None:
+            st_diagnosis = self._tushare_failure_diagnosis(st_error)
+        elif st_raw is None:
+            st_diagnosis = "unavailable"
+        elif st_frame.empty:
+            st_diagnosis = "empty"
+        if not st_frame.empty:
+            st_frame["imp_date_ts"] = pd.to_datetime(st_frame["imp_date"], errors="coerce")
+            st_window = st_frame[
+                st_frame["imp_date_ts"].notna()
+                & (st_frame["imp_date_ts"] <= as_of_ts)
+            ].sort_values("imp_date_ts", ascending=False).reset_index(drop=True)
+            st_events = st_window.drop(columns=["imp_date_ts"], errors="ignore").to_dict("records")
+            if not active_st and not st_window.empty:
+                latest = st_window.iloc[0]
+                st_type_text = str(latest.get("st_type", "")).strip()
+                reason_text = " ".join(
+                    [
+                        st_type_text,
+                        str(latest.get("st_reason", "")).strip(),
+                        str(latest.get("st_explain", "")).strip(),
+                    ]
+                )
+                if not any(token in reason_text for token in ("撤销", "摘帽", "解除")):
+                    active_st = True
+        if st_window.empty:
+            st_detail = "近窗口未命中 ST 变更记录" if st_diagnosis == "empty" else "当前未拿到 ST 变更记录"
+            st_status = "✅" if st_diagnosis == "empty" else ("❌" if active_st else "ℹ️")
+        else:
+            latest = st_window.iloc[0]
+            st_detail = (
+                f"{str(latest.get('imp_date', '')).strip()} 最近一次 ST 变更为 `{str(latest.get('st_type', '')).strip() or '未标注'}`；"
+                f"原因：{str(latest.get('st_reason', '')).strip() or '未披露'}"
+            )
+            st_status = "❌" if active_st else "⚠️"
+        components["st"] = {
+            "source": "tushare.st",
+            "as_of": as_of_text,
+            "fallback": "none",
+            "diagnosis": st_diagnosis,
+            "disclosure": (
+                "Tushare st 提供 ST 风险警示板变更原因与实施日期。"
+                if st_diagnosis in {"live", "empty"}
+                else self._blocked_disclosure(st_diagnosis, source="Tushare st")
+            ),
+            "status": st_status,
+            "detail": st_detail,
+            "active": active_st,
+            "items": st_events[:5],
+        }
+
+        high_shock_error: BaseException | None = None
+        try:
+            high_shock_raw = self._ts_stock_high_shock(ts_code, window_start, window_end)
+        except Exception as exc:  # noqa: BLE001
+            high_shock_raw = None
+            high_shock_error = exc
+        high_shock_frame = self._normalize_stock_regulatory_events(high_shock_raw, date_column="trade_date")
+        high_shock_diagnosis = "live"
+        if high_shock_error is not None:
+            high_shock_diagnosis = self._tushare_failure_diagnosis(high_shock_error)
+        elif high_shock_raw is None:
+            high_shock_diagnosis = "unavailable"
+        elif high_shock_frame.empty:
+            high_shock_diagnosis = "empty"
+        high_shock_events = high_shock_frame.to_dict("records") if not high_shock_frame.empty else []
+        if high_shock_events:
+            latest = high_shock_events[0]
+            high_shock_status = "⚠️"
+            high_shock_detail = (
+                f"{str(latest.get('event_date', '')).strip()} 命中严重异常波动："
+                f"{str(latest.get('reason', '')).strip() or '未披露原因'}"
+            )
+        else:
+            high_shock_status = "✅" if high_shock_diagnosis == "empty" else "ℹ️"
+            high_shock_detail = "近窗口未命中严重异常波动" if high_shock_diagnosis == "empty" else "当前未拿到严重异常波动记录"
+        components["stk_high_shock"] = {
+            "source": "tushare.stk_high_shock",
+            "as_of": as_of_text,
+            "fallback": "none",
+            "diagnosis": high_shock_diagnosis,
+            "disclosure": (
+                "Tushare stk_high_shock 提供交易所严重异常波动公告。"
+                if high_shock_diagnosis in {"live", "empty"}
+                else self._blocked_disclosure(high_shock_diagnosis, source="Tushare stk_high_shock")
+            ),
+            "status": high_shock_status,
+            "detail": high_shock_detail,
+            "count": len(high_shock_events),
+            "items": high_shock_events[:5],
+        }
+
+        alert_error: BaseException | None = None
+        try:
+            alert_raw = self._ts_stock_alert(ts_code, window_start, window_end)
+        except Exception as exc:  # noqa: BLE001
+            alert_raw = None
+            alert_error = exc
+        alert_frame = self._normalize_stock_regulatory_events(alert_raw, date_column="start_date", end_column="end_date")
+        alert_diagnosis = "live"
+        if alert_error is not None:
+            alert_diagnosis = self._tushare_failure_diagnosis(alert_error)
+        elif alert_raw is None:
+            alert_diagnosis = "unavailable"
+        elif alert_frame.empty:
+            alert_diagnosis = "empty"
+        alert_events = alert_frame.to_dict("records") if not alert_frame.empty else []
+        active_alerts = [
+            item
+            for item in alert_events
+            if str(item.get("event_date", "")).strip() <= as_of_ts.strftime("%Y-%m-%d")
+            and (not str(item.get("end_date", "")).strip() or str(item.get("end_date", "")).strip() >= as_of_ts.strftime("%Y-%m-%d"))
+        ]
+        if active_alerts:
+            latest = active_alerts[0]
+            alert_status = "⚠️"
+            alert_detail = (
+                f"{str(latest.get('event_date', '')).strip()} 起被列入 `{str(latest.get('type', '')).strip() or '交易所重点提示证券'}`，"
+                f"参考截至 {str(latest.get('end_date', '')).strip() or '未披露'}"
+            )
+        elif alert_events:
+            latest = alert_events[0]
+            alert_status = "⚠️"
+            alert_detail = (
+                f"近窗口曾被列入 `{str(latest.get('type', '')).strip() or '交易所重点提示证券'}`，"
+                f"起始 {str(latest.get('event_date', '')).strip()}"
+            )
+        else:
+            alert_status = "✅" if alert_diagnosis == "empty" else "ℹ️"
+            alert_detail = "近窗口未命中交易所重点提示证券" if alert_diagnosis == "empty" else "当前未拿到交易所重点提示记录"
+        components["stk_alert"] = {
+            "source": "tushare.stk_alert",
+            "as_of": as_of_text,
+            "fallback": "none",
+            "diagnosis": alert_diagnosis,
+            "disclosure": (
+                "Tushare stk_alert 提供交易所重点提示证券名单。"
+                if alert_diagnosis in {"live", "empty"}
+                else self._blocked_disclosure(alert_diagnosis, source="Tushare stk_alert")
+            ),
+            "status": alert_status,
+            "detail": alert_detail,
+            "count": len(alert_events),
+            "active_count": len(active_alerts),
+            "items": alert_events[:5],
+        }
+
+        fallback = "name_prefix_only" if components["stock_st"]["fallback"] == "name_prefix_only" else "none"
+        diagnoses = {str(component.get("diagnosis", "")) for component in components.values()}
+        blocked_diagnoses = {"unavailable", "permission_blocked", "rate_limited", "network_error", "fetch_error"}
+        if active_st:
+            overall_status = "❌"
+            detail = "当前仍处于 ST 风险警示板，直接抬高退市与交易约束风险。"
+        elif high_shock_events and active_alerts:
+            overall_status = "⚠️"
+            detail = "近窗口同时命中严重异常波动与交易所重点提示，短线波动与监管关注都偏高。"
+        elif high_shock_events:
+            overall_status = "⚠️"
+            detail = "近窗口命中过严重异常波动，需要把它当成高波动样本而不是普通强势股。"
+        elif active_alerts:
+            overall_status = "⚠️"
+            detail = "当前仍在交易所重点提示证券名单内，短线执行需要更保守。"
+        elif diagnoses.issubset(blocked_diagnoses):
+            overall_status = "ℹ️"
+            detail = "Tushare 股票风险专题接口当前不可用，本轮不把缺口写成通过。"
+        elif diagnoses & blocked_diagnoses:
+            overall_status = "ℹ️"
+            detail = "股票风险专题部分缺失，本轮只做保守披露，不把缺口写成通过。"
+        else:
+            overall_status = "✅"
+            detail = f"截至 {latest_trade_text} 未命中 ST 风险警示、严重异常波动或交易所重点提示。"
+
+        disclosure_lines = [
+            str(component.get("disclosure", "")).strip()
+            for component in components.values()
+            if str(component.get("disclosure", "")).strip()
+        ]
+        return {
+            "source": "tushare.stock_st+tushare.st+tushare.stk_high_shock+tushare.stk_alert",
+            "as_of": as_of_text,
+            "fallback": fallback,
+            "status": overall_status,
+            "detail": detail,
+            "disclosure": "；".join(dict.fromkeys(disclosure_lines)),
+            "active_st": active_st,
+            "high_shock_count": len(high_shock_events),
+            "alert_count": len(alert_events),
+            "active_alert_count": len(active_alerts),
+            "components": components,
+        }
+
+    def get_stock_margin_snapshot(
+        self,
+        symbol: str,
+        *,
+        as_of: str = "",
+        lookback_days: int = 20,
+        display_name: str = "",
+    ) -> dict[str, Any]:
+        """Unified Tushare-first stock margin snapshot for crowding/risk checks."""
+        cleaned_symbol = str(symbol).strip()
+        ts_code = self._to_ts_code(cleaned_symbol)
+        as_of_ts = pd.Timestamp(as_of or datetime.now().strftime("%Y-%m-%d")).normalize()
+        as_of_text = f"{as_of_ts.strftime('%Y-%m-%d')} 00:00:00"
+        latest_trade_date = ""
+        for trade_date in reversed(self._recent_open_trade_dates(lookback_days=max(int(lookback_days), 20))):
+            normalized = self._normalize_date_text(trade_date)
+            if normalized and normalized <= as_of_ts.strftime("%Y-%m-%d"):
+                latest_trade_date = trade_date
+                break
+        if not latest_trade_date:
+            latest_trade_date = as_of_ts.strftime("%Y%m%d")
+        latest_trade_text = self._normalize_date_text(latest_trade_date)
+        window_start = (as_of_ts - timedelta(days=max(int(lookback_days), 1))).strftime("%Y%m%d")
+
+        margin_error: BaseException | None = None
+        try:
+            margin_raw = self._ts_margin_detail_snapshot(
+                ts_code=ts_code,
+                start_date=window_start,
+                end_date=latest_trade_date,
+            )
+        except Exception as exc:  # noqa: BLE001
+            margin_raw = None
+            margin_error = exc
+        margin_frame = self._normalize_margin_detail_frame(margin_raw)
+        margin_frame = margin_frame[margin_frame["ts_code"] == ts_code].sort_values("日期").reset_index(drop=True) if not margin_frame.empty else pd.DataFrame()
+        diagnosis = "live"
+        if margin_error is not None:
+            diagnosis = self._tushare_failure_diagnosis(margin_error)
+        elif margin_raw is None:
+            diagnosis = "unavailable"
+        elif margin_frame.empty:
+            diagnosis = "empty"
+
+        latest_row: dict[str, Any] = {}
+        latest_date = ""
+        is_fresh = False
+        fin_balance = None
+        margin_balance = None
+        sec_balance = None
+        fin_buy = None
+        fin_repay = None
+        buy_repay_ratio = None
+        five_day_change_pct = None
+        three_day_change_pct = None
+        crowding_level = "unknown"
+
+        if not margin_frame.empty:
+            latest_row = dict(margin_frame.iloc[-1])
+            latest_date = str(latest_row.get("日期", "")).strip()
+            is_fresh = bool(latest_date and latest_date == latest_trade_text)
+            if diagnosis == "live" and not is_fresh:
+                diagnosis = "stale"
+
+            def _coerce_latest(key: str) -> float | None:
+                series = pd.to_numeric(pd.Series([latest_row.get(key)]), errors="coerce").dropna()
+                return None if series.empty else float(series.iloc[0])
+
+            fin_balance = _coerce_latest("融资余额")
+            margin_balance = _coerce_latest("融资融券余额")
+            sec_balance = _coerce_latest("融券余额")
+            fin_buy = _coerce_latest("融资买入额")
+            fin_repay = _coerce_latest("融资偿还额")
+            if fin_buy is not None and fin_repay is not None and fin_repay > 0:
+                buy_repay_ratio = fin_buy / fin_repay
+
+            fin_series = pd.to_numeric(margin_frame.get("融资余额", pd.Series(dtype=float)), errors="coerce").dropna()
+            if len(fin_series) >= 2:
+                tail_three = fin_series.tail(min(3, len(fin_series)))
+                base_three = float(tail_three.iloc[0] or 0.0)
+                if base_three > 0:
+                    three_day_change_pct = (float(tail_three.iloc[-1]) - base_three) / base_three
+                tail_five = fin_series.tail(min(5, len(fin_series)))
+                base_five = float(tail_five.iloc[0] or 0.0)
+                if base_five > 0:
+                    five_day_change_pct = (float(tail_five.iloc[-1]) - base_five) / base_five
+
+            if is_fresh:
+                if (five_day_change_pct is not None and five_day_change_pct >= 0.12) or (
+                    buy_repay_ratio is not None and buy_repay_ratio >= 1.30
+                ):
+                    crowding_level = "high"
+                elif (five_day_change_pct is not None and five_day_change_pct >= 0.05) or (
+                    buy_repay_ratio is not None and buy_repay_ratio >= 1.10
+                ):
+                    crowding_level = "medium"
+                elif five_day_change_pct is not None and five_day_change_pct <= -0.05:
+                    crowding_level = "relieved"
+                else:
+                    crowding_level = "neutral"
+
+        component = {
+            "source": "tushare.margin_detail",
+            "as_of": latest_date or latest_trade_text,
+            "fallback": "none",
+            "diagnosis": diagnosis,
+            "disclosure": (
+                "Tushare margin_detail 提供个股融资融券余额与当日买卖变动。"
+                if diagnosis in {"live", "empty", "stale"}
+                else self._blocked_disclosure(diagnosis, source="Tushare margin_detail")
+            ),
+            "status": "matched" if latest_row else "empty" if diagnosis == "empty" else "blocked",
+            "detail": (
+                f"{latest_date} 融资余额 {fin_balance:,.0f} 元 / 融资买入 {fin_buy:,.0f} 元 / 融资偿还 {fin_repay:,.0f} 元"
+                if latest_row and fin_balance is not None and fin_buy is not None and fin_repay is not None
+                else "当前未命中可用个股两融明细。"
+            ),
+            "item": latest_row,
+        }
+
+        stock_name = str(display_name or cleaned_symbol).strip() or cleaned_symbol
+        if latest_row and is_fresh and crowding_level == "high":
+            status = "⚠️"
+            detail = (
+                f"{stock_name} 两融拥挤度偏高：近 5 个样本融资余额变化 "
+                f"{(five_day_change_pct or 0.0):+.1%}，当日融资买入/偿还约 {buy_repay_ratio:.2f}x。"
+                if buy_repay_ratio is not None
+                else f"{stock_name} 两融拥挤度偏高：近 5 个样本融资余额变化 {(five_day_change_pct or 0.0):+.1%}。"
+            )
+        elif latest_row and is_fresh and crowding_level == "medium":
+            status = "⚠️"
+            detail = (
+                f"{stock_name} 两融资金仍在升温：近 5 个样本融资余额变化 {(five_day_change_pct or 0.0):+.1%}，"
+                "短线需要防融资盘一致性交易放大波动。"
+            )
+        elif latest_row and is_fresh and crowding_level == "relieved":
+            status = "✅"
+            detail = f"{stock_name} 两融余额近窗口回落，短线融资盘拥挤度有所释放。"
+        elif latest_row and is_fresh:
+            status = "✅"
+            detail = f"{stock_name} 两融余额未见明显拥挤式抬升，当前更偏中性观察。"
+        elif latest_row:
+            status = "ℹ️"
+            detail = f"{stock_name} 个股两融明细最新停在 {latest_date or '未知'}，当前不按 fresh 命中处理。"
+        elif diagnosis in {"permission_blocked", "rate_limited", "network_error", "fetch_error", "unavailable"}:
+            status = "ℹ️"
+            detail = "个股两融明细当前不可用，本轮不把缺口写成融资盘已经退潮。"
+        else:
+            status = "ℹ️"
+            detail = "当前未命中可稳定使用的个股两融明细。"
+
+        return {
+            "source": "tushare.margin_detail",
+            "as_of": as_of_text,
+            "latest_date": latest_date or latest_trade_text,
+            "fallback": "none",
+            "diagnosis": diagnosis,
+            "status": status,
+            "is_fresh": is_fresh,
+            "detail": detail,
+            "disclosure": component["disclosure"],
+            "crowding_level": crowding_level,
+            "fin_balance": fin_balance,
+            "margin_balance": margin_balance,
+            "sec_balance": sec_balance,
+            "fin_buy": fin_buy,
+            "fin_repay": fin_repay,
+            "buy_repay_ratio": buy_repay_ratio,
+            "five_day_change_pct": five_day_change_pct,
+            "three_day_change_pct": three_day_change_pct,
+            "components": {"margin_detail": component},
+        }
 
     def get_share_float(self, symbol: str, start_date: str = "", end_date: str = "") -> pd.DataFrame:
         """A股限售股解禁日历。Tushare share_float 优先。"""
@@ -947,6 +1322,155 @@ class ChinaMarketCollector(BaseCollector):
                 return normalized
         return None
 
+    def _ts_stock_st_snapshot(self, trade_date: str) -> pd.DataFrame | None:
+        trade_date = str(trade_date).replace("-", "").strip()
+        if not trade_date:
+            return None
+        cache_key = f"cn_market:ts_stock_st:v1:{trade_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+        raw = self._ts_call("stock_st", trade_date=trade_date)
+        if raw is None:
+            return None
+        if raw.empty:
+            empty = pd.DataFrame(columns=["ts_code", "name", "trade_date", "type", "type_name"])
+            self._save_cache(cache_key, empty)
+            return empty
+        self._save_cache(cache_key, raw)
+        return raw
+
+    def _normalize_stock_st_snapshot(self, frame: pd.DataFrame | None, trade_date: str = "") -> pd.DataFrame:
+        if frame is None:
+            return pd.DataFrame()
+        if frame.empty:
+            return pd.DataFrame(columns=["ts_code", "name", "trade_date", "type", "type_name"])
+        working = frame.copy()
+        ts_code_col = self._first_existing_column(working, ("ts_code", "code"))
+        name_col = self._first_existing_column(working, ("name", "名称"))
+        type_col = self._first_existing_column(working, ("type", "st_type"))
+        type_name_col = self._first_existing_column(working, ("type_name", "st_type_name"))
+        if ts_code_col is None:
+            return pd.DataFrame()
+        normalized = pd.DataFrame(
+            {
+                "ts_code": working[ts_code_col].astype(str),
+                "name": working.get(name_col, pd.Series("", index=working.index)).astype(str),
+                "trade_date": working.get("trade_date", pd.Series(trade_date, index=working.index)).map(self._normalize_date_text),
+                "type": working.get(type_col, pd.Series("", index=working.index)).astype(str),
+                "type_name": working.get(type_name_col, pd.Series("", index=working.index)).astype(str),
+            }
+        )
+        return normalized.drop_duplicates("ts_code").reset_index(drop=True)
+
+    def _ts_st_events(self, ts_code: str) -> pd.DataFrame | None:
+        ts_code = str(ts_code).strip()
+        if not ts_code:
+            return None
+        cache_key = f"cn_market:ts_st:v1:{ts_code}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+        raw = self._ts_call("st", ts_code=ts_code)
+        if raw is None:
+            return None
+        if raw.empty:
+            empty = pd.DataFrame(columns=["ts_code", "name", "pub_date", "imp_date", "st_tpye", "st_reason", "st_explain"])
+            self._save_cache(cache_key, empty)
+            return empty
+        self._save_cache(cache_key, raw)
+        return raw
+
+    def _normalize_st_events(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        if frame is None:
+            return pd.DataFrame()
+        if frame.empty:
+            return pd.DataFrame(columns=["ts_code", "name", "pub_date", "imp_date", "st_type", "st_reason", "st_explain"])
+        working = frame.copy()
+        ts_code_col = self._first_existing_column(working, ("ts_code", "code"))
+        name_col = self._first_existing_column(working, ("name", "名称"))
+        st_type_col = self._first_existing_column(working, ("st_type", "st_tpye", "type"))
+        if ts_code_col is None:
+            return pd.DataFrame()
+        normalized = pd.DataFrame(
+            {
+                "ts_code": working[ts_code_col].astype(str),
+                "name": working.get(name_col, pd.Series("", index=working.index)).astype(str),
+                "pub_date": working.get("pub_date", pd.Series("", index=working.index)).map(self._normalize_date_text),
+                "imp_date": working.get("imp_date", pd.Series("", index=working.index)).map(self._normalize_date_text),
+                "st_type": working.get(st_type_col, pd.Series("", index=working.index)).astype(str),
+                "st_reason": working.get("st_reason", pd.Series("", index=working.index)).astype(str),
+                "st_explain": working.get("st_explain", pd.Series("", index=working.index)).astype(str),
+            }
+        )
+        return normalized.drop_duplicates(["ts_code", "imp_date", "st_type"], keep="first").reset_index(drop=True)
+
+    def _ts_stock_high_shock(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
+        cache_key = f"cn_market:ts_stk_high_shock:v1:{ts_code}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=6)
+        if cached is not None:
+            return cached
+        raw = self._ts_call("stk_high_shock", ts_code=ts_code, start_date=start_date, end_date=end_date)
+        if raw is None:
+            return None
+        if raw.empty:
+            empty = pd.DataFrame(columns=["ts_code", "trade_date", "name", "trade_market", "reason", "period"])
+            self._save_cache(cache_key, empty)
+            return empty
+        self._save_cache(cache_key, raw)
+        return raw
+
+    def _ts_stock_alert(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
+        cache_key = f"cn_market:ts_stk_alert:v1:{ts_code}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=6)
+        if cached is not None:
+            return cached
+        raw = self._ts_call("stk_alert", ts_code=ts_code, start_date=start_date, end_date=end_date)
+        if raw is None:
+            return None
+        if raw.empty:
+            empty = pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date", "type"])
+            self._save_cache(cache_key, empty)
+            return empty
+        self._save_cache(cache_key, raw)
+        return raw
+
+    def _normalize_stock_regulatory_events(
+        self,
+        frame: pd.DataFrame | None,
+        *,
+        date_column: str,
+        end_column: str = "",
+    ) -> pd.DataFrame:
+        if frame is None:
+            return pd.DataFrame()
+        if frame.empty:
+            columns = ["ts_code", "name", "event_date", "market", "reason", "period", "end_date", "type"]
+            return pd.DataFrame(columns=columns)
+        working = frame.copy()
+        ts_code_col = self._first_existing_column(working, ("ts_code", "code"))
+        name_col = self._first_existing_column(working, ("name", "名称"))
+        market_col = self._first_existing_column(working, ("trade_market", "market"))
+        reason_col = self._first_existing_column(working, ("reason", "remark"))
+        period_col = self._first_existing_column(working, ("period",))
+        type_col = self._first_existing_column(working, ("type",))
+        if ts_code_col is None:
+            return pd.DataFrame()
+        normalized = pd.DataFrame(
+            {
+                "ts_code": working[ts_code_col].astype(str),
+                "name": working.get(name_col, pd.Series("", index=working.index)).astype(str),
+                "event_date": working.get(date_column, pd.Series("", index=working.index)).map(self._normalize_date_text),
+                "market": working.get(market_col, pd.Series("", index=working.index)).astype(str),
+                "reason": working.get(reason_col, pd.Series("", index=working.index)).astype(str),
+                "period": working.get(period_col, pd.Series("", index=working.index)).astype(str),
+                "end_date": working.get(end_column, pd.Series("", index=working.index)).map(self._normalize_date_text) if end_column else "",
+                "type": working.get(type_col, pd.Series("", index=working.index)).astype(str),
+            }
+        )
+        normalized = normalized[normalized["event_date"].astype(str) != ""].copy()
+        return normalized.sort_values("event_date", ascending=False).reset_index(drop=True)
+
     def _ts_share_float(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
         """Tushare share_float — A股限售股解禁日历。"""
         ts_code = self._to_ts_code(symbol)
@@ -1026,44 +1550,6 @@ class ChinaMarketCollector(BaseCollector):
         self._save_cache(cache_key, frame)
         return frame
 
-    def _ak_margin_summary(self) -> pd.DataFrame | None:
-        """AKShare 融资融券汇总兜底，统一为与 Tushare 一致的汇总列。"""
-        sse_fetcher = self._ak_function("stock_margin_sse")
-        szse_fetcher = self._ak_function("stock_margin_szse")
-
-        for offset in range(0, 6):
-            date_str = self._date_str(offset_days=-offset)
-            frames: list[pd.DataFrame] = []
-
-            try:
-                sse_raw = self.cached_call(
-                    f"cn_market:margin_sse:v2:{date_str}",
-                    sse_fetcher,
-                    start_date=date_str,
-                    end_date=date_str,
-                )
-                sse_frame = self._normalize_margin_summary_frame(sse_raw, source="akshare_sse", default_date=date_str)
-                if not sse_frame.empty:
-                    frames.append(sse_frame)
-            except Exception:
-                pass
-
-            try:
-                szse_raw = self.cached_call(
-                    f"cn_market:margin_szse:v2:{date_str}",
-                    szse_fetcher,
-                    date=date_str,
-                )
-                szse_frame = self._normalize_margin_summary_frame(szse_raw, source="akshare_szse", default_date=date_str)
-                if not szse_frame.empty:
-                    frames.append(szse_frame)
-            except Exception:
-                pass
-
-            if frames:
-                return pd.concat(frames, ignore_index=True)
-        return None
-
     def get_sector_pe(self, sector: str) -> pd.DataFrame:
         """板块估值数据。"""
         if ak is None:
@@ -1080,29 +1566,6 @@ class ChinaMarketCollector(BaseCollector):
         )
 
     # ── 内部工具方法 ──────────────────────────────────────────
-
-    def _normalize_open_fund_nav(self, frame: pd.DataFrame) -> pd.DataFrame:
-        if frame is None or frame.empty:
-            raise ValueError("Open fund nav frame is empty")
-
-        date_col = next((col for col in frame.columns if col in {"净值日期", "日期", "date"}), None)
-        value_col = next((col for col in frame.columns if col in {"单位净值", "累计净值", "净值", "close"}), None)
-        if not date_col or not value_col:
-            raise ValueError("Open fund nav frame missing required columns")
-
-        nav = frame[[date_col, value_col]].copy()
-        nav.columns = ["date", "close"]
-        nav["date"] = pd.to_datetime(nav["date"], errors="coerce")
-        nav["close"] = pd.to_numeric(nav["close"], errors="coerce")
-        nav = nav.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
-        if nav.empty:
-            raise ValueError("Open fund nav frame has no valid rows")
-
-        for column in ("open", "high", "low"):
-            nav[column] = nav["close"]
-        nav["volume"] = 0.0
-        nav["amount"] = np.nan
-        return nav[["date", "open", "high", "low", "close", "volume", "amount"]]
 
     # --- efinance fallback normalization helpers ---
 

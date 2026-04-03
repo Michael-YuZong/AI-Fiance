@@ -5,6 +5,134 @@ from __future__ import annotations
 from src.commands.release_check import check_generic_client_report, check_stock_pick_client_report
 
 
+HOMEPAGE_V2 = """## 首页判断
+
+当前更像解释型判断页，先看宏观、主题和动作边界，再决定是否执行。
+
+### 宏观面
+
+- 当前环境更适合先看主线和风险边界。
+
+### 板块 / 主题认知
+
+- 这份稿件先回答市场在交易什么，不把背景直接翻译成动作。
+
+### 情绪与热度
+
+- 情绪与热度只作辅助层，不直接等于催化。
+
+### 微观面
+
+- 当前更需要看确认和赔率，而不是只看单一亮点。
+
+### 动作建议与结论
+
+- 先按解释版理解正文，再决定是否执行。
+
+结论：首页先给主叙事，后文再展开证据。
+"""
+
+HOMEPAGE_V2_THEME_CONFLICT = """## 首页判断
+
+当前更像解释型判断页，先看宏观、主题和动作边界，再决定是否执行。
+
+### 宏观面
+
+- 当前环境更适合先看主线和风险边界。
+
+### 板块 / 主题认知
+
+- 当前更适合先按 `信息技术` 行业层去理解，先回答盈利周期、政策和风格顺逆风，再决定要不要往更细主题上落。
+- 当前先不要把它硬写成单一细主题，因为 `先进封装 / HBM / Chiplet / AI算力` 这几条线还在打架。
+
+### 情绪与热度
+
+- 情绪与热度只作辅助层，不直接等于催化。
+
+### 微观面
+
+- `科技ETF` 当前更适合先按行业层观察，因为 `先进封装 / HBM / Chiplet / AI算力` 这几条线还在打架，不要硬落单一细主题。
+
+### 动作建议与结论
+
+- 先按解释版理解正文，再决定是否执行。
+
+结论：首页先给主叙事，后文再展开证据。
+"""
+
+HOMEPAGE_V2_SUBTHEME_BRIDGE = """## 首页判断
+
+当前更像解释型判断页，先看宏观、主题和动作边界，再决定是否执行。
+
+### 宏观面
+
+- 当前环境更适合先看主线和风险边界。
+
+### 板块 / 主题认知
+
+- 当前更适合先按 `信息技术` 行业层去理解，先回答盈利周期、政策和风格顺逆风，再决定要不要往更细主题上落。
+- 结合当前上下文，可优先留意 `AI算力` 这条细分线；但这层线索还不够把行业层直接改写成已确认主题。
+
+### 情绪与热度
+
+- 情绪与热度只作辅助层，不直接等于催化。
+
+### 微观面
+
+- 当前更需要看确认和赔率，而不是只看单一亮点。
+
+### 动作建议与结论
+
+- 先按解释版理解正文，再决定是否执行。
+
+结论：首页先给主叙事，后文再展开证据。
+"""
+
+SCAN_EVENT_DIGEST_SECTION = """## 事件消化
+
+- 事件状态：`已消化`。
+- 事件分层：`公告`；当前优先级：`高`。
+- 事件细分：公告类型：中标/订单
+- 影响层与性质：更直接影响 `盈利 / 景气`；当前更像 `thesis变化`。
+- 优先级判断：优先前置，因为公司级执行事件已开始改写 `盈利 / 景气`。
+- 这件事改变了什么：把研究重点推进到公司/产品级执行层，后面更该看订单、回购、增减持或项目节奏会不会真的兑现。
+- 当前前置事件：新易盛公告：800G 光模块新品发布（证券时报 / 2026-03-28）
+- 现在更该做什么：继续盯公告落地节奏、兑现质量和价格反馈。
+"""
+
+SCAN_WHAT_CHANGED_SECTION = """## What Changed
+
+- 上次怎么看：核心假设是 `800G 光模块放量兑现`；验证指标看 `订单和毛利率同步改善`；预期周期是 `1-3个月`。
+- 这次什么变了：事件状态从 `待补充` 升到 `已消化`，前置层从 `行业主题事件` 切到 `公告`。
+- 当前事件理解：公告类型：一般公告；更直接影响 `盈利 / 估值`；当前更像 `thesis变化`
+- 结论变化：`升级`；当前更像 `中期逻辑未坏 / 观察为主 / 观察稿`。
+"""
+
+MARKET_EVENT_DIGEST_SECTION = """## 事件消化
+
+- 事件状态：`已消化`。
+- 事件分层：`行业主题事件`；当前优先级：`中`。
+- 事件细分：主题事件：主线归因；结论：偏利多，先看 `共封装光学(CPO)` 能否继续扩散。
+- 影响层与性质：更直接影响 `景气 / 资金偏好`；当前更像 `thesis跟踪`。
+- 优先级判断：优先前置，因为个股主线归因已经从泛板块热度收敛到可复核的主题成员关系。
+- 这件事改变了什么：把跟踪重点从泛新闻覆盖推进到主题链路和盘面验证，不再只看笼统热度。
+- 当前前置事件：A股概念成员：中际旭创 属于 共封装光学(CPO)（+3.65%）（同花顺主题成分 / 2026-04-01）
+- 现在更该做什么：继续盯主题扩散、成交承接和交易所风险提示有没有同步改善。
+"""
+
+P1_STOCK_EVENT_DIGEST_SECTION = """## 事件消化
+
+- 事件状态：`已消化`。
+- 事件分层：`行业主题事件`；当前优先级：`中`。
+- 事件细分：主题事件：资金承接；结论：偏利多，个股主力资金开始给出直接承接。
+- 影响层与性质：更直接影响 `资金偏好 / 交易结构`；当前更像 `thesis跟踪`。
+- 优先级判断：优先前置，因为个股级 moneyflow 已从板块代理下沉到公司自身承接，后续更该盯融资盘和次日承接。
+- 这件事改变了什么：把跟踪重点从泛题材热度推进到个股级资金承接、两融拥挤度和龙虎榜微观结构，不再只看板块代理。
+- 当前前置事件：个股资金流确认：中际旭创 当日主力净流入 1.60亿（个股资金流向专题 / 2026-04-01）
+- 现在更该做什么：继续盯个股资金承接、融资盘拥挤度和龙虎榜/竞价信号能否同步维持。
+"""
+
+
 def test_release_check_flags_internal_process_and_score_drift() -> None:
     client = """# 今日个股推荐
 
@@ -31,6 +159,390 @@ def test_release_check_flags_internal_process_and_score_drift() -> None:
     findings = check_stock_pick_client_report(client, source)
     assert any("内部过程词" in item for item in findings)
     assert any("中际旭创 技术" in item for item in findings)
+
+
+def test_release_check_flags_missing_event_digest_section_when_contract_present() -> None:
+    client = f"""# demo
+
+{HOMEPAGE_V2}
+
+## 为什么这么判断
+
+- 值得继续看的地方：主线还在。
+
+## 值得继续看的地方
+
+- 主线还在。
+
+## 现在不适合激进的地方
+
+- 技术确认不足。
+- 催化确认不足。
+
+## 当前更合适的动作
+
+- 先观察。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        event_digest_contract={"status": "已消化", "lead_layer": "公告", "changed_what": "把研究重点推进到公司级执行层。"},
+    )
+    assert any("事件消化" in item for item in findings)
+
+
+def test_release_check_accepts_event_digest_section_when_contract_present() -> None:
+    client = f"""# demo
+
+{HOMEPAGE_V2}
+
+## 为什么这么判断
+
+- 值得继续看的地方：主线还在。
+
+## 值得继续看的地方
+
+- 主线还在。
+
+## 现在不适合激进的地方
+
+- 技术确认不足。
+- 催化确认不足。
+
+{SCAN_EVENT_DIGEST_SECTION}
+
+## 当前更合适的动作
+
+- 先观察。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        event_digest_contract={
+            "status": "已消化",
+            "lead_layer": "公告",
+            "lead_detail": "公告类型：中标/订单",
+            "impact_summary": "盈利 / 景气",
+            "thesis_scope": "thesis变化",
+            "importance_reason": "优先前置，因为公司级执行事件已开始改写 `盈利 / 景气`。",
+            "changed_what": "把研究重点推进到公司级执行层。",
+        },
+    )
+    assert not any("事件消化" in item for item in findings)
+
+
+def test_release_check_accepts_market_event_digest_section_from_tushare_theme_membership() -> None:
+    client = f"""# demo
+
+{HOMEPAGE_V2}
+
+## 为什么这么判断
+
+- 值得继续看的地方：主题归因开始收敛。
+
+## 值得继续看的地方
+
+- 主线归因更具体了。
+
+## 现在不适合激进的地方
+
+- 交易所风险提示还要继续盯。
+- 价格确认还没完全到位。
+
+{MARKET_EVENT_DIGEST_SECTION}
+
+## 当前更合适的动作
+
+- 先观察主题扩散和成交承接。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        event_digest_contract={
+            "status": "已消化",
+            "lead_layer": "行业主题事件",
+            "lead_detail": "主题事件：主线归因；结论：偏利多，先看 `共封装光学(CPO)` 能否继续扩散。",
+            "impact_summary": "景气 / 资金偏好",
+            "thesis_scope": "thesis跟踪",
+            "importance_reason": "优先前置，因为个股主线归因已经从泛板块热度收敛到可复核的主题成员关系。",
+            "changed_what": "把跟踪重点从泛新闻覆盖推进到主题链路和盘面验证，不再只看笼统热度。",
+        },
+    )
+    assert not any("事件消化" in item for item in findings)
+
+
+def test_release_check_accepts_p1_stock_event_digest_section_from_tushare_capital_flow() -> None:
+    client = f"""# demo
+
+{HOMEPAGE_V2}
+
+## 为什么这么判断
+
+- 值得继续看的地方：个股资金承接开始替代泛板块代理。
+
+## 值得继续看的地方
+
+- 个股级 moneyflow 和龙虎榜结构开始给出确认。
+
+## 现在不适合激进的地方
+
+- 两融拥挤度还要继续盯。
+- 短线打板情绪不能直接当成确定性趋势。
+
+{P1_STOCK_EVENT_DIGEST_SECTION}
+
+## 当前更合适的动作
+
+- 先观察资金承接和拥挤度能否一起稳定。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        event_digest_contract={
+            "status": "已消化",
+            "lead_layer": "行业主题事件",
+            "lead_detail": "主题事件：资金承接；结论：偏利多，个股主力资金开始给出直接承接。",
+            "impact_summary": "资金偏好 / 交易结构",
+            "thesis_scope": "thesis跟踪",
+            "importance_reason": "优先前置，因为个股级 moneyflow 已从板块代理下沉到公司自身承接，后续更该盯融资盘和次日承接。",
+            "changed_what": "把跟踪重点从泛题材热度推进到个股级资金承接、两融拥挤度和龙虎榜微观结构，不再只看板块代理。",
+        },
+    )
+    assert not any("事件消化" in item for item in findings)
+
+
+def test_release_check_flags_missing_event_digest_deep_fields_when_contract_present() -> None:
+    client = f"""# demo
+
+{HOMEPAGE_V2}
+
+## 为什么这么判断
+
+- 值得继续看的地方：主线还在。
+
+## 值得继续看的地方
+
+- 主线还在。
+
+## 现在不适合激进的地方
+
+- 技术确认不足。
+- 催化确认不足。
+
+## 事件消化
+
+- 事件状态：`已消化`。
+- 事件分层：`公告`；当前优先级：`高`。
+- 这件事改变了什么：把研究重点推进到公司级执行层。
+- 当前前置事件：新易盛公告：800G 光模块新品发布（证券时报 / 2026-03-28）
+
+## 当前更合适的动作
+
+- 先观察。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        event_digest_contract={
+            "status": "已消化",
+            "lead_layer": "公告",
+            "lead_detail": "公告类型：中标/订单",
+            "impact_summary": "盈利 / 景气",
+            "thesis_scope": "thesis变化",
+            "importance_reason": "优先前置，因为公司级执行事件已开始改写 `盈利 / 景气`。",
+            "changed_what": "把研究重点推进到公司级执行层。",
+        },
+    )
+    assert any("事件细分" in item for item in findings)
+    assert any("影响层" in item for item in findings)
+    assert any("事件性质" in item for item in findings)
+
+
+def test_release_check_flags_missing_event_digest_priority_reason_when_contract_present() -> None:
+    client = f"""# demo
+
+{HOMEPAGE_V2}
+
+## 为什么这么判断
+
+- 值得继续看的地方：主线还在。
+
+## 值得继续看的地方
+
+- 主线还在。
+
+## 现在不适合激进的地方
+
+- 技术确认不足。
+- 催化确认不足。
+
+## 事件消化
+
+- 事件状态：`已消化`。
+- 事件分层：`公告`；当前优先级：`高`。
+- 事件细分：公告类型：中标/订单
+- 影响层与性质：更直接影响 `盈利 / 景气`；当前更像 `thesis变化`。
+- 这件事改变了什么：把研究重点推进到公司级执行层。
+- 当前前置事件：新易盛公告：800G 光模块新品发布（证券时报 / 2026-03-28）
+
+## 当前更合适的动作
+
+- 先观察。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        event_digest_contract={
+            "status": "已消化",
+            "lead_layer": "公告",
+            "lead_detail": "公告类型：中标/订单",
+            "impact_summary": "盈利 / 景气",
+            "thesis_scope": "thesis变化",
+            "importance_reason": "优先前置，因为公司级执行事件已开始改写 `盈利 / 景气`。",
+            "changed_what": "把研究重点推进到公司级执行层。",
+        },
+    )
+    assert any("优先级判断" in item for item in findings)
+
+
+def test_release_check_flags_missing_what_changed_section_when_contract_present() -> None:
+    client = f"""# demo
+
+{HOMEPAGE_V2}
+
+{SCAN_EVENT_DIGEST_SECTION}
+
+## 当前更合适的动作
+
+- 先观察。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        what_changed_contract={
+            "previous_view": "核心假设是 `800G 光模块放量兑现`。",
+            "change_summary": "事件状态从 `待补充` 升到 `已消化`。",
+            "current_event_understanding": "公告类型：一般公告；更直接影响 `盈利 / 估值`；当前更像 `thesis变化`",
+            "conclusion_label": "升级",
+        },
+    )
+    assert any("What Changed" in item for item in findings)
+
+
+def test_release_check_accepts_what_changed_section_when_contract_present() -> None:
+    client = f"""# demo
+
+{HOMEPAGE_V2}
+
+{SCAN_EVENT_DIGEST_SECTION}
+
+{SCAN_WHAT_CHANGED_SECTION}
+
+## 当前更合适的动作
+
+- 先观察。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        what_changed_contract={
+            "previous_view": "核心假设是 `800G 光模块放量兑现`。",
+            "change_summary": "事件状态从 `待补充` 升到 `已消化`。",
+            "current_event_understanding": "公告类型：一般公告；更直接影响 `盈利 / 估值`；当前更像 `thesis变化`",
+            "conclusion_label": "升级",
+        },
+    )
+    assert not any("What Changed" in item for item in findings)
+
+
+def test_release_check_flags_missing_current_event_understanding_when_contract_present() -> None:
+    client = f"""# demo
+
+{HOMEPAGE_V2}
+
+{SCAN_EVENT_DIGEST_SECTION}
+
+## What Changed
+
+- 上次怎么看：核心假设是 `800G 光模块放量兑现`。
+- 这次什么变了：事件状态从 `待补充` 升到 `已消化`。
+- 结论变化：`升级`；当前更像 `中期逻辑未坏 / 观察为主 / 观察稿`。
+
+## 当前更合适的动作
+
+- 先观察。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        what_changed_contract={
+            "previous_view": "核心假设是 `800G 光模块放量兑现`。",
+            "change_summary": "事件状态从 `待补充` 升到 `已消化`。",
+            "current_event_understanding": "公告类型：一般公告；更直接影响 `盈利 / 估值`；当前更像 `thesis变化`",
+            "conclusion_label": "升级",
+        },
+    )
+    assert any("当前事件理解" in item for item in findings)
+
+
+def test_release_check_flags_missing_what_changed_state_trigger_when_contract_present() -> None:
+    client = f"""# demo
+
+{HOMEPAGE_V2}
+
+{SCAN_EVENT_DIGEST_SECTION}
+
+{SCAN_WHAT_CHANGED_SECTION}
+
+## 当前更合适的动作
+
+- 先观察。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        what_changed_contract={
+            "previous_view": "核心假设是 `800G 光模块放量兑现`。",
+            "change_summary": "事件状态从 `待补充` 升到 `已消化`。",
+            "current_event_understanding": "公告类型：一般公告；更直接影响 `盈利 / 估值`；当前更像 `thesis变化`",
+            "conclusion_label": "升级",
+            "state_trigger": "事件完成消化",
+        },
+    )
+    assert any("状态触发" in item for item in findings)
+
+
+def test_release_check_flags_missing_what_changed_state_summary_when_contract_present() -> None:
+    client = f"""# demo
+
+{HOMEPAGE_V2}
+
+{SCAN_EVENT_DIGEST_SECTION}
+
+## What Changed
+
+- 上次怎么看：核心假设是 `800G 光模块放量兑现`。
+- 这次什么变了：事件状态从 `待补充` 升到 `已消化`。
+- 当前事件理解：公告类型：一般公告；更直接影响 `盈利 / 估值`；当前更像 `thesis变化`
+- 结论变化：`升级`；当前更像 `中期逻辑未坏 / 观察为主 / 观察稿`；触发：事件完成消化。
+
+## 当前更合适的动作
+
+- 先观察。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        what_changed_contract={
+            "previous_view": "核心假设是 `800G 光模块放量兑现`。",
+            "change_summary": "事件状态从 `待补充` 升到 `已消化`。",
+            "current_event_understanding": "公告类型：一般公告；更直接影响 `盈利 / 估值`；当前更像 `thesis变化`",
+            "conclusion_label": "升级",
+            "state_trigger": "事件完成消化",
+            "state_summary": "当前事件已完成消化并更新主导事件，thesis 可以按更高确定性理解。",
+        },
+    )
+    assert any("状态解释" in item for item in findings)
 
 
 def test_release_check_passes_clean_stock_pick_client_report() -> None:
@@ -112,6 +624,89 @@ def test_release_check_passes_clean_stock_pick_client_report() -> None:
 """
     findings = check_stock_pick_client_report(client, source)
     assert findings == []
+
+
+def test_release_check_flags_stock_pick_theme_conflict_missing_boundary_surface() -> None:
+    client = f"""# 今日个股推荐
+
+{HOMEPAGE_V2_THEME_CONFLICT}
+
+**数据完整度：** 本轮新闻/事件覆盖基本正常。
+- A股 结构化事件覆盖 50%（1/2） / 高置信公司新闻覆盖 100%（2/2）
+- 覆盖率的分母是当前纳入详细分析的各市场标的，不是全市场扫描池。
+
+## A股
+
+为什么今天优先看新易盛：因为主线、相对强弱和交易结构更匹配。
+为什么暂不推荐中际旭创：因为技术确认不足。
+为什么宁德时代暂不推：因为事件窗口刚打开。
+
+| 标的 | 技术 | 基本面 | 催化 | 相对强弱 | 风险 | 结论 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 新易盛 | 44 | 70 | 40 | 87 | 20 | 正式推荐 |
+| 中际旭创 | 36 | 70 | 50 | 47 | 30 | 看好但暂不推荐 |
+
+### 新易盛 (300502)
+
+为什么能进正式推荐：
+
+- 基本面 70：新易盛 PE 52.5x。
+- 相对强弱 87：相对基准更强。
+- 技术面 44：MACD 零轴下方金叉。
+
+当前最需要防的点：
+
+- 风险特征 20：高波动。
+
+**催化证据来源：**
+
+- `结构化事件`：[新易盛：公司将出席2026年OFC大会](https://example.com/xys)（证券时报 / 2026-03-11）
+
+**历史相似样本：** 严格口径下保留 `16` 个非重叠样本，20 日胜率 `69%`（95%区间 `45% ~ 86%`），20 日中位收益 `+8.1%`。
+
+- 样本质量：中高（68/100）
+
+- 这层只反映历史相似量价/技术场景的样本置信度，不等于本次总推荐置信度。
+
+### 中际旭创 (300308)
+
+为什么仍然值得继续看：
+
+- 基本面 70：中际旭创 PE 56.3x。
+- 催化面 50：个股相关头条 4 条。
+
+为什么今天不放进正式推荐：
+
+- 技术面 36：RSI 47.0 · 前低 · 量能比 0.94。
+- 风险特征 30：年化波动 59.4%。
+"""
+    source = """### 1. [A] 新易盛 (300502)  ⭐⭐⭐ 较强机会
+
+**八维雷达：**
+| 维度 | 得分 | 核心信号 |
+| --- | --- | --- |
+| 技术面 | 44/100 | MACD 零轴下方金叉 |
+| 基本面 | 70/100 | 新易盛 PE 52.5x |
+| 催化面 | 40/100 | 个股相关头条 5 条 |
+| 相对强弱 | 87/100 | 相对基准更强 |
+| 筹码结构 | 33/100 | 北向增持 |
+| 风险特征 | 20/100 | 高波动 |
+
+---
+### 6. [A] 中际旭创 (300308)  — 无信号
+
+**八维雷达：**
+| 维度 | 得分 | 核心信号 |
+| --- | --- | --- |
+| 技术面 | 36/100 | RSI 47.0 · 前低 · 量能比 0.94 |
+| 基本面 | 70/100 | 中际旭创 PE 56.3x |
+| 催化面 | 50/100 | 个股相关头条 4 条 |
+| 相对强弱 | 47/100 | 主线相关 |
+| 筹码结构 | 33/100 | 北向增持 |
+| 风险特征 | 30/100 | 年化波动 59.4% |
+"""
+    findings = check_stock_pick_client_report(client, source)
+    assert any("主题边界" in item for item in findings)
 
 
 def test_release_check_parses_stock_pick_source_with_auxiliary_chip_row() -> None:
@@ -395,6 +990,59 @@ def test_release_check_flags_observe_only_stock_packaged_as_recommendation() -> 
     findings = check_stock_pick_client_report(client, source)
     assert any("没有可执行候选，但标题仍写成“推荐”" in item for item in findings)
     assert any("没有可执行候选，但仍使用" in item for item in findings)
+
+
+def test_release_check_flags_stock_pick_observe_only_missing_retained_feature_sections() -> None:
+    client = """# 今日个股观察
+
+| 报告定位 | 观察稿 |
+
+## 数据完整度
+
+- A股 结构化事件覆盖 100%（2/2） / 高置信公司新闻覆盖 50%（1/2）
+- 覆盖率的分母是当前纳入详细分析的各市场标的，不是全市场扫描池。
+
+## 催化证据来源
+
+- `结构化事件`：[测试事件](https://example.com)
+
+## 历史相似样本
+
+- 非重叠样本 `12` 个，95%区间 `31% ~ 81%`。
+
+## A股
+
+为什么今天先看歌尔股份：因为基本面还在，但动作条件没到。
+为什么今天不出手：因为技术确认不足。
+为什么另一只没放前面：因为相对强弱更弱。
+
+| 标的 | 技术 | 基本面 | 催化 | 相对强弱 | 风险 | 结论 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 歌尔股份 | 25 | 70 | 35 | 58 | 40 | 看好但暂不推荐 |
+
+升级条件
+
+- 放量站回 20 日线。
+
+关键盯盘价位
+
+- 20 日线。
+"""
+    source = """### 1. [A] 歌尔股份 (002241)  — 无信号
+
+**八维雷达：**
+| 维度 | 得分 | 核心信号 |
+| --- | --- | --- |
+| 技术面 | 25/100 | 还没右侧确认 |
+| 基本面 | 70/100 | 盈利质量还在 |
+| 催化面 | 35/100 | 业绩窗口临近 |
+| 相对强弱 | 58/100 | 相对基准略强 |
+| 筹码结构 | 20/100 | 一般 |
+| 风险特征 | 40/100 | 波动不低 |
+"""
+    findings = check_stock_pick_client_report(client, source)
+    assert any("丢了 `第二批：继续跟踪`" in item for item in findings)
+    assert any("丢了 `代表样本复核卡`" in item for item in findings)
 
 
 def test_release_check_flags_repeated_stock_explanations() -> None:
@@ -799,7 +1447,9 @@ def test_release_check_passes_retro_spect_report() -> None:
 
 
 def test_release_check_allows_intraday_language_with_supporting_terms() -> None:
-    client = """# 今日 ETF 分析
+    client = f"""# 今日 ETF 分析
+
+{HOMEPAGE_V2}
 
 ## 为什么这么判断
 
@@ -821,6 +1471,343 @@ def test_release_check_allows_intraday_language_with_supporting_terms() -> None:
 """
     findings = check_generic_client_report(client, "scan")
     assert findings == []
+
+
+def test_release_check_flags_scan_theme_conflict_missing_boundary_surface() -> None:
+    client = f"""# 今日 ETF 分析
+
+{HOMEPAGE_V2_THEME_CONFLICT}
+
+## 为什么这么判断
+
+- 当前先看行业层和确认过程。
+
+## 值得继续看的地方
+
+- 主题方向没有坏。
+
+## 现在不适合激进的地方
+
+- 波动仍然偏高。
+- 不适合满仓。
+
+## 当前更合适的动作
+
+- 先等主线收敛后再决定是否跟随。
+"""
+    findings = check_generic_client_report(client, "scan")
+    assert any("主题边界" in item for item in findings)
+
+
+def test_release_check_allows_scan_theme_conflict_with_boundary_surface() -> None:
+    client = f"""# 今日 ETF 分析
+
+{HOMEPAGE_V2_THEME_CONFLICT}
+
+## 为什么这么判断
+
+- 主题边界：当前先按 `信息技术` 行业层理解，不把几条同时活跃的细分线硬写成单一主题。
+
+## 值得继续看的地方
+
+- 主题方向没有坏。
+
+## 现在不适合激进的地方
+
+- 波动仍然偏高。
+- 不适合满仓。
+
+## 当前更合适的动作
+
+- 先等主线收敛后再决定是否跟随。
+"""
+    findings = check_generic_client_report(client, "scan")
+    assert not any("主题边界" in item for item in findings)
+
+
+def test_release_check_flags_scan_bridge_missing_subtheme_surface() -> None:
+    client = f"""# 今日 ETF 分析
+
+{HOMEPAGE_V2_SUBTHEME_BRIDGE}
+
+## 为什么这么判断
+
+- 当前先看行业层和确认过程。
+
+## 值得继续看的地方
+
+- 行业层逻辑没有坏。
+
+## 现在不适合激进的地方
+
+- 波动仍然偏高。
+- 右侧确认还没补齐。
+
+## 当前更合适的动作
+
+- 先等更清晰的细分主线。
+"""
+    findings = check_generic_client_report(client, "scan")
+    assert any("细分观察" in item for item in findings)
+
+
+def test_release_check_allows_scan_bridge_with_subtheme_surface() -> None:
+    client = f"""# 今日 ETF 分析
+
+{HOMEPAGE_V2_SUBTHEME_BRIDGE}
+
+## 为什么这么判断
+
+- 细分观察：当前更偏向 `AI算力`，但还没有足够证据把行业层稿件直接改成已确认细主题。
+
+## 值得继续看的地方
+
+- 行业层逻辑没有坏。
+
+## 现在不适合激进的地方
+
+- 波动仍然偏高。
+- 右侧确认还没补齐。
+
+## 当前更合适的动作
+
+- 先等更清晰的细分主线。
+"""
+    findings = check_generic_client_report(client, "scan")
+    assert not any("细分观察" in item for item in findings)
+
+
+def test_release_check_flags_editor_theme_conflict_candidates_missing_from_body() -> None:
+    client = f"""# 今日 ETF 分析
+
+{HOMEPAGE_V2_THEME_CONFLICT}
+
+## 为什么这么判断
+
+- 主题边界：当前先按 `信息技术` 行业层理解，不把几条同时活跃的细分线硬写成单一主题。
+
+## 值得继续看的地方
+
+- 主题方向没有坏。
+
+## 现在不适合激进的地方
+
+- 波动仍然偏高。
+- 不适合满仓。
+
+## 当前更合适的动作
+
+- 先等主线收敛后再决定是否跟随。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        editor_theme_playbook={
+            "label": "信息技术",
+            "playbook_level": "sector",
+            "theme_match_status": "ambiguous_conflict",
+            "theme_match_candidates": ["先进封装 / HBM / Chiplet", "AI算力"],
+        },
+    )
+    assert any("冲突候选" in item for item in findings)
+
+
+def test_release_check_flags_editor_bridge_top_label_missing_from_body() -> None:
+    client = f"""# 今日 ETF 分析
+
+{HOMEPAGE_V2_SUBTHEME_BRIDGE}
+
+## 为什么这么判断
+
+- 细分观察：当前更偏向算力链条，但还没有足够证据把行业层稿件直接改成已确认细主题。
+
+## 值得继续看的地方
+
+- 行业层逻辑没有坏。
+
+## 现在不适合激进的地方
+
+- 波动仍然偏高。
+- 右侧确认还没补齐。
+
+## 当前更合适的动作
+
+- 先等更清晰的细分主线。
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        editor_theme_playbook={
+            "label": "信息技术",
+            "playbook_level": "sector",
+            "subtheme_bridge_confidence": "high",
+            "subtheme_bridge_top_label": "AI算力",
+        },
+    )
+    assert any("下钻主线" in item for item in findings)
+
+
+def test_release_check_flags_editor_prompt_conflict_candidates_missing_from_body() -> None:
+    client = f"""# 今日 ETF 分析
+
+{HOMEPAGE_V2_THEME_CONFLICT}
+
+## 为什么这么判断
+
+- 主题边界：当前先按 `信息技术` 行业层理解，不把几条同时活跃的细分线硬写成单一主题。
+
+## 值得继续看的地方
+
+- 主题方向没有坏。
+
+## 现在不适合激进的地方
+
+- 波动仍然偏高。
+- 不适合满仓。
+
+## 当前更合适的动作
+
+- 先等主线收敛后再决定是否跟随。
+"""
+    editor_prompt = """## Theme Playbook
+
+- 主题：信息技术
+- 主题匹配状态：ambiguous_conflict
+- 易混主题候选：先进封装 / HBM / Chiplet / AI算力
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        editor_prompt_text=editor_prompt,
+    )
+    assert any("editor_prompt" in item and "冲突候选" in item for item in findings)
+
+
+def test_release_check_flags_editor_prompt_bridge_top_label_missing_from_body() -> None:
+    client = f"""# 今日 ETF 分析
+
+{HOMEPAGE_V2_SUBTHEME_BRIDGE}
+
+## 为什么这么判断
+
+- 细分观察：当前更偏向算力链条，但还没有足够证据把行业层稿件直接改成已确认细主题。
+
+## 值得继续看的地方
+
+- 行业层逻辑没有坏。
+
+## 现在不适合激进的地方
+
+- 波动仍然偏高。
+- 右侧确认还没补齐。
+
+## 当前更合适的动作
+
+- 先等更清晰的细分主线。
+"""
+    editor_prompt = """## Theme Playbook
+
+- 主题：信息技术
+- 行业层下钻方向：AI算力 / 半导体 / 先进封装 / HBM / Chiplet
+- 行业层下钻置信度：high
+- 当前下钻线索：AI算力 <- 服务器, 光模块 / 半导体 <- 晶圆厂
+"""
+    findings = check_generic_client_report(
+        client,
+        "scan",
+        editor_prompt_text=editor_prompt,
+    )
+    assert any("editor_prompt" in item and "下钻主线" in item for item in findings)
+
+
+def test_release_check_flags_stock_pick_theme_label_missing_from_homepage_with_editor_payload() -> None:
+    client = f"""# 今日个股推荐
+
+{HOMEPAGE_V2}
+
+**数据完整度：** 本轮新闻/事件覆盖基本正常。
+- A股 结构化事件覆盖 50%（1/2） / 高置信公司新闻覆盖 100%（2/2）
+- 覆盖率的分母是当前纳入详细分析的各市场标的，不是全市场扫描池。
+
+## A股
+
+为什么今天优先看新易盛：因为主线、相对强弱和交易结构更匹配。
+为什么暂不推荐中际旭创：因为技术确认不足。
+为什么宁德时代暂不推：因为事件窗口刚打开。
+
+| 标的 | 技术 | 基本面 | 催化 | 相对强弱 | 风险 | 结论 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 新易盛 | 44 | 70 | 40 | 87 | 20 | 正式推荐 |
+| 中际旭创 | 36 | 70 | 50 | 47 | 30 | 看好但暂不推荐 |
+
+### 新易盛 (300502)
+
+为什么能进正式推荐：
+
+- 基本面 70：新易盛 PE 52.5x。
+- 相对强弱 87：相对基准更强。
+- 技术面 44：MACD 零轴下方金叉。
+
+当前最需要防的点：
+
+- 风险特征 20：高波动。
+
+**催化证据来源：**
+
+- `结构化事件`：[新易盛：公司将出席2026年OFC大会](https://example.com/xys)（证券时报 / 2026-03-11）
+
+**历史相似样本：** 严格口径下保留 `16` 个非重叠样本，20 日胜率 `69%`（95%区间 `45% ~ 86%`），20 日中位收益 `+8.1%`。
+
+- 样本质量：中高（68/100）
+
+- 这层只反映历史相似量价/技术场景的样本置信度，不等于本次总推荐置信度。
+
+### 中际旭创 (300308)
+
+为什么仍然值得继续看：
+
+- 基本面 70：中际旭创 PE 56.3x。
+- 催化面 50：个股相关头条 4 条。
+
+为什么今天不放进正式推荐：
+
+- 技术面 36：RSI 47.0 · 前低 · 量能比 0.94。
+- 风险特征 30：年化波动 59.4%。
+"""
+    source = """### 1. [A] 新易盛 (300502)  ⭐⭐⭐ 较强机会
+
+**八维雷达：**
+| 维度 | 得分 | 核心信号 |
+| --- | --- | --- |
+| 技术面 | 44/100 | MACD 零轴下方金叉 |
+| 基本面 | 70/100 | 新易盛 PE 52.5x |
+| 催化面 | 40/100 | 个股相关头条 5 条 |
+| 相对强弱 | 87/100 | 相对基准更强 |
+| 筹码结构 | 33/100 | 北向增持 |
+| 风险特征 | 20/100 | 高波动 |
+
+---
+### 6. [A] 中际旭创 (300308)  — 无信号
+
+**八维雷达：**
+| 维度 | 得分 | 核心信号 |
+| --- | --- | --- |
+| 技术面 | 36/100 | RSI 47.0 · 前低 · 量能比 0.94 |
+| 基本面 | 70/100 | 中际旭创 PE 56.3x |
+| 催化面 | 50/100 | 个股相关头条 4 条 |
+| 相对强弱 | 47/100 | 主线相关 |
+| 筹码结构 | 33/100 | 北向增持 |
+| 风险特征 | 30/100 | 年化波动 59.4% |
+"""
+    findings = check_stock_pick_client_report(
+        client,
+        source,
+        editor_theme_playbook={
+            "label": "AI算力",
+            "playbook_level": "theme",
+        },
+    )
+    assert any("没把这条主题显式写出来" in item for item in findings)
 
 
 def test_release_check_does_not_mistake_open_price_reference_for_intraday_claim() -> None:
@@ -893,7 +1880,7 @@ def test_release_check_ignores_intraday_delivery_tier_labels() -> None:
 
 ## 关键证据
 
-- [证据1](https://example.com)
+- [证据1](https://example.com)；信号：资金回流确认；强弱：中强；结论：偏利多，说明商品主线仍有配置资金支撑。
 
 ## 为什么不是另外几只
 
@@ -1063,7 +2050,9 @@ def test_release_check_flags_scan_score_drift_against_source() -> None:
 
 
 def test_release_check_passes_stock_analysis_when_client_matches_source_scores() -> None:
-    client = """# Meta (META) | 个股详细分析 | 2026-03-12
+    client = f"""# Meta (META) | 个股详细分析 | 2026-03-12
+
+{HOMEPAGE_V2}
 
 ## 为什么这么判断
 
@@ -1113,7 +2102,9 @@ def test_release_check_passes_stock_analysis_when_client_matches_source_scores()
 
 
 def test_release_check_passes_stock_analysis_report() -> None:
-    client = """# Meta (META) | 个股详细分析 | 2026-03-12
+    client = f"""# Meta (META) | 个股详细分析 | 2026-03-12
+
+{HOMEPAGE_V2}
 
 ## 为什么这么判断
 
@@ -1148,6 +2139,21 @@ def test_release_check_passes_stock_analysis_report() -> None:
 
 def test_release_check_passes_strategy_validation_report() -> None:
     client = """# Strategy Validation
+
+## 动作卡片
+
+> **继续观察｜暂不可用，不要当成稳定策略**
+>
+> 当前 batch 仍在观察。
+>
+> 当前动作：继续扩大样本。
+
+## 当前结论
+
+| 项目 | 结论 |
+| --- | --- |
+| 当前状态 | 继续观察。 |
+| 可用性 | 暂不可用，不要当成稳定策略。 |
 
 ## 这套策略是什么
 
@@ -1191,6 +2197,21 @@ def test_release_check_passes_strategy_validation_report() -> None:
 
 def test_release_check_passes_strategy_experiment_report() -> None:
     client = """# Strategy Experiment
+
+## 动作卡片
+
+> **继续保留 baseline｜暂不切换。**
+>
+> 当前 baseline 继续保留。
+>
+> 当前动作：继续扩大样本。
+
+## 当前结论
+
+| 项目 | 结论 |
+| --- | --- |
+| 当前状态 | 继续保留 baseline。 |
+| 切换建议 | 暂不切换。 |
 
 ## 这套策略是什么
 
@@ -1238,6 +2259,21 @@ def test_release_check_passes_strategy_experiment_report() -> None:
 def test_release_check_flags_strategy_missing_promotion_gate() -> None:
     client = """# Strategy Experiment
 
+## 动作卡片
+
+> **继续保留 baseline｜暂不切换。**
+>
+> 当前 baseline 继续保留。
+>
+> 当前动作：继续扩大样本。
+
+## 当前结论
+
+| 项目 | 结论 |
+| --- | --- |
+| 当前状态 | 继续保留 baseline。 |
+| 切换建议 | 暂不切换。 |
+
 ## 这套策略是什么
 
 | 项目 | 结论 |
@@ -1270,6 +2306,21 @@ def test_release_check_flags_strategy_missing_promotion_gate() -> None:
 
 def test_release_check_flags_strategy_internal_process_terms() -> None:
     client = """# Strategy Experiment
+
+## 动作卡片
+
+> **先别谈切换｜不可切换。**
+>
+> 当前 experiment 还没满足 promotion gate 的最低数据合同。
+>
+> 当前动作：先别急着改生产链路。
+
+## 当前结论
+
+| 项目 | 结论 |
+| --- | --- |
+| 当前状态 | 先别谈切换。 |
+| 切换建议 | 不可切换。 |
 
 ## 这套策略是什么
 
@@ -1314,6 +2365,21 @@ def test_release_check_flags_strategy_internal_process_terms() -> None:
 def test_release_check_flags_strategy_missing_strategy_definition_heading() -> None:
     client = """# Strategy Validation
 
+## 动作卡片
+
+> **继续观察｜暂不可用，不要当成稳定策略**
+>
+> 当前 batch 仍在观察。
+>
+> 当前动作：继续扩大样本。
+
+## 当前结论
+
+| 项目 | 结论 |
+| --- | --- |
+| 当前状态 | 继续观察。 |
+| 可用性 | 暂不可用，不要当成稳定策略。 |
+
 ## 执行摘要
 
 | 项目 | 结论 |
@@ -1336,8 +2402,103 @@ def test_release_check_flags_strategy_missing_strategy_definition_heading() -> N
     assert any("这套策略是什么" in item for item in findings)
 
 
+def test_release_check_flags_strategy_missing_current_verdict_heading() -> None:
+    client = """# Strategy Validation
+
+## 动作卡片
+
+> **继续观察｜暂不可用，不要当成稳定策略**
+>
+> 当前 batch 仍在观察。
+>
+> 当前动作：继续扩大样本。
+
+## 这套策略是什么
+
+| 项目 | 结论 |
+| --- | --- |
+| 是不是具体策略 | 是，但当前是窄版研究策略。 |
+| 这份报告在回答什么 | 它在看这套固定打分逻辑历史上是否稳定。 |
+
+## 这次到底看出来什么
+
+| 项目 | 结论 |
+| --- | --- |
+| 一句话结论 | 当前 batch 仍在观察。 |
+| 现在能不能用 | 现在不能把它当成稳定可用策略。 |
+
+## 执行摘要
+
+| 项目 | 结论 |
+| --- | --- |
+| 当前判断 | 当前 batch 仍在观察。 |
+| 主要问题 | 平均超额收益偏弱。 |
+| 下一步 | 继续扩大样本。 |
+
+## 总体结果
+
+- hit rate: `50.0%`
+- 平均超额收益: `-1.0%`
+- 平均成本后方向收益: `-1.5%`
+
+## Rollback Gate
+
+- 当前 baseline 已进入观察。
+"""
+    findings = check_generic_client_report(client, "strategy")
+    assert any("当前结论" in item for item in findings)
+
+
+def test_release_check_flags_strategy_missing_action_card_heading() -> None:
+    client = """# Strategy Validation
+
+## 当前结论
+
+| 项目 | 结论 |
+| --- | --- |
+| 当前状态 | 继续观察。 |
+| 可用性 | 暂不可用，不要当成稳定策略。 |
+
+## 这套策略是什么
+
+| 项目 | 结论 |
+| --- | --- |
+| 是不是具体策略 | 是，但当前是窄版研究策略。 |
+| 这份报告在回答什么 | 它在看这套固定打分逻辑历史上是否稳定。 |
+
+## 这次到底看出来什么
+
+| 项目 | 结论 |
+| --- | --- |
+| 一句话结论 | 当前 batch 仍在观察。 |
+| 现在能不能用 | 现在不能把它当成稳定可用策略。 |
+
+## 执行摘要
+
+| 项目 | 结论 |
+| --- | --- |
+| 当前判断 | 当前 batch 仍在观察。 |
+| 主要问题 | 平均超额收益偏弱。 |
+| 下一步 | 继续扩大样本。 |
+
+## 总体结果
+
+- hit rate: `50.0%`
+- 平均超额收益: `-1.0%`
+- 平均成本后方向收益: `-1.5%`
+
+## Rollback Gate
+
+- 当前 baseline 已进入观察。
+"""
+    findings = check_generic_client_report(client, "strategy")
+    assert any("动作卡片" in item for item in findings)
+
+
 def test_release_check_passes_etf_pick_report() -> None:
-    client = """# 今日ETF推荐 | 2026-03-12
+    client = f"""# 今日ETF推荐 | 2026-03-12
+
+{HOMEPAGE_V2}
 
 ## 数据完整度
 
@@ -1387,7 +2548,7 @@ def test_release_check_passes_etf_pick_report() -> None:
 
 ## 关键证据
 
-- [证据1](https://example.com)
+- [证据1](https://example.com)；信号：防守资产相对占优；强弱：中等；结论：偏中性，当前更适合作为观察对象而不是立即升级推荐。
 
 ## 为什么不是另外几只
 
@@ -1398,7 +2559,7 @@ def test_release_check_passes_etf_pick_report() -> None:
 ### 2. 黄金ETF (518880)
 
 - 今天主线不是纯避险配置。
-"""
+    """
     findings = check_generic_client_report(client, "etf_pick")
     assert findings == []
 
@@ -1590,7 +2751,7 @@ def test_release_check_flags_non_standard_delivery_tier_without_observe_language
 
 ## 关键证据
 
-- [证据1](https://example.com)
+- [证据1](https://example.com)；信号：防守资产相对占优；强弱：中等；结论：偏中性，当前更适合作为观察对象而不是立即升级推荐。
 
 ## 为什么不是另外几只
 
@@ -1607,7 +2768,9 @@ def test_release_check_flags_non_standard_delivery_tier_without_observe_language
 
 
 def test_release_check_accepts_observe_pick_reason_heading() -> None:
-    client = """# 今日ETF观察 | 2026-03-12
+    client = f"""# 今日ETF观察 | 2026-03-12
+
+{HOMEPAGE_V2}
 
 ## 数据完整度
 
@@ -1655,7 +2818,7 @@ def test_release_check_accepts_observe_pick_reason_heading() -> None:
 
 ## 关键证据
 
-- [证据1](https://example.com)
+- [证据1](https://example.com)；信号：防守资产相对占优；强弱：中等；结论：偏中性，当前更适合作为观察对象而不是立即升级推荐。
 
 ## 为什么不是另外几只
 
@@ -1666,7 +2829,7 @@ def test_release_check_accepts_observe_pick_reason_heading() -> None:
 ### 2. 能源ETF (159930)
 
 - 当前催化不够强。
-"""
+    """
     findings = check_generic_client_report(client, "etf_pick")
     assert findings == []
 
@@ -1797,6 +2960,169 @@ def test_release_check_flags_missing_etf_alternative_section_even_with_profile_s
 """
     findings = check_generic_client_report(client, "etf_pick")
     assert any("'为什么不是另外几只' 需要至少给出备选原因或候选不足说明" in item for item in findings)
+
+
+def test_release_check_flags_scan_when_etf_profile_blocks_disappear_from_client() -> None:
+    client = """# 扫描报告 | 2026-04-01
+
+## 首页判断
+
+### 宏观面
+- 中性。
+
+### 板块 / 主题认知
+- 当前更像指数修复。
+
+### 情绪与热度
+- 情绪一般。
+
+### 微观面
+- 持仓映射仍有辨识度。
+
+### 动作建议与结论
+- 继续观察。
+
+## 为什么这么判断
+
+## 值得继续看的地方
+
+- 跟踪方向仍清晰。
+
+## 现在不适合激进的地方
+
+- 直接催化偏弱。
+- 量能仍不足。
+"""
+    source = """# 扫描内部详细稿 | 2026-04-01
+
+## 八维评分
+
+| 维度 | 得分 | 一句话判断 | 详情 |
+| --- | --- | --- | --- |
+| 技术面 | 52/100 | 方向未坏 | 细节 |
+
+## 基金画像
+
+| 项目 | 内容 |
+| --- | --- |
+| 基金类型 | 股票型 |
+| 基金公司 | 华泰柏瑞 |
+| 基金经理 | 张某 |
+| 成立日期 | 2024-01-01 |
+| 业绩比较基准 | 中证A500指数收益率 |
+
+### 前十大持仓
+
+| 代码 | 名称 |
+| --- | --- |
+| 600519 | 贵州茅台 |
+
+### 行业暴露
+
+| 行业 | 权重 |
+| --- | --- |
+| 食品饮料 | 8.1% |
+"""
+    findings = check_generic_client_report(client, "scan", source_text=source)
+    assert any("丢了 `基金画像`" in item for item in findings)
+    assert any("丢了 `持仓展开`" in item for item in findings)
+    assert any("丢了 `行业暴露`" in item for item in findings)
+
+
+def test_release_check_flags_etf_pick_when_fund_factor_row_disappears_from_client() -> None:
+    client = """# 今日ETF观察 | 2026-04-03
+
+## 首页判断
+
+### 宏观面
+- 当前更像观察阶段。
+
+### 板块 / 主题认知
+- 先按指数暴露理解。
+
+### 情绪与热度
+- 热度一般。
+
+### 微观面
+- 份额与持仓映射仍可参考。
+
+### 动作建议与结论
+- 先观察，不急着升级。
+
+## 数据完整度
+
+- 本轮新闻/事件覆盖存在降级。
+- 覆盖率的分母是今天进入完整分析的 1 只 ETF，不是全市场全部 ETF。
+
+## 交付等级
+
+- 当前交付等级：降级观察稿。
+- 这是一份 ETF 观察优先稿，不按正式推荐稿理解。
+- 当前流程不是把全市场每只标的都做完整八维深扫，而是先初筛 12 只，再对其中 1 只做完整分析。
+
+## 为什么先看它
+
+- 跟踪指数结构清楚。
+- 当前更适合作为观察对象。
+- 份额快照已接上。
+
+## 这只ETF为什么是这个分
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 38/100 | 技术仍偏弱 |
+
+## 标准化分类
+
+| 维度 | 结果 |
+| --- | --- |
+| 产品形态 | ETF |
+| 载体角色 | 场内ETF |
+| 管理方式 | 被动跟踪 |
+| 暴露类型 | 行业主题 |
+| 主方向 | 新能源 |
+| 份额类别 | 未分级 |
+
+## 基金画像
+
+| 项目 | 内容 |
+| --- | --- |
+| 基金类型 | 股票型 / 被动指数型 |
+| 基金公司 | 易方达基金 |
+| 基金经理 | 测试经理 |
+| 成立日期 | 2024-01-01 |
+| 业绩比较基准 | 国证新能源电池指数收益率 |
+
+## 关键证据
+
+- [证据1](https://example.com)
+
+## 为什么不是另外几只
+
+- 今天只有 1 只进入完整分析名单。
+- 其余样本当前不展开。
+"""
+    source = """# ETF 详细稿 | 2026-04-03
+
+## 八维评分
+
+| 维度 | 得分 | 一句话判断 | 详情 |
+| --- | --- | --- | --- |
+| 技术面 | 38/100 | 技术仍偏弱 | 细节 |
+
+## 基金画像
+
+| 项目 | 内容 |
+| --- | --- |
+| 基金类型 | 股票型 / 被动指数型 |
+| 基金公司 | 易方达基金 |
+| 基金经理 | 测试经理 |
+| 成立日期 | 2024-01-01 |
+| 业绩比较基准 | 国证新能源电池指数收益率 |
+| 场内基金技术状态 | 震荡 / 动能偏弱（2026-04-02） |
+"""
+    findings = check_generic_client_report(client, "etf_pick", source_text=source)
+    assert any("丢了 `场内基金技术状态`" in item for item in findings)
 
 
 def test_release_check_flags_pick_coverage_denominator_mismatch() -> None:
@@ -2197,8 +3523,133 @@ def test_release_check_flags_briefing_lines_missing_from_source() -> None:
     assert any("briefing 客户稿动作在详细稿行动章节中不存在" in item for item in findings)
 
 
+def test_release_check_flags_briefing_without_linked_external_signal_items() -> None:
+    client = """# 今日晨报 | 2026-04-02
+
+## 执行摘要
+
+| 项目 | 建议 |
+| --- | --- |
+| 当前判断 | 强修复，不是反转确认。 |
+| 优先动作 | 先看主线延续，不急着追后排。 |
+| 中期背景 / 当天主线 | 温和修复 / 医药与AI成长修复 |
+
+### 关键新闻 / 关键证据
+
+- A股主题活跃：创新药/医药（涨停集中：化学制药 6家）
+- A股行业走强：通信设备（+2.10%）
+
+## 为什么今天这么判断
+
+- 市场在做成长修复。
+- 情绪从防御切回弹性方向。
+- 还需要量能继续验证。
+
+## 宏观判断依据
+
+- PMI 回到扩张区间。
+- 风险偏好边际改善。
+
+## 宏观领先指标
+
+- PMI 50.4。
+- 新订单回升。
+- 信用脉冲改善。
+
+## 数据完整度
+
+- 覆盖正常。
+- 盘面和新闻都有跟踪。
+
+## 证据时点与来源
+
+- 分析生成时间：2026-04-02 11:00:00
+- 时点边界：A股盘后
+- A股观察池来源：Tushare
+
+## 今天怎么做
+
+- 先看医药和算力能否延续。
+
+## 重点观察
+
+- 看量能是否继续放大。
+- 看强势主线是否继续强。
+
+## 今日A股观察池
+
+- 全市场初筛 16 -> 完整分析 7。
+- 当前先按观察池管理。
+
+## A股观察池升级条件
+
+- 医药继续强。
+- 算力继续强。
+"""
+    findings = check_generic_client_report(client, "briefing")
+    assert any("没有任何可点击外部情报" in item for item in findings)
+
+
+def test_release_check_flags_linked_top_news_without_signal_conclusion() -> None:
+    client = """# 今日ETF推荐 | 2026-04-02
+
+## 数据完整度
+
+- 覆盖正常。
+
+## 交付等级
+
+- 当前交付等级：`标准推荐稿`。
+- 当前仍按正式推荐框架编排。
+
+### 关键新闻 / 关键证据
+
+- [红利板块震荡攀升 - 21财经](https://example.com/hl)
+
+## 宏观判断依据
+
+- PMI 修复。
+- 风险偏好改善。
+
+## 为什么推荐它
+
+- 主线没坏。
+- 资金偏好更稳定。
+- 位置相对不拥挤。
+
+## 这只ETF为什么是这个分
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 62/100 | 趋势修复中 |
+
+## 标准化分类
+
+| 维度 | 结果 |
+| --- | --- |
+| 产品形态 | ETF |
+| 载体角色 | 场内ETF |
+| 管理方式 | 被动跟踪 |
+| 暴露类型 | 境内 |
+| 主方向 | 红利 |
+
+## 关键证据
+
+- `主题催化`：[红利板块震荡攀升 - 21财经](https://example.com/hl)（21财经 / 2026-04-02）
+
+## 为什么不是另外几只
+
+- 其他方向弹性更大但确认度不足。
+- 当前先看这一只。
+"""
+    findings = check_generic_client_report(client, "etf_pick")
+    assert any("没有把 `信号/强弱/结论` 写清" in item for item in findings)
+
+
 def test_release_check_accepts_briefing_client_safe_rewrite_against_source() -> None:
-    client = """# 今日晨报 | 2026-03-13
+    client = f"""# 今日晨报 | 2026-03-13
+
+{HOMEPAGE_V2}
 
 ## 执行摘要
 
@@ -2303,7 +3754,96 @@ def test_release_check_accepts_briefing_client_safe_rewrite_against_source() -> 
 - 执行节奏: 先观察开盘 30 分钟风格延续性，确认后再执行。
 """
     findings = check_generic_client_report(client, "briefing", source_text=source)
-    assert findings == []
+    assert not any("1.2 今天怎么做/周末怎么跟踪" in item for item in findings)
+    assert not any("briefing 客户稿动作在详细稿行动章节中不存在" in item for item in findings)
+
+
+def test_release_check_accepts_briefing_weekend_action_heading_against_source() -> None:
+    client = f"""# 今日晨报 | 2026-03-28
+
+{HOMEPAGE_V2}
+
+## 执行摘要
+
+| 项目 | 建议 |
+| --- | --- |
+| 当前判断 | 电网/公用事业。 |
+| 优先动作 | 周末先复盘，下个交易日再验证。 |
+| 中期背景 / 当天主线 | 温和复苏 / 电网/公用事业 |
+
+## 今日最重要的判断
+
+电网/公用事业。
+
+## 为什么今天这么判断
+
+- 电网/公用事业仍是当前主线。
+
+## 宏观判断依据
+
+- PMI 49.0。
+
+## 宏观领先指标
+
+- PMI 49.0。
+
+## 数据完整度
+
+- 本次覆盖：中国宏观 | Watchlist 行情。
+- 当前缺失：跨市场代理。
+
+## 证据时点与来源
+
+| 项目 | 说明 |
+| --- | --- |
+| 分析生成时间 | 2026-03-28 08:30:00 |
+
+## 今天怎么做
+
+- 周末先按‘电网/公用事业承接’复盘，下个交易日优先看高确定性链条是否继续拿到资金。
+- 观察节奏: 下个交易日先看开盘后前 30 分钟风格是否延续、强势方向是否扩散，再决定是否把观察名单上调。
+
+## 重点观察
+
+- `电网`：先看主线延续。
+
+## 今日A股观察池
+
+- A 股观察池暂未生成。
+
+## A股观察池升级条件
+
+- 当前没有升级条件。
+
+## 今天最值得看的 3 个方向
+
+暂无明确主线方向。
+
+## 今天最该盯的验证点
+
+暂无。
+
+## 今天最重要的风险提醒
+
+- 暂无。
+"""
+    source = """# 每日晨报
+
+## 1. 主线判断与行动
+
+### 1.1 今日主线
+
+电网/公用事业。
+- 电网/公用事业仍是当前主线。
+
+### 1.2 周末怎么跟踪
+
+周末先按‘电网/公用事业承接’复盘，下个交易日优先看高确定性链条是否继续拿到资金。
+- 观察节奏: 下个交易日先看开盘后前 30 分钟风格是否延续、强势方向是否扩散，再决定是否把观察名单上调。
+"""
+    findings = check_generic_client_report(client, "briefing", source_text=source)
+    assert not any("1.2 今天怎么做/周末怎么跟踪" in item for item in findings)
+    assert not any("briefing 客户稿动作在详细稿行动章节中不存在" in item for item in findings)
 
 
 def test_release_check_flags_briefing_missing_evidence_and_upgrade_sections() -> None:
@@ -2565,3 +4105,210 @@ def test_release_check_flags_absolute_asset_paths_and_blank_holding_names() -> N
     findings = check_generic_client_report(client, "etf_pick")
     assert any("本机绝对图片路径" in item for item in findings)
     assert any("持仓表仍有名称空白" in item for item in findings)
+
+
+def test_release_check_flags_incomplete_homepage_v2_sections() -> None:
+    client = """# 今日ETF推荐
+
+## 首页判断
+
+当前更像观察阶段。
+
+### 宏观面
+
+- 中期更接近 recovery。
+
+### 情绪与热度
+
+- 情绪指数 70，热度偏高。
+"""
+    findings = check_generic_client_report(client, "etf_pick")
+    assert any("首页判断缺少章节" in item for item in findings)
+
+
+def test_release_check_requires_homepage_for_etf_pick() -> None:
+    client = """# 今日ETF观察
+
+## 今日结论
+
+先看观察顺序。
+
+## 数据完整度
+
+- 覆盖率偏低。
+
+## 交付等级
+
+- 当前交付等级：`观察稿`。
+
+## 为什么先看它
+
+- 方向没坏。
+- 但还没确认。
+
+## 这只ETF为什么是这个分
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 34/100 | 技术偏弱 |
+
+## 标准化分类
+
+- ETF
+
+## 关键证据
+
+- 当前没有高置信直连证据。
+"""
+    findings = check_generic_client_report(client, "etf_pick")
+    assert any("缺少首页判断" in item for item in findings)
+
+
+def test_release_check_requires_homepage_for_scan() -> None:
+    client = """# 半导体ETF (512480) | 详细分析 | 2026-03-26
+
+## 一句话结论
+
+这是观察稿。
+
+## 执行摘要
+
+| 项目 | 建议 |
+| --- | --- |
+| 当前建议 | 观察为主 |
+
+## 为什么这么判断
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 36/100 | 技术偏弱 |
+
+## 当前更合适的动作
+
+| 项目 | 建议 |
+| --- | --- |
+| 当前动作 | 观察为主 |
+"""
+    findings = check_generic_client_report(client, "scan")
+    assert any("缺少首页判断" in item for item in findings)
+
+
+def test_release_check_allows_observe_only_scan_without_action_section() -> None:
+    client = """# 半导体ETF (512480) | 详细分析 | 2026-03-26
+
+## 首页判断
+
+当前更像观察阶段，短期先看确认，不把主题逻辑直接翻译成交易动作。当前更适合按 `观察为主` 档位理解。
+
+### 宏观面
+
+- 中期背景更接近 `滞涨`。
+
+### 板块 / 主题认知
+
+- 半导体当前更像在交易 AI 基建、算力扩张和晶圆厂资本开支的持续性。
+
+### 情绪与热度
+
+- 情绪与热度当前只作辅助层。
+
+### 微观面
+
+- 当前最大问题不是没故事，而是直接催化和确认还不够。
+
+### 动作建议与结论
+
+- 先按观察名单理解。
+
+结论：今天更适合把它放在观察名单里，而不是直接升级成交易动作；当前建议仍是 `回避`。
+
+## 为什么这么判断
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 36/100 | 技术偏弱 |
+"""
+    findings = check_generic_client_report(client, "scan")
+    assert not any("缺少解释性章节: ## 当前更合适的动作" in item for item in findings)
+
+
+def test_release_check_accepts_stale_real_chip_disclosure_as_observation() -> None:
+    client = """# 个股详细分析
+
+## 首页判断
+
+当前更像解释型判断页，先看确认和风险边界。
+
+### 宏观面
+
+- 当前环境更适合先看主线和风险边界。
+
+### 板块 / 主题认知
+
+- 这份稿件先回答市场在交易什么，再决定是否执行。
+
+### 情绪与热度
+
+- 情绪与热度只作辅助层。
+
+### 微观面
+
+- 真实筹码分布当前不是 fresh 命中，只保留观察披露。
+
+### 动作建议与结论
+
+- 先按观察名单理解。
+
+结论：当前更适合继续观察，而不是把旧筹码直接升级成今天的交易确认。
+
+## 为什么这么判断
+
+| 维度 | 分数 | 为什么是这个分 | 更多说明 |
+| --- | --- | --- | --- |
+| 技术面 | 36/100 | 技术偏弱 | 先看修复。 |
+| 筹码结构（辅助项） | 辅助项 | 筹码代理暂未显示明确承接，且当前更多来自行业/市场级信号，不把它当成公司资金面已经显著转强。 当前主排序不直接使用这项。 | 300308 近 90 日高管/股东净减持约 0.99% |
+| 真实筹码分布 | 真实筹码分布非当期（最新 2026-04-01） | 最新可用筹码日期停在 2026-04-01，当前不按 fresh 命中处理；先只保留缺口披露，不把旧筹码直接写成今天的资金确认。 | 观察 |
+
+## 关键证据
+
+- [证据1](https://example.com)
+
+## 当前更合适的动作
+
+- 继续观察，不把旧筹码写成今天确认。
+"""
+    findings = check_generic_client_report(client, "scan")
+    assert not any("真实筹码分布" in item and "fresh" in item for item in findings)
+
+
+def test_release_check_flags_sentiment_written_as_direct_catalyst() -> None:
+    client = """# 个股详细分析
+
+## 首页判断
+
+逻辑没坏，但还没确认。
+
+### 宏观面
+
+- 中期更接近 recovery。
+
+### 板块 / 主题认知
+
+- 半导体当前更像在交易 AI capex。
+
+### 情绪与热度
+
+- 热度已经形成直接催化，说明现在可以直接追。
+
+### 微观面
+
+- 风险收益比一般。
+
+### 动作建议与结论
+
+- 先观察。
+
+结论：继续观察。
+"""
+    findings = check_generic_client_report(client, "stock_analysis")
+    assert any("情绪与热度" in item and "直接催化" in item for item in findings)

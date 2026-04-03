@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from math import sqrt
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -14,7 +14,7 @@ from src.processors.opportunity_engine import summarize_proxy_contracts_from_ana
 from src.processors.risk_support import build_blended_benchmark, build_portfolio_risk_context
 from src.processors.horizon import build_trade_plan_horizon
 from src.processors.technical import normalize_ohlcv_frame
-from src.storage.portfolio import PortfolioRepository
+from src.storage.portfolio import PortfolioRepository, build_portfolio_overlap_summary
 from src.storage.thesis import ThesisRepository
 from src.utils.config import detect_asset_type
 from src.utils.market import compute_history_metrics, fetch_asset_history, get_asset_context
@@ -240,6 +240,101 @@ def _project_holdings(
     }
 
 
+def load_portfolio_status(
+    config: Mapping[str, Any],
+    *,
+    repo: PortfolioRepository | None = None,
+) -> Dict[str, Any]:
+    repository = repo or PortfolioRepository()
+    holdings = repository.list_holdings()
+    if not holdings:
+        return {}
+
+    latest_prices: Dict[str, float] = {}
+    for holding in holdings:
+        symbol = str(holding.get("symbol") or "").strip()
+        asset_type = str(holding.get("asset_type") or "").strip()
+        if not symbol or not asset_type:
+            continue
+        try:
+            history = fetch_asset_history(symbol, asset_type, dict(config))
+            latest_prices[symbol] = compute_history_metrics(history)["last_close"]
+        except Exception:
+            latest_prices[symbol] = float(holding.get("cost_basis", 0.0))
+    return repository.build_status(latest_prices)
+
+
+def build_candidate_portfolio_overlap_summary(
+    analysis: Mapping[str, Any],
+    config: Mapping[str, Any],
+    *,
+    status: Mapping[str, Any] | None = None,
+    repo: PortfolioRepository | None = None,
+) -> Dict[str, Any]:
+    subject = dict(analysis or {})
+    symbol = str(subject.get("symbol") or "").strip()
+    asset_type = str(subject.get("asset_type") or "").strip()
+    if not symbol or not asset_type:
+        return {}
+
+    portfolio_status = dict(status or load_portfolio_status(config, repo=repo) or {})
+    holdings = list(portfolio_status.get("holdings") or [])
+    if not holdings:
+        return {}
+
+    context = get_asset_context(symbol, asset_type, dict(config))
+    metadata = dict(subject.get("metadata") or {})
+    region = (
+        str(subject.get("region") or "").strip()
+        or str(metadata.get("region") or "").strip()
+        or str(context.metadata.get("region", "")).strip()
+        or "UNKNOWN"
+    )
+    sector = (
+        str(subject.get("sector") or "").strip()
+        or str(metadata.get("sector") or "").strip()
+        or str(metadata.get("hard_sector_label") or "").strip()
+        or str(context.metadata.get("sector", "")).strip()
+        or "UNKNOWN"
+    )
+    existing_row = next((row for row in holdings if str(row.get("symbol") or "").strip() == symbol), {})
+    return build_portfolio_overlap_summary(
+        portfolio_status,
+        candidate_symbol=symbol,
+        candidate_name=str(subject.get("name") or "").strip(),
+        candidate_sector=sector,
+        candidate_region=region.upper(),
+        candidate_asset_type=asset_type,
+        existing_symbol_weight=float(existing_row.get("weight", 0.0) or 0.0),
+    )
+
+
+def attach_portfolio_overlap_summaries(
+    items: Sequence[Mapping[str, Any]],
+    config: Mapping[str, Any],
+    *,
+    repo: PortfolioRepository | None = None,
+) -> List[Dict[str, Any]]:
+    rows = [dict(item or {}) for item in list(items or []) if dict(item or {})]
+    if not rows:
+        return []
+
+    try:
+        portfolio_status = load_portfolio_status(config, repo=repo)
+    except Exception:
+        portfolio_status = {}
+    if not portfolio_status:
+        return rows
+
+    enriched: List[Dict[str, Any]] = []
+    for row in rows:
+        summary = build_candidate_portfolio_overlap_summary(row, config, status=portfolio_status, repo=repo)
+        if summary:
+            row["portfolio_overlap_summary"] = summary
+        enriched.append(row)
+    return enriched
+
+
 def _portfolio_risk_metrics(
     *,
     returns_df: pd.DataFrame,
@@ -414,6 +509,22 @@ def build_trade_plan(
             f"这笔单约占日均成交额 `{float(participation) * 100:.2f}%`，高于保守参与率上限 `{participation_limit * 100:.1f}%`。"
         )
 
+    portfolio_overlap = build_portfolio_overlap_summary(
+        projected,
+        candidate_symbol=symbol,
+        candidate_name=asset_context.name,
+        candidate_sector=current_sector,
+        candidate_region=current_region,
+        candidate_asset_type=asset_kind,
+        existing_symbol_weight=current_weight,
+        projected_weight=projected_weight,
+        projected_sector_weight=sector_weight,
+        projected_region_weight=region_weight,
+        suggested_max_weight=suggested_max_weight,
+        sector_limit=single_sector_max,
+        region_limit=single_region_max,
+    )
+
     if action == "buy":
         if projected_weight <= suggested_max_weight + 1e-9 and execution["tradability_label"] in {"顺畅", "可成交", "非即时成交"}:
             headline = (
@@ -468,6 +579,7 @@ def build_trade_plan(
         "horizon": horizon,
         "headline": headline,
         "alerts": alerts,
+        "portfolio_overlap": portfolio_overlap,
         "volatility_20d": symbol_vol,
         "avg_turnover_20d": _safe_float(metrics.get("avg_turnover_20d"), 0.0),
         "thesis_snapshot": thesis_record,

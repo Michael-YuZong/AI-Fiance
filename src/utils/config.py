@@ -55,9 +55,12 @@ def ensure_runtime_directories(config: Mapping[str, Any]) -> None:
 def load_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     """Load runtime configuration and resolve relative paths from project root."""
     base_config = _read_yaml(EXAMPLE_CONFIG_PATH)
+    default_config = _read_yaml(DEFAULT_CONFIG_PATH)
     target_path = resolve_project_path(config_path) if config_path else DEFAULT_CONFIG_PATH
     target_config = _read_yaml(target_path)
-    config = _deep_merge(base_config, target_config)
+    config = _deep_merge(base_config, default_config)
+    if target_path != DEFAULT_CONFIG_PATH:
+        config = _deep_merge(config, target_config)
     storage = config.setdefault("storage", {})
     storage["db_path"] = str(resolve_project_path(storage.get("db_path", "data/investment.db")))
     storage["cache_dir"] = str(resolve_project_path(storage.get("cache_dir", "data/cache")))

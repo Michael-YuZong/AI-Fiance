@@ -230,6 +230,56 @@ def test_close_yfinance_runtime_caches_closes_known_peewee_managers(monkeypatch)
     assert isinstance(yf_cache._ISINCacheManager._isin_cache, _Dummy)
 
 
+def test_get_asset_context_resolves_name_input_via_lookup(monkeypatch):
+    class _FakeLookup:
+        def __init__(self, _config):  # noqa: ANN001
+            pass
+
+        def resolve_best(self, query: str):  # noqa: ANN001
+            if query == "农发种业":
+                return {
+                    "symbol": "600313",
+                    "name": "农发种业",
+                    "asset_type": "cn_stock",
+                    "sector": "农业",
+                    "chain_nodes": ["粮食安全", "种业"],
+                }
+            return None
+
+    monkeypatch.setattr(market, "AssetLookupCollector", _FakeLookup)
+    monkeypatch.setattr(market, "load_asset_aliases", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(market, "load_watchlist", lambda *_args, **_kwargs: [])
+
+    context = market.resolve_asset_context("农发种业", {})
+
+    assert context.symbol == "600313"
+    assert context.asset_type == "cn_stock"
+    assert context.name == "农发种业"
+    assert context.metadata["sector"] == "农业"
+    assert context.metadata["chain_nodes"] == ["粮食安全", "种业"]
+
+
+def test_get_asset_context_fast_paths_direct_cn_symbol_without_lookup(monkeypatch):
+    class _FailLookup:
+        def __init__(self, _config):  # noqa: ANN001
+            raise AssertionError("AssetLookupCollector should not be created for direct CN symbols")
+
+    monkeypatch.setattr(market, "AssetLookupCollector", _FailLookup)
+    monkeypatch.setattr(
+        market,
+        "load_asset_aliases",
+        lambda *_args, **_kwargs: [{"symbol": "600313", "name": "农发种业", "asset_type": "cn_stock", "sector": "农业"}],
+    )
+    monkeypatch.setattr(market, "load_watchlist", lambda *_args, **_kwargs: [])
+
+    context = market.get_asset_context("600313", "cn_stock", {})
+
+    assert context.symbol == "600313"
+    assert context.asset_type == "cn_stock"
+    assert context.name == "农发种业"
+    assert context.metadata["sector"] == "农业"
+
+
 def test_market_regime_proxy_skips_timeout_ticker(monkeypatch):
     calls: list[str] = []
 
@@ -247,6 +297,12 @@ def test_market_regime_proxy_skips_timeout_ticker(monkeypatch):
     assert "vix" not in result
     assert result["dxy"] == pytest.approx(103.0)
     assert "copper_gold_ratio" in result
+
+
+def test_load_global_proxy_snapshot_disabled_by_default() -> None:
+    from src.processors.context import load_global_proxy_snapshot
+
+    assert load_global_proxy_snapshot({}) == {}
 
 
 def test_ticker_history_with_timeout_raises_timeout(monkeypatch):

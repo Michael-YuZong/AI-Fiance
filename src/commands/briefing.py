@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from copy import deepcopy
 import io
 import re
+import threading
 import warnings
 from collections import Counter
 from contextlib import redirect_stderr
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import pandas as pd
 
@@ -29,12 +30,39 @@ from src.collectors import (
     NewsCollector,
     SocialSentimentCollector,
 )
-from src.commands.final_runner import finalize_client_markdown
+from src.commands.final_runner import finalize_client_markdown, internal_sidecar_path
 from src.output.briefing import BriefingRenderer
 from src.output.client_report import ClientReportRenderer
+from src.output.catalyst_web_review import (
+    attach_catalyst_web_review_to_analysis,
+    build_catalyst_web_review_packet,
+    load_catalyst_web_review,
+    render_catalyst_web_review_prompt,
+    render_catalyst_web_review_scaffold,
+)
+from src.output.editor_payload import (
+    _attach_strategy_background_confidence,
+    build_briefing_editor_packet,
+    render_financial_editor_prompt,
+    summarize_theme_playbook_contract,
+    summarize_what_changed_contract,
+)
+from src.output.event_digest import summarize_event_digest_contract
 from src.commands.report_guard import ensure_report_task_registered
 from src.commands.release_check import check_generic_client_report
-from src.processors.context import derive_regime_inputs, load_china_macro_snapshot, load_global_proxy_snapshot, macro_lines
+from src.output.pick_ranking import (
+    average_dimension_score,
+    portfolio_overlap_priority,
+    score_band,
+    strategy_confidence_priority,
+)
+from src.processors.context import (
+    derive_regime_inputs,
+    global_proxy_runtime_enabled,
+    load_china_macro_snapshot,
+    load_global_proxy_snapshot,
+    macro_lines,
+)
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.horizon import get_horizon_contract
 from src.processors.market_analysis import build_market_analysis
@@ -43,11 +71,21 @@ from src.processors.opportunity_engine import (
     summarize_proxy_contracts,
     _today_theme as _opportunity_day_theme,
 )
+from src.processors.portfolio_actions import attach_portfolio_overlap_summaries
 from src.processors.regime import RegimeDetector
 from src.processors.technical import TechnicalAnalyzer, normalize_ohlcv_frame
 from src.processors.trade_handoff import portfolio_whatif_handoff
-from src.storage.portfolio import PortfolioRepository
-from src.storage.thesis import ThesisRepository
+from src.storage.portfolio import PortfolioRepository, build_portfolio_overlap_summary
+from src.storage.thesis import (
+    ThesisRepository,
+    build_thesis_review_queue,
+    summarize_review_queue_followup_lines,
+    summarize_review_queue_action_lines,
+    summarize_review_queue_summary_line,
+    summarize_review_queue_transitions,
+    summarize_thesis_event_memory,
+    summarize_thesis_state_snapshot,
+)
 from src.utils.config import load_config, resolve_project_path
 from src.utils.data import load_watchlist
 from src.utils.logger import setup_logger
@@ -109,6 +147,61 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="", help="Optional path to config YAML")
     parser.add_argument("--client-final", action="store_true", help="Render and persist client-facing final markdown/pdf")
     return parser
+
+
+def _client_final_runtime_overrides(
+    config: Mapping[str, Any],
+    *,
+    client_final: bool,
+    explicit_config_path: str = "",
+) -> tuple[Dict[str, Any], List[str]]:
+    if not client_final or explicit_config_path.strip():
+        return deepcopy(dict(config or {})), []
+
+    effective = deepcopy(dict(config or {}))
+    notes: List[str] = []
+
+    market_context = dict(effective.get("market_context") or {})
+    proxy_changed = False
+    if not bool(market_context.get("skip_global_proxy")):
+        market_context["skip_global_proxy"] = True
+        proxy_changed = True
+    if not bool(market_context.get("skip_market_monitor")):
+        market_context["skip_market_monitor"] = True
+        proxy_changed = True
+    if proxy_changed:
+        effective["market_context"] = market_context
+        notes.append("为保证晨报 `client-final` 可交付，本轮自动跳过跨市场代理与 market monitor 慢链。")
+
+    current_snapshot_timeout = float(effective.get("briefing_snapshot_timeout_seconds", 15) or 15)
+    if current_snapshot_timeout > 8:
+        effective["briefing_snapshot_timeout_seconds"] = 8
+        notes.append("本轮 `client-final` 已自动收紧晨报快照超时阈值，优先保证正式稿稳定落盘。")
+
+    current_collector_timeout = float(effective.get("briefing_collector_timeout_seconds", 15) or 15)
+    if current_collector_timeout > 8:
+        effective["briefing_collector_timeout_seconds"] = 8
+        notes.append("本轮 `client-final` 已自动收紧晨报采集超时阈值，优先使用国内快照和已有缓存。")
+    current_signal_timeout = float(effective.get("briefing_signal_timeout_seconds", 15) or 15)
+    if current_signal_timeout > 10 or "briefing_signal_timeout_seconds" not in effective:
+        effective["briefing_signal_timeout_seconds"] = 10
+        notes.append("对 A 股盘面/脉冲/热股这类关键情报，保留适中的采集窗口，避免单条慢链把晨报整体拖住。")
+
+    if bool(effective.get("news_topic_search_enabled", True)):
+        effective["news_topic_search_enabled"] = False
+        notes.append("本轮 `client-final` 已自动关闭晨报全局主题新闻扩搜，优先使用结构化事件和已命中的新闻线索。")
+    if "briefing_search_backfill_enabled" not in effective:
+        effective["briefing_search_backfill_enabled"] = True
+        notes.append("本轮 `client-final` 保留受控晨报 query-group 搜索回填，用来补足可点击外部事件流。")
+    effective.setdefault("news_topic_query_cap", 3)
+    effective.setdefault("briefing_backfill_timeout_seconds", 12)
+    effective.setdefault("briefing_a_share_watch_timeout_seconds", 20)
+    current_news_feeds = str(effective.get("news_feeds_file", "") or "").strip()
+    if current_news_feeds != "config/news_feeds.briefing_light.yaml":
+        effective["news_feeds_file"] = "config/news_feeds.briefing_light.yaml"
+        notes.append("本轮 `client-final` 已自动切到轻量新闻源配置，避免晨报被全局新闻拉取慢链拖住。")
+
+    return effective, notes
 
 
 def _trend_label(technical: Dict[str, Any]) -> str:
@@ -419,10 +512,52 @@ def _briefing_a_share_watch_rows(
     if top_n <= 0:
         return [], ["当前已关闭 A 股全市场观察池。"], {"enabled": False, "mode": "disabled"}, []
     try:
-        shortlist_n = max(int(config.get("briefing_a_share_shortlist", max(top_n * 2, 8)) or max(top_n * 2, 8)), top_n)
-        candidate_cap = max(int(config.get("briefing_a_share_max_candidates", max(top_n * 2 + 6, 16)) or max(top_n * 2 + 6, 16)), shortlist_n)
+        effective_config = deepcopy(dict(config or {}))
+        if bool(effective_config.get("news_topic_search_enabled", True)):
+            effective_config["news_topic_search_enabled"] = False
+        if str(effective_config.get("stock_news_runtime_mode", "") or "").strip().lower() != "structured_only":
+            effective_config["stock_news_runtime_mode"] = "structured_only"
+        if list(effective_config.get("structured_stock_intelligence_apis") or []) != [
+            "forecast",
+            "express",
+            "dividend",
+            "irm_qa_sh",
+            "irm_qa_sz",
+        ]:
+            effective_config["structured_stock_intelligence_apis"] = [
+                "forecast",
+                "express",
+                "dividend",
+                "irm_qa_sh",
+                "irm_qa_sz",
+            ]
+        if int(effective_config.get("stock_news_limit", 10) or 10) > 4:
+            effective_config["stock_news_limit"] = 4
+        effective_config["skip_catalyst_dynamic_search_runtime"] = True
+        effective_config["skip_cn_stock_direct_news_runtime"] = True
+        effective_config["skip_analysis_proxy_signals_runtime"] = True
+        effective_config["skip_signal_confidence_runtime"] = True
+        effective_config["skip_index_topic_bundle_runtime"] = True
+        effective_config["skip_cn_stock_unlock_pressure_runtime"] = True
+        effective_config["skip_cn_stock_pledge_risk_runtime"] = True
+        effective_config["skip_cn_stock_regulatory_risk_runtime"] = True
+        effective_config["skip_cn_stock_chip_snapshot_runtime"] = True
+        effective_config["skip_cn_stock_capital_flow_runtime"] = True
+        effective_config["skip_cn_stock_margin_runtime"] = True
+        effective_config["skip_cn_stock_board_action_runtime"] = True
+        effective_config["stock_pool_skip_industry_lookup_runtime"] = True
+        opportunity = dict(effective_config.get("opportunity") or {})
+        worker_count = int(opportunity.get("analysis_workers", 4) or 4)
+        if worker_count > 3:
+            opportunity["analysis_workers"] = 3
+        if opportunity:
+            effective_config["opportunity"] = opportunity
+        default_shortlist = max(top_n + 1, 6)
+        shortlist_n = max(int(config.get("briefing_a_share_shortlist", default_shortlist) or default_shortlist), top_n)
+        default_candidate_cap = max(shortlist_n + 2, 8)
+        candidate_cap = max(int(config.get("briefing_a_share_max_candidates", default_candidate_cap) or default_candidate_cap), shortlist_n)
         payload = discover_stock_opportunities(
-            config,
+            effective_config,
             top_n=shortlist_n,
             market="cn",
             context=shared_context,
@@ -435,6 +570,16 @@ def _briefing_a_share_watch_rows(
     top_items = list(payload.get("top") or [])[:top_n]
     if not analyses:
         return [], ["A 股全市场观察池暂不可用：当前未拿到可用的全市场初筛池。"], {"enabled": True, "mode": "empty_pool"}, []
+    top_items = attach_portfolio_overlap_summaries(top_items, config)
+    top_items = _attach_strategy_background_confidence(top_items)
+    top_items.sort(
+        key=lambda item: (
+            strategy_confidence_priority(item),
+            -score_band(average_dimension_score(item)),
+            portfolio_overlap_priority(item),
+            -average_dimension_score(item),
+        )
+    )
     rows: List[List[str]] = []
     sector_counter: Counter[str] = Counter()
     for index, item in enumerate(top_items, start=1):
@@ -492,8 +637,8 @@ def _briefing_a_share_watch_rows(
 def _theme_information_environment(aligned: bool, horizon: str) -> str:
     horizon_text = str(horizon).strip() or "观察期"
     if aligned:
-        return f"当前更像直接催化和盘面方向基本一致，适合按 `{horizon_text}` 继续跟踪。"
-    return f"当前更多是背景储备和信息环境支持，适合按 `{horizon_text}` 保留观察资格，但不等于直接催化已兑现。"
+        return f"当前更像盘面方向和信息环境基本一致，适合按 `{horizon_text}` 继续跟踪，但不直接等于催化已验证。"
+    return f"当前更多是背景储备和信息环境支持，适合按 `{horizon_text}` 保留观察资格，但不把它当成直接催化。"
 
 
 def _rotation_lines(snapshots: List[BriefingSnapshot]) -> List[str]:
@@ -541,8 +686,8 @@ def _headline_lines(
         )
 
     if pulse:
-        zt_pool = pulse.get("zt_pool", pd.DataFrame())
-        dt_pool = pulse.get("dt_pool", pd.DataFrame())
+        zt_pool = _fresh_pulse_frame(pulse, "zt_pool")
+        dt_pool = _fresh_pulse_frame(pulse, "dt_pool")
         detail = pulse.get("lhb_detail", pd.DataFrame())
         top_zt = _top_categories(zt_pool, "所属行业", limit=2)
         market_line = (
@@ -769,9 +914,342 @@ def _news_report(
     )
 
 
+def _briefing_signal_strength(change_pct: Any, *, high: float = 0.06, medium: float = 0.03) -> str:
+    value = abs(_to_float(change_pct))
+    if value >= high:
+        return "高"
+    if value >= medium:
+        return "中"
+    return "低"
+
+
+def _briefing_signal_conclusion(signal_type: str, impact: str = "") -> str:
+    signal = str(signal_type or "").strip()
+    target = str(impact or "").strip() or "相关方向"
+    if signal in {"主线增强", "行业催化", "主线活跃", "板块活跃"}:
+        return f"偏利多，先看 `{target}` 能否从局部走向扩散。"
+    if signal in {"龙头确认", "热度抬升", "观察池前排"}:
+        return f"偏利多，但先按 `{target}` 的跟涨/扩散确认处理。"
+    if signal in {"医药催化", "AI应用催化", "海外科技映射"}:
+        return f"偏利多，先看 `{target}` 能否继续拿到价格与成交确认。"
+    if signal == "地缘缓和":
+        return "偏利多风险偏好，先看黄金/原油回落与成长弹性修复。"
+    if signal in {"地缘扰动", "避险交易", "能源冲击"}:
+        return "偏利空风险偏好，先看黄金、防守和能源资产是否继续走强。"
+    if signal == "利率预期":
+        return "偏利多成长估值，但仍要等价格共振，不把标题直接当成动作信号。"
+    return f"中性偏观察，先把它当 `{target}` 的辅助线索。"
+
+
+def _top_named_movers(
+    frame: pd.DataFrame,
+    *,
+    name_columns: Sequence[str],
+    change_columns: Sequence[str] = ("涨跌幅",),
+    limit: int = 3,
+    min_abs_change: float = 0.0,
+) -> List[tuple[str, float]]:
+    if frame is None or frame.empty:
+        return []
+    working = frame.copy()
+    name_col = next((column for column in name_columns if column in working.columns), "")
+    change_col = next((column for column in change_columns if column in working.columns), "")
+    if not name_col or not change_col:
+        return []
+    working[name_col] = working[name_col].astype(str).str.strip()
+    working[change_col] = pd.to_numeric(working[change_col], errors="coerce")
+    working = working.dropna(subset=[name_col, change_col])
+    if min_abs_change > 0:
+        working = working[working[change_col].abs() >= min_abs_change]
+    if working.empty:
+        return []
+    working = working.drop_duplicates(subset=[name_col]).sort_values(change_col, ascending=False)
+    result: List[tuple[str, float]] = []
+    for _, row in working.head(limit).iterrows():
+        name = str(row.get(name_col, "")).strip()
+        if not name:
+            continue
+        result.append((name, float(row.get(change_col) or 0.0)))
+    return result
+
+
+def _top_category_counts(frame: pd.DataFrame, column: str, limit: int = 3) -> List[tuple[str, int]]:
+    if frame is None or frame.empty or column not in frame.columns:
+        return []
+    series = frame[column].astype(str).replace({"": pd.NA, "nan": pd.NA}).dropna()
+    if series.empty:
+        return []
+    counts = series.value_counts().head(limit)
+    return [(str(name), int(count)) for name, count in counts.items()]
+
+
+def _top_board_movers(
+    frame: pd.DataFrame,
+    *,
+    name_columns: Sequence[str],
+    change_columns: Sequence[str] = ("涨跌幅",),
+    leader_name_columns: Sequence[str] = ("领涨股票",),
+    leader_change_columns: Sequence[str] = ("领涨股票-涨跌幅",),
+    limit: int = 3,
+    min_abs_change: float = 0.0,
+) -> List[tuple[str, float, str, float]]:
+    if frame is None or frame.empty:
+        return []
+    working = frame.copy()
+    name_col = next((column for column in name_columns if column in working.columns), "")
+    change_col = next((column for column in change_columns if column in working.columns), "")
+    leader_name_col = next((column for column in leader_name_columns if column in working.columns), "")
+    leader_change_col = next((column for column in leader_change_columns if column in working.columns), "")
+    if not name_col or not change_col:
+        return []
+    working[name_col] = working[name_col].astype(str).str.strip()
+    working[change_col] = pd.to_numeric(working[change_col], errors="coerce")
+    if leader_name_col:
+        working[leader_name_col] = working[leader_name_col].astype(str).str.strip()
+    if leader_change_col:
+        working[leader_change_col] = pd.to_numeric(working[leader_change_col], errors="coerce")
+    working = working.dropna(subset=[name_col, change_col])
+    if min_abs_change > 0:
+        working = working[working[change_col].abs() >= min_abs_change]
+    if working.empty:
+        return []
+    working = working.drop_duplicates(subset=[name_col]).sort_values(change_col, ascending=False)
+    result: List[tuple[str, float, str, float]] = []
+    for _, row in working.head(limit).iterrows():
+        name = str(row.get(name_col, "")).strip()
+        if not name:
+            continue
+        leader_name = str(row.get(leader_name_col, "")).strip() if leader_name_col else ""
+        leader_change = float(row.get(leader_change_col) or 0.0) if leader_change_col else 0.0
+        result.append((name, float(row.get(change_col) or 0.0), leader_name, leader_change))
+    return result
+
+
+def _briefing_headline_signal(title: str, category: str = "") -> tuple[str, str]:
+    blob = f"{title} {category}".lower()
+    if any(token in blob for token in ("停火", "休战", "缓和", "ceasefire", "truce", "de-escalat")):
+        return "地缘缓和", "黄金/原油/风险偏好"
+    if any(token in blob for token in ("伊朗", "以色列", "中东", "war", "strike", "missile", "conflict")):
+        return "地缘扰动", "黄金/原油/风险偏好"
+    if any(token in blob for token in ("创新药", "医药", "制药", "药业", "cxo", "fda", "临床", "license-out", "bd", "授权")):
+        return "医药催化", "创新药/医药"
+    if any(token in blob for token in ("智谱", "kimi", "deepseek", "大模型", "模型", "agent")):
+        return "AI应用催化", "AI应用/国产模型"
+    if any(token in blob for token in ("新易盛", "中际旭创", "华工科技", "cpo", "光模块", "f5g", "marvell", "nvidia", "nvda", "算力", "semiconductor", "芯片")):
+        return "海外科技映射", "AI算力/光模块"
+    if any(token in blob for token in ("黄金", "gold", "贵金属")):
+        return "避险交易", "黄金/防守"
+    if any(token in blob for token in ("原油", "oil", "opec")):
+        return "能源冲击", "原油/能源"
+    if any(token in blob for token in ("债券", "bond", "fed", "rate", "yield", "利率")):
+        return "利率预期", "成长估值/风险偏好"
+    return "信息环境：新闻/舆情脉冲", "估值/资金偏好"
+
+def _briefing_news_backfill_groups(
+    *,
+    narrative: Mapping[str, Any],
+    drivers: Mapping[str, Any],
+    pulse: Mapping[str, Any] | None = None,
+    snapshots: Sequence[BriefingSnapshot] | None = None,
+) -> List[List[str]]:
+    theme = str(narrative.get("theme", "")).strip().lower()
+    frame = _fresh_driver_frame(drivers, "industry_spot")
+    concept_frame = _fresh_driver_frame(drivers, "concept_spot")
+    hot_rank = _fresh_driver_frame(drivers, "hot_rank")
+    groups: List[List[str]] = []
+    seen: set[tuple[str, ...]] = set()
+
+    def _add_group(*terms: str) -> None:
+        cleaned = tuple(term.strip() for term in terms if str(term).strip())
+        if not cleaned or cleaned in seen:
+            return
+        seen.add(cleaned)
+        groups.append(list(cleaned))
+
+    strong_snapshots = sorted(
+        [item for item in list(snapshots or []) if abs(float(getattr(item, "return_1d", 0.0) or 0.0)) >= 0.025],
+        key=lambda item: abs(float(getattr(item, "return_1d", 0.0) or 0.0)),
+        reverse=True,
+    )
+    snapshot_blob = " ".join(
+        " ".join(
+            part
+            for part in (
+                str(getattr(item, "symbol", "") or ""),
+                str(getattr(item, "name", "") or ""),
+                str(getattr(item, "sector", "") or ""),
+            )
+            if part
+        )
+        for item in strong_snapshots[:6]
+    ).lower()
+
+    gold = _board_name(frame, ["贵金属", "黄金"], "黄金/防守")
+    energy = _board_name(frame, ["石油", "油气", "煤炭", "能源"], "能源/油气")
+    power = _board_name(frame, ["电网", "电力", "公用事业"], "电力/电网")
+    dividend = _board_name(frame, ["银行", "公用事业", "煤炭", "红利"], "高股息/红利")
+    tech = _board_name(frame, ["半导体", "通信", "IT服务", "消费电子", "软件"], "AI算力链")
+
+    if any(token in snapshot_blob for token in ("创新药", "医药", "制药", "药")):
+        _add_group("创新药 医药 A股 大涨", "创新药 医药 财联社")
+        _add_group("创新药 license-out 临床 授权", "港股创新药ETF 医药 催化")
+    if any(token in snapshot_blob for token in ("人工智能", "ai", "半导体", "芯片", "算力", "光模块")):
+        _add_group("智谱 大模型 agent A股", "AI 应用 国产模型")
+        _add_group("新易盛 光模块 算力 A股", "CPO 光模块 财联社")
+    if any(token in snapshot_blob for token in ("有色", "黄金", "贵金属", "金属")):
+        _add_group("有色 铜 金属 A股", "铜价 金价 金属 风险偏好")
+    _add_group("中东 停火 风险偏好", "ceasefire middle east market")
+
+    if theme in {"gold_defense", "dividend_defense", "defensive_riskoff"} or "黄金" in gold:
+        _add_group("黄金 避险 金价", "gold safe haven market")
+        _add_group("高股息 红利 银行", "dividend defensive stocks")
+    if theme in {"energy_shock", "power_utilities"} or any(token in energy + power for token in ("能源", "油气", "电力", "电网")):
+        _add_group("原油 能源 OPEC", "oil energy market")
+        _add_group("电力 电网 公用事业", "utilities power grid")
+    if theme in {"ai_semis", "rate_growth"} or any(token in tech for token in ("半导体", "AI", "算力")):
+        _add_group("AI 半导体 算力", "semiconductor ai market")
+    if theme in {"broad_market_repair", "china_policy"}:
+        _add_group("券商 宽基 修复", "A股 宽基 修复")
+    for name, _ in _top_named_movers(
+        concept_frame,
+        name_columns=("名称", "板块名称"),
+        change_columns=("涨跌幅",),
+        limit=3,
+        min_abs_change=2.0,
+    ):
+        _add_group(f"{name} A股 盘面", name)
+    for name, _ in _top_named_movers(
+        hot_rank,
+        name_columns=("股票名称", "名称"),
+        change_columns=("涨跌幅",),
+        limit=3,
+        min_abs_change=3.0,
+    ):
+        _add_group(f"{name} A股 大涨", name)
+    for sector in _top_categories(dict(pulse or {}).get("zt_pool", pd.DataFrame()), "所属行业", limit=2):
+        _add_group(f"{sector} A股 涨停", sector)
+
+    _add_group("A股 市场 快讯", "盘面 轮动")
+    _add_group("宏观 政策 央行", "内需 政策")
+    _add_group("Federal Reserve inflation market", "Fed rate cuts market")
+    _add_group("geopolitics market", "全球 市场 地缘")
+
+    return groups
+
+
+def _backfill_briefing_news_report(
+    news_report: Mapping[str, Any],
+    *,
+    config: Mapping[str, Any],
+    narrative: Mapping[str, Any],
+    drivers: Mapping[str, Any],
+    pulse: Mapping[str, Any] | None = None,
+    snapshots: Sequence[BriefingSnapshot] | None = None,
+) -> Dict[str, Any]:
+    report = dict(news_report or {})
+    current_items = list(report.get("items") or [])
+    if len(current_items) >= 3:
+        return report
+
+    query_groups = _briefing_news_backfill_groups(
+        narrative=narrative,
+        drivers=drivers,
+        pulse=pulse,
+        snapshots=snapshots,
+    )
+    if not query_groups:
+        return report
+
+    preferred_sources = ["财联社", "证券时报", "上海证券报", "中国证券报", "Reuters", "Bloomberg"]
+    merged = list(current_items)
+    query_terms = [item for group in query_groups for item in group]
+    notes: List[str] = []
+
+    collector = NewsCollector(deepcopy(dict(config or {})))
+
+    try:
+        tushare_hits = collector.get_market_intelligence(
+            query_terms,
+            limit=6,
+            recent_days=10,
+        )
+    except Exception:
+        tushare_hits = []
+    if tushare_hits:
+        merged.extend(tushare_hits)
+        notes.append("已按 Tushare 市场情报回填。")
+
+    broad_feed_config = deepcopy(dict(config or {}))
+    broad_feed_config["news_feeds_file"] = "config/news_feeds.yaml"
+    broad_feed_collector = NewsCollector(broad_feed_config)
+    try:
+        broad_feed_report = broad_feed_collector.collect(
+            snapshots=[],
+            china_macro={},
+            global_proxy={},
+            preferred_sources=preferred_sources,
+        )
+    except Exception:
+        broad_feed_report = {}
+    broad_feed_hits = list((broad_feed_report or {}).get("items") or [])
+    if broad_feed_hits:
+        merged.extend(broad_feed_hits)
+        notes.append("已按广覆盖 RSS 情报池回填。")
+
+    linked_items = [item for item in merged if str(item.get("link") or "").strip()]
+    should_search_backfill = bool(config.get("briefing_search_backfill_enabled", True)) and (
+        len(merged) < 6 or len(linked_items) < 2
+    )
+    if should_search_backfill:
+        search_config = deepcopy(dict(config or {}))
+        search_config["news_topic_search_enabled"] = True
+        search_collector = NewsCollector(search_config)
+        try:
+            hits = search_collector.search_by_keyword_groups(
+                query_groups[:4],
+                preferred_sources=preferred_sources,
+                limit=4,
+                recent_days=5,
+            )
+        except Exception:
+            hits = []
+        if hits:
+            merged.extend(hits)
+            notes.append("已按宏观/主题 query groups 搜索回填。")
+
+    if not merged:
+        return report
+
+    ranked = broad_feed_collector._rank_items(
+        broad_feed_collector._filter_candidate_items(merged, recent_days=10),
+        preferred_sources=preferred_sources + ["Tushare"],
+        query_keywords=query_terms,
+    )
+    selected = broad_feed_collector._diversify_items(ranked, 6)
+    if not selected:
+        return report
+
+    report.update(
+        {
+            "mode": "live",
+            "items": selected,
+            "all_items": ranked,
+            "lines": broad_feed_collector._live_lines(selected),
+            "source_list": sorted(broad_feed_collector._present_sources(selected)),
+            "note": "轻量 RSS 未命中足够情报，" + "".join(notes),
+        }
+    )
+    return report
+
+
 def _collect_monitor_rows(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     market_context_cfg = dict(config.get("market_context") or {})
     if market_context_cfg.get("skip_market_monitor"):
+        return []
+    if not (
+        market_context_cfg.get("enable_market_monitor_runtime", False)
+        or config.get("enable_market_monitor_runtime", False)
+    ):
         return []
     return MarketMonitorCollector(config).collect()
 
@@ -780,9 +1258,11 @@ def _load_briefing_global_proxy(config: Dict[str, Any]) -> tuple[Dict[str, Any],
     market_context_cfg = dict(config.get("market_context") or {})
     if market_context_cfg.get("skip_global_proxy"):
         return {}, "跨市场代理数据已按运行配置关闭，本次先按国内宏观与本地缓存生成。"
+    if not global_proxy_runtime_enabled(config):
+        return {}, "跨市场代理数据默认关闭，本次先按国内宏观与本地缓存生成。"
     try:
         with redirect_stderr(io.StringIO()):
-            return load_global_proxy_snapshot(), ""
+            return load_global_proxy_snapshot(config), ""
     except Exception:
         return {}, "跨市场代理数据暂不可用，已回退到国内宏观与本地缓存。"
 
@@ -794,17 +1274,70 @@ def _timed_collect(
     fallback: Any,
     timeout_seconds: float,
 ) -> tuple[Any, str]:
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(loader)
-    try:
-        return future.result(timeout=timeout_seconds), ""
-    except FutureTimeoutError:
-        future.cancel()
+    result: Dict[str, Any] = {}
+    error: Dict[str, BaseException] = {}
+
+    def _runner() -> None:
+        try:
+            result["value"] = loader()
+        except BaseException as exc:  # noqa: BLE001
+            error["value"] = exc
+
+    worker = threading.Thread(
+        target=_runner,
+        name=f"briefing_timed_collect_{label}",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout_seconds)
+    if worker.is_alive():
         return fallback, f"{label} 拉取超时（>{int(timeout_seconds)}s），本轮已按降级口径处理。"
-    except Exception:
+    if "value" in error:
         return fallback, f"{label} 拉取失败，本轮已按降级口径处理。"
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+    return result.get("value", fallback), ""
+
+
+def _timed_collect_many(
+    tasks: Mapping[str, tuple[str, Any, Any, float]],
+) -> tuple[Dict[str, Any], List[str]]:
+    states: Dict[str, Dict[str, Any]] = {}
+    workers: Dict[str, tuple[threading.Thread, str, float]] = {}
+
+    for key, payload in dict(tasks or {}).items():
+        label, loader, fallback, timeout_seconds = payload
+        state: Dict[str, Any] = {"fallback": fallback}
+        states[key] = state
+
+        def _runner(state_ref: Dict[str, Any] = state, loader_ref=loader) -> None:
+            try:
+                state_ref["value"] = loader_ref()
+            except BaseException as exc:  # noqa: BLE001
+                state_ref["error"] = exc
+
+        worker = threading.Thread(
+            target=_runner,
+            name=f"briefing_parallel_collect_{label}",
+            daemon=True,
+        )
+        worker.start()
+        workers[key] = (worker, label, float(timeout_seconds))
+
+    results: Dict[str, Any] = {}
+    warnings: List[str] = []
+    for key, (worker, label, timeout_seconds) in workers.items():
+        worker.join(timeout_seconds)
+        state = states[key]
+        fallback = state.get("fallback")
+        if worker.is_alive():
+            results[key] = fallback
+            warnings.append(f"{label} 拉取超时（>{int(timeout_seconds)}s），本轮已按降级口径处理。")
+            continue
+        if "error" in state:
+            results[key] = fallback
+            warnings.append(f"{label} 拉取失败，本轮已按降级口径处理。")
+            continue
+        results[key] = state.get("value", fallback)
+    return results, warnings
 
 
 def _monitor_lines(rows: List[Dict[str, Any]]) -> List[str]:
@@ -885,14 +1418,85 @@ def _latest_trade_date_label(pulse: Dict[str, Any]) -> str:
     return str(pulse.get("market_date", "") or "最近交易日")
 
 
+def _fresh_driver_frame(drivers: Mapping[str, Any], key: str) -> pd.DataFrame:
+    report = drivers.get(f"{key}_report")
+    if isinstance(report, Mapping):
+        frame = report.get("frame", pd.DataFrame())
+        if not isinstance(frame, pd.DataFrame) or not bool(report.get("is_fresh")):
+            return pd.DataFrame()
+        return frame
+    frame = drivers.get(key, pd.DataFrame())
+    return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+def _fresh_pulse_frame(pulse: Mapping[str, Any], key: str) -> pd.DataFrame:
+    report = pulse.get(f"{key}_report")
+    if isinstance(report, Mapping):
+        frame = report.get("frame", pd.DataFrame())
+        if not isinstance(frame, pd.DataFrame) or not bool(report.get("is_fresh")):
+            return pd.DataFrame()
+        return frame
+    frame = pulse.get(key, pd.DataFrame())
+    return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+
+def _stale_market_snapshot_detected(payload: Mapping[str, Any], keys: Sequence[str]) -> bool:
+    for key in keys:
+        report = payload.get(f"{key}_report")
+        if not isinstance(report, Mapping):
+            continue
+        frame = report.get("frame", pd.DataFrame())
+        if isinstance(frame, pd.DataFrame) and not frame.empty and not bool(report.get("is_fresh")):
+            return True
+    return False
+
+
+def _market_snapshot_contract(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    drivers = dict(payload.get("drivers") or {})
+    pulse = dict(payload.get("pulse") or {})
+    driver_keys = ("industry_spot", "concept_spot", "hot_rank")
+    pulse_keys = ("zt_pool", "dt_pool", "strong_pool", "prev_zt_pool")
+    driver_stale = _stale_market_snapshot_detected(drivers, driver_keys)
+    pulse_stale = _stale_market_snapshot_detected(pulse, pulse_keys)
+
+    def _fresh_keys(source: Mapping[str, Any], keys: Sequence[str]) -> List[str]:
+        rows: List[str] = []
+        for key in keys:
+            report = source.get(f"{key}_report")
+            frame = source.get(key)
+            if not isinstance(report, Mapping) or not bool(report.get("is_fresh")):
+                continue
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                rows.append(str(key))
+        return rows
+
+    return {
+        "contract_version": "briefing.market_snapshot.v1",
+        "stale_detected": bool(driver_stale or pulse_stale),
+        "driver_stale_detected": bool(driver_stale),
+        "pulse_stale_detected": bool(pulse_stale),
+        "fresh_driver_keys": _fresh_keys(drivers, driver_keys),
+        "fresh_pulse_keys": _fresh_keys(pulse, pulse_keys),
+        "warning_line": "A股轮动快照未通过 freshness 校验，本轮先不把旧盘面当成今天主线依据。",
+    }
+
+
 def _market_pulse_lines(pulse: Dict[str, Any]) -> List[str]:
     if not pulse:
         return ["全市场脉搏暂不可用。"]
 
-    zt_pool = pulse.get("zt_pool", pd.DataFrame())
-    dt_pool = pulse.get("dt_pool", pd.DataFrame())
-    strong_pool = pulse.get("strong_pool", pd.DataFrame())
-    prev_zt_pool = pulse.get("prev_zt_pool", pd.DataFrame())
+    zt_pool = _fresh_pulse_frame(pulse, "zt_pool")
+    dt_pool = _fresh_pulse_frame(pulse, "dt_pool")
+    strong_pool = _fresh_pulse_frame(pulse, "strong_pool")
+    prev_zt_pool = _fresh_pulse_frame(pulse, "prev_zt_pool")
+    if (
+        zt_pool.empty
+        and dt_pool.empty
+        and strong_pool.empty
+        and prev_zt_pool.empty
+        and _stale_market_snapshot_detected(pulse, ("zt_pool", "dt_pool", "strong_pool", "prev_zt_pool"))
+    ):
+        return ["A股盘面快照未通过 freshness 校验，本轮不把旧盘面当成今天主线依据。"]
     trade_date = _latest_trade_date_label(pulse)
 
     zt_count = len(zt_pool.index) if not zt_pool.empty else 0
@@ -1025,7 +1629,8 @@ def _source_quality_lines(news_report: Dict[str, Any]) -> List[str]:
     if len(sources) < 2:
         lines.append("⚠️ 当前新闻源不足 2 类，晨报应降级为‘主线草稿’，不要把单源新闻写成确定结论。")
     else:
-        lines.append(f"本次共命中 {len(sources)} 类新闻源，源覆盖基本可用，但仍需优先参考一级信源。")
+        display_count = min(len(sources), 4)
+        lines.append(f"累计命中 {len(sources)} 类新闻源（正文展示前 {display_count} 类代表源），源覆盖基本可用，但仍需优先参考一级信源。")
     if domestic_count == 0:
         lines.append("⚠️ 当前没有命中国内快讯源，A 股盘面与政策解读可能不完整。")
     return lines[:3]
@@ -1102,6 +1707,65 @@ def _keyword_match(text: str, keywords: Sequence[str]) -> bool:
     return False
 
 
+def _is_weekend_briefing_day(now: Optional[datetime] = None) -> bool:
+    current = now or datetime.now()
+    return current.weekday() >= 5
+
+
+def _theme_watch_keywords(theme: str) -> List[str]:
+    mapping = {
+        "energy_shock": ["电网", "电力", "公用事业", "石油", "油气", "能源", "煤炭", "黄金", "561380"],
+        "gold_defense": ["黄金", "贵金属", "避险", "518", "15993", "GLD"],
+        "dividend_defense": ["高股息", "红利", "银行", "公用事业", "电力"],
+        "defensive_riskoff": ["黄金", "贵金属", "红利", "高股息", "公用事业", "电力"],
+        "broad_market_repair": ["宽基", "沪深300", "中证1000", "中证2000", "A500", "券商", "银行", "510", "1599"],
+        "rate_growth": ["科技", "纳指", "QQQM", "HSTECH", "港股科技", "成长", "半导体", "AI"],
+        "power_utilities": ["电网", "电力", "公用事业", "储能", "逆变器", "561380"],
+        "china_policy": ["电网", "基建", "央国企", "建筑", "工程", "中字头", "高股息", "银行"],
+        "ai_semis": ["半导体", "芯片", "算力", "通信", "AI", "科技"],
+    }
+    return mapping.get(theme, [])
+
+
+def _snapshot_theme_match_score(snapshot: BriefingSnapshot, theme: str) -> int:
+    keywords = _theme_watch_keywords(theme)
+    if not keywords:
+        return 0
+    text = " ".join(
+        [
+            str(getattr(snapshot, "symbol", "")),
+            str(getattr(snapshot, "name", "")),
+            str(getattr(snapshot, "sector", "")),
+            str(getattr(snapshot, "notes", "")),
+            str(getattr(snapshot, "note", "")),
+            str(getattr(snapshot, "summary", "")),
+        ]
+    )
+    score = 0
+    for keyword in keywords:
+        if _keyword_match(text, [keyword]):
+            score += 1
+    return score
+
+
+def _pick_theme_anchor(
+    snapshots: List[BriefingSnapshot],
+    narrative: Dict[str, Any],
+    *,
+    key: str = "signal_score",
+) -> BriefingSnapshot:
+    theme = str(narrative.get("theme", "macro_background")).strip()
+    return max(
+        snapshots,
+        key=lambda item: (
+            _snapshot_theme_match_score(item, theme),
+            getattr(item, key, 0.0),
+            item.return_1d,
+            item.return_20d,
+        ),
+    )
+
+
 def _industry_text(*frames: pd.DataFrame) -> str:
     parts: List[str] = []
     for frame in frames:
@@ -1114,13 +1778,16 @@ def _industry_text(*frames: pd.DataFrame) -> str:
 
 
 def _board_name(frame: pd.DataFrame, keywords: Sequence[str], fallback: str) -> str:
-    if frame is None or frame.empty or "板块名称" not in frame.columns:
+    if frame is None or frame.empty:
         return fallback
-    names = frame["板块名称"].astype(str)
+    name_col = next((column for column in ("板块名称", "名称") if column in frame.columns), "")
+    if not name_col:
+        return fallback
+    names = frame[name_col].astype(str)
     for keyword in keywords:
         matched = frame[names.str.contains(keyword, na=False)]
         if not matched.empty:
-            return str(matched.iloc[0]["板块名称"])
+            return str(matched.iloc[0][name_col])
     return fallback
 
 
@@ -1147,10 +1814,10 @@ def _primary_narrative(
     us10y_1d = _to_float(us10y.get("return_1d")) or 0.0
 
     top_industry_text = _industry_text(
-        pulse.get("zt_pool", pd.DataFrame()),
-        pulse.get("strong_pool", pd.DataFrame()),
-        drivers.get("industry_spot", pd.DataFrame()),
-        drivers.get("concept_spot", pd.DataFrame()),
+        _fresh_pulse_frame(pulse, "zt_pool"),
+        _fresh_pulse_frame(pulse, "strong_pool"),
+        _fresh_driver_frame(drivers, "industry_spot"),
+        _fresh_driver_frame(drivers, "concept_spot"),
     )
 
     qqqm = _find_snapshot(snapshots, "QQQM")
@@ -1211,7 +1878,7 @@ def _primary_narrative(
     if vix_latest >= 22:
         scores["gold_defense"] += 2
 
-    if any(keyword in top_industry_text for keyword in ["银行", "红利", "公用事业", "煤炭"]):
+    if any(keyword in top_industry_text for keyword in ["银行", "红利", "煤炭"]):
         scores["dividend_defense"] += 3
     if dividend_1d >= 0:
         scores["dividend_defense"] += 2
@@ -1241,7 +1908,7 @@ def _primary_narrative(
     if any(keyword in top_industry_text for keyword in ["银行", "券商", "保险", "非银", "白酒", "家电"]):
         scores["broad_market_repair"] += 1
 
-    if any(keyword in top_industry_text for keyword in ["电网", "电力", "公用事业", "特高压"]):
+    if any(keyword in top_industry_text for keyword in ["电网", "电力", "公用事业", "特高压", "储能", "逆变器"]):
         scores["power_utilities"] += 3
     if grid_1d >= 0:
         scores["power_utilities"] += 2
@@ -1266,8 +1933,19 @@ def _primary_narrative(
     for theme_name, boost in watch_boosts.items():
         scores[theme_name] += int(boost)
 
+    has_bank_dividend_keywords = any(keyword in top_industry_text for keyword in ["银行", "红利"])
+    has_power_utilities_keywords = any(keyword in top_industry_text for keyword in ["电网", "电力", "公用事业", "特高压", "储能", "逆变器"])
+
     theme = max(scores, key=scores.get)
     score = scores[theme]
+    if (
+        theme == "dividend_defense"
+        and has_power_utilities_keywords
+        and not has_bank_dividend_keywords
+        and scores["power_utilities"] >= scores["dividend_defense"] - 2
+    ):
+        theme = "power_utilities"
+        score = scores[theme]
     if score < 4:
         theme = "macro_background"
 
@@ -1341,8 +2019,8 @@ def _narrative_validation_lines(
     hstech = _find_snapshot(snapshots, "HSTECH")
     gld = _find_snapshot(snapshots, "GLD")
 
-    top_zt = " ".join(_top_categories(pulse.get("zt_pool", pd.DataFrame()), "所属行业"))
-    top_strong = " ".join(_top_categories(pulse.get("strong_pool", pd.DataFrame()), "所属行业"))
+    top_zt = " ".join(_top_categories(_fresh_pulse_frame(pulse, "zt_pool"), "所属行业"))
+    top_strong = " ".join(_top_categories(_fresh_pulse_frame(pulse, "strong_pool"), "所属行业"))
     lines = [f"当前主线候选: `{narrative['label']}`；背景宏观仍是 `{narrative['background_regime']}`。"]
 
     passed = 0
@@ -1550,9 +2228,11 @@ def _rotation_driver_lines(
     snapshots: List[BriefingSnapshot],
 ) -> List[str]:
     lines: List[str] = []
-    industry_spot = drivers.get("industry_spot", pd.DataFrame()) if drivers else pd.DataFrame()
-    concept_spot = drivers.get("concept_spot", pd.DataFrame()) if drivers else pd.DataFrame()
-    hot_rank = drivers.get("hot_rank", pd.DataFrame()) if drivers else pd.DataFrame()
+    industry_spot = _fresh_driver_frame(drivers or {}, "industry_spot") if drivers else pd.DataFrame()
+    concept_spot = _fresh_driver_frame(drivers or {}, "concept_spot") if drivers else pd.DataFrame()
+    hot_rank = _fresh_driver_frame(drivers or {}, "hot_rank") if drivers else pd.DataFrame()
+    zt_pool = _fresh_pulse_frame(pulse or {}, "zt_pool") if pulse else pd.DataFrame()
+    strong_pool = _fresh_pulse_frame(pulse or {}, "strong_pool") if pulse else pd.DataFrame()
 
     if not industry_spot.empty and "名称" in industry_spot.columns and "涨跌幅" in industry_spot.columns:
         frame = industry_spot.copy()
@@ -1573,12 +2253,21 @@ def _rotation_driver_lines(
                 + "。"
             )
     else:
-        top_zt = _top_categories(pulse.get("zt_pool", pd.DataFrame()), "所属行业")
-        top_strong = _top_categories(pulse.get("strong_pool", pd.DataFrame()), "所属行业")
+        top_zt = _top_categories(zt_pool, "所属行业")
+        top_strong = _top_categories(strong_pool, "所属行业")
         if top_zt:
             lines.append("盘面扩散更明显的方向在: " + "、".join(top_zt) + "。")
         if top_strong:
             lines.append("强势股池集中在: " + "、".join(top_strong) + "，说明主线仍偏这些方向。")
+
+    if (
+        not lines
+        and (
+            _stale_market_snapshot_detected(drivers or {}, ("industry_spot", "concept_spot", "hot_rank"))
+            or _stale_market_snapshot_detected(pulse or {}, ("zt_pool", "strong_pool"))
+        )
+    ):
+        lines.append("A股轮动快照未通过 freshness 校验，本轮先不把旧盘面当成今天主线依据。")
 
     if not concept_spot.empty and "名称" in concept_spot.columns and "涨跌幅" in concept_spot.columns:
         frame = concept_spot.copy()
@@ -1940,18 +2629,20 @@ def _liquidity_lines(config: Dict[str, Any]) -> List[str]:
         latest = frame.iloc[-1]
         north = _to_float(latest.get("北向资金净流入"))
         south = _to_float(latest.get("南向资金净流入"))
-        if abs(north) > 1e-6:
+        north_extreme = abs(north) >= 200 * 1e8
+        south_extreme = abs(south) >= 200 * 1e8
+        if abs(north) > 1e-6 and not north_extreme:
             direction = "净流入" if north >= 0 else "净流出"
             lines.append(f"北向资金当日{direction}约 {_fmt_yi(north)}。")
+        elif north_extreme:
+            lines.append("⚠️ 北向资金读数异常偏大，已暂不把该数值作为正文证据，需先复核口径后再使用。")
         else:
             lines.append("北向资金当日净买额尚未更新（盘中或收盘前通常为 0），今日改用南向资金、全市场主力流向和龙虎榜活跃度做代理。")
-        if abs(south) > 1e-6:
+        if abs(south) > 1e-6 and not south_extreme:
             direction = "净流入" if south >= 0 else "净流出"
             lines.append(f"南向资金当日{direction}约 {_fmt_yi(south)}，可作为 HSTECH 情绪承接的辅助观察。")
-            if abs(south) >= 200 * 1e8:
-                lines.append("⚠️ 南向资金读数偏大，请复核是否为单日口径、分市场合计口径或极端风险偏好切换。")
-        if abs(north) >= 200 * 1e8:
-            lines.append("⚠️ 北向资金读数偏大，请复核是否为单日口径或极端风险偏好切换。")
+        elif south_extreme:
+            lines.append("⚠️ 南向资金读数异常偏大，已暂不把该数值作为正文证据，需先复核是否为分市场合计或极端口径。")
 
     try:
         margin = collector.get_margin_trading()
@@ -1983,16 +2674,16 @@ def _positioning_lines(
 
     if vix >= 30 or theme == "energy_shock":
         return [
-            "仓位框架: 当前按高波动日处理，总仓位宜控制在 50% 左右，单次新增仓位不超过 10%。",
-            "执行上更适合‘先活下来再进攻’，不适合在极端新闻日一次性打满。",
+            "仓位框架: 当前按高波动日处理，整体风险暴露宜偏低，新增动作以小步确认为主。",
+            "执行上更适合‘先活下来再进攻’，不适合在极端新闻日把观察信号直接升级成大仓位动作。",
         ]
     if vix >= 25 or theme in {"defensive_riskoff", "gold_defense", "dividend_defense"}:
         return [
-            "仓位框架: 当前按偏防守处理，总仓位宜控制在 60% 左右，单次新增仓位不超过 15%。",
-            "如果验证点继续恶化，应优先降弹性仓位，再讨论抄底。",
+            "仓位框架: 当前按偏防守处理，先控制总风险暴露，不急着把观察信号直接升级成执行。",
+            "如果验证点继续恶化，应先降弹性、再谈抄底，不把单日修复误判成趋势反转。",
         ]
     return [
-        "仓位框架: 当前可以按常规节奏分批确认，总仓位上限可放在 70%-80%。",
+        "仓位框架: 当前仍以分批确认和观察扩散为主，不因为单日修复就快速放大风险暴露。",
         "若主线与校验继续共振，再逐步提高弹性资产权重。",
     ]
 
@@ -2110,7 +2801,69 @@ def _watchlist_technical_lines(snapshots: List[BriefingSnapshot]) -> List[str]:
     return [_technical_watchlist_line(item) for item in ordered]
 
 
-def _portfolio_lines(config: Dict[str, Any]) -> List[str]:
+def _portfolio_review_queue_from_holdings(
+    holdings: Sequence[Mapping[str, Any]],
+    holdings_status: Mapping[str, Mapping[str, Any]],
+    thesis_repo: ThesisRepository,
+) -> List[Dict[str, Any]]:
+    queue = build_thesis_review_queue(
+        [
+            {
+                "symbol": holding["symbol"],
+                "record": thesis_repo.get(holding["symbol"]),
+                "weight": float(dict(holdings_status.get(holding["symbol"]) or {}).get("weight", 0.0) or 0.0),
+                "pnl": float(dict(holdings_status.get(holding["symbol"]) or {}).get("pnl", 0.0) or 0.0),
+            }
+            for holding in holdings
+        ]
+    )
+    history_map: Dict[str, Mapping[str, Any]] = {}
+    if hasattr(thesis_repo, "load_review_queue"):
+        try:
+            history_map = {
+                str(key): dict(value or {})
+                for key, value in dict(thesis_repo.load_review_queue().get("history") or {}).items()
+                if str(key).strip()
+            }
+        except Exception:
+            history_map = {}
+    if not history_map:
+        return queue
+    enriched: List[Dict[str, Any]] = []
+    for item in queue:
+        row = dict(item or {})
+        history = dict(history_map.get(str(row.get("symbol") or "").strip()) or {})
+        if history.get("report_followup"):
+            row["report_followup"] = history.get("report_followup")
+        if history.get("last_run"):
+            row["last_run"] = history.get("last_run")
+        enriched.append(row)
+    return enriched
+
+
+def _portfolio_review_queue(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    portfolio_repo = PortfolioRepository()
+    thesis_repo = ThesisRepository()
+    holdings = portfolio_repo.list_holdings()
+    if not holdings:
+        return []
+    latest_prices: Dict[str, float] = {}
+    for holding in holdings:
+        try:
+            history = fetch_asset_history(holding["symbol"], holding["asset_type"], config)
+            latest_prices[holding["symbol"]] = compute_history_metrics(history)["last_close"]
+        except Exception:
+            latest_prices[holding["symbol"]] = float(holding.get("cost_basis", 0.0))
+    status = portfolio_repo.build_status(latest_prices)
+    holdings_status = {str(item.get("symbol")): item for item in list(status.get("holdings") or [])}
+    return _portfolio_review_queue_from_holdings(holdings, holdings_status, thesis_repo)
+
+
+def _review_queue_summary_line(review_queue: Sequence[Mapping[str, Any]], *, prefix: str = "优先复查 thesis:") -> str:
+    return summarize_review_queue_summary_line(list(review_queue or []), prefix=prefix, limit=2)
+
+
+def _portfolio_lines(config: Dict[str, Any], *, review_queue: Sequence[Mapping[str, Any]] | None = None) -> List[str]:
     portfolio_lines: List[str] = []
     portfolio_repo = PortfolioRepository()
     thesis_repo = ThesisRepository()
@@ -2118,7 +2871,7 @@ def _portfolio_lines(config: Dict[str, Any]) -> List[str]:
     if not holdings:
         return ["当前没有持仓记录，今天晨报只做观察池跟踪。"]
 
-    latest_prices = {}
+    latest_prices: Dict[str, float] = {}
     for holding in holdings:
         try:
             history = fetch_asset_history(holding["symbol"], holding["asset_type"], config)
@@ -2127,6 +2880,7 @@ def _portfolio_lines(config: Dict[str, Any]) -> List[str]:
             latest_prices[holding["symbol"]] = float(holding.get("cost_basis", 0.0))
 
     status = portfolio_repo.build_status(latest_prices)
+    holdings_status = {str(item.get("symbol")): item for item in list(status.get("holdings") or [])}
     portfolio_lines.append(f"组合市值约 {status['total_value']:.2f} {status['base_currency']}。")
     if status["holdings"]:
         top = max(status["holdings"], key=lambda row: row["weight"])
@@ -2139,6 +2893,20 @@ def _portfolio_lines(config: Dict[str, Any]) -> List[str]:
         portfolio_lines.append(f"地区暴露最高为 {top_region[0]}，占比 {top_region[1] * 100:.1f}%。")
     if top_sector:
         portfolio_lines.append(f"行业暴露最高为 {top_sector[0]}，占比 {top_sector[1] * 100:.1f}%。")
+    overlap_summary = build_portfolio_overlap_summary(status)
+    summary_line = str(overlap_summary.get("summary_line") or "").strip()
+    if summary_line:
+        portfolio_lines.append(summary_line)
+    overlap_label = str(overlap_summary.get("overlap_label") or "").strip()
+    conflict_label = str(overlap_summary.get("conflict_label") or "").strip()
+    if overlap_label or conflict_label:
+        portfolio_lines.append(f"组合联动: {overlap_label or '—'}；{conflict_label or '—'}")
+    style_summary_line = str(overlap_summary.get("style_summary_line") or "").strip()
+    if style_summary_line:
+        portfolio_lines.append(f"风格与方向: {style_summary_line}")
+    style_priority_hint = str(overlap_summary.get("style_priority_hint") or "").strip()
+    if style_priority_hint:
+        portfolio_lines.append(f"组合优先级: {style_priority_hint}")
 
     suggestions = portfolio_repo.rebalance_suggestions(latest_prices)
     if suggestions:
@@ -2151,6 +2919,11 @@ def _portfolio_lines(config: Dict[str, Any]) -> List[str]:
     portfolio_lines.append(f"Thesis 覆盖 {covered}/{len(holdings)} 个持仓。")
     if covered < len(holdings):
         portfolio_lines.append("仍有持仓未绑定 thesis，晨报无法自动检查其论点健康。")
+    queue = list(review_queue or _portfolio_review_queue_from_holdings(holdings, holdings_status, thesis_repo))
+    summary_line = _review_queue_summary_line(queue)
+    if summary_line:
+        portfolio_lines.append(summary_line)
+    portfolio_lines.extend(summarize_review_queue_followup_lines(queue))
     return portfolio_lines
 
 
@@ -2175,6 +2948,170 @@ def _calendar_lines(mode: str) -> List[str]:
     else:
         lines.append("收盘后复核 thesis、组合偏离和异常波动，决定明天是否要上调优先级。")
     return lines
+
+
+def _portfolio_priority_action_line(portfolio_lines: Sequence[str]) -> str:
+    for line in portfolio_lines:
+        text = str(line).strip()
+        if text.startswith("优先复查 thesis:"):
+            return text.replace("优先复查 thesis:", "今天优先复查 thesis:", 1)
+    return ""
+
+
+def _watchlist_review_trigger_lines(
+    snapshots: Sequence[BriefingSnapshot],
+    review_queue: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    snapshot_map = {str(item.symbol): item for item in snapshots}
+    lines: List[str] = []
+    for row in list(review_queue or []):
+        item = dict(row or {})
+        if str(item.get("priority") or "") != "高":
+            continue
+        symbol = str(item.get("symbol") or "").strip()
+        snapshot = snapshot_map.get(symbol)
+        if not snapshot:
+            continue
+        summary = str(item.get("summary") or "").strip()
+        thesis_state = str(item.get("thesis_state") or "").strip()
+        thesis_state_trigger = str(item.get("thesis_state_trigger") or "").strip()
+        thesis_state_summary = str(item.get("thesis_state_summary") or "").strip()
+        thesis_scope = str(item.get("thesis_scope") or "").strip()
+        event_detail = str(item.get("event_detail") or "").strip()
+        event_importance_label = str(item.get("event_importance_label") or "").strip()
+        impact_summary = str(item.get("impact_summary") or "").strip()
+        importance_reason = str(item.get("event_importance_reason") or "").strip()
+        event_label = str(item.get("event_monitor_label") or "").strip()
+        detail = "；".join(
+            part
+            for part in (
+                thesis_state,
+                thesis_state_trigger,
+                thesis_state_summary,
+                thesis_scope,
+                event_detail,
+                f"事件优先级 {event_importance_label}" if event_importance_label else "",
+                impact_summary,
+                importance_reason,
+                summary,
+                event_label,
+            )
+            if part
+        )
+        if detail:
+            lines.append(f"watchlist 触发 thesis 复查：{snapshot.name}({symbol}) 当前也在观察池，{detail}。")
+        else:
+            lines.append(f"watchlist 触发 thesis 复查：{snapshot.name}({symbol}) 当前也在观察池，先复查 thesis 再决定是否升级动作。")
+        if len(lines) >= 2:
+            break
+    return lines
+
+
+def _event_calendar_layer(event: Mapping[str, Any] | None) -> str:
+    blob = " ".join(
+        str(dict(event or {}).get(key) or "").strip().lower()
+        for key in ("title", "note")
+    )
+    if any(keyword in blob for keyword in ("财报", "业绩", "年报", "季报", "快报", "earnings")):
+        return "财报"
+    if any(
+        keyword in blob
+        for keyword in ("公告", "中标", "订单", "回购", "减持", "增持", "分红", "定增", "停牌", "复牌")
+    ):
+        return "公告"
+    if any(
+        keyword in blob
+        for keyword in ("政策", "国务院", "发改委", "工信部", "证监会", "财政部", "央行", "监管", "规划", "方案")
+    ):
+        return "政策"
+    if any(keyword in blob for keyword in ("产业", "行业", "主题", "展会", "峰会", "大会", "论坛", "景气")):
+        return "行业主题事件"
+    return "新闻"
+
+
+def _calendar_review_trigger_lines(
+    events: Sequence[Mapping[str, Any]],
+    review_queue: Sequence[Mapping[str, Any]],
+    snapshots: Sequence[BriefingSnapshot],
+) -> List[str]:
+    if not events or not review_queue:
+        return []
+    snapshot_map = {str(item.symbol): item for item in snapshots}
+    lines: List[str] = []
+    seen_symbols: set[str] = set()
+    for event in list(events or [])[:5]:
+        title = str(dict(event or {}).get("title") or "").strip()
+        note = str(dict(event or {}).get("note") or "").strip()
+        blob = f"{title} {note}".lower()
+        if not blob:
+            continue
+        event_layer = _event_calendar_layer(event)
+        for row in list(review_queue or []):
+            item = dict(row or {})
+            symbol = str(item.get("symbol") or "").strip()
+            if not symbol or symbol in seen_symbols or str(item.get("priority") or "") == "低":
+                continue
+            snapshot = snapshot_map.get(symbol)
+            keywords = [symbol.lower()]
+            if snapshot and snapshot.name:
+                keywords.append(str(snapshot.name).lower())
+            matched = next((keyword for keyword in keywords if keyword and keyword in blob), "")
+            review_layer = str(item.get("event_layer") or "").strip()
+            layer_matched = bool(review_layer and review_layer == event_layer and str(item.get("priority") or "") == "高")
+            if not matched and not layer_matched:
+                continue
+            name = snapshot.name if snapshot else symbol
+            action = str(item.get("recommended_action") or "").strip() or "复查 thesis"
+            time_text = str(dict(event or {}).get("time") or "待定").strip()
+            focus = "；".join(
+                part
+                for part in (
+                    str(item.get("event_detail") or "").strip(),
+                    str(item.get("thesis_state_trigger") or "").strip(),
+                    str(item.get("thesis_state_summary") or "").strip(),
+                    (
+                        f"事件优先级 {str(item.get('event_importance_label') or '').strip()}"
+                        if str(item.get("event_importance_label") or "").strip()
+                        else ""
+                    ),
+                    str(item.get("impact_summary") or "").strip(),
+                    str(item.get("thesis_scope") or "").strip(),
+                    str(item.get("event_importance_reason") or "").strip(),
+                )
+                if part
+            )
+            if matched:
+                line = f"事件日历触发 thesis 复查：{time_text} {title} 命中 {name}({symbol})，建议先{action}"
+            else:
+                line = (
+                    f"事件日历触发 thesis 复查：{time_text} {title} 属于 `{event_layer}` 层，"
+                    f"{name}({symbol}) 当前也卡在同层事件，建议先{action}"
+                )
+            if focus:
+                line += f"；当前焦点：{focus}"
+            lines.append(line + "。")
+            seen_symbols.add(symbol)
+            break
+        if len(lines) >= 2:
+            break
+    return lines
+
+
+def _review_queue_transition_lines(
+    review_queue: Sequence[Mapping[str, Any]],
+    *,
+    source: str,
+    as_of: str,
+) -> List[str]:
+    try:
+        payload = ThesisRepository().record_review_queue(
+            list(review_queue or []),
+            source=source,
+            as_of=as_of,
+        )
+    except Exception as exc:
+        return [f"thesis 复查队列状态未能写入，当前只展示当日排序：{exc}。"]
+    return summarize_review_queue_transitions(payload)
 
 
 def _event_rows(events: List[Dict[str, Any]]) -> List[List[str]]:
@@ -2292,36 +3229,45 @@ def _action_lines(
     if not snapshots:
         return ["先修复数据覆盖，再谈晨报动作。"]
 
-    strongest = max(snapshots, key=lambda item: item.signal_score)
+    strongest = _pick_theme_anchor(snapshots, narrative, key="signal_score")
     weakest = min(snapshots, key=lambda item: item.signal_score)
     gold = next((item for item in snapshots if item.sector == "黄金"), None)
     theme = str(narrative.get("theme", "macro_background"))
+    weekend = _is_weekend_briefing_day()
     lines: List[str] = []
     if theme == "energy_shock":
-        lines.append("今天先按‘能源冲击日’处理，优先做验证和控回撤，不把背景复苏叙事当成日内主导。")
+        lines.append("周末先按‘能源冲击日’复盘，下个交易日优先做验证和控回撤，不把背景复苏叙事当成日内主导。" if weekend else "今天先按‘能源冲击日’处理，优先做验证和控回撤，不把背景复苏叙事当成日内主导。")
     elif theme in {"defensive_riskoff", "gold_defense", "dividend_defense"}:
-        lines.append("今天先按‘防守优先’处理，动作顺序是减弹性、看验证、再考虑进攻。")
+        lines.append("周末先按‘防守优先’复盘，下个交易日动作顺序是减弹性、看验证、再考虑进攻。" if weekend else "今天先按‘防守优先’处理，动作顺序是减弹性、看验证、再考虑进攻。")
     elif theme == "broad_market_repair":
-        lines.append("今天更像指数修复日，先看宽基和金融权重能否继续扩散，再决定是否上调风险暴露。")
+        lines.append("周末更适合先按‘指数修复’复盘，下个交易日重点看宽基和金融权重能否继续扩散，再决定是否上调风险暴露。" if weekend else "今天更像指数修复日，先看宽基和金融权重能否继续扩散，再决定是否上调风险暴露。")
     elif theme == "power_utilities":
-        lines.append("今天先按‘电网/公用事业承接’处理，优先看高确定性链条是否继续拿到资金，而不是直接追高高弹性方向。")
+        lines.append("周末先按‘电网/公用事业承接’复盘，下个交易日优先看高确定性链条是否继续拿到资金，而不是直接追高高弹性方向。" if weekend else "今天先按‘电网/公用事业承接’处理，优先看高确定性链条是否继续拿到资金，而不是直接追高高弹性方向。")
     else:
-        lines.append(f"今天先围绕 `{narrative['label']}` 做跟踪，动作上先验证主线，再决定是否加大风险暴露。")
+        lines.append(f"周末先围绕 `{narrative['label']}` 做复盘，下个交易日动作上先验证主线，再决定是否加大风险暴露。" if weekend else f"今天先围绕 `{narrative['label']}` 做跟踪，动作上先验证主线，再决定是否加大风险暴露。")
 
     lines.extend(_positioning_lines(narrative, monitor_rows))
     strongest_rsi = float(strongest.technical.get("rsi", {}).get("RSI", 0.0))
-    strongest_tail = "已进入超买区，适合持有观察，不宜新增追高。" if strongest_rsi > 70 else "仍可作为主线验证器。"
-    lines.append(f"优先方向: {strongest.symbol} — 它当前最能代表主线延续性；{strongest_tail}")
+    strongest_tail = "已进入偏热区，更适合持有观察，不宜把它当成追高理由。" if strongest_rsi > 70 else "仍可作为主线验证器，但不等于今天就能直接做。"
+    lines.append(f"优先观察方向: {strongest.symbol} — 它当前最能代表主线延续性；{strongest_tail}")
     lines.append(f"谨慎对待 {weakest.symbol}：它当前最弱，更适合等确认而不是抢反弹。")
     if gold and theme in {"energy_shock", "defensive_riskoff", "gold_defense"}:
         lines.append(f"把 {gold.symbol} 当作防守情绪验证器，观察避险需求是否继续抬头。")
-    lines.append(_briefing_preflight_line(strongest, narrative, stage="today"))
-    lines.append("执行节奏: 先观察开盘 30 分钟风格延续性，确认后再执行。")
+    now = datetime.now()
+    after_open = now.hour >= 11
+    if weekend or after_open:
+        lines.append("观察节奏: 下个交易时段先看开盘后前 30 分钟风格是否延续、强势方向是否扩散，再决定是否把观察名单上调。")
+    else:
+        lines.append("观察节奏: 先看开盘 30 分钟风格是否延续、强势方向是否扩散，再决定是否把观察名单上调。")
     return lines[:6]
 
 
-def _judgement_mark(passed: bool) -> str:
-    return "✅" if passed else "❌"
+def _judgement_mark(passed: Optional[bool]) -> str:
+    if passed is True:
+        return "✅"
+    if passed is False:
+        return "❌"
+    return "⚠️"
 
 
 def _compact_headline_lines(
@@ -2356,28 +3302,32 @@ def _compact_validation_lines(
     narrative: Dict[str, Any],
     monitor_rows: List[Dict[str, Any]],
     pulse: Dict[str, Any],
+    *,
+    cross_market_available: bool,
 ) -> List[str]:
     monitor = _monitor_map(monitor_rows)
     brent = monitor.get("布伦特原油", {})
     dxy = monitor.get("美元指数", {})
     vix = monitor.get("VIX波动率", {})
-    top_zt = " ".join(_top_categories(pulse.get("zt_pool", pd.DataFrame()), "所属行业"))
-    top_strong = " ".join(_top_categories(pulse.get("strong_pool", pd.DataFrame()), "所属行业"))
+    top_zt = " ".join(_top_categories(_fresh_pulse_frame(pulse, "zt_pool"), "所属行业"))
+    top_strong = " ".join(_top_categories(_fresh_pulse_frame(pulse, "strong_pool"), "所属行业"))
 
     price_ok = False
     board_ok = False
-    cross_ok = False
+    cross_ok: Optional[bool] = False
     if narrative.get("theme") == "energy_shock":
         price_ok = _to_float(brent.get("return_1d")) >= 0.05 or _to_float(brent.get("return_5d")) >= 0.12
         board_ok = any(keyword in f"{top_zt} {top_strong}" for keyword in ["电力", "电网", "石油", "油气", "煤炭"])
-        cross_ok = _to_float(vix.get("latest")) >= 25 or _to_float(dxy.get("return_5d")) > 0.005
+        cross_ok = (_to_float(vix.get("latest")) >= 25 or _to_float(dxy.get("return_5d")) > 0.005) if cross_market_available else None
     else:
         price_ok = True
         board_ok = bool(top_zt or top_strong)
-        cross_ok = _to_float(vix.get("latest")) >= 0
+        cross_ok = (_to_float(vix.get("latest")) >= 0) if cross_market_available else None
 
-    passed = sum([price_ok, board_ok, cross_ok])
-    return [f"主线校验: 价格 {_judgement_mark(price_ok)} / 盘面 {_judgement_mark(board_ok)} / 跨市场 {_judgement_mark(cross_ok)}，通过 {passed}/3 项。"]
+    passed = sum(1 for item in [price_ok, board_ok, cross_ok] if item is True)
+    available = sum(1 for item in [price_ok, board_ok, cross_ok] if item is not None)
+    suffix = "（跨市场待补）" if cross_ok is None else ""
+    return [f"主线校验: 价格 {_judgement_mark(price_ok)} / 盘面 {_judgement_mark(board_ok)} / 跨市场 {_judgement_mark(cross_ok)}，通过 {passed}/{available} 项{suffix}。"]
 
 
 def _amount_delta_text(value: Optional[float]) -> str:
@@ -2400,6 +3350,7 @@ def _domestic_overview_rows(
     pulse: Dict[str, Any],
 ) -> tuple[List[List[str]], List[str]]:
     index_rows: List[List[str]] = []
+    lines: List[str] = []
     domestic = overview.get("domestic_indices", []) or []
     by_name = {str(item.get("name", "")): item for item in domestic}
     ordered_names = ["上证指数", "深证成指", "创业板指", "科创50", "沪深300", "中证1000", "中证2000"]
@@ -2417,27 +3368,41 @@ def _domestic_overview_rows(
                 _index_brief(row),
             ]
         )
+        weekly_summary = str(row.get("weekly_summary", "")).strip()
+        monthly_summary = str(row.get("monthly_summary", "")).strip()
+        if weekly_summary or monthly_summary:
+            structure_bits: List[str] = []
+            if weekly_summary:
+                structure_bits.append(f"周线 {weekly_summary}")
+            if monthly_summary:
+                structure_bits.append(f"月线 {monthly_summary}")
+            lines.append(f"{name}：{'；'.join(structure_bits)}。")
 
     breadth = overview.get("breadth", {}) or {}
-    lines: List[str] = []
     turnover = breadth.get("turnover")
     if turnover is not None:
         lines.append(f"全市场成交额: {turnover:.0f}亿，较前日口径暂缺，先按绝对量能判断活跃度。")
-    up_count = int(breadth.get("up_count", 0))
-    down_count = int(breadth.get("down_count", 0))
-    total = up_count + down_count + int(breadth.get("flat_count", 0))
-    if total > 0:
+    up_raw = breadth.get("up_count")
+    down_raw = breadth.get("down_count")
+    flat_raw = breadth.get("flat_count")
+    has_breadth = any(item is not None for item in (up_raw, down_raw, flat_raw))
+    up_count = int(up_raw or 0)
+    down_count = int(down_raw or 0)
+    total = up_count + down_count + int(flat_raw or 0)
+    if has_breadth and total > 0:
         ratio = up_count / max(down_count, 1)
         lines.append(f"涨跌家数: 上涨 {up_count} 家，下跌 {down_count} 家，涨跌比 {ratio:.2f}。")
-    prev_zt = pulse.get("prev_zt_pool", pd.DataFrame())
+    prev_zt = _fresh_pulse_frame(pulse, "prev_zt_pool")
     avg_prev = pd.to_numeric(prev_zt["涨跌幅"], errors="coerce").dropna().mean() if not prev_zt.empty and "涨跌幅" in prev_zt.columns else None
-    zt_count = len(pulse.get("zt_pool", pd.DataFrame()).index) if pulse else 0
-    dt_count = len(pulse.get("dt_pool", pd.DataFrame()).index) if pulse else 0
+    zt_count = len(_fresh_pulse_frame(pulse, "zt_pool").index) if pulse else 0
+    dt_count = len(_fresh_pulse_frame(pulse, "dt_pool").index) if pulse else 0
     if avg_prev is not None:
         relay = "好" if avg_prev > 0 else "差"
         lines.append(f"涨停/跌停: 涨停 {zt_count} 家，跌停 {dt_count} 家。昨日涨停今日表现 {avg_prev:+.2f}%（接力环境{relay}）。")
-    else:
+    elif zt_count or dt_count:
         lines.append(f"涨停/跌停: 涨停 {zt_count} 家，跌停 {dt_count} 家。")
+    else:
+        lines.append("涨停/跌停: 今日连板与跌停池数据未稳定更新，先不把 `0 家` 解读成情绪冰点。")
     return index_rows, lines
 
 
@@ -2452,26 +3417,36 @@ def _style_rows(
     szzs = domestic.get("上证指数", {})
 
     rows: List[List[str]] = []
-    small = _to_float(zz1000.get("change_pct"))
-    large = _to_float(hs300.get("change_pct"))
-    size_signal = "偏小盘" if small - large > 0.003 else "偏大盘" if large - small > 0.003 else "均衡"
+    small_raw = zz1000.get("change_pct")
+    large_raw = hs300.get("change_pct")
+    small = _to_float(small_raw) if small_raw is not None else None
+    large = _to_float(large_raw) if large_raw is not None else None
+    if small is None or large is None:
+        size_signal = "待补"
+    else:
+        size_signal = "偏小盘" if small - large > 0.003 else "偏大盘" if large - small > 0.003 else "均衡"
     rows.append(
         [
             "大盘 vs 小盘",
-            f"中证1000 {format_pct(small)}",
-            f"沪深300 {format_pct(large)}",
+            f"中证1000 {format_pct(small) if small is not None else '—'}",
+            f"沪深300 {format_pct(large) if large is not None else '—'}",
             size_signal,
         ]
     )
 
-    growth = _to_float(cyb.get("change_pct"))
-    value = _to_float(szzs.get("change_pct"))
-    gv_signal = "偏成长" if growth - value > 0.003 else "偏价值" if value - growth > 0.003 else "均衡"
+    growth_raw = cyb.get("change_pct")
+    value_raw = szzs.get("change_pct")
+    growth = _to_float(growth_raw) if growth_raw is not None else None
+    value = _to_float(value_raw) if value_raw is not None else None
+    if growth is None or value is None:
+        gv_signal = "待补"
+    else:
+        gv_signal = "偏成长" if growth - value > 0.003 else "偏价值" if value - growth > 0.003 else "均衡"
     rows.append(
         [
             "成长 vs 价值",
-            f"创业板指 {format_pct(growth)}",
-            f"上证指数 {format_pct(value)}",
+            f"创业板指 {format_pct(growth) if growth is not None else '—'}",
+            f"上证指数 {format_pct(value) if value is not None else '—'}",
             gv_signal,
         ]
     )
@@ -2481,18 +3456,20 @@ def _style_rows(
     strong_pct = None
     weak_pct = None
     if not industry_rows.empty:
-        for keyword in ["电力", "电网设备", "公用事业"]:
-            matched = industry_rows[industry_rows["板块名称"].astype(str).str.contains(keyword, na=False)]
-            if not matched.empty:
-                strong_name = str(matched.iloc[0]["板块名称"])
-                strong_pct = _to_float(pd.to_numeric(pd.Series([matched.iloc[0]["涨跌幅"]]), errors="coerce").iloc[0]) / 100
-                break
-        for keyword in ["消费电子", "半导体", "元件", "电子化学品"]:
-            matched = industry_rows[industry_rows["板块名称"].astype(str).str.contains(keyword, na=False)]
-            if not matched.empty:
-                weak_name = str(matched.iloc[0]["板块名称"])
-                weak_pct = _to_float(pd.to_numeric(pd.Series([matched.iloc[0]["涨跌幅"]]), errors="coerce").iloc[0]) / 100
-                break
+        name_col = next((column for column in ("板块名称", "名称") if column in industry_rows.columns), "")
+        if name_col:
+            for keyword in ["电力", "电网设备", "公用事业"]:
+                matched = industry_rows[industry_rows[name_col].astype(str).str.contains(keyword, na=False)]
+                if not matched.empty:
+                    strong_name = str(matched.iloc[0][name_col])
+                    strong_pct = _to_float(pd.to_numeric(pd.Series([matched.iloc[0]["涨跌幅"]]), errors="coerce").iloc[0]) / 100
+                    break
+            for keyword in ["消费电子", "半导体", "元件", "电子化学品"]:
+                matched = industry_rows[industry_rows[name_col].astype(str).str.contains(keyword, na=False)]
+                if not matched.empty:
+                    weak_name = str(matched.iloc[0][name_col])
+                    weak_pct = _to_float(pd.to_numeric(pd.Series([matched.iloc[0]["涨跌幅"]]), errors="coerce").iloc[0]) / 100
+                    break
     rows.append(
         [
             "内需 vs 外需",
@@ -2547,8 +3524,11 @@ def _generic_headline(title: str) -> bool:
 
 
 def _industry_rank_rows(drivers: Dict[str, Any], narrative: Dict[str, Any], news_report: Dict[str, Any]) -> List[List[str]]:
-    frame = drivers.get("industry_spot", pd.DataFrame())
-    if frame is None or frame.empty or "板块名称" not in frame.columns or "涨跌幅" not in frame.columns:
+    frame = _fresh_driver_frame(drivers, "industry_spot")
+    if frame is None or frame.empty or "涨跌幅" not in frame.columns:
+        return []
+    name_col = next((column for column in ("板块名称", "名称") if column in frame.columns), "")
+    if not name_col:
         return []
     ranked = frame.copy()
     ranked["涨跌幅"] = pd.to_numeric(ranked["涨跌幅"], errors="coerce")
@@ -2562,18 +3542,18 @@ def _industry_rank_rows(drivers: Dict[str, Any], narrative: Dict[str, Any], news
         rows.append(
             [
                 str(index),
-                str(row["板块名称"]),
+                str(row[name_col]),
                 f"{pd.to_numeric(pd.Series([row['涨跌幅']]), errors='coerce').iloc[0]:+.2f}%",
-                _industry_catalyst_text(str(row["板块名称"]), narrative, news_report, str(row.get("领涨股票", "")), is_leader=True),
+                _industry_catalyst_text(str(row[name_col]), narrative, news_report, str(row.get("领涨股票", "")), is_leader=True),
             ]
         )
     tail_labels = ["-5", "-4", "-3", "-2", "-1"]
     for label, (_, row) in zip(tail_labels, laggards.iterrows()):
-        cause = _industry_catalyst_text(str(row["板块名称"]), narrative, news_report, str(row.get("领涨股票", "")), is_leader=False)
+        cause = _industry_catalyst_text(str(row[name_col]), narrative, news_report, str(row.get("领涨股票", "")), is_leader=False)
         rows.append(
             [
                 label,
-                str(row["板块名称"]),
+                str(row[name_col]),
                 f"{pd.to_numeric(pd.Series([row['涨跌幅']]), errors='coerce').iloc[0]:+.2f}%",
                 cause,
             ]
@@ -2673,41 +3653,588 @@ def _core_event_lines(news_report: Dict[str, Any], catalyst_rows: List[List[str]
         source = str(item.get("source") or item.get("configured_source") or "未知源")
         category = str(item.get("category", "")).lower()
         transmission = transmission_map.get(category, "消息面 -> 风险偏好 -> 相关资产表现。")
-        meaning = meaning_map.get(category, "先作为观察项，不下强结论。")
+        meaning = meaning_map.get(category, "先把它当成新增情报线索，再结合盘面和后文验证点确认。")
         lines.append(f"**{item.get('title', '未命名事件')}** ({source})\n  → {transmission}\n  → {meaning}")
     if lines:
         return lines
-    for row in catalyst_rows[:3]:
-        lines.append(f"**{row[0]}**\n  → {row[2]}\n  → {row[3]}")
-    if lines:
-        return lines
-    return ["暂无可结构化的核心事件。"]
+    if catalyst_rows:
+        return ["当前没有可直接复核的核心事件；以下判断更多依赖主题推演和盘面代理，不把它们当成已验证事件。"]
+    return ["暂无可直接复核的核心事件。"]
 
 
-def _market_event_rows(news_report: Dict[str, Any], narrative: Dict[str, Any]) -> List[List[str]]:
-    impact = "、".join(_effective_asset_preference(narrative)[:3]) or "观察池核心资产"
-    rows: List[List[str]] = []
-    items = [item for item in (news_report.get("items", []) or []) if not _generic_headline(str(item.get("title", "")))]
-    for item in items[:3]:
-        category = str(item.get("category", "")).lower()
-        importance = "高" if category in {"fed", "earnings", "energy", "geopolitics"} else "中"
-        rows.append(
+def _briefing_market_signal_rows(
+    *,
+    narrative: Mapping[str, Any],
+    drivers: Mapping[str, Any],
+    pulse: Mapping[str, Any],
+    news_report: Mapping[str, Any],
+    a_share_watch_candidates: Sequence[Mapping[str, Any]] | None = None,
+    snapshots: Sequence[BriefingSnapshot] | None = None,
+) -> List[List[str]]:
+    buckets: Dict[str, List[List[str]]] = {
+        "theme": [],
+        "concept": [],
+        "hot": [],
+        "external": [],
+        "zt": [],
+        "strong": [],
+        "industry": [],
+        "snapshot": [],
+        "watch": [],
+    }
+    trade_date = _latest_trade_date_label(dict(pulse or {})) or datetime.now().strftime("%Y-%m-%d")
+    concept_spot = _fresh_driver_frame(drivers, "concept_spot")
+    industry_spot = _fresh_driver_frame(drivers, "industry_spot")
+    hot_rank = _fresh_driver_frame(drivers, "hot_rank")
+    zt_pool = _fresh_pulse_frame(pulse, "zt_pool")
+    strong_pool = _fresh_pulse_frame(pulse, "strong_pool")
+    industry_report = dict(drivers.get("industry_spot_report") or {})
+    industry_source = str(industry_report.get("source", "")).strip()
+    industry_is_standard = (
+        "sw_daily" in industry_source
+        or "ci_daily" in industry_source
+        or any(
+            any(token in str(row.get("框架来源", "")).strip() for token in ("申万", "中信"))
+            for row in industry_spot.head(3).to_dict("records")
+        )
+    )
+    specific_signal_types = {
+        "医药催化",
+        "AI应用催化",
+        "海外科技映射",
+        "地缘缓和",
+        "地缘扰动",
+        "避险交易",
+        "能源冲击",
+        "利率预期",
+    }
+
+    def _record_row(
+        bucket: str,
+        title: str,
+        *,
+        source: str,
+        strength: str,
+        impact: str,
+        signal_type: str,
+        signal_bias: str = "",
+        time_label: str = "",
+        link: str = "",
+    ) -> None:
+        cleaned = str(title).strip()
+        if not cleaned:
+            return
+        buckets.setdefault(bucket, []).append(
             [
-                "待定",
-                str(item.get("title", "未命名事件")),
-                "—",
-                importance,
+                time_label or trade_date,
+                cleaned,
+                source,
+                strength,
                 impact,
+                link,
+                signal_type,
+                signal_bias or _briefing_signal_conclusion(signal_type, impact),
             ]
         )
+
+    def _append_row(
+        title: str,
+        *,
+        bucket: str,
+        source: str,
+        strength: str,
+        impact: str,
+        signal_type: str,
+        signal_bias: str = "",
+        time_label: str = "",
+        link: str = "",
+    ) -> None:
+        _record_row(
+            bucket,
+            title,
+            source=source,
+            strength=strength,
+            impact=impact,
+            signal_type=signal_type,
+            signal_bias=signal_bias,
+            time_label=time_label,
+            link=link,
+        )
+
+    def _industry_display_contract(row: Mapping[str, Any]) -> tuple[str, str]:
+        framework_label = str(row.get("框架来源", "")).strip()
+        if framework_label:
+            return (f"A股{framework_label}走强", f"{framework_label}/盘面")
+        source = str(industry_report.get("source", "")).strip()
+        if "sw_daily" in source:
+            return ("A股申万行业走强", "申万行业/盘面")
+        if "ci_daily" in source:
+            return ("A股中信行业走强", "中信行业/盘面")
+        return ("A股行业走强", "A股行业/盘面")
+
+    def _structured_company_signal_rows(item: Mapping[str, Any]) -> List[Dict[str, str]]:
+        name = str(item.get("name", "")).strip()
+        symbol = str(item.get("symbol", "")).strip()
+        sector = str(dict(item.get("metadata") or {}).get("sector", "")).strip() or name or symbol or "A股观察池"
+        if not name:
+            return []
+        existing_titles = {
+            str(row[1]).strip()
+            for row in list(item.get("market_event_rows") or [])
+            if isinstance(row, (list, tuple)) and len(row) > 1 and str(row[1]).strip()
+        }
+        dimensions = dict(item.get("dimensions") or {})
+        catalyst = dict(dimensions.get("catalyst") or {})
+        candidate_items: List[Mapping[str, Any]] = [
+            *[dict(row or {}) for row in list(catalyst.get("evidence") or []) if isinstance(row, Mapping)],
+            *[
+                dict(row or {})
+                for row in list(dict(item.get("news_report") or {}).get("items") or [])
+                if isinstance(row, Mapping)
+            ],
+        ]
+        promoted: List[Dict[str, str]] = []
+        seen_titles: set[str] = set()
+        for row in candidate_items:
+            title = str(row.get("title", "")).strip()
+            if not title or title in existing_titles or title in seen_titles:
+                continue
+            source = str(row.get("source") or row.get("configured_source") or "公司级直接情报").strip()
+            configured_source = str(row.get("configured_source", "")).strip()
+            note = str(row.get("note") or row.get("lead_detail") or "").strip()
+            link = str(row.get("link", "")).strip()
+            time_label = (
+                str(row.get("published_at") or row.get("date") or row.get("as_of") or "").strip()
+                or trade_date
+            )
+            blob = " ".join([title, source, configured_source, note]).lower()
+            signal_type = ""
+            conclusion = ""
+            source_label = source or "公司级直接情报"
+            strength = "中"
+            if any(
+                token in blob
+                for token in (
+                    "irm_qa_sh",
+                    "irm_qa_sz",
+                    "互动易",
+                    "互动平台",
+                    "e互动",
+                    "投资者关系",
+                    "路演纪要",
+                    "调研纪要",
+                    "电话会",
+                    "业绩说明会",
+                )
+            ):
+                signal_type = "管理层口径确认"
+                source_label = "互动易/投资者关系"
+                conclusion = "偏中性偏利多，先把它当管理层口径或业务确认，不直接等同订单或业绩落地。"
+            elif (
+                configured_source.startswith("Tushare::")
+                or source in {"CNINFO", "SSE", "深交所", "上交所"}
+                or any(token in blob for token in ("业绩预告", "业绩快报", "分红", "中标", "订单", "问询", "回复函", "公告"))
+            ):
+                signal_type = note or "公司级直接情报"
+                source_label = source or "公司公告/结构化"
+                conclusion = "偏利多或偏谨慎，属于公司级直接情报，优先级高于泛主题新闻，但仍要看后续兑现。"
+            if not signal_type:
+                continue
+            promoted.append(
+                {
+                    "title": title,
+                    "source": source_label,
+                    "strength": strength,
+                    "impact": sector,
+                    "signal_type": signal_type,
+                    "conclusion": conclusion,
+                    "time_label": time_label,
+                    "link": link,
+                }
+            )
+            seen_titles.add(title)
+            if len(promoted) >= 2:
+                break
+        return promoted
+
+    for sector, count in _top_category_counts(
+        zt_pool,
+        "所属行业",
+        limit=2,
+    ):
+        signal_type, impact = _briefing_headline_signal(sector, "zt_pool")
+        if signal_type in specific_signal_types:
+            _append_row(
+                f"A股主题活跃：{impact}（涨停集中：{sector} {count}家）",
+                bucket="theme",
+                source="A股主题/涨停扩散",
+                strength="高" if count >= 3 else "中",
+                impact=impact,
+                signal_type=signal_type,
+            )
+        if signal_type == "信息环境：新闻/舆情脉冲":
+            signal_type = "主线活跃"
+            impact = sector
+        _append_row(
+            f"A股涨停集中：{sector}（{count}家）",
+            bucket="zt",
+            source="A股涨停/盘面",
+            strength="高" if count >= 3 else "中",
+            impact=impact,
+            signal_type=signal_type,
+        )
+
+    concept_leaders = _top_board_movers(
+        concept_spot,
+        name_columns=("名称", "板块名称"),
+        change_columns=("涨跌幅",),
+        limit=2,
+        min_abs_change=2.0,
+    )
+    for name, change_pct, leader_name, leader_change in concept_leaders:
+        if change_pct <= 0:
+            continue
+        signal_type, impact = _briefing_headline_signal(f"{name} {leader_name}", "concept")
+        if signal_type == "信息环境：新闻/舆情脉冲":
+            signal_type = "主线增强"
+            impact = name
+        title = f"A股概念领涨：{name}（{change_pct:+.2f}%）"
+        if leader_name:
+            title = f"{title}；领涨 {leader_name}（{leader_change:+.2f}%）"
+        _append_row(
+            title,
+            bucket="concept",
+            source="A股概念/盘面",
+            strength=_briefing_signal_strength(change_pct, high=0.05, medium=0.02),
+            impact=impact,
+            signal_type=signal_type,
+        )
+
+    industry_leaders = _top_board_movers(
+        industry_spot,
+        name_columns=("名称", "板块名称"),
+        change_columns=("涨跌幅",),
+        limit=2,
+        min_abs_change=1.5,
+    )
+    for name, change_pct, leader_name, leader_change in industry_leaders:
+        if change_pct <= 0:
+            continue
+        signal_type, impact = _briefing_headline_signal(f"{name} {leader_name}", "industry")
+        if signal_type == "信息环境：新闻/舆情脉冲":
+            signal_type = "行业催化"
+            impact = name
+        matched_row = next(
+            (
+                row
+                for row in industry_spot.to_dict("records")
+                if str(row.get("名称", row.get("板块名称", ""))).strip() == str(name).strip()
+            ),
+            {"名称": name},
+        )
+        title_prefix, source_label = _industry_display_contract(matched_row)
+        title = f"{title_prefix}：{name}（{change_pct:+.2f}%）"
+        if leader_name:
+            title = f"{title}；领涨 {leader_name}（{leader_change:+.2f}%）"
+        _append_row(
+            title,
+            bucket="industry",
+            source=source_label,
+            strength=_briefing_signal_strength(change_pct, high=0.04, medium=0.02),
+            impact=impact,
+            signal_type=signal_type,
+        )
+
+    hot_names = _top_named_movers(
+        hot_rank,
+        name_columns=("股票名称", "名称"),
+        change_columns=("涨跌幅",),
+        limit=3,
+        min_abs_change=3.0,
+    )
+    for name, change_pct in hot_names:
+        signal_type, impact = _briefing_headline_signal(name, "hot_rank")
+        if signal_type in specific_signal_types:
+            _append_row(
+                f"A股主题跟踪：{impact}（热股前排 {name}）",
+                bucket="theme",
+                source="A股主题/热股",
+                strength=_briefing_signal_strength(change_pct, high=0.08, medium=0.04),
+                impact=impact,
+                signal_type=signal_type,
+            )
+        if signal_type == "信息环境：新闻/舆情脉冲":
+            signal_type = "龙头确认" if abs(change_pct) >= 0.05 else "热度抬升"
+            impact = name
+        _append_row(
+            f"A股热股前排：{name}（{change_pct:+.2f}%）",
+            bucket="hot",
+            source="A股热度/个股",
+            strength=_briefing_signal_strength(change_pct, high=0.08, medium=0.04),
+            impact=impact,
+            signal_type=signal_type,
+        )
+
+    strong_names = _top_named_movers(
+        strong_pool,
+        name_columns=("名称",),
+        change_columns=("涨跌幅",),
+        limit=2,
+        min_abs_change=5.0,
+    )
+    for name, change_pct in strong_names:
+        signal_type, impact = _briefing_headline_signal(name, "strong_pool")
+        if signal_type in specific_signal_types:
+            _append_row(
+                f"A股主题跟踪：{impact}（强势股池 {name}）",
+                bucket="theme",
+                source="A股主题/强势股",
+                strength=_briefing_signal_strength(change_pct, high=0.08, medium=0.04),
+                impact=impact,
+                signal_type=signal_type,
+            )
+        if signal_type == "信息环境：新闻/舆情脉冲":
+            signal_type = "龙头确认" if abs(change_pct) >= 0.08 else "热度抬升"
+            impact = name
+        _append_row(
+            f"A股强势股池：{name}（{change_pct:+.2f}%）",
+            bucket="strong",
+            source="A股强势股/盘面",
+            strength=_briefing_signal_strength(change_pct, high=0.08, medium=0.04),
+            impact=impact,
+            signal_type=signal_type,
+        )
+
+    snapshot_candidates = sorted(
+        [
+            item
+            for item in list(snapshots or [])
+            if float(item.return_5d) >= 0.04 or float(item.return_1d) >= 0.015
+        ],
+        key=lambda item: max(float(item.return_5d), float(item.return_1d)),
+        reverse=True,
+    )
+    for item in snapshot_candidates[:2]:
+        signal_type, impact = _briefing_headline_signal(f"{item.name} {item.sector}", "watchlist")
+        if signal_type == "信息环境：新闻/舆情脉冲":
+            signal_type = "主线活跃"
+            impact = item.sector or item.name
+        _append_row(
+            f"观察资产走强：{item.name} ({item.symbol})（1日 {format_pct(item.return_1d)} / 5日 {format_pct(item.return_5d)}）",
+            bucket="snapshot",
+            source="观察池/跨市场",
+            strength=_briefing_signal_strength(max(float(item.return_1d), float(item.return_5d)), high=0.05, medium=0.02),
+            impact=impact,
+            signal_type=signal_type,
+        )
+
+    for item in list(a_share_watch_candidates or [])[:2]:
+        name = str(item.get("name", "")).strip()
+        symbol = str(item.get("symbol", "")).strip()
+        trade_state = str(item.get("trade_state", "")).strip() or "观察为主"
+        sector = str(dict(item.get("metadata") or {}).get("sector", "")).strip() or "A股观察池"
+        reuse_only = bool(item.get("briefing_reuse_only"))
+        if not name and not list(item.get("market_event_rows") or []):
+            continue
+        if not reuse_only and name:
+            signal_type, impact = _briefing_headline_signal(f"{name} {sector}", "a_share_watch")
+            if signal_type in specific_signal_types:
+                _append_row(
+                    f"A股主题跟踪：{impact}（观察池前排 {name}）",
+                    bucket="theme",
+                    source="A股主题/观察池",
+                    strength="中",
+                    impact=impact,
+                    signal_type=signal_type,
+                )
+            _append_row(
+                f"A股观察池前排：{name} ({symbol})，当前 `{trade_state}`",
+                bucket="watch",
+                source="A股观察池",
+                strength="中",
+                impact=sector,
+                signal_type="观察池前排",
+            )
+        for market_row in list(item.get("market_event_rows") or [])[:3]:
+            values = [str(part).strip() for part in list(market_row or [])]
+            if len(values) < 8:
+                continue
+            source = values[2] or "A股观察池"
+            if source not in {"同花顺主题成分", "交易所风险专题", "筹码分布专题", "个股资金流向专题", "卖方共识专题", "两融专题", "龙虎榜/打板专题", "申万行业框架", "中信行业框架", "互动易/投资者关系", "公司公告/结构化"}:
+                continue
+            row_signal = values[6] or ("主线归因" if source == "同花顺主题成分" else "风险提示")
+            if source in {"同花顺主题成分", "申万行业框架", "中信行业框架"}:
+                bucket = "theme"
+            elif source == "个股资金流向专题" and row_signal in {"资金承接", "主题资金共振"}:
+                bucket = "theme"
+            elif source == "卖方共识专题" and row_signal in {"卖方共识升温", "卖方覆盖提升"}:
+                bucket = "theme"
+            elif source == "筹码分布专题" and row_signal == "筹码确认":
+                bucket = "theme"
+            elif source == "龙虎榜/打板专题" and row_signal == "龙虎榜确认":
+                bucket = "theme"
+            elif source == "卖方共识专题":
+                bucket = "company"
+            elif source in {"互动易/投资者关系", "公司公告/结构化"}:
+                bucket = "company"
+            else:
+                bucket = "watch"
+            _append_row(
+                values[1],
+                bucket=bucket,
+                source=source,
+                strength=values[3] or "中",
+                impact=values[4] or sector,
+                signal_type=row_signal,
+                signal_bias=values[7],
+                time_label=values[0] or trade_date,
+            )
+        if not reuse_only:
+            for promoted_row in _structured_company_signal_rows(item)[:2]:
+                _append_row(
+                    promoted_row["title"],
+                    bucket="company",
+                    source=promoted_row["source"],
+                    strength=promoted_row["strength"],
+                    impact=promoted_row["impact"],
+                    signal_type=promoted_row["signal_type"],
+                    signal_bias=promoted_row["conclusion"],
+                    time_label=promoted_row["time_label"],
+                    link=promoted_row["link"],
+                )
+
+    for item in list(dict(news_report or {}).get("items") or [])[:8]:
+        title = str(item.get("title", "")).strip()
+        if not title:
+            continue
+        signal_type, impact = _briefing_headline_signal(title, str(item.get("category", "")))
+        if signal_type not in {"地缘缓和", "地缘扰动", "海外科技映射", "医药催化", "AI应用催化"}:
+            continue
+        _append_row(
+            title,
+            bucket="external",
+            source=str(item.get("source") or item.get("configured_source") or "外部情报").strip() or "外部情报",
+            strength="中",
+            impact=impact,
+            signal_type=signal_type,
+            time_label=str(item.get("published_at", "")).strip() or trade_date,
+            link=str(item.get("link", "")).strip(),
+        )
+
+    rows: List[List[str]] = []
+    seen_titles: set[str] = set()
+    seen_impacts: set[str] = set()
+
+    def _merge_bucket(bucket: str, limit: int) -> None:
+        if limit <= 0:
+            return
+        added = 0
+        for row in buckets.get(bucket, []):
+            title = str(row[1]).strip() if len(row) > 1 else ""
+            impact = str(row[4]).strip() if len(row) > 4 else ""
+            if not title or title in seen_titles or len(rows) >= 8:
+                continue
+            if bucket == "industry" and impact and impact in seen_impacts:
+                continue
+            seen_titles.add(title)
+            if impact:
+                seen_impacts.add(impact)
+            rows.append(row)
+            added += 1
+            if added >= limit:
+                break
+
+    # 晨报优先回答“今天A股在交易什么”和“有没有关键外部催化”，
+    # 再补广度和观察池，不让泛行业行把更具体的主题/龙头/地缘信号挤掉。
+    bucket_limits = (
+        (
+            ("theme", 2),
+            ("company", 2),
+            ("external", 2),
+            ("industry", 2),
+            ("concept", 2),
+            ("hot", 2),
+            ("zt", 1),
+            ("strong", 1),
+            ("snapshot", 1),
+            ("watch", 1),
+        )
+        if industry_is_standard
+        else (
+            ("theme", 2),
+            ("company", 2),
+            ("external", 2),
+            ("concept", 2),
+            ("hot", 2),
+            ("zt", 1),
+            ("strong", 1),
+            ("industry", 1),
+            ("snapshot", 1),
+            ("watch", 1),
+        )
+    )
+    for bucket, limit in bucket_limits:
+        _merge_bucket(bucket, limit)
+        if len(rows) >= 8:
+            return rows
+
+    for bucket in (
+        ("theme", "industry", "concept", "hot", "external", "company", "zt", "strong", "snapshot", "watch")
+        if industry_is_standard
+        else ("theme", "concept", "hot", "external", "company", "zt", "strong", "industry", "snapshot", "watch")
+    ):
+        _merge_bucket(bucket, 99)
+        if len(rows) >= 8:
+            break
+
     return rows
+
+
+def _market_event_rows(
+    events: List[Dict[str, Any]],
+    narrative: Dict[str, Any],
+    *,
+    drivers: Optional[Dict[str, Any]] = None,
+    pulse: Optional[Dict[str, Any]] = None,
+    news_report: Optional[Dict[str, Any]] = None,
+    a_share_watch_candidates: Optional[Sequence[Mapping[str, Any]]] = None,
+    snapshots: Optional[Sequence[BriefingSnapshot]] = None,
+) -> List[List[str]]:
+    impact = "、".join(_effective_asset_preference(narrative)[:3]) or "观察池核心资产"
+    rows: List[List[str]] = _briefing_market_signal_rows(
+        narrative=narrative,
+        drivers=drivers or {},
+        pulse=pulse or {},
+        news_report=news_report or {},
+        a_share_watch_candidates=a_share_watch_candidates or [],
+        snapshots=snapshots or [],
+    )
+    now = datetime.now()
+    for item in (events or [])[:5]:
+        importance = {"high": "高", "medium": "中", "low": "低"}.get(str(item.get("importance", "")).lower(), "中")
+        impact_targets = str(item.get("impact_targets", "") or item.get("impact", "") or impact).strip()
+        time_label = str(item.get("time") or item.get("date") or "待定")
+        if re.fullmatch(r"\d{2}:\d{2}", time_label):
+            hour, minute = [int(part) for part in time_label.split(":", 1)]
+            if (hour, minute) < (now.hour, now.minute):
+                time_label = f"下个交易日 {time_label}"
+        rows.append(
+            [
+                time_label,
+                str(item.get("title", "未命名事件")),
+                str(item.get("note", "") or "待补"),
+                importance,
+                impact_targets or impact,
+            ]
+        )
+    return rows[:8]
 
 
 def _theme_tracking_rows(
     narrative: Dict[str, Any],
     drivers: Dict[str, Any],
 ) -> List[List[str]]:
-    frame = drivers.get("industry_spot", pd.DataFrame())
+    frame = _fresh_driver_frame(drivers, "industry_spot")
     power = _board_name(frame, ["电网", "电力", "公用事业"], "电力/电网")
     energy = _board_name(frame, ["石油", "油气", "煤炭", "能源"], "能源/油气")
     dividend = _board_name(frame, ["银行", "公用事业", "煤炭", "红利"], "高股息/红利")
@@ -3181,10 +4708,16 @@ def _theme_tracking_lines(
 
 def _workflow_event_rows(events: List[Dict[str, Any]]) -> List[List[str]]:
     rows: List[List[str]] = []
+    now = datetime.now()
     for item in events[:5]:
+        time_label = str(item.get("time", "待定"))
+        if re.fullmatch(r"\d{2}:\d{2}", time_label):
+            hour, minute = [int(part) for part in time_label.split(":", 1)]
+            if (hour, minute) < (now.hour, now.minute):
+                time_label = f"下个交易日 {time_label}"
         rows.append(
             [
-                str(item.get("time", "待定")),
+                time_label,
                 str(item.get("title", "未命名动作")),
                 str(item.get("note", "")),
             ]
@@ -3199,8 +4732,8 @@ def _capital_flow_lines(
     snapshots: List[BriefingSnapshot],
 ) -> List[str]:
     lines: List[str] = []
-    top_zt = _top_categories(pulse.get("zt_pool", pd.DataFrame()), "所属行业")
-    top_strong = _top_categories(pulse.get("strong_pool", pd.DataFrame()), "所属行业")
+    top_zt = _top_categories(_fresh_pulse_frame(pulse, "zt_pool"), "所属行业")
+    top_strong = _top_categories(_fresh_pulse_frame(pulse, "strong_pool"), "所属行业")
     if top_zt:
         lines.append("涨停集中方向: " + "、".join(top_zt) + "，与当前主线基本一致。")
     if top_strong:
@@ -3236,6 +4769,16 @@ def _quality_lines(
             + "。今日把这些资产当方向参考，不当严格实时点位。"
         )
     return lines[:6]
+
+
+def _merge_quality_lines(runtime_notes: Sequence[str], quality_lines: Sequence[str]) -> List[str]:
+    merged: List[str] = []
+    for item in [*list(runtime_notes or []), *list(quality_lines or [])]:
+        text = str(item or "").strip()
+        if not text or text in merged:
+            continue
+        merged.append(text)
+    return merged
 
 
 def _verification_rows_v4(
@@ -3327,11 +4870,11 @@ def _yesterday_review_rows(snapshots: List[BriefingSnapshot], monitor_rows: List
 
 def _yesterday_review_summary_lines(rows: List[List[str]]) -> List[str]:
     if not rows:
-        return ["暂无昨日晨报归档，暂时无法自动回顾‘昨日验证点’。", "命中率: —。暂无可复盘记录。", "框架修正: —"]
+        return ["暂无昨日晨报归档，暂时无法自动回顾‘昨日验证点’。", "命中率: —。暂无可复盘记录。", "框架修正: 暂无自动回顾记录。"]
     hits = sum(1 for row in rows if row[-1] == "✅")
     total = len(rows)
     verdict = "连续准确" if hits == total else "需要局部修正" if hits <= total / 2 else "框架大体有效"
-    fix = "—" if hits >= max(total - 1, 1) else "若连续错在同一方向，应下调对应主线权重。"
+    fix = "暂无新增结构性修正。" if hits >= max(total - 1, 1) else "若连续错在同一方向，应下调对应主线权重。"
     return [f"命中率: {hits}/{total}。{verdict}", f"框架修正: {fix}"]
 
 
@@ -3354,6 +4897,19 @@ def _portfolio_table_rows(config: Dict[str, Any]) -> List[List[str]]:
         cost = float(holding.get("cost_basis", 0.0))
         pnl = latest / cost - 1 if cost else 0.0
         thesis = thesis_repo.get(holding["symbol"])
+        event_memory = summarize_thesis_event_memory(thesis)
+        state_memory = summarize_thesis_state_snapshot(thesis)
+        state_label = str(state_memory.get("state") or "").strip()
+        state_trigger = str(state_memory.get("trigger") or "").strip()
+        monitor_label = str(event_memory.get("monitor_label") or "持有观察")
+        thesis_scope = str(event_memory.get("thesis_scope") or "").strip()
+        if state_label and state_label != "维持":
+            state_text = state_label
+            if state_trigger:
+                state_text += f"({state_trigger})"
+            monitor_label = f"{state_text} / {monitor_label}"
+        if thesis_scope and thesis_scope != "待确认":
+            monitor_label = f"{thesis_scope} / {monitor_label}"
         rows.append(
             [
                 holding["symbol"],
@@ -3361,8 +4917,8 @@ def _portfolio_table_rows(config: Dict[str, Any]) -> List[List[str]]:
                 f"{cost:.3f}",
                 f"{latest:.3f}",
                 format_pct(pnl),
-                str((thesis or {}).get("core_hypothesis", "—"))[:24],
-                "持有观察",
+                str((thesis or {}).get("core_assumption") or (thesis or {}).get("core_hypothesis") or "—")[:24],
+                monitor_label,
             ]
         )
     return rows
@@ -3424,20 +4980,28 @@ def _appendix_earnings_rows(news_report: Dict[str, Any]) -> List[List[str]]:
 
 def _appendix_allocation_rows(narrative: Dict[str, Any], monitor_rows: List[Dict[str, Any]]) -> List[List[str]]:
     monitor = _monitor_map(monitor_rows)
-    vix = _to_float(monitor.get("VIX波动率", {}).get("latest"))
+    vix_row = monitor.get("VIX波动率", {}) or {}
+    has_vix = bool(vix_row)
+    vix = _to_float(vix_row.get("latest"))
     theme_assets = " / ".join(_effective_asset_preference(narrative)[:2]) or "高股息 / 现金"
-    if vix > 35:
+    if not has_vix:
+        applicable = "观察"
+        applicable_note = "波动代理缺失，先按主线观察，不把仓位建议抬到进取。"
+    elif vix > 35:
         applicable = "保守"
+        applicable_note = "结合 VIX 和主线执行，不和高波动对着干"
     elif vix > 25:
         applicable = "平衡"
+        applicable_note = "结合 VIX 和主线执行，不和高波动对着干"
     else:
         applicable = "进取"
+        applicable_note = "结合 VIX 和主线执行，不和高波动对着干"
     rows = [
         ["保守型", "≤40%", "高股息 + 中短债", "—", "维持防守，不参与主题追价"],
         ["平衡型", "40-70%", "红利 + 确定性成长", "主线方向小仓位", f"底仓不动，主线方向围绕 {theme_assets} 试探性配置"],
         ["进取型", "60-90%", "景气主线", "高弹性题材", "围绕主线做波段，单一主题≤20%"],
     ]
-    rows.append(["当日适用", applicable, theme_assets, "—", "结合 VIX 和主线执行，不和高波动对着干"])
+    rows.append(["当日适用", applicable, theme_assets, "—", applicable_note])
     return rows
 
 
@@ -3573,8 +5137,8 @@ def _noon_breadth(overview: Dict[str, Any], pulse: Dict[str, Any]) -> Dict[str, 
     up = int(breadth.get("up_count", 0))
     down = int(breadth.get("down_count", 0))
     ratio = up / down if down > 0 else 1.0
-    zt = len(pulse.get("zt_pool", pd.DataFrame()))
-    dt = len(pulse.get("dt_pool", pd.DataFrame()))
+    zt = len(_fresh_pulse_frame(pulse, "zt_pool"))
+    dt = len(_fresh_pulse_frame(pulse, "dt_pool"))
     risk_on = ratio > 2.0 or (up > down * 1.5 and zt > max(dt, 1) * 3)
     return {"up": up, "down": down, "ratio": ratio, "zt": zt, "dt": dt, "risk_on": risk_on}
 
@@ -3856,6 +5420,10 @@ def _build_noon_payload(
     watchlist_rows: List[List[str]],
     events: Dict[str, Any],
     config: Dict[str, Any],
+    review_queue: Sequence[Mapping[str, Any]] | None = None,
+    review_queue_transition_lines: Sequence[str] | None = None,
+    review_queue_action_lines: Sequence[str] | None = None,
+    calendar_review_trigger_lines: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
     """Build payload for noon briefing."""
     morning_md = _load_same_day_briefing("daily")
@@ -3863,13 +5431,19 @@ def _build_noon_payload(
     prior_headline = _parse_prior_headline(morning_md)
     eval_rows = _evaluate_prior_verification(prior_rows, snapshots, monitor_rows)
     domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
-    style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
+    style_rows = _style_rows(overview, _fresh_driver_frame(drivers, "industry_spot"))
     industry_rows = _industry_rank_rows(drivers, narrative, {})
+    watchlist_change_lines = (
+        list(review_queue_transition_lines or [])
+        + list(calendar_review_trigger_lines or [])
+        + _watchlist_change_lines(snapshots, morning_md or "")
+        + _watchlist_review_trigger_lines(snapshots, review_queue or [])
+    )
 
     return {
         "title": "午间盘中简报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "watchlist_change_lines": _watchlist_change_lines(snapshots, morning_md or ""),
+        "watchlist_change_lines": watchlist_change_lines,
         "morning_eval_rows": eval_rows,
         "morning_eval_fallback": "暂无今日晨报，跳过策略验证。" if not morning_md else "",
         "domestic_index_rows": domestic_index_rows,
@@ -3878,10 +5452,11 @@ def _build_noon_payload(
         "industry_rows": industry_rows,
         "watchlist_rows": watchlist_rows,
         "strategy_adjustment_lines": _noon_strategy_adjustment(prior_headline, eval_rows, snapshots, narrative, overview, pulse),
-        "afternoon_action_lines": _noon_action_lines(eval_rows, snapshots, narrative, monitor_rows, pulse, overview),
+        "afternoon_action_lines": list(review_queue_action_lines or [])
+        + _noon_action_lines(eval_rows, snapshots, narrative, monitor_rows, pulse, overview),
         "afternoon_verification_rows": _noon_verification_rows(snapshots, monitor_rows),
         "afternoon_event_rows": _workflow_event_rows(events),
-        "portfolio_lines": _portfolio_lines(config),
+        "portfolio_lines": _portfolio_lines(config, review_queue=review_queue),
         "portfolio_table_rows": _portfolio_table_rows(config),
     }
 
@@ -3899,6 +5474,10 @@ def _build_evening_payload(
     anomaly_report: Dict[str, Any],
     overnight_rows: List[List[str]],
     liquidity_lines: List[str],
+    review_queue: Sequence[Mapping[str, Any]] | None = None,
+    review_queue_transition_lines: Sequence[str] | None = None,
+    review_queue_action_lines: Sequence[str] | None = None,
+    calendar_review_trigger_lines: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
     """Build payload for evening briefing."""
     morning_md = _load_same_day_briefing("daily")
@@ -3906,16 +5485,22 @@ def _build_evening_payload(
     prior_headline = _parse_prior_headline(morning_md)
     eval_rows = _evaluate_prior_verification(prior_rows, snapshots, monitor_rows)
     domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
-    style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
+    style_rows = _style_rows(overview, _fresh_driver_frame(drivers, "industry_spot"))
     industry_rows = _industry_rank_rows(drivers, narrative, news_report)
     macro_asset_rows = _macro_asset_rows(monitor_rows, anomaly_report)
     catalyst_rows = _catalyst_rows(news_report, narrative)
     capital_flow_lines = _capital_flow_lines(pulse, drivers, liquidity_lines, snapshots)
+    watchlist_change_lines = (
+        list(review_queue_transition_lines or [])
+        + list(calendar_review_trigger_lines or [])
+        + _watchlist_change_lines(snapshots, morning_md or "")
+        + _watchlist_review_trigger_lines(snapshots, review_queue or [])
+    )
 
     return {
         "title": "收盘晚报",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "watchlist_change_lines": _watchlist_change_lines(snapshots, morning_md or ""),
+        "watchlist_change_lines": watchlist_change_lines,
         "full_day_eval_rows": eval_rows,
         "full_day_eval_fallback": "暂无今日晨报，跳过全日验证。" if not morning_md else "",
         "hit_rate_lines": _evening_hit_rate_summary(eval_rows),
@@ -3931,8 +5516,8 @@ def _build_evening_payload(
         "overnight_rows": overnight_rows,
         "tomorrow_outlook_lines": _tomorrow_outlook_lines(narrative, snapshots, monitor_rows, overnight_rows),
         "tomorrow_verification_rows": _tomorrow_verification_rows(snapshots, monitor_rows, narrative),
-        "tomorrow_action_lines": _tomorrow_action_lines(eval_rows, snapshots, narrative),
-        "portfolio_lines": _portfolio_lines(config),
+        "tomorrow_action_lines": list(review_queue_action_lines or []) + _tomorrow_action_lines(eval_rows, snapshots, narrative),
+        "portfolio_lines": _portfolio_lines(config, review_queue=review_queue),
         "portfolio_table_rows": _portfolio_table_rows(config),
         "appendix_technical_rows": _appendix_technical_rows(snapshots),
         "appendix_lhb_lines": _lhb_lines(pulse),
@@ -3971,7 +5556,7 @@ def _build_market_payload(
 ) -> Dict[str, Any]:
     market_analysis = build_market_analysis(config, overview, pulse, drivers)
     domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
-    style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
+    style_rows = _style_rows(overview, _fresh_driver_frame(drivers, "industry_spot"))
     industry_rows = _industry_rank_rows(drivers, narrative, news_report)
     macro_asset_rows = _macro_asset_rows(monitor_rows, anomaly_report)
     theme_tracking_rows = _theme_tracking_rows(narrative, drivers)
@@ -4031,6 +5616,10 @@ def _build_market_payload(
     }
 
 
+def _action_section_title() -> str:
+    return "1.2 周末怎么跟踪" if _is_weekend_briefing_day() else "1.2 今天怎么做"
+
+
 def _persist_briefing(markdown: str, mode: str) -> Path:
     reports_dir = _briefing_internal_dir()
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -4048,13 +5637,98 @@ def _briefing_internal_dir() -> Path:
     return resolve_project_path("reports/briefings/internal")
 
 
+def _load_same_day_stock_pick_market_event_rows(trade_date: str, *, limit: int = 4) -> List[List[str]]:
+    path = resolve_project_path(f"reports/stock_picks/final/stock_picks_cn_{trade_date}_final.md")
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    marker = "## 关键证据"
+    if marker not in text:
+        return []
+    _, remainder = text.split(marker, 1)
+    section = remainder.split("\n## ", 1)[0]
+    rows: List[List[str]] = []
+
+    def _priority(values: List[str]) -> tuple[int, int]:
+        title = str(values[1] if len(values) > 1 else "").strip()
+        source = str(values[2] if len(values) > 2 else "").strip()
+        signal = str(values[6] if len(values) > 6 else "").strip()
+        strong_score = {"高": 3, "中": 2, "低": 1}.get(str(values[3] if len(values) > 3 else "").strip(), 0)
+        source_score = 0
+        if source in {"互动易/投资者关系", "公司公告/结构化"}:
+            source_score = 7
+        elif source == "卖方共识专题":
+            source_score = 4
+        elif source in {"申万行业框架", "中信行业框架", "同花顺主题成分"}:
+            source_score = 2
+        signal_score = 0
+        if signal in {"管理层口径确认", "公司级直接情报"}:
+            signal_score = 7
+        elif signal == "卖方共识观察":
+            signal_score = 4
+        elif signal in {"标准行业归因", "行业/指数映射"}:
+            signal_score = 2
+        text_score = 0
+        if any(token in title for token in ("互动易", "投资者关系", "路演", "业绩说明会", "互动平台问答", "问答回复")):
+            text_score = 5
+        elif any(token in title for token in ("券商金股", "卖方共识")):
+            text_score = 4
+        return (source_score + signal_score + text_score, strong_score)
+    pattern = re.compile(
+        r"^- `市场情报`：(?P<title>.+)（(?P<source>[^（）]+?) / (?P<date>[^（）]+?)）；信号类型：`(?P<signal>[^`]+)`；信号强弱：`(?P<strength>[^`]+)`；主要影响：`(?P<impact>[^`]+)`；结论：(?P<conclusion>.+)$"
+    )
+    link_pattern = re.compile(r"^\[(?P<label>.+?)\]\((?P<link>https?://[^)]+)\)$")
+    for raw_line in section.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("- `市场情报`："):
+            continue
+        match = pattern.match(line)
+        if not match:
+            continue
+        title_blob = str(match.group("title") or "").strip()
+        title = title_blob
+        link = ""
+        link_match = link_pattern.match(title_blob)
+        if link_match:
+            title = str(link_match.group("label") or "").strip()
+            link = str(link_match.group("link") or "").strip()
+        rows.append(
+            [
+                str(match.group("date") or "").strip() or trade_date,
+                title,
+                str(match.group("source") or "").strip() or "今日stock_pick复用",
+                str(match.group("strength") or "").strip() or "中",
+                str(match.group("impact") or "").strip() or "A股观察池",
+                link,
+                str(match.group("signal") or "").strip() or "市场情报",
+                str(match.group("conclusion") or "").strip(),
+            ]
+        )
+    rows.sort(key=_priority, reverse=True)
+    return rows[:limit]
+
+
 def _export_pdf(markdown_text: str, pdf_path: Path) -> None:
     """Convert briefing markdown to styled PDF."""
     try:
-        from src.output.briefing_pdf import render_briefing_pdf
-        render_briefing_pdf(markdown_text, pdf_path)
+        from src.output.client_export import _export_pdf as _fast_export_pdf
+        from src.output.client_export import markdown_to_html
+
+        html_path = pdf_path.with_suffix(".html")
+        html_path.write_text(
+            markdown_to_html(markdown_text, pdf_path.stem, source_dir=pdf_path.parent),
+            encoding="utf-8",
+        )
+        _fast_export_pdf(markdown_text, html_path, pdf_path)
+        return
     except Exception:
-        pass
+        try:
+            from src.output.briefing_pdf import render_briefing_pdf
+
+            render_briefing_pdf(markdown_text, pdf_path)
+            return
+        except Exception:
+            pass
 
 
 def _render_briefing_charts(snapshots: List[BriefingSnapshot]) -> Dict[str, Dict[str, str]]:
@@ -4097,8 +5771,17 @@ def main() -> None:
     args = build_parser().parse_args()
     ensure_report_task_registered("briefing")
     setup_logger("ERROR")
-    config = load_config(args.config or None)
+    base_config = load_config(args.config or None)
+    config, runtime_notes = _client_final_runtime_overrides(
+        base_config,
+        client_final=bool(args.client_final),
+        explicit_config_path=str(args.config or ""),
+    )
     collector_timeout_seconds = float(config.get("briefing_collector_timeout_seconds", 15))
+    signal_timeout_seconds = max(
+        float(config.get("briefing_signal_timeout_seconds", collector_timeout_seconds) or collector_timeout_seconds),
+        collector_timeout_seconds,
+    )
     china_macro = load_china_macro_snapshot(config)
     global_proxy, global_proxy_note = _load_briefing_global_proxy(config)
     monitor_rows = _collect_monitor_rows(config)
@@ -4107,44 +5790,71 @@ def main() -> None:
 
     snapshots, alerts, watchlist_rows = _collect_snapshots(config, args.mode)
     proxy_contract = _briefing_proxy_contract(snapshots, config)
-    collection_warnings: List[str] = []
-    overview, warning = _timed_collect(
-        "市场概览",
-        lambda: MarketOverviewCollector(config).collect(),
-        fallback={},
-        timeout_seconds=collector_timeout_seconds,
+    collection_warnings: List[str] = list(runtime_notes)
+    initial_results, initial_warnings = _timed_collect_many(
+        {
+            "overview": (
+                "市场概览",
+                lambda: MarketOverviewCollector(config).collect(),
+                {},
+                collector_timeout_seconds,
+            ),
+            "pulse": (
+                "市场脉冲",
+                lambda: MarketPulseCollector(config).collect(),
+                {},
+                signal_timeout_seconds,
+            ),
+            "drivers": (
+                "市场驱动",
+                lambda: MarketDriversCollector(config).collect(),
+                {},
+                signal_timeout_seconds,
+            ),
+            "news_report": (
+                "新闻覆盖",
+                lambda: _news_report(snapshots, china_macro, global_proxy, config, args.news_source),
+                {"items": [], "lines": []},
+                max(collector_timeout_seconds, 12),
+            ),
+            "events": (
+                "事件日历",
+                lambda: EventsCollector(config).collect(mode=args.mode),
+                [],
+                collector_timeout_seconds,
+            ),
+        }
     )
-    if warning:
-        collection_warnings.append(warning)
-    pulse, warning = _timed_collect(
-        "市场脉冲",
-        lambda: MarketPulseCollector(config).collect(),
-        fallback={},
-        timeout_seconds=collector_timeout_seconds,
+    collection_warnings.extend(initial_warnings)
+    overview = dict(initial_results.get("overview") or {})
+    pulse = dict(initial_results.get("pulse") or {})
+    drivers = dict(initial_results.get("drivers") or {})
+    news_report = dict(initial_results.get("news_report") or {"items": [], "lines": []})
+    events = list(initial_results.get("events") or [])
+    preliminary_narrative = _primary_narrative(
+        news_report,
+        monitor_rows,
+        pulse,
+        snapshots,
+        drivers,
+        regime_result,
+        {},
     )
-    if warning:
-        collection_warnings.append(warning)
-    drivers, warning = _timed_collect(
-        "市场驱动",
-        lambda: MarketDriversCollector(config).collect(),
-        fallback={},
-        timeout_seconds=collector_timeout_seconds,
-    )
-    if warning:
-        collection_warnings.append(warning)
     news_report, warning = _timed_collect(
-        "新闻覆盖",
-        lambda: _news_report(snapshots, china_macro, global_proxy, config, args.news_source),
-        fallback={"items": [], "lines": []},
-        timeout_seconds=max(collector_timeout_seconds, 20),
-    )
-    if warning:
-        collection_warnings.append(warning)
-    events, warning = _timed_collect(
-        "事件日历",
-        lambda: EventsCollector(config).collect(mode=args.mode),
-        fallback=[],
-        timeout_seconds=collector_timeout_seconds,
+        "晨报情报回填",
+        lambda: _backfill_briefing_news_report(
+            news_report,
+            config=config,
+            narrative=preliminary_narrative,
+            drivers=drivers,
+            pulse=pulse,
+            snapshots=snapshots,
+        ),
+        fallback=dict(news_report),
+        timeout_seconds=max(
+            float(config.get("briefing_backfill_timeout_seconds", collector_timeout_seconds) or collector_timeout_seconds),
+            8.0,
+        ),
     )
     if warning:
         collection_warnings.append(warning)
@@ -4153,6 +5863,20 @@ def main() -> None:
     a_share_watch_meta: Dict[str, Any] = {}
     a_share_watch_candidates: List[Dict[str, Any]] = []
     if args.mode in {"daily", "weekly", "market"}:
+        trade_date = datetime.now().strftime("%Y-%m-%d")
+        stock_pick_fallback_rows = _load_same_day_stock_pick_market_event_rows(trade_date)
+        stock_pick_fallback_candidates: List[Dict[str, Any]] = []
+        if stock_pick_fallback_rows:
+            stock_pick_fallback_candidates = [
+                {
+                    "name": "",
+                    "symbol": "",
+                    "trade_state": "观察为主",
+                    "metadata": {"sector": "A股观察池"},
+                    "briefing_reuse_only": True,
+                    "market_event_rows": stock_pick_fallback_rows,
+                }
+            ]
         a_share_watch_context = _briefing_shared_market_context(
             config,
             china_macro=china_macro,
@@ -4164,10 +5888,36 @@ def main() -> None:
             pulse=pulse,
             events=events,
         )
-        a_share_watch_rows, a_share_watch_lines, a_share_watch_meta, a_share_watch_candidates = _briefing_a_share_watch_rows(
-            config,
-            shared_context=a_share_watch_context,
+        (
+            a_share_watch_rows,
+            a_share_watch_lines,
+            a_share_watch_meta,
+            a_share_watch_candidates,
+        ), warning = _timed_collect(
+            "A股观察池",
+            lambda: _briefing_a_share_watch_rows(
+                config,
+                shared_context=a_share_watch_context,
+            ),
+            fallback=(
+                [],
+                (
+                    ["A 股全市场观察池拉取超时，本轮已回退复用今日 `stock_pick` 已确认的 A 股证据。"]
+                    if stock_pick_fallback_rows
+                    else ["A 股全市场观察池拉取超时，本轮先保留已确认的宏观、盘面和外部情报。"]
+                ),
+                {
+                    "enabled": True,
+                    "mode": "timeout_stock_pick_fallback" if stock_pick_fallback_rows else "timeout",
+                    "fallback_source": "same_day_stock_pick" if stock_pick_fallback_rows else "",
+                },
+                stock_pick_fallback_candidates,
+            ),
+            timeout_seconds=max(float(config.get("briefing_a_share_watch_timeout_seconds", 20) or 20), 8.0),
         )
+        if warning:
+            collection_warnings.append(warning)
+        a_share_watch_candidates = attach_portfolio_overlap_summaries(a_share_watch_candidates, config)
     narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime_result, a_share_watch_meta)
     anomaly_report = _anomaly_report(snapshots, monitor_rows)
     liquidity_lines = _liquidity_lines(config)
@@ -4197,11 +5947,25 @@ def main() -> None:
 
     overnight_rows = _overnight_rows(overview)
     alerts = _monitor_alerts(monitor_rows) + list(alerts or [])
+    review_queue = _portfolio_review_queue(config)
+    review_queue_transition_lines: List[str] = []
+    review_queue_action_lines = summarize_review_queue_action_lines(review_queue)
+    calendar_review_trigger_lines = _calendar_review_trigger_lines(events, review_queue, snapshots)
+    if args.mode in {"daily", "weekly", "noon", "evening"}:
+        review_queue_transition_lines = _review_queue_transition_lines(
+            review_queue,
+            source=f"briefing_{args.mode}",
+            as_of=generated_at,
+        )
 
     if args.mode == "noon":
         payload = _build_noon_payload(
             snapshots, monitor_rows, overview, pulse, drivers,
             narrative, watchlist_rows, events, config,
+            review_queue=review_queue,
+            review_queue_transition_lines=review_queue_transition_lines,
+            review_queue_action_lines=review_queue_action_lines,
+            calendar_review_trigger_lines=calendar_review_trigger_lines,
         )
         rendered = BriefingRenderer().render_noon(payload)
     elif args.mode == "evening":
@@ -4209,6 +5973,10 @@ def main() -> None:
             snapshots, monitor_rows, overview, pulse, drivers,
             narrative, news_report, watchlist_rows, config,
             anomaly_report, overnight_rows, liquidity_lines,
+            review_queue=review_queue,
+            review_queue_transition_lines=review_queue_transition_lines,
+            review_queue_action_lines=review_queue_action_lines,
+            calendar_review_trigger_lines=calendar_review_trigger_lines,
         )
         rendered = BriefingRenderer().render_evening(payload)
     elif args.mode == "market":
@@ -4235,7 +6003,10 @@ def main() -> None:
             missing_sources=missing_sources,
             macro_items=macro_items,
             alerts=alerts,
-            quality_lines=_quality_lines(news_report, anomaly_report, monitor_rows) + collection_warnings,
+            quality_lines=_merge_quality_lines(
+                collection_warnings,
+                _quality_lines(news_report, anomaly_report, monitor_rows),
+            ),
             proxy_contract=proxy_contract,
             evidence_rows=evidence_rows,
         )
@@ -4244,26 +6015,48 @@ def main() -> None:
         yesterday_rows = _yesterday_review_rows(snapshots, monitor_rows)
         yesterday_lines = _yesterday_review_summary_lines(yesterday_rows)
         domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
-        style_rows = _style_rows(overview, drivers.get("industry_spot", pd.DataFrame()))
+        style_rows = _style_rows(overview, _fresh_driver_frame(drivers, "industry_spot"))
         industry_rows = _industry_rank_rows(drivers, narrative, news_report)
         macro_asset_rows = _macro_asset_rows(monitor_rows, anomaly_report)
         catalyst_rows = _catalyst_rows(news_report, narrative)
         theme_tracking_rows = _theme_tracking_rows(narrative, drivers)
         theme_tracking_lines = _theme_tracking_lines(narrative, theme_tracking_rows, args.mode)
         capital_flow_lines = _capital_flow_lines(pulse, drivers, liquidity_lines, snapshots)
-        quality_lines = _quality_lines(news_report, anomaly_report, monitor_rows) + collection_warnings
+        quality_lines = _merge_quality_lines(
+            collection_warnings,
+            _quality_lines(news_report, anomaly_report, monitor_rows),
+        )
         verification_rows = _verification_rows_v4(snapshots, monitor_rows)
-        portfolio_lines = _portfolio_lines(config)
+        portfolio_lines = _portfolio_lines(config, review_queue=review_queue)
         portfolio_table_rows = _portfolio_table_rows(config)
         briefing_charts = _render_briefing_charts(snapshots)
+        action_lines = _action_lines(snapshots, narrative, monitor_rows)
+        review_action_line = _portfolio_priority_action_line(portfolio_lines)
+        watchlist_trigger_lines = _watchlist_review_trigger_lines(snapshots, review_queue)
+        if review_queue_transition_lines:
+            action_lines = [*review_queue_transition_lines, *action_lines]
+        if calendar_review_trigger_lines:
+            action_lines = [*calendar_review_trigger_lines[:2], *action_lines]
+        if review_action_line:
+            action_lines = [review_action_line, *action_lines]
+        if review_queue_action_lines:
+            action_lines = [*review_queue_action_lines, *action_lines]
+        if watchlist_trigger_lines:
+            action_lines = [*watchlist_trigger_lines[:2], *action_lines]
 
         payload = {
             "title": "每日晨报" if args.mode == "daily" else "每周周报",
             "generated_at": generated_at,
+            "news_report": news_report,
             "data_coverage": data_coverage,
             "missing_sources": missing_sources,
             "headline_lines": _compact_headline_lines(narrative, china_macro, monitor_rows, pulse)
-            + _compact_validation_lines(narrative, monitor_rows, pulse),
+            + _compact_validation_lines(
+                narrative,
+                monitor_rows,
+                pulse,
+                cross_market_available=(not bool(global_proxy_note) and bool(monitor_rows)),
+            ),
             "macro_items": macro_items,
             "regime_reasoning_lines": list(regime_result.get("reasoning") or []),
             "regime": regime_result,
@@ -4283,7 +6076,15 @@ def main() -> None:
             "core_event_lines": _core_event_lines(news_report, catalyst_rows),
             "theme_tracking_rows": theme_tracking_rows,
             "theme_tracking_lines": theme_tracking_lines,
-            "market_event_rows": _market_event_rows(news_report, narrative),
+            "market_event_rows": _market_event_rows(
+                events,
+                narrative,
+                drivers=drivers,
+                pulse=pulse,
+                news_report=news_report,
+                a_share_watch_candidates=a_share_watch_candidates,
+                snapshots=snapshots,
+            ),
             "workflow_event_rows": _workflow_event_rows(events),
             "capital_flow_lines": capital_flow_lines,
             "quality_lines": quality_lines,
@@ -4300,7 +6101,8 @@ def main() -> None:
             "watchlist_technical_lines": _watchlist_technical_lines(snapshots),
             "sentiment_lines": _sentiment_lines(snapshots, config),
             "alerts": alerts or ["当前没有触发强提醒，但仍需关注强弱方向是否在盘中发生切换。"],
-            "action_lines": _action_lines(snapshots, narrative, monitor_rows),
+            "action_lines": action_lines[:6],
+            "action_section_title": _action_section_title(),
             "charts": briefing_charts,
             "a_share_watch_meta": a_share_watch_meta,
             "a_share_watch_candidates": a_share_watch_candidates,
@@ -4314,9 +6116,71 @@ def main() -> None:
         return
 
     if args.mode in {"daily", "weekly"}:
+        catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
+        if args.client_final:
+            review_lookup = load_catalyst_web_review(catalyst_review_path)
+            if review_lookup:
+                payload["a_share_watch_candidates"] = [
+                    attach_catalyst_web_review_to_analysis(item, review_lookup)
+                    for item in list(payload.get("a_share_watch_candidates") or [])
+                ]
         client_markdown = ClientReportRenderer().render_briefing(payload)
-        findings = check_generic_client_report(client_markdown, "briefing", source_text=rendered)
+        editor_packet = build_briefing_editor_packet({**payload, "mode": args.mode})
+        editor_prompt = render_financial_editor_prompt(editor_packet)
+        findings = check_generic_client_report(
+            client_markdown,
+            "briefing",
+            source_text=rendered,
+            editor_theme_playbook=editor_packet.get("theme_playbook") or {},
+            editor_prompt_text=editor_prompt,
+            event_digest_contract=editor_packet.get("event_digest") or {},
+            what_changed_contract=editor_packet.get("what_changed") or {},
+        )
         output_path = resolve_project_path("reports/briefings/final") / f"{args.mode}_briefing_{str(payload.get('generated_at', ''))[:10]}_client_final.md"
+        catalyst_packet = build_catalyst_web_review_packet(
+            report_type="briefing",
+            subject=f"{args.mode}_briefing {str(payload.get('generated_at', ''))[:10]}",
+            generated_at=str(payload.get("generated_at", "")),
+            analyses=list(payload.get("a_share_watch_candidates") or []),
+        )
+        text_sidecars = {
+            "editor_prompt": (
+                internal_sidecar_path(detail_path, "editor_prompt.md"),
+                editor_prompt,
+            )
+        }
+        json_sidecars = {
+            "editor_payload": (
+                internal_sidecar_path(detail_path, "editor_payload.json"),
+                editor_packet,
+            )
+        }
+        if list(catalyst_packet.get("items") or []):
+            text_sidecars.update(
+                {
+                    "catalyst_web_review_prompt": (
+                        internal_sidecar_path(detail_path, "catalyst_web_review_prompt.md"),
+                        render_catalyst_web_review_prompt(catalyst_packet),
+                    ),
+                    "catalyst_web_review": (
+                        internal_sidecar_path(detail_path, "catalyst_web_review.md"),
+                        render_catalyst_web_review_scaffold(catalyst_packet),
+                    ),
+                }
+            )
+            json_sidecars.update(
+                {
+                    "catalyst_web_review_payload": (
+                        internal_sidecar_path(detail_path, "catalyst_web_review_payload.json"),
+                        catalyst_packet,
+                )
+            }
+        )
+        elif catalyst_review_path.exists():
+            text_sidecars["catalyst_web_review"] = (
+                catalyst_review_path,
+                catalyst_review_path.read_text(encoding="utf-8"),
+            )
         bundle = finalize_client_markdown(
             report_type="briefing",
             client_markdown=client_markdown,
@@ -4326,10 +6190,24 @@ def main() -> None:
             extra_manifest={
                 "mode": args.mode,
                 "a_share_watch": payload.get("a_share_watch_meta", {}),
+                "market_snapshot_contract": _market_snapshot_contract(payload),
                 "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
                 "proxy_contract": dict(payload.get("proxy_contract") or {}),
+                "theme_playbook_contract": summarize_theme_playbook_contract(editor_packet.get("theme_playbook") or {}),
+                "event_digest_contract": summarize_event_digest_contract(editor_packet.get("event_digest") or {}),
+                "what_changed_contract": summarize_what_changed_contract(editor_packet.get("what_changed") or {}),
             },
-            release_checker=lambda markdown, source_text: check_generic_client_report(markdown, "briefing", source_text=source_text),
+            release_checker=lambda markdown, source_text: check_generic_client_report(
+                markdown,
+                "briefing",
+                source_text=source_text,
+                editor_theme_playbook=editor_packet.get("theme_playbook") or {},
+                editor_prompt_text=editor_prompt,
+                event_digest_contract=editor_packet.get("event_digest") or {},
+                what_changed_contract=editor_packet.get("what_changed") or {},
+            ),
+            text_sidecars=text_sidecars,
+            json_sidecars=json_sidecars,
         )
         print(client_markdown)
         from src.commands.report_guard import exported_bundle_lines
@@ -4338,8 +6216,68 @@ def main() -> None:
             print(f"\n{line}" if index == 0 else line)
         return
 
-    findings = check_generic_client_report(rendered, "briefing")
+    editor_packet = build_briefing_editor_packet({**payload, "mode": args.mode})
+    editor_prompt = render_financial_editor_prompt(editor_packet)
+    findings = check_generic_client_report(
+        rendered,
+        "briefing",
+        editor_theme_playbook=editor_packet.get("theme_playbook") or {},
+        editor_prompt_text=editor_prompt,
+        event_digest_contract=editor_packet.get("event_digest") or {},
+        what_changed_contract=editor_packet.get("what_changed") or {},
+    )
     output_path = resolve_project_path("reports/briefings/final") / f"{args.mode}_briefing_{datetime.now().strftime('%Y-%m-%d')}_client_final.md"
+    catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
+    review_lookup = load_catalyst_web_review(catalyst_review_path)
+    if review_lookup:
+        payload["a_share_watch_candidates"] = [
+            attach_catalyst_web_review_to_analysis(item, review_lookup)
+            for item in list(payload.get("a_share_watch_candidates") or [])
+        ]
+    catalyst_packet = build_catalyst_web_review_packet(
+        report_type="briefing",
+        subject=f"{args.mode}_briefing {datetime.now().strftime('%Y-%m-%d')}",
+        generated_at=str(payload.get("generated_at", "")),
+        analyses=list(payload.get("a_share_watch_candidates") or []),
+    )
+    text_sidecars = {
+        "editor_prompt": (
+            internal_sidecar_path(detail_path, "editor_prompt.md"),
+            editor_prompt,
+        )
+    }
+    json_sidecars = {
+        "editor_payload": (
+            internal_sidecar_path(detail_path, "editor_payload.json"),
+            editor_packet,
+        )
+    }
+    if list(catalyst_packet.get("items") or []):
+        text_sidecars.update(
+            {
+                "catalyst_web_review_prompt": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review_prompt.md"),
+                    render_catalyst_web_review_prompt(catalyst_packet),
+                ),
+                "catalyst_web_review": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review.md"),
+                    render_catalyst_web_review_scaffold(catalyst_packet),
+                ),
+            }
+        )
+        json_sidecars.update(
+            {
+                "catalyst_web_review_payload": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review_payload.json"),
+                    catalyst_packet,
+                )
+            }
+        )
+    elif catalyst_review_path.exists():
+        text_sidecars["catalyst_web_review"] = (
+            catalyst_review_path,
+            catalyst_review_path.read_text(encoding="utf-8"),
+        )
     bundle = finalize_client_markdown(
         report_type="briefing",
         client_markdown=rendered,
@@ -4349,10 +6287,24 @@ def main() -> None:
         extra_manifest={
             "mode": args.mode,
             "a_share_watch": payload.get("a_share_watch_meta", {}),
+            "market_snapshot_contract": _market_snapshot_contract(payload),
             "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
             "proxy_contract": dict(payload.get("proxy_contract") or {}),
+            "theme_playbook_contract": summarize_theme_playbook_contract(editor_packet.get("theme_playbook") or {}),
+            "event_digest_contract": summarize_event_digest_contract(editor_packet.get("event_digest") or {}),
+            "what_changed_contract": summarize_what_changed_contract(editor_packet.get("what_changed") or {}),
         },
-        release_checker=lambda markdown, source_text: check_generic_client_report(markdown, "briefing", source_text=source_text),
+        release_checker=lambda markdown, source_text: check_generic_client_report(
+            markdown,
+            "briefing",
+            source_text=source_text,
+            editor_theme_playbook=editor_packet.get("theme_playbook") or {},
+            editor_prompt_text=editor_prompt,
+            event_digest_contract=editor_packet.get("event_digest") or {},
+            what_changed_contract=editor_packet.get("what_changed") or {},
+        ),
+        text_sidecars=text_sidecars,
+        json_sidecars=json_sidecars,
     )
     print(rendered)
     from src.commands.report_guard import exported_bundle_lines
