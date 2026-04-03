@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlparse
 
 
 _EDGE_BINARY = Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_REPORT_THEME = "terminal"
 _REPORT_THEME_STORAGE_KEY = "ai-finance-report-theme"
 _REPORT_THEME_PRESETS: Dict[str, tuple[str, Dict[str, str]]] = {
@@ -707,6 +708,21 @@ def _image_data_uri(path_str: str) -> str | None:
     return f"data:{mime_type};base64,{encoded}"
 
 
+def _resolve_report_asset_fallback(candidate: Path) -> Path | None:
+    parts = list(candidate.parts)
+    if "assets" in parts:
+        asset_suffix = Path(*parts[parts.index("assets") :])
+        fallback = (_PROJECT_ROOT / "reports" / asset_suffix).resolve()
+        if fallback.exists() and fallback.is_file():
+            return fallback
+    if "reports" in parts:
+        report_suffix = Path(*parts[parts.index("reports") :])
+        fallback = (_PROJECT_ROOT / report_suffix).resolve()
+        if fallback.exists() and fallback.is_file():
+            return fallback
+    return None
+
+
 def _resolve_local_image_path(src: str, source_dir: Path | None = None) -> Path | None:
     candidate = src.strip()
     if not candidate:
@@ -715,12 +731,29 @@ def _resolve_local_image_path(src: str, source_dir: Path | None = None) -> Path 
     if parsed.scheme in {"http", "https", "data"}:
         return None
     if parsed.scheme == "file":
-        return Path(unquote(parsed.path))
+        file_path = Path(unquote(parsed.path))
+        if file_path.exists() and file_path.is_file():
+            return file_path
+        return _resolve_report_asset_fallback(file_path)
 
-    resolved = Path(unquote(candidate))
-    if not resolved.is_absolute() and source_dir is not None:
-        resolved = (source_dir / resolved).resolve()
-    return resolved
+    raw_path = Path(unquote(candidate))
+    search_candidates: List[Path] = []
+    if raw_path.is_absolute():
+        search_candidates.append(raw_path.resolve())
+    else:
+        if source_dir is not None:
+            search_candidates.append((source_dir / raw_path).resolve())
+        search_candidates.append(raw_path.resolve())
+
+    for resolved in search_candidates:
+        if resolved.exists() and resolved.is_file():
+            return resolved
+
+    for probe in search_candidates + [raw_path]:
+        fallback = _resolve_report_asset_fallback(probe)
+        if fallback is not None:
+            return fallback
+    return search_candidates[0] if search_candidates else raw_path
 
 
 def _embed_image_src(src: str, source_dir: Path | None = None) -> str:
@@ -1130,14 +1163,14 @@ def _rewrite_local_report_asset_paths(markdown_text: str, markdown_dir: Path) ->
 
     def _replace(match: re.Match[str]) -> str:
         prefix, raw_path, suffix = match.group(1), match.group(2), match.group(3)
-        candidate = Path(raw_path)
+        parsed = urlparse(raw_path)
+        if parsed.scheme in {"http", "https", "data"}:
+            return match.group(0)
         try:
-            resolved = candidate.expanduser().resolve()
+            resolved = _resolve_local_image_path(raw_path, source_dir=base)
         except OSError:
             return match.group(0)
-        if not resolved.is_absolute():
-            return match.group(0)
-        if "reports" not in resolved.parts or "assets" not in resolved.parts:
+        if resolved is None or not resolved.exists() or not resolved.is_file():
             return match.group(0)
         try:
             relative = os.path.relpath(resolved, base)
@@ -1145,7 +1178,7 @@ def _rewrite_local_report_asset_paths(markdown_text: str, markdown_dir: Path) ->
             return match.group(0)
         return f"{prefix}{relative}{suffix}"
 
-    return re.sub(r"(!?\[[^\]]*\]\()(/[^)\s]+)(\))", _replace, markdown_text)
+    return re.sub(r"(!?\[[^\]]*\]\()([^)\s]+)(\))", _replace, markdown_text)
 
 
 def export_markdown_bundle(markdown_text: str, markdown_path: Path, *, allow_unreviewed_final: bool = False) -> Dict[str, Path]:

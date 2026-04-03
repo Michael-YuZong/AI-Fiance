@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -188,6 +189,46 @@ def test_export_markdown_bundle_rewrites_local_report_asset_paths(tmp_path: Path
     markdown = bundle["markdown"].read_text(encoding="utf-8")
     assert "../../assets/demo.png" in markdown
     assert str(image_path) not in markdown
+
+
+def test_markdown_to_html_resolves_report_assets_when_preview_dir_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_root = tmp_path / "project"
+    asset_dir = project_root / "reports" / "assets"
+    asset_dir.mkdir(parents=True)
+    image_path = asset_dir / "demo.png"
+    image_path.write_bytes(_PNG_BYTES)
+
+    preview_dir = tmp_path / "preview"
+    preview_dir.mkdir()
+    monkeypatch.setattr(client_export, "_PROJECT_ROOT", project_root)
+
+    rendered = markdown_to_html("![图表](../../assets/demo.png)", "demo", source_dir=preview_dir)
+
+    assert 'src="data:image/png;base64,' in rendered
+    assert "<figcaption>图表</figcaption>" in rendered
+
+
+def test_export_markdown_bundle_rewrites_relative_report_asset_paths_for_moved_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_root = tmp_path / "project"
+    asset_dir = project_root / "reports" / "assets"
+    asset_dir.mkdir(parents=True)
+    image_path = asset_dir / "demo.png"
+    image_path.write_bytes(_PNG_BYTES)
+    target = tmp_path / "preview" / "demo.md"
+
+    monkeypatch.setattr(client_export, "_PROJECT_ROOT", project_root)
+    monkeypatch.setattr(client_export, "_export_pdf", lambda markdown_text, html_path, pdf_path: pdf_path.write_bytes(b"%PDF-1.4 demo"))
+
+    bundle = export_markdown_bundle("![图表](../../assets/demo.png)", target, allow_unreviewed_final=True)
+
+    markdown = bundle["markdown"].read_text(encoding="utf-8")
+    expected = os.path.relpath(image_path, target.parent)
+    assert expected in markdown
+    assert "../../assets/demo.png" not in markdown
 
 
 def test_export_pdf_ignores_stale_existing_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
