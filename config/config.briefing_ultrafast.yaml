@@ -1,0 +1,15 @@
+# Briefing ultrafast profile for weak-network reruns.
+# Keep domestic market structure and local watchlist logic,
+# but disable RSS/search backfill paths that can hang on socket reads.
+news_feeds_file: config/news_feeds.empty.yaml
+news_topic_search_enabled: false
+briefing_search_backfill_enabled: false
+
+briefing_snapshot_timeout_seconds: 6
+briefing_collector_timeout_seconds: 6
+briefing_signal_timeout_seconds: 6
+briefing_a_share_watch_timeout_seconds: 12
+
+market_context:
+  skip_global_proxy: true
+  skip_market_monitor: true

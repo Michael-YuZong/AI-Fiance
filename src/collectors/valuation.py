@@ -11,11 +11,6 @@ from .base import BaseCollector
 from .index_topic import IndexTopicCollector
 
 try:
-    import akshare as ak
-except ImportError:  # pragma: no cover
-    ak = None
-
-try:
     import yfinance as yf
 except ImportError:  # pragma: no cover
     yf = None
@@ -29,13 +24,8 @@ except ImportError:  # pragma: no cover
 class ValuationCollector(BaseCollector):
     """Collect ETF scale, index valuation snapshots, and financial proxies.
 
-    Tushare 优先（daily_basic / fina_indicator / index_topic 主链），AKShare 仅保留未覆盖侧路。
+    Tushare 优先（daily_basic / fina_indicator / stk_factor_pro / index_topic 主链）。
     """
-
-    def _require_ak(self):
-        if ak is None:
-            raise RuntimeError("akshare is not installed")
-        return ak
 
     def _index_topic_collector(self) -> IndexTopicCollector:
         return IndexTopicCollector(self.config)
@@ -60,6 +50,9 @@ class ValuationCollector(BaseCollector):
                 filtered = raw[mask].sort_values(date_col).reset_index(drop=True)
                 if not filtered.empty:
                     return filtered
+                fallback = raw.sort_values(date_col).reset_index(drop=True)
+                if not fallback.empty:
+                    return fallback
         except Exception:
             pass
         return pd.DataFrame()
@@ -241,6 +234,283 @@ class ValuationCollector(BaseCollector):
         if result:
             self._save_cache(cache_key, result)
         return result
+
+    def _normalize_stock_factor_pro_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        columns = [
+            "ts_code",
+            "trade_date",
+            "open",
+            "open_qfq",
+            "open_hfq",
+            "high",
+            "high_qfq",
+            "high_hfq",
+            "low",
+            "low_qfq",
+            "low_hfq",
+            "close",
+            "close_qfq",
+            "close_hfq",
+            "pre_close",
+            "change",
+            "pct_chg",
+            "vol",
+            "amount",
+            "turnover_rate",
+            "turnover_rate_f",
+            "volume_ratio",
+            "pe",
+            "pe_ttm",
+            "pb",
+            "ps",
+            "ps_ttm",
+            "dv_ratio",
+            "dv_ttm",
+            "total_share",
+            "float_share",
+            "free_share",
+            "total_mv",
+            "circ_mv",
+            "adj_factor",
+            "asi_qfq",
+            "atr_qfq",
+            "bbi_qfq",
+            "bias1_qfq",
+            "bias2_qfq",
+            "bias3_qfq",
+            "boll_lower_qfq",
+            "boll_mid_qfq",
+            "boll_upper_qfq",
+            "brar_ar_qfq",
+            "brar_br_qfq",
+            "cci_qfq",
+            "cr_qfq",
+            "dfma_dif_qfq",
+            "dfma_difma_qfq",
+            "dmi_adx_qfq",
+            "dmi_adxr_qfq",
+            "dmi_mdi_qfq",
+            "dmi_pdi_qfq",
+            "kdj_k_qfq",
+            "kdj_d_qfq",
+            "kdj_j_qfq",
+            "macd_dif_qfq",
+            "macd_dea_qfq",
+            "macd_macd_qfq",
+            "obv_qfq",
+            "rsi_qfq",
+        ]
+        if frame is None or getattr(frame, "empty", False):
+            return pd.DataFrame(columns=columns)
+        working = frame.copy()
+        if "ts_code" not in working.columns or "trade_date" not in working.columns:
+            return pd.DataFrame(columns=columns)
+        normalized = pd.DataFrame(
+            {
+                "ts_code": working["ts_code"].astype(str),
+                "trade_date": working["trade_date"].map(self._normalize_date_text),
+            }
+        )
+        for column in columns[2:]:
+            if column in working.columns:
+                normalized[column] = pd.to_numeric(working.get(column), errors="coerce")
+        normalized = normalized.dropna(subset=["trade_date"]).sort_values("trade_date").reset_index(drop=True)
+        return normalized
+
+    def get_cn_stock_factor_snapshot(
+        self,
+        symbol: str,
+        *,
+        as_of: str = "",
+        lookback_days: int = 90,
+    ) -> Dict[str, Any]:
+        """Tushare stk_factor_pro 股票技术面因子快照。"""
+        cleaned_symbol = str(symbol).strip()
+        ts_code = self._to_ts_code(cleaned_symbol)
+        as_of_ts = pd.Timestamp(as_of or datetime.now().strftime("%Y-%m-%d")).normalize()
+        as_of_text = f"{as_of_ts.strftime('%Y-%m-%d')} 00:00:00"
+        latest_trade_date = ""
+        recent_open_dates = self._recent_open_trade_dates(lookback_days=max(int(lookback_days), 20))
+        for trade_date in reversed(recent_open_dates):
+            normalized = self._normalize_date_text(trade_date)
+            if normalized and normalized <= as_of_ts.strftime("%Y-%m-%d"):
+                latest_trade_date = trade_date
+                break
+        if not latest_trade_date:
+            latest_trade_date = as_of_ts.strftime("%Y%m%d")
+        latest_trade_text = self._normalize_date_text(latest_trade_date)
+        window_start = (as_of_ts - timedelta(days=max(int(lookback_days), 30))).strftime("%Y%m%d")
+        window_end = latest_trade_date
+
+        raw_error: BaseException | None = None
+        try:
+            raw = self._ts_call(
+                "stk_factor_pro",
+                ts_code=ts_code,
+                start_date=window_start,
+                end_date=window_end,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raw = None
+            raw_error = exc
+
+        frame = self._normalize_stock_factor_pro_frame(raw)
+        frame = frame[frame["ts_code"] == ts_code].reset_index(drop=True)
+        blocked_diagnoses = {"permission_blocked", "rate_limited", "network_error", "fetch_error", "unavailable"}
+        if raw_error is not None:
+            diagnosis = self._tushare_failure_diagnosis(raw_error)
+        elif raw is None:
+            diagnosis = "unavailable"
+        elif frame.empty:
+            diagnosis = "empty"
+        else:
+            diagnosis = "live"
+
+        latest_row = frame.iloc[-1].to_dict() if not frame.empty else {}
+        latest_row_date = str(latest_row.get("trade_date", "")).strip()
+        latest_date = latest_row_date or latest_trade_text
+        is_fresh = bool(latest_row) and latest_date == latest_trade_text
+        if bool(latest_row) and is_fresh:
+            status = "matched"
+        elif bool(latest_row):
+            status = "matched"
+            diagnosis = "stale"
+        elif diagnosis in blocked_diagnoses:
+            status = "blocked"
+        else:
+            status = "empty"
+
+        close_qfq = self._coerce_float(latest_row.get("close_qfq"))
+        close_bfq = self._coerce_float(latest_row.get("close"))
+        bbi_qfq = self._coerce_float(latest_row.get("bbi_qfq"))
+        bias1_qfq = self._coerce_float(latest_row.get("bias1_qfq"))
+        bias2_qfq = self._coerce_float(latest_row.get("bias2_qfq"))
+        bias3_qfq = self._coerce_float(latest_row.get("bias3_qfq"))
+        adx_qfq = self._coerce_float(latest_row.get("dmi_adx_qfq"))
+        dmi_pdi_qfq = self._coerce_float(latest_row.get("dmi_pdi_qfq"))
+        dmi_mdi_qfq = self._coerce_float(latest_row.get("dmi_mdi_qfq"))
+        pct_chg = self._coerce_float(latest_row.get("pct_chg"))
+        volume_ratio = self._coerce_float(latest_row.get("volume_ratio"))
+        turnover_rate = self._coerce_float(latest_row.get("turnover_rate"))
+        turnover_rate_f = self._coerce_float(latest_row.get("turnover_rate_f"))
+        atr_qfq = self._coerce_float(latest_row.get("atr_qfq"))
+        boll_mid_qfq = self._coerce_float(latest_row.get("boll_mid_qfq"))
+        obv_qfq = self._coerce_float(latest_row.get("obv_qfq"))
+        rsi_qfq = self._coerce_float(latest_row.get("rsi_qfq"))
+
+        trend_score = 0
+        if close_qfq is not None and bbi_qfq is not None:
+            trend_score += 1 if close_qfq >= bbi_qfq else -1
+        if dmi_pdi_qfq is not None and dmi_mdi_qfq is not None:
+            trend_score += 1 if dmi_pdi_qfq >= dmi_mdi_qfq else -1
+        if adx_qfq is not None:
+            if adx_qfq >= 30:
+                trend_score += 1
+            elif adx_qfq < 20:
+                trend_score -= 1
+        if bias1_qfq is not None:
+            trend_score += 1 if bias1_qfq >= 0 else -1
+
+        if trend_score >= 3:
+            trend_label = "趋势偏强"
+        elif trend_score >= 1:
+            trend_label = "修复中"
+        elif trend_score <= -3:
+            trend_label = "趋势偏弱"
+        else:
+            trend_label = "震荡"
+
+        if pct_chg is not None and pct_chg >= 2.0:
+            momentum_label = "动能改善"
+        elif pct_chg is not None and pct_chg <= -2.0:
+            momentum_label = "动能偏弱"
+        elif volume_ratio is not None and volume_ratio >= 1.2 and trend_label in {"趋势偏强", "修复中"}:
+            momentum_label = "动能改善"
+        elif bias1_qfq is not None and bias1_qfq < 0 and trend_label == "趋势偏弱":
+            momentum_label = "动能偏弱"
+        else:
+            momentum_label = "动能中性"
+
+        if trend_label == "趋势偏强" and momentum_label == "动能改善":
+            signal_strength = "高"
+        elif trend_label in {"趋势偏强", "修复中"} or momentum_label == "动能改善":
+            signal_strength = "中"
+        elif trend_label == "趋势偏弱" or momentum_label == "动能偏弱":
+            signal_strength = "低"
+        else:
+            signal_strength = "中"
+
+        if status == "matched" and not is_fresh:
+            detail = (
+                f"最新可用技术因子日期停在 {latest_date}，当前不按 fresh 命中处理；"
+                "只保留缺口披露，不把旧技术状态写成今天已确认。"
+            )
+        elif status == "matched":
+            if close_qfq is not None and bbi_qfq is not None:
+                detail = f"收盘复权价 {close_qfq:.2f} / BBI {bbi_qfq:.2f}"
+            elif close_bfq is not None:
+                detail = f"收盘价 {close_bfq:.2f}"
+            else:
+                detail = "技术因子快照已接入"
+            if bias1_qfq is not None:
+                detail += f" / BIAS1 {bias1_qfq:+.2f}%"
+            if adx_qfq is not None:
+                detail += f" / ADX {adx_qfq:.1f}"
+            if volume_ratio is not None:
+                detail += f" / 量比 {volume_ratio:.2f}"
+        elif status == "empty":
+            detail = "Tushare stk_factor_pro 当前未返回可用技术因子数据。"
+        else:
+            detail = self._blocked_disclosure(diagnosis, source="Tushare stk_factor_pro")
+
+        snapshot = {
+            "symbol": cleaned_symbol,
+            "ts_code": ts_code,
+            "as_of": as_of_text,
+            "latest_date": latest_date,
+            "is_fresh": is_fresh,
+            "source": "tushare.stk_factor_pro",
+            "fallback": "none",
+            "diagnosis": diagnosis,
+            "status": status,
+            "disclosure": "Tushare stk_factor_pro 用于刻画股票每日技术面因子；权限失败、空表或频控时只按缺失处理，不把空结果写成已确认趋势。",
+            "detail": detail,
+            "trend_label": trend_label,
+            "momentum_label": momentum_label,
+            "signal_strength": signal_strength,
+            "close_qfq": close_qfq,
+            "close": close_bfq,
+            "bbi_qfq": bbi_qfq,
+            "bias1_qfq": bias1_qfq,
+            "bias2_qfq": bias2_qfq,
+            "bias3_qfq": bias3_qfq,
+            "adx_qfq": adx_qfq,
+            "dmi_pdi_qfq": dmi_pdi_qfq,
+            "dmi_mdi_qfq": dmi_mdi_qfq,
+            "pct_chg": pct_chg,
+            "volume_ratio": volume_ratio,
+            "turnover_rate": turnover_rate,
+            "turnover_rate_f": turnover_rate_f,
+            "atr_qfq": atr_qfq,
+            "boll_mid_qfq": boll_mid_qfq,
+            "obv_qfq": obv_qfq,
+            "rsi_qfq": rsi_qfq,
+            "components": {
+                "stk_factor_pro": {
+                    "source": "tushare.stk_factor_pro",
+                    "as_of": latest_row_date or latest_trade_text,
+                    "fallback": "none",
+                    "diagnosis": diagnosis,
+                    "status": status,
+                    "detail": detail,
+                    "disclosure": "Tushare stk_factor_pro 股票技术因子快照。",
+                    "item": latest_row,
+                }
+            },
+        }
+        if status == "matched" and latest_row:
+            snapshot["item"] = latest_row
+        return snapshot
 
     # ── 业绩预告 / 快报 ──────────────────────────────────────
 
@@ -667,6 +937,7 @@ class ValuationCollector(BaseCollector):
 
         matched_dates = [date for date in (perf_trade_text, distribution_trade_text) if date]
         latest_date = max(matched_dates, default=latest_trade_text)
+        trade_gap_days = self._trade_day_gap(latest_date, latest_trade_text, lookback_days=max(int(lookback_days), 40))
         is_fresh = status == "matched" and latest_date == latest_trade_text
         if status == "matched" and is_fresh:
             diagnosis = "live"
@@ -681,10 +952,16 @@ class ValuationCollector(BaseCollector):
         price_vs_avg = (current_price_value / avg_cost - 1.0) if current_price_value and avg_cost else None
 
         if status == "matched" and not is_fresh:
-            detail = (
-                f"最新可用筹码日期停在 {latest_date}，当前不按 fresh 命中处理；"
-                "先只保留缺口披露，不把旧筹码直接写成今天的资金确认。"
-            )
+            if trade_gap_days == 1:
+                detail = (
+                    f"最新可用筹码日期停在 {latest_date}（上一交易日，T+1 直连）；"
+                    "当前不把它写成今天盘中的新增资金，但仍可用于判断平均成本和上方套牢盘。"
+                )
+            else:
+                detail = (
+                    f"最新可用筹码日期停在 {latest_date}，当前不按 fresh 命中处理；"
+                    "先只保留缺口披露，不把旧筹码直接写成今天的资金确认。"
+                )
         elif status == "matched" and current_price_value and avg_cost:
             above_text = f"，上方套牢盘约 {above_price_pct:.1f}%" if above_price_pct is not None else ""
             if above_price_pct is not None and above_price_pct >= 60:
@@ -709,6 +986,7 @@ class ValuationCollector(BaseCollector):
             "ts_code": ts_code,
             "as_of": as_of_text,
             "latest_date": latest_date,
+            "trade_gap_days": None if trade_gap_days is None else int(trade_gap_days),
             "is_fresh": is_fresh,
             "source": "tushare.cyq_perf+tushare.cyq_chips",
             "fallback": "none",

@@ -61,6 +61,9 @@ def _analysis_review_item(analysis: Mapping[str, Any]) -> Dict[str, Any] | None:
         "day_theme": _safe_text(dict(analysis.get("day_theme") or {}).get("label") or analysis.get("day_theme")),
         "sector": _safe_text(metadata.get("sector")),
         "chain_nodes": [str(item).strip() for item in list(metadata.get("chain_nodes") or []) if str(item).strip()],
+        "primary_chain": _safe_text(metadata.get("primary_chain")),
+        "theme_role": _safe_text(metadata.get("theme_role")),
+        "evidence_keywords": [str(item).strip() for item in list(metadata.get("evidence_keywords") or []) if str(item).strip()],
         "theme_name": _safe_text(playbook.get("label")),
         "theme_family": _safe_text(playbook.get("theme_family")),
         "playbook_hint": _safe_text(playbook_hint_line(playbook)),
@@ -260,6 +263,9 @@ def render_catalyst_web_review_prompt(packet: Mapping[str, Any]) -> str:
         chain_nodes = [str(node).strip() for node in list(item.get("chain_nodes") or []) if str(node).strip()]
         if chain_nodes:
             lines.append(f"- chain nodes：`{' / '.join(chain_nodes[:6])}`")
+        evidence_keywords = [str(node).strip() for node in list(item.get("evidence_keywords") or []) if str(node).strip()]
+        if evidence_keywords:
+            lines.append(f"- 证据关键词：`{' / '.join(evidence_keywords[:10])}`")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -296,6 +302,9 @@ def render_catalyst_web_review_scaffold(packet: Mapping[str, Any]) -> str:
                 lines.append(f"- `{group}`")
         else:
             lines.append("- 先按主题、标的名、代码和链条关键词补检。")
+        evidence_keywords = [str(node).strip() for node in list(item.get("evidence_keywords") or []) if str(node).strip()]
+        if evidence_keywords:
+            lines.append(f"- 证据关键词补检：`{' / '.join(evidence_keywords[:10])}`")
         lines.extend(
             [
                 "",

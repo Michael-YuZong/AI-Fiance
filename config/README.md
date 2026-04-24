@@ -71,8 +71,12 @@ review / profile：
 
 说明：
 - `config/config.stock_pick_fast.yaml` 现在不只是轻量新闻源，还会同步收窄候选池、并发和慢链开关；显式传这个 profile 时，应按 stock_pick 快路径合同运行。
+- `config/config.stock_pick_fast.yaml` 还会优先复用本地 A 股快照缓存，避免 stock pool 为全市场 live 实时快照白等长超时；`client-final` 也不再给整段个股分析套 thread timeout，避免 fast profile 误把观察池直接裁空。
+- `config/config.stock_pick_fast.yaml` 现在把 discovery 阶段的个股情报改成 `focused`：先看结构化/官方线索，只做少量搜索回填；重搜索和主题扩搜只留给入围样本，不再对全池逐票爆搜。
 - 即使 `config/config.stock_pick_fast.yaml` 把全局新闻压成轻量模式，个股级 `get_stock_news()` 里的结构化情报与 `e互动` 仍然保留，不应被误关掉。
-- `config/config.etf_pick_fast.yaml` 现在默认保留 `ETF light fund_profile`，不会再通过 `skip_fund_profile` 把 `跟踪指数 / 份额变化 / 场内基金技术状态` 整条产品层静默关掉；这份 profile 只继续收紧外部情报和跨市场慢链。
+- `config/config.etf_pick_fast.yaml` 现在默认保留 `ETF light fund_profile`，不会再通过 `skip_fund_profile` 把 `跟踪指数 / 份额变化 / 场内基金技术状态` 整条产品层静默关掉；这份 profile 会继续收紧外部情报和跨市场慢链，但不再静默关掉 same-day `market_drivers`，而是把 stale / empty 盘面显式降级成弱主线。
+- `config/config.etf_pick_fast.yaml` 现在也会在 discovery 阶段跳过逐候选动态主题扩搜；指数/主题情报补强只留给入围 ETF，避免把整个候选池都拖进同一套搜索慢链。
+- 即使显式传了 `config/config.etf_pick_fast.yaml`，`scan --client-final` 在 ETF / 基金正式稿阶段也会补跑一次 `full profile`，避免把 light 候选画像直接带进客户稿导致 `基金经理 / 基金画像` 缺失。
 
 ## 默认不要读的 YAML
 

@@ -198,9 +198,51 @@ STRUCTURED_STOCK_INTELLIGENCE_APIS = (
     "express",
     "dividend",
     "stk_holdertrade",
+    "stk_surv",
     "disclosure_date",
     "irm_qa_sh",
     "irm_qa_sz",
+)
+
+# Shared market-intelligence lanes often describe a theme through event words
+# ("ASCO"/"FDA"/"版号"/"特高压") instead of the product-facing theme label.
+# Bridge those two vocabularies here so shared context does not depend on
+# exact ETF/theme wording appearing in Tushare headlines.
+MARKET_INTELLIGENCE_THEME_BRIDGES = (
+    {
+        "triggers": ("创新药", "港股医药", "港股创新药", "医药", "医疗", "生物医药", "制药", "cro", "cxo", "biotech", "pharma"),
+        "terms": (
+            "创新药",
+            "港股医药",
+            "生物医药",
+            "医药",
+            "医疗",
+            "制药",
+            "药企",
+            "新药",
+            "药监局",
+            "临床",
+            "FDA",
+            "ASCO",
+            "ESMO",
+            "license-out",
+            "授权",
+            "首付款",
+            "里程碑",
+        ),
+    },
+    {
+        "triggers": ("通信", "通信设备", "光通信", "光模块", "cpo"),
+        "terms": ("通信", "通信设备", "光通信", "光模块", "CPO", "光纤", "交换机", "服务器"),
+    },
+    {
+        "triggers": ("电网", "电力", "公用事业", "特高压"),
+        "terms": ("电网", "电力", "公用事业", "特高压", "配电网", "电力设备", "变压器", "虚拟电厂"),
+    },
+    {
+        "triggers": ("游戏", "电竞"),
+        "terms": ("游戏", "版号", "手游", "端游", "电竞", "小游戏", "出海游戏"),
+    },
 )
 
 IRM_QA_STRUCTURED_APIS = ("irm_qa_sh", "irm_qa_sz")
@@ -367,6 +409,7 @@ class NewsCollector(BaseCollector):
         preferred_sources: Optional[Sequence[str]] = None,
         limit: int = 6,
         recent_days: int = 7,
+        query_cap: Optional[int] = None,
     ) -> List[Dict[str, str]]:
         """Search live RSS by asset/topic keywords for sector-specific catalysts."""
         topic_search_enabled = bool(
@@ -388,9 +431,10 @@ class NewsCollector(BaseCollector):
                 if value and value not in preferred:
                     preferred.append(value)
 
-        query_cap = max(1, int(self.config.get("news_topic_query_cap", 4) or 4))
+        effective_query_cap = query_cap if query_cap is not None else self.config.get("news_topic_query_cap", 4)
+        effective_query_cap = max(1, int(effective_query_cap or 4))
         items: List[Dict[str, str]] = []
-        for label, url in self._topic_queries(cleaned, preferred, recent_days)[:query_cap]:
+        for label, url in self._topic_queries(cleaned, preferred, recent_days)[:effective_query_cap]:
             try:
                 parsed = self.cached_call(
                     f"news:topic:{url}",
@@ -423,8 +467,8 @@ class NewsCollector(BaseCollector):
                     }
                 )
 
-        items = self._filter_candidate_items(items, recent_days=recent_days)
-        ranked = self._rank_items(items, preferred, query_keywords=cleaned)
+        items, ranking_reference_time = self._filter_topic_search_items(items, recent_days=recent_days)
+        ranked = self._rank_items(items, preferred, query_keywords=cleaned, reference_time=ranking_reference_time)
         return self._diversify_items(ranked, limit)
 
     def search_by_keyword_groups(
@@ -433,6 +477,8 @@ class NewsCollector(BaseCollector):
         preferred_sources: Optional[Sequence[str]] = None,
         limit: int = 6,
         recent_days: int = 7,
+        query_cap_per_group: Optional[int] = None,
+        total_query_cap: Optional[int] = None,
     ) -> List[Dict[str, str]]:
         """Search multiple query groups and merge the best live items.
 
@@ -442,26 +488,39 @@ class NewsCollector(BaseCollector):
 
         merged: List[Dict[str, str]] = []
         seen_groups: set[tuple[str, ...]] = set()
+        remaining_budget = max(int(total_query_cap or 0), 0) if total_query_cap is not None else None
         for group in keyword_groups:
             cleaned_group = tuple(self._normalize_topic_keywords(group))
             if not cleaned_group or cleaned_group in seen_groups:
                 continue
+            if remaining_budget is not None and remaining_budget <= 0:
+                break
             seen_groups.add(cleaned_group)
+            per_group_query_cap = query_cap_per_group
+            if remaining_budget is not None:
+                if per_group_query_cap is None:
+                    per_group_query_cap = remaining_budget
+                else:
+                    per_group_query_cap = min(int(per_group_query_cap or 0), remaining_budget)
             try:
-                hits = self.search_by_keywords(
+                hits = self._call_search_by_keywords(
                     cleaned_group,
                     preferred_sources=preferred_sources,
                     limit=max(limit, 4),
                     recent_days=recent_days,
+                    query_cap=per_group_query_cap,
                 )
             except Exception:
                 continue
             merged.extend(hits)
-        merged = self._filter_candidate_items(merged, recent_days=recent_days)
+            if remaining_budget is not None and per_group_query_cap is not None:
+                remaining_budget -= max(int(per_group_query_cap or 0), 0)
+        merged, ranking_reference_time = self._filter_topic_search_items(merged, recent_days=recent_days)
         ranked = self._rank_items(
             merged,
             list(preferred_sources or []),
             query_keywords=[item for group in seen_groups for item in group],
+            reference_time=ranking_reference_time,
         )
         return self._diversify_items(ranked, limit)
 
@@ -470,7 +529,7 @@ class NewsCollector(BaseCollector):
         configured_limit = int(self.config.get("stock_news_limit", limit) or limit)
         limit = max(1, min(limit, configured_limit))
         runtime_mode = str(self.config.get("stock_news_runtime_mode", "full") or "full").strip().lower()
-        if runtime_mode not in {"full", "structured_only"}:
+        if runtime_mode not in {"full", "focused", "finalist", "structured_only"}:
             runtime_mode = "full"
         profile = self._stock_identity(symbol)
         if not profile:
@@ -495,7 +554,7 @@ class NewsCollector(BaseCollector):
             except Exception:
                 pass
 
-        primary_items = self._filter_candidate_items([*direct_items, *structured_items], recent_days=30)
+        primary_items = self._filter_candidate_items([*direct_items, *structured_items], recent_days=90)
         if runtime_mode != "structured_only" and self._needs_stock_tushare_news_backfill(primary_items, limit=limit):
             for api_name in ("news", "major_news"):
                 try:
@@ -506,21 +565,96 @@ class NewsCollector(BaseCollector):
                 if len(tushare_news_items) >= limit:
                     break
 
-        primary_items = self._filter_candidate_items([*direct_items, *structured_items, *tushare_news_items], recent_days=30)
+        primary_items = self._filter_candidate_items([*direct_items, *structured_items, *tushare_news_items], recent_days=90)
         if runtime_mode != "structured_only" and self._needs_stock_search_backfill(primary_items, limit=limit):
             try:
-                search_items.extend(self._search_stock_intelligence(profile, limit=max(limit, 6)))
+                search_items.extend(self._call_search_stock_intelligence(profile, limit=max(limit, 6), runtime_mode=runtime_mode))
             except Exception:
                 pass
 
         items = [*direct_items, *structured_items, *tushare_news_items, *search_items]
         ranked = self._rank_items(
-            self._filter_candidate_items(items, recent_days=30),
+            self._filter_candidate_items(items, recent_days=None),
             preferred_sources=preferred_sources + ["Tushare"],
             query_keywords=keywords,
         )
         diversified = self._diversify_items(ranked, limit)
+        diversified = self._ensure_structured_lane_coverage(diversified, ranked, limit=limit)
         return self._ensure_irm_lane_coverage(diversified, ranked, limit=limit)
+
+    def get_stk_surv(
+        self,
+        symbol: str,
+        *,
+        limit: int = 20,
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> Dict[str, Any]:
+        """Return a Tushare机构调研快照 for downstream event consumption.
+
+        The snapshot keeps the same freshness contract as the other structured
+        collectors: empty / blocked / stale rows are never disguised as fresh.
+        """
+        configured_limit = max(1, int(limit or 1))
+        profile = self._stock_identity(symbol) or {}
+        ts_code = str(profile.get("ts_code", "")).strip() or self._to_ts_code(symbol)
+        name = str(profile.get("name", "")).strip() or str(symbol).strip() or self._from_ts_code(ts_code)
+        bare_symbol = str(profile.get("symbol", "")).strip() or self._from_ts_code(ts_code)
+        if not ts_code:
+            return self._empty_stk_surv_snapshot(symbol=bare_symbol, ts_code="", name=name)
+
+        normalized_trade_date = str(trade_date).replace("-", "").strip()
+        normalized_start_date = str(start_date).replace("-", "").strip()
+        normalized_end_date = str(end_date).replace("-", "").strip()
+
+        cache_key = (
+            f"news:stk_surv:{ts_code}:{normalized_trade_date}:{normalized_start_date}:{normalized_end_date}:{configured_limit}"
+        )
+
+        def _fetch_snapshot() -> Dict[str, Any]:
+            try:
+                kwargs: Dict[str, Any] = {"ts_code": ts_code}
+                if normalized_trade_date:
+                    kwargs["trade_date"] = normalized_trade_date
+                if normalized_start_date:
+                    kwargs["start_date"] = normalized_start_date
+                if normalized_end_date:
+                    kwargs["end_date"] = normalized_end_date
+                frame = self._ts_call(
+                    "stk_surv",
+                    **kwargs,
+                )
+            except TypeError:
+                try:
+                    kwargs = {"ts_code": ts_code}
+                    if normalized_start_date:
+                        kwargs["start_date"] = normalized_start_date
+                    if normalized_end_date:
+                        kwargs["end_date"] = normalized_end_date
+                    frame = self._ts_call(
+                        "stk_surv",
+                        **kwargs,
+                    )
+                except Exception:
+                    frame = None
+            except Exception:
+                frame = None
+            return self._annotate_stk_surv_snapshot(
+                frame,
+                symbol=bare_symbol,
+                ts_code=ts_code,
+                name=name,
+                limit=configured_limit,
+            )
+
+        try:
+            snapshot = self.cached_call(cache_key, _fetch_snapshot, ttl_hours=12, prefer_stale=True)
+        except Exception:
+            snapshot = self._empty_stk_surv_snapshot(symbol=bare_symbol, ts_code=ts_code, name=name)
+        if not isinstance(snapshot, Mapping):
+            return self._empty_stk_surv_snapshot(symbol=bare_symbol, ts_code=ts_code, name=name)
+        return dict(snapshot)
 
     def _ensure_irm_lane_coverage(
         self,
@@ -551,6 +685,67 @@ class NewsCollector(BaseCollector):
         trimmed = chosen[: max(int(limit) - 1, 0)]
         return [*trimmed, best_irm]
 
+    def _ensure_structured_lane_coverage(
+        self,
+        selected_items: Sequence[Dict[str, str]],
+        ranked_items: Sequence[Dict[str, str]],
+        *,
+        limit: int,
+    ) -> List[Dict[str, str]]:
+        chosen = [dict(item) for item in selected_items if isinstance(item, Mapping)]
+        if int(limit) < 2:
+            return chosen
+
+        def _item_key(item: Mapping[str, Any]) -> tuple[str, str]:
+            return (
+                str(item.get("title", "")).strip(),
+                str(item.get("source", "")).strip(),
+            )
+
+        def _is_structured(item: Mapping[str, Any]) -> bool:
+            return str(item.get("source_note", "")).strip() == "structured_disclosure" or str(item.get("configured_source", "")).startswith("Tushare::")
+
+        structured_ranked: List[Dict[str, str]] = []
+        seen_structured: set[tuple[str, str]] = set()
+        for item in ranked_items:
+            if not isinstance(item, Mapping) or not _is_structured(item):
+                continue
+            key = _item_key(item)
+            if key in seen_structured:
+                continue
+            seen_structured.add(key)
+            structured_ranked.append(dict(item))
+        if not structured_ranked:
+            return chosen
+
+        target_structured = 2 if int(limit) >= 5 and len(structured_ranked) >= 2 else 1
+        chosen_keys = {_item_key(item) for item in chosen}
+        chosen_structured = sum(1 for item in chosen if _is_structured(item))
+        missing = [item for item in structured_ranked if _item_key(item) not in chosen_keys]
+
+        while chosen_structured < target_structured and missing:
+            candidate = missing.pop(0)
+            if len(chosen) < int(limit):
+                chosen.append(candidate)
+                chosen_keys.add(_item_key(candidate))
+                chosen_structured += 1
+                continue
+            replace_idx = next((idx for idx in range(len(chosen) - 1, -1, -1) if not _is_structured(chosen[idx])), None)
+            if replace_idx is None:
+                break
+            removed_key = _item_key(chosen[replace_idx])
+            chosen[replace_idx] = candidate
+            chosen_keys.discard(removed_key)
+            chosen_keys.add(_item_key(candidate))
+            chosen_structured = sum(1 for item in chosen if _is_structured(item))
+
+        ranked_order = {
+            _item_key(item): idx
+            for idx, item in enumerate(ranked_items)
+            if isinstance(item, Mapping)
+        }
+        return sorted(chosen, key=lambda item: ranked_order.get(_item_key(item), len(ranked_order)))
+
     def get_market_intelligence(
         self,
         keywords: Sequence[str],
@@ -565,21 +760,19 @@ class NewsCollector(BaseCollector):
         headlines without depending on Google News query feeds.
         """
         cleaned_keywords = [str(item).strip() for item in keywords if str(item).strip()]
-        if not cleaned_keywords:
+        match_keywords = self._expand_market_intelligence_keywords(cleaned_keywords)
+        if not match_keywords:
             return []
         end = datetime.now().strftime("%Y%m%d")
         start = (datetime.now() - timedelta(days=max(recent_days, 3))).strftime("%Y%m%d")
         items: List[Dict[str, str]] = []
         for api_name in ("major_news", "news"):
-            try:
-                frame = self._ts_call(api_name, start_date=start, end_date=end)
-            except Exception:
-                frame = None
+            frame = self._cached_market_intelligence_frame(api_name, start_date=start, end_date=end)
             items.extend(
                 self._normalize_tushare_market_news(
                     api_name,
                     frame,
-                    keywords=cleaned_keywords,
+                    keywords=match_keywords,
                     limit=max(limit, 6),
                 )
             )
@@ -588,9 +781,30 @@ class NewsCollector(BaseCollector):
         ranked = self._rank_items(
             self._filter_candidate_items(items, recent_days=recent_days),
             preferred_sources=["Tushare"],
-            query_keywords=cleaned_keywords,
+            query_keywords=match_keywords,
         )
         return self._diversify_items(ranked, limit)
+
+    def _cached_market_intelligence_frame(
+        self,
+        api_name: str,
+        *,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame | None:
+        cache_key = f"news:market_intelligence:{api_name}:{start_date}:{end_date}"
+        try:
+            return self.cached_call(
+                cache_key,
+                self._ts_call,
+                api_name,
+                start_date=start_date,
+                end_date=end_date,
+                ttl_hours=2,
+                prefer_stale=True,
+            )
+        except Exception:
+            return None
 
     def _official_stock_intelligence(
         self,
@@ -895,8 +1109,14 @@ class NewsCollector(BaseCollector):
         return not self._has_recent_primary_stock_intelligence(items)
 
     def _has_recent_primary_stock_intelligence(self, items: Sequence[Dict[str, str]]) -> bool:
+        reference_time = datetime.now()
         for item in items:
-            if str(item.get("freshness_bucket", "")).strip() not in {"fresh", "recent"}:
+            published_at = _parse_news_timestamp(item.get("published_at"))
+            if published_at is not None:
+                age_days = (reference_time - published_at).total_seconds() / 86400.0
+                if age_days < -1 or age_days > 35:
+                    continue
+            elif str(item.get("freshness_bucket", "")).strip() not in {"fresh", "recent"}:
                 continue
             if str(item.get("source_note", "")).strip() in {"official_direct", "official_site_search", "structured_disclosure"}:
                 return True
@@ -971,6 +1191,16 @@ class NewsCollector(BaseCollector):
                     start_date=start_date,
                     end_date=end_date,
                 )
+            except Exception:
+                return None
+        if api_name == "stk_surv":
+            try:
+                return self._ts_call(api_name, ts_code=ts_code, start_date=start_date, end_date=end_date)
+            except TypeError:
+                try:
+                    return self._ts_call(api_name, ts_code=ts_code)
+                except Exception:
+                    return None
             except Exception:
                 return None
         try:
@@ -1101,7 +1331,7 @@ class NewsCollector(BaseCollector):
             combined_text = combined_text + " " + working[content_col].astype(str)
         mask = pd.Series(False, index=working.index)
         for keyword in pattern_keywords:
-            mask = mask | combined_text.str.contains(keyword, case=False, na=False)
+            mask = mask | combined_text.str.contains(keyword, case=False, na=False, regex=False)
         filtered = working[mask].copy()
         if filtered.empty:
             return []
@@ -1274,6 +1504,21 @@ class NewsCollector(BaseCollector):
             if modify_date:
                 detail_parts.append(f"更新 {modify_date}")
             return f"{prefix}披露日历：{'；'.join(detail_parts)}" if detail_parts else f"{prefix}更新披露日历"
+        if api_name == "stk_surv":
+            surv_date = self._normalize_date_text(row.get("surv_date") or row.get("trade_date") or row.get("ann_date"))
+            rece_mode = str(row.get("rece_mode", "")).strip()
+            rece_org = str(row.get("rece_org", "")).strip()
+            org_type = str(row.get("org_type", "")).strip()
+            detail_parts = []
+            if surv_date:
+                detail_parts.append(surv_date)
+            if rece_mode:
+                detail_parts.append(rece_mode)
+            if rece_org:
+                detail_parts.append(rece_org)
+            elif org_type:
+                detail_parts.append(org_type)
+            return f"{prefix}机构调研：{'；'.join(detail_parts)}" if detail_parts else f"{prefix}机构调研"
         if api_name in IRM_QA_STRUCTURED_APIS:
             question = self._compact_irm_text(row.get("q") or row.get("question"), limit=16)
             answer = self._compact_irm_text(row.get("a") or row.get("answer") or row.get("reply"), limit=18)
@@ -1287,6 +1532,124 @@ class NewsCollector(BaseCollector):
                 detail_parts.append(f"涉及 {industry}")
             return f"{prefix}互动平台问答：{'；'.join(detail_parts)}" if detail_parts else f"{prefix}互动平台问答"
         return ""
+
+    def _stk_surv_title(self, row: Mapping[str, Any], *, name: str) -> str:
+        return self._structured_intelligence_title("stk_surv", row, name=name)
+
+    def _normalize_tushare_stk_surv_items(
+        self,
+        frame: pd.DataFrame | None,
+        *,
+        name: str,
+        symbol: str,
+        ts_code: str,
+        limit: int = 20,
+    ) -> List[Dict[str, str]]:
+        if frame is None or frame.empty:
+            return []
+
+        working = frame.copy()
+        date_col = self._first_existing_column(working, ("surv_date", "trade_date", "ann_date", "pub_date", "date"))
+        if date_col is not None:
+            working["_published_at"] = working[date_col].map(self._normalize_date_text)
+            working = working.sort_values("_published_at", ascending=False)
+
+        items: List[Dict[str, str]] = []
+        for _, row in working.head(limit).iterrows():
+            title = self._stk_surv_title(row, name=name)
+            if not title:
+                continue
+            latest_date = str(row.get("_published_at", "")).strip() if "_published_at" in row else (
+                self._normalize_date_text(row.get(date_col)) if date_col else ""
+            )
+            lead_detail = self._compact_irm_text(
+                "；".join(
+                    [
+                        str(row.get("fund_visitors", "")).strip(),
+                        str(row.get("rece_place", "")).strip(),
+                        str(row.get("rece_mode", "")).strip(),
+                        str(row.get("rece_org", "")).strip(),
+                        str(row.get("org_type", "")).strip(),
+                        str(row.get("comp_rece", "")).strip(),
+                        str(row.get("content", "")).strip(),
+                    ]
+                ),
+                limit=80,
+            )
+            disclosure = "stk_surv 机构调研快照来自 Tushare；空表、权限失败或旧日期均按缺失处理，不伪装成 fresh。"
+            item = {
+                "category": "stock_structured_intelligence",
+                "title": title,
+                "source": "Tushare",
+                "configured_source": "Tushare::stk_surv",
+                "source_note": "structured_disclosure",
+                "must_include": False,
+                "published_at": latest_date,
+                "link": self._structured_disclosure_fallback_link(symbol=symbol, ts_code=ts_code),
+                "note": "投资者关系/路演纪要",
+                "lead_detail": lead_detail or "投资者关系/路演纪要",
+                "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "latest_date": latest_date,
+                "fallback": "none",
+                "disclosure": disclosure,
+            }
+            item["is_fresh"] = bool(latest_date and self._is_snapshot_fresh(latest_date, datetime.now(), max_age_days=14))
+            items.append(item)
+        return items
+
+    def _annotate_stk_surv_snapshot(
+        self,
+        frame: pd.DataFrame | None,
+        *,
+        symbol: str,
+        ts_code: str,
+        name: str,
+        limit: int,
+    ) -> Dict[str, Any]:
+        items = self._normalize_tushare_stk_surv_items(frame, name=name, symbol=symbol, ts_code=ts_code, limit=limit)
+        latest_date = ""
+        if items:
+            latest_date = max(
+                (str(item.get("latest_date", "")).strip() for item in items if str(item.get("latest_date", "")).strip()),
+                default="",
+            )
+        as_of = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        disclosure = "stk_surv 以 Tushare 机构调研快照为准；空表、权限失败或旧日期均按缺失处理，不伪装成 fresh。"
+        is_fresh = bool(latest_date and self._is_snapshot_fresh(latest_date, datetime.now(), max_age_days=14))
+        return {
+            "symbol": symbol,
+            "ts_code": ts_code,
+            "name": name,
+            "source": "tushare.stk_surv",
+            "as_of": as_of,
+            "latest_date": latest_date,
+            "is_fresh": is_fresh,
+            "fallback": "none" if items else "missing",
+            "disclosure": disclosure,
+            "items": items,
+        }
+
+    def _empty_stk_surv_snapshot(self, *, symbol: str, ts_code: str, name: str) -> Dict[str, Any]:
+        return {
+            "symbol": symbol,
+            "ts_code": ts_code,
+            "name": name,
+            "source": "tushare.stk_surv",
+            "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "latest_date": "",
+            "is_fresh": False,
+            "fallback": "missing",
+            "disclosure": "stk_surv 当前无可用快照，空表、权限失败或旧日期均按缺失处理，不伪装成 fresh。",
+            "items": [],
+        }
+
+    @staticmethod
+    def _is_snapshot_fresh(date_text: str, reference_date: datetime, max_age_days: int = 7) -> bool:
+        parsed = _parse_news_timestamp(date_text)
+        if parsed is None:
+            return False
+        age_days = (reference_date - parsed).total_seconds() / 86400.0
+        return 0 <= age_days <= max_age_days
 
     def _official_announcement_hint(self, value: Any) -> str:
         text = str(value or "").strip()
@@ -1356,7 +1719,7 @@ class NewsCollector(BaseCollector):
     def _stock_preferred_sources(self) -> List[str]:
         return [*A_SHARE_FIRST_PARTY_SOURCES, "证券时报", "财联社", "Reuters", "Bloomberg"]
 
-    def _stock_query_groups(self, profile: Mapping[str, Any]) -> List[List[str]]:
+    def _stock_query_groups(self, profile: Mapping[str, Any], *, query_cap: int | None = None) -> List[List[str]]:
         name = str(profile.get("name", "")).strip()
         symbol = str(profile.get("symbol", "")).strip()
         groups: List[List[str]] = []
@@ -1365,19 +1728,25 @@ class NewsCollector(BaseCollector):
         groups.append([name, symbol] if symbol else [name])
         for token in A_SHARE_INTELLIGENCE_TOKENS:
             groups.append([name, token])
-        return groups
+        if query_cap is None:
+            return groups
+        return groups[: max(int(query_cap or 0), 0)]
 
-    def _stock_official_query_groups(self, profile: Mapping[str, Any]) -> List[List[str]]:
+    def _stock_official_query_groups(self, profile: Mapping[str, Any], *, query_cap: int | None = None) -> List[List[str]]:
         name = str(profile.get("name", "")).strip()
         symbol = str(profile.get("symbol", "")).strip()
         if not name:
             return []
         groups: List[List[str]] = []
+        symbol_groups: List[List[str]] = []
         for token in ("公告", "业绩预告", "业绩说明会", "互动易", "问询回复", "路演纪要", "投资者关系", "官网"):
             groups.append([name, token])
             if symbol:
-                groups.append([name, symbol, token])
-        return groups
+                symbol_groups.append([name, symbol, token])
+        groups.extend(symbol_groups)
+        if query_cap is None:
+            return groups
+        return groups[: max(int(query_cap or 0), 0)]
 
     def _classify_stock_search_item(self, item: Mapping[str, Any], profile: Mapping[str, Any]) -> Dict[str, str]:
         row = dict(item or {})
@@ -1414,19 +1783,55 @@ class NewsCollector(BaseCollector):
         row.setdefault("source_note", "search_fallback")
         return row
 
-    def _search_stock_intelligence(self, profile: Mapping[str, Any], *, limit: int = 10) -> List[Dict[str, str]]:
-        official_groups = self._stock_official_query_groups(profile)
-        generic_groups = self._stock_query_groups(profile)
+    def _search_stock_intelligence(
+        self,
+        profile: Mapping[str, Any],
+        *,
+        limit: int = 10,
+        runtime_mode: str = "full",
+    ) -> List[Dict[str, str]]:
+        runtime_mode = str(runtime_mode or "full").strip().lower()
+        if runtime_mode not in {"full", "focused", "finalist"}:
+            runtime_mode = "full"
+        if runtime_mode == "focused":
+            official_query_cap = int(self.config.get("stock_news_official_query_cap", 2) or 2)
+            generic_query_cap = int(self.config.get("stock_news_search_query_cap", 1) or 1)
+            recent_days = int(self.config.get("stock_news_search_recent_days", 14) or 14)
+            search_limit = min(max(limit, 3), 4)
+        elif runtime_mode == "finalist":
+            official_query_cap = int(self.config.get("stock_news_finalist_official_query_cap", 2) or 2)
+            generic_query_cap = int(self.config.get("stock_news_finalist_search_query_cap", 1) or 1)
+            recent_days = int(self.config.get("stock_news_finalist_search_recent_days", 21) or 21)
+            search_limit = min(max(limit, 4), 5)
+        else:
+            official_query_cap = int(self.config.get("stock_news_official_query_cap", 0) or 0) or None
+            generic_query_cap = int(self.config.get("stock_news_search_query_cap", 0) or 0) or None
+            recent_days = int(self.config.get("stock_news_search_recent_days", 21) or 21)
+            search_limit = max(limit, 6)
+        official_groups = self._stock_official_query_groups(profile, query_cap=official_query_cap)
+        generic_groups = self._stock_query_groups(profile, query_cap=generic_query_cap)
+        official_group_keys = {
+            tuple(token.strip() for token in group if str(token).strip())
+            for group in official_groups
+        }
+        generic_groups = [
+            group
+            for group in generic_groups
+            if tuple(token.strip() for token in group if str(token).strip()) not in official_group_keys
+        ]
         if not official_groups and not generic_groups:
             return []
         hits: List[Dict[str, str]] = []
         if official_groups:
+            official_total_query_cap = max(1, int(official_query_cap or 0)) if official_query_cap is not None else None
             hits.extend(
-                self.search_by_keyword_groups(
+                self._call_search_by_keyword_groups(
                     official_groups,
                     preferred_sources=[*A_SHARE_DIRECT_SOURCE_HINTS, *self._stock_site_search_hints(profile)],
-                    limit=max(limit, 6),
-                    recent_days=21,
+                    limit=search_limit,
+                    recent_days=recent_days,
+                    query_cap_per_group=1,
+                    total_query_cap=official_total_query_cap,
                 )
             )
         classified_official_hits = [self._classify_stock_search_item(item, profile) for item in hits]
@@ -1439,12 +1844,15 @@ class NewsCollector(BaseCollector):
             if str(item.get("source_note", "")).startswith("official_")
         ]
         if len(official_like) < min(limit, 2) and generic_groups:
+            generic_total_query_cap = max(1, int(generic_query_cap or 0)) if generic_query_cap is not None else None
             hits.extend(
-                self.search_by_keyword_groups(
+                self._call_search_by_keyword_groups(
                     generic_groups,
                     preferred_sources=self._stock_preferred_sources() + self._stock_site_search_hints(profile),
-                    limit=max(limit, 6),
-                    recent_days=21,
+                    limit=search_limit,
+                    recent_days=recent_days,
+                    query_cap_per_group=1,
+                    total_query_cap=generic_total_query_cap,
                 )
             )
 
@@ -1458,6 +1866,70 @@ class NewsCollector(BaseCollector):
             row.setdefault("source_note", "search_fallback")
             normalized.append(row)
         return normalized
+
+    def _call_search_by_keywords(
+        self,
+        keywords: Sequence[str],
+        *,
+        preferred_sources: Optional[Sequence[str]] = None,
+        limit: int = 6,
+        recent_days: int = 7,
+        query_cap: Optional[int] = None,
+    ) -> List[Dict[str, str]]:
+        try:
+            return self.search_by_keywords(
+                keywords,
+                preferred_sources=preferred_sources,
+                limit=limit,
+                recent_days=recent_days,
+                query_cap=query_cap,
+            )
+        except TypeError:
+            return self.search_by_keywords(
+                keywords,
+                preferred_sources=preferred_sources,
+                limit=limit,
+                recent_days=recent_days,
+            )
+
+    def _call_search_by_keyword_groups(
+        self,
+        keyword_groups: Sequence[Sequence[str]],
+        *,
+        preferred_sources: Optional[Sequence[str]] = None,
+        limit: int = 6,
+        recent_days: int = 7,
+        query_cap_per_group: Optional[int] = None,
+        total_query_cap: Optional[int] = None,
+    ) -> List[Dict[str, str]]:
+        try:
+            return self.search_by_keyword_groups(
+                keyword_groups,
+                preferred_sources=preferred_sources,
+                limit=limit,
+                recent_days=recent_days,
+                query_cap_per_group=query_cap_per_group,
+                total_query_cap=total_query_cap,
+            )
+        except TypeError:
+            return self.search_by_keyword_groups(
+                keyword_groups,
+                preferred_sources=preferred_sources,
+                limit=limit,
+                recent_days=recent_days,
+            )
+
+    def _call_search_stock_intelligence(
+        self,
+        profile: Mapping[str, Any],
+        *,
+        limit: int = 10,
+        runtime_mode: str = "full",
+    ) -> List[Dict[str, str]]:
+        try:
+            return self._search_stock_intelligence(profile, limit=limit, runtime_mode=runtime_mode)
+        except TypeError:
+            return self._search_stock_intelligence(profile, limit=limit)
 
     def _stock_site_search_hints(self, profile: Mapping[str, Any]) -> List[str]:
         hints: List[str] = []
@@ -1500,12 +1972,13 @@ class NewsCollector(BaseCollector):
         items: Sequence[Dict[str, str]],
         preferred_sources: Sequence[str],
         query_keywords: Optional[Sequence[str]] = None,
+        reference_time: Optional[datetime] = None,
     ) -> List[Dict[str, str]]:
         preferred_lower = [item.lower() for item in preferred_sources]
         query_terms = [str(item).strip() for item in (query_keywords or []) if str(item).strip()]
         deduped: List[Dict[str, str]] = []
         seen_titles = set()
-        reference_time = datetime.now()
+        reference_time = reference_time or datetime.now()
         for item in items:
             title = item.get("title", "")
             normalized_title = _normalized_title_key(title)
@@ -1572,6 +2045,30 @@ class NewsCollector(BaseCollector):
             )
 
         return sorted(deduped, key=_score)
+
+    def _latest_published_reference_time(self, items: Sequence[Dict[str, str]]) -> Optional[datetime]:
+        published_times = [
+            parsed
+            for parsed in (_parse_news_timestamp(item.get("published_at")) for item in items)
+            if parsed is not None
+        ]
+        if not published_times:
+            return None
+        return max(published_times)
+
+    def _filter_topic_search_items(
+        self,
+        items: Sequence[Dict[str, str]],
+        *,
+        recent_days: int,
+    ) -> tuple[List[Dict[str, str]], Optional[datetime]]:
+        filtered = self._filter_candidate_items(items, recent_days=recent_days)
+        if filtered:
+            return filtered, None
+        reference_time = self._latest_published_reference_time(items)
+        if reference_time is None:
+            return [], None
+        return self._filter_candidate_items(items, recent_days=recent_days, reference_time=reference_time), reference_time
 
     def _filter_candidate_items(
         self,
@@ -1645,6 +2142,33 @@ class NewsCollector(BaseCollector):
                 cleaned.append(value)
         return cleaned[:8]
 
+    def _expand_market_intelligence_keywords(self, keywords: Sequence[str]) -> List[str]:
+        expanded: List[str] = []
+        seen: set[str] = set()
+
+        def _append(value: Any) -> None:
+            token = str(value).strip()
+            normalized = token.lower()
+            if not token or normalized in seen:
+                return
+            seen.add(normalized)
+            expanded.append(token)
+
+        base_keywords = self._normalize_topic_keywords(keywords)
+        for keyword in base_keywords:
+            _append(keyword)
+        if not expanded:
+            return []
+
+        query_blob = " ".join(item.lower() for item in expanded)
+        for rule in MARKET_INTELLIGENCE_THEME_BRIDGES:
+            triggers = tuple(str(item).strip().lower() for item in rule.get("triggers", ()) if str(item).strip())
+            if not triggers or not any(trigger in query_blob for trigger in triggers):
+                continue
+            for term in rule.get("terms", ()):
+                _append(term)
+        return expanded[:20]
+
     def _topic_queries(
         self,
         keywords: Sequence[str],
@@ -1674,44 +2198,40 @@ class NewsCollector(BaseCollector):
                 seen.add(url)
 
             anchor_terms = cleaned_terms[:2]
-            site_sources = [source for source in preferred_sources if str(source).strip().lower().startswith("site:")]
+            combined_anchor = " ".join(anchor_terms).strip()
+            named_sources: List[tuple[str, str]] = []
+            site_sources: List[tuple[str, str]] = []
             for source in preferred_sources[:5]:
-                if str(source).strip().lower().startswith("site:"):
+                source_name = str(source).strip()
+                if not source_name:
                     continue
-                domain = SOURCE_DOMAIN_HINTS.get(source)
-                if not domain:
+                if source_name.lower().startswith("site:"):
+                    domain = source_name[5:].strip()
+                    if domain:
+                        site_sources.append((source_name, f"site:{domain}"))
                     continue
-                combined_anchor = " ".join(anchor_terms).strip()
-                if combined_anchor:
-                    combined_query = f"{domain} {combined_anchor} when:{recent_days}d"
-                    combined_url = self._google_news_search_url(combined_query, hl=hl, gl=gl, ceid=ceid)
-                    if combined_url not in seen:
-                        queries.append((source, combined_url))
-                        seen.add(combined_url)
-                for anchor in anchor_terms:
-                    scoped_query = f"{domain} {anchor} when:{recent_days}d"
+                domain = SOURCE_DOMAIN_HINTS.get(source_name)
+                if domain:
+                    named_sources.append((source_name, domain))
+
+            # Cover each preferred lane once before expanding anchor variants.
+            for source_name, domain_query in [*named_sources, *site_sources[:3]]:
+                if not combined_anchor:
+                    continue
+                combined_query = f"{domain_query} {combined_anchor} when:{recent_days}d"
+                combined_url = self._google_news_search_url(combined_query, hl=hl, gl=gl, ceid=ceid)
+                if combined_url in seen:
+                    continue
+                queries.append((source_name, combined_url))
+                seen.add(combined_url)
+
+            for anchor in anchor_terms[:1]:
+                for source_name, domain_query in [*named_sources, *site_sources[:3]]:
+                    scoped_query = f"{domain_query} {anchor} when:{recent_days}d"
                     scoped_url = self._google_news_search_url(scoped_query, hl=hl, gl=gl, ceid=ceid)
                     if scoped_url in seen:
                         continue
-                    queries.append((source, scoped_url))
-                    seen.add(scoped_url)
-            for source in site_sources[:3]:
-                domain = str(source).strip()[5:].strip()
-                if not domain:
-                    continue
-                combined_anchor = " ".join(anchor_terms).strip()
-                if combined_anchor:
-                    combined_query = f"site:{domain} {combined_anchor} when:{recent_days}d"
-                    combined_url = self._google_news_search_url(combined_query, hl=hl, gl=gl, ceid=ceid)
-                    if combined_url not in seen:
-                        queries.append((source, combined_url))
-                        seen.add(combined_url)
-                for anchor in anchor_terms:
-                    scoped_query = f"site:{domain} {anchor} when:{recent_days}d"
-                    scoped_url = self._google_news_search_url(scoped_query, hl=hl, gl=gl, ceid=ceid)
-                    if scoped_url in seen:
-                        continue
-                    queries.append((source, scoped_url))
+                    queries.append((source_name, scoped_url))
                     seen.add(scoped_url)
         return queries
 

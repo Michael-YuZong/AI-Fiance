@@ -68,7 +68,8 @@ def finalize_client_markdown(
     written_detail = write_detail_markdown(detail_path, detail_markdown)
     written_text_sidecars = _write_text_sidecars(text_sidecars)
     written_json_sidecars = _write_json_sidecars(json_sidecars)
-    normalized_client_markdown = _rewrite_local_report_asset_paths(client_markdown, markdown_path.parent)
+    release_check_base = markdown_path.parent.parent if markdown_path.parent.name == "final" else markdown_path.parent
+    normalized_client_markdown = _rewrite_local_report_asset_paths(client_markdown, release_check_base)
     review_path = review_path_for(markdown_path)
     scaffold_created = False
     if not review_path.exists():

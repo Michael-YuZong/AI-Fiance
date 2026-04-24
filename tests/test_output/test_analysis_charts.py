@@ -79,14 +79,197 @@ def test_analysis_chart_renderer_outputs_dashboard(tmp_path: Path):
         image = Path(visuals[key])
         assert image.exists()
         assert image.stat().st_size > 0
+        assert image.suffix == ".svg"
 
 
-def test_analysis_chart_renderer_skips_visuals_for_history_fallback(tmp_path: Path):
+def test_analysis_chart_renderer_writes_theme_variant_svgs(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path), theme="institutional", render_theme_variants=True)
+    visuals = renderer.render(_sample_analysis())
+    dashboard = Path(visuals["dashboard"])
+    assert "<svg" in dashboard.read_text(encoding="utf-8")
+    for theme_name in ("terminal", "abyss-gold", "institutional", "clinical", "erdtree", "neo-brutal"):
+        variant = tmp_path / f"{dashboard.stem}.theme-{theme_name}{dashboard.suffix}"
+        assert variant.exists()
+        assert variant.stat().st_size > 0
+
+
+def test_terminal_theme_variant_uses_terminal_header_palette(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path), theme="institutional", render_theme_variants=True)
+    visuals = renderer.render(_sample_analysis())
+    dashboard = Path(visuals["dashboard"])
+    terminal_variant = tmp_path / f"{dashboard.stem}.theme-terminal{dashboard.suffix}"
+    svg = terminal_variant.read_text(encoding="utf-8")
+
+    assert "#202d3d" in svg
+    assert "#edf3fb" not in svg
+
+
+def test_analysis_chart_renderer_skips_theme_variants_by_default(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path), theme="institutional")
+    visuals = renderer.render(_sample_analysis())
+    dashboard = Path(visuals["dashboard"])
+    assert dashboard.exists()
+    for theme_name in ("terminal", "abyss-gold", "institutional", "clinical", "erdtree", "neo-brutal"):
+        variant = tmp_path / f"{dashboard.stem}.theme-{theme_name}{dashboard.suffix}"
+        assert not variant.exists()
+
+
+def test_analysis_chart_renderer_defaults_to_institutional_theme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("AI_FINANCE_REPORT_THEME", raising=False)
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    assert renderer.theme == "institutional"
+    assert renderer._PANEL == "#05080c"
+    assert renderer._PAPER == "#000000"
+
+
+def test_institutional_theme_uses_dark_gold_header_cards(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path), theme="institutional")
+    assert renderer._header_panel_fill() == "#15120e"
+    assert renderer._header_panel_alpha() == pytest.approx(0.96)
+    assert renderer._header_panel_edge_alpha() == pytest.approx(0.88)
+    assert renderer._header_shadow_alpha() == pytest.approx(0.12)
+    assert renderer._header_title_color() == "#ffe082"
+    score_fill = renderer._score_card_fill()
+    assert isinstance(score_fill, tuple)
+    assert len(score_fill) == 4
+    assert score_fill[-1] == pytest.approx(0.08)
+
+
+def test_apply_theme_updates_variant_specific_header_palette(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path), theme="institutional")
+    renderer._apply_theme("terminal")
+    assert renderer.theme == "terminal"
+    assert renderer._header_panel_fill() == "#202d3d"
+    assert renderer._header_title_color() == "#eff6ff"
+
+
+def test_clinical_theme_header_palette_stays_distinct_from_institutional(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path), theme="clinical")
+    assert renderer._header_panel_fill() == "#ffffff"
+    assert renderer._header_title_color() == "#1d1d1f"
+
+
+def test_analysis_chart_renderer_uses_report_theme_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("AI_FINANCE_REPORT_THEME", "abyss-gold")
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    assert renderer.theme == "abyss-gold"
+    assert renderer._PANEL == "#181512"
+    assert renderer._LAST_PRICE_BOX == "#2b2218"
+
+
+def test_analysis_chart_renderer_supports_light_report_theme_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("AI_FINANCE_REPORT_THEME", "clinical")
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    assert renderer.theme == "clinical"
+    assert renderer._PANEL == "#f5f8fd"
+    assert renderer._PAPER == "#fbfbfd"
+
+
+def test_analysis_chart_renderer_returns_snapshot_card_for_history_fallback(tmp_path: Path):
     renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
     analysis = _sample_analysis()
     analysis["history_fallback_mode"] = True
     visuals = renderer.render(analysis)
-    assert visuals == {}
+    assert visuals["mode"] == "snapshot_fallback"
+    assert "dashboard" in visuals
+    assert "note" in visuals
+    dashboard = Path(visuals["dashboard"])
+    assert dashboard.exists()
+    assert dashboard.suffix == ".svg"
+    svg = dashboard.read_text(encoding="utf-8")
+    assert "当前快照 / 关键位" in svg
+    assert "降级说明 / 当前应读什么" in svg
+    assert "近3月价格结构 / K线" not in svg
+    assert "相对强弱 / 归一化走势" not in svg
+
+
+def test_header_context_lines_wraps_long_summary_into_two_lines(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    analysis = _sample_analysis()
+    analysis["narrative"]["summary_lines"] = [
+        "总体来看，阳光电源的核心逻辑在于背景宏观主导背景下的电气设备暴露仍有配置价值，同时短线还需要等价格和资金重新共振确认。"
+    ]
+    lines = renderer._header_context_lines(analysis)
+    assert 1 <= len(lines) <= 2
+    assert all(line.strip() for line in lines)
+    assert sum("行情" in line for line in lines) <= 1
+
+
+def test_dashboard_header_uses_single_summary_card_layout(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    visuals = renderer.render(_sample_analysis())
+    dashboard = Path(visuals["dashboard"])
+    svg = dashboard.read_text(encoding="utf-8")
+    assert "研判概览" not in svg
+    assert "当前判断" not in svg
+    assert "机会评级" not in svg
+    assert "信号等级" not in svg
+    assert "阶段" in svg
+    assert "方向" in svg
+    assert "电网设备" in svg
+    assert "较强机会" in svg
+
+
+def test_dashboard_header_renders_signal_badges_inside_header(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    renderer._header_market_snapshot = lambda analysis: {
+        "price_value": "28.580",
+        "change_value": "-7.09%",
+        "change_color": "#18c48f",
+        "metrics": [("MACD", "0.496"), ("KDJ", "29.6"), ("RSI(14)", "47.5"), ("ADX", "29.7")],
+        "badges": [("修复中", "bull"), ("空头主导", "bear")],
+    }
+    visuals = renderer.render(_sample_analysis())
+    svg = Path(visuals["dashboard"]).read_text(encoding="utf-8")
+
+    assert "修复中" in svg
+    assert "空头主导" in svg
+
+
+def test_header_signal_rows_keep_summary_text_inside_compact_right_card(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    rows = renderer._header_signal_rows(
+        phase_value="震荡整理中的修复阶段",
+        direction_value="中性偏多但仍待确认",
+        action_value="等待右侧确认，不追高",
+        theme_value="能源 / 资源 / 地缘 / 周期",
+    )
+
+    assert len(rows) == 3
+    assert rows[0][0] > 0.0
+    assert rows[-1][0] > 0.0
+    assert rows[0][2].count("/") >= 1
+    assert rows[1][2].endswith("...") or len(rows[1][2]) <= 10
+    assert rows[2][2].endswith("...") or len(rows[2][2]) <= 10
+
+
+def test_dashboard_header_splits_name_and_symbol_hierarchy(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    visuals = renderer.render(_sample_analysis())
+    dashboard = Path(visuals["dashboard"])
+    svg = dashboard.read_text(encoding="utf-8")
+
+    assert "电网ETF" in svg
+    assert "561380" in svg
+    assert "电网ETF (561380)" not in svg
+
+
+def test_dashboard_header_prefers_theme_playbook_label_over_day_theme(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    analysis = _sample_analysis()
+    analysis["day_theme"] = {"label": "背景宏观主导"}
+    analysis["theme_playbook"] = {
+        "label": "光伏主链",
+        "hard_sector_label": "电力设备 / 新能源设备",
+        "playbook_level": "theme",
+    }
+    cards = renderer._header_summary_cards(analysis)
+    theme_card = next(item for item in cards if item["label"] == "主线")
+
+    assert theme_card["value"] == "光伏主链"
+    assert "光伏主链" in renderer._headline_note(analysis)
+    assert "背景宏观主导" not in renderer._headline_note(analysis)
+    assert "主线: 光伏主链" in renderer._footer_text(analysis)
 
 
 def test_draw_candles_adds_bodies_and_wicks(tmp_path: Path):
@@ -177,6 +360,66 @@ def test_visible_price_levels_hides_far_target_from_short_panel(tmp_path: Path):
     assert "止损参考" in labels
 
 
+def test_visible_price_levels_keeps_nearest_resistance_when_none_is_within_range(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    levels = [
+        ("止损参考", 1.558, "stop"),
+        ("反压下沿", 1.978, "resistance"),
+        ("反压上沿", 2.032, "resistance"),
+    ]
+    filtered = renderer._visible_price_levels(levels, price=1.694, max_distance_pct=0.10)
+    labels = [item[0] for item in filtered]
+    assert "止损参考" in labels
+    assert "反压下沿" in labels
+
+
+def test_build_price_levels_relabels_broken_support_zone_as_resistance(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    analysis = _sample_analysis()
+    levels = renderer._build_price_levels(
+        analysis,
+        analysis["history"].tail(40).copy(),
+        price=1.694,
+        support_low=1.978,
+        support_high=2.032,
+    )
+    labels = [item[0] for item in levels]
+    assert "反压下沿" in labels
+    assert "反压上沿" in labels
+    assert "支撑下沿" not in labels
+
+
+def test_resolve_level_label_y_spreads_dense_price_labels(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    occupied = [29.923, 29.775]
+    label_y = renderer._resolve_level_label_y(
+        29.890,
+        occupied,
+        min_gap=0.12,
+        y_min=27.0,
+        y_max=36.5,
+        prefer_direction=-1,
+    )
+    assert all(abs(label_y - used) >= 0.12 for used in occupied[:-1])
+
+
+def test_apply_price_ylim_adds_extra_headroom_for_badges(tmp_path: Path):
+    pytest.importorskip("matplotlib")
+    import matplotlib.pyplot as plt
+
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    history = _sample_analysis()["history"].tail(40).copy()
+    history["high"] = [30.4 + idx * 0.01 for idx in range(len(history))]
+    history["low"] = [27.8 + idx * 0.01 for idx in range(len(history))]
+    levels = [("支撑上沿", 29.923, "support"), ("止损参考", 27.756, "stop"), ("目标压力", 36.490, "resistance")]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    renderer._apply_price_ylim(ax, history, levels)
+    lower, upper = ax.get_ylim()
+    assert upper >= 36.490 + (36.490 - 27.756) * 0.10
+    assert lower <= 27.756 - (36.490 - 27.756) * 0.10
+    plt.close(fig)
+
+
 def test_extract_price_hint_prefers_price_over_day_count(tmp_path: Path):
     renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
     value = renderer._extract_price_hint("先看前高/近 60 日高点 1.442 附近", reference_price=1.335)
@@ -242,6 +485,27 @@ def test_market_mode_badge_uses_adx_thresholds(tmp_path: Path):
     renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
     assert renderer._market_mode_badge({"adx": pd.Series([31.0])}) == ("趋势市", "bull")
     assert renderer._market_mode_badge({"adx": pd.Series([17.0])}) == ("震荡市", "neutral")
+
+
+def test_dashboard_svg_header_uses_explanatory_chip_labels(tmp_path: Path):
+    renderer = AnalysisChartRenderer(output_dir=str(tmp_path))
+    visuals = renderer.render(_sample_analysis())
+    dashboard_svg = Path(visuals["dashboard"]).read_text(encoding="utf-8")
+    assert "当前判断" not in dashboard_svg
+    assert "研判概览" not in dashboard_svg
+    assert "机会评级" not in dashboard_svg
+    assert "3星" in dashboard_svg
+    assert "信号等级" not in dashboard_svg
+    assert "较强机会" in dashboard_svg
+    assert "MACD" in dashboard_svg
+    assert "KDJ" in dashboard_svg
+    assert "RSI(14)" in dashboard_svg
+    assert "ADX" in dashboard_svg
+    assert "阶段" in dashboard_svg
+    assert "强势整理" in dashboard_svg
+    assert "观察为主" in dashboard_svg
+    assert "电网设备" in dashboard_svg
+    assert "当前价" in dashboard_svg
     assert renderer._market_mode_badge({"adx": pd.Series([21.0])}) == ("过渡期", "warn")
 
 

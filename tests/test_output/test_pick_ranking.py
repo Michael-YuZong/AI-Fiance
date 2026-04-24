@@ -31,6 +31,30 @@ def test_recommendation_bucket_lazy_loads_strategy_background_confidence(monkeyp
     assert bucket == "观察为主"
 
 
+def test_recommendation_bucket_downgrades_etf_when_direct_coverage_is_zero_and_setup_is_weak() -> None:
+    candidate = _watch_candidate("159516")
+    candidate["asset_type"] = "cn_etf"
+    candidate["rating"] = {"rank": 3, "label": "较强机会"}
+    candidate["dimensions"]["technical"] = {"score": 45}
+    candidate["dimensions"]["catalyst"] = {
+        "score": 15,
+        "coverage": {
+            "diagnosis": "proxy_degraded",
+            "direct_news_count": 0,
+            "fresh_direct_news_count": 0,
+            "structured_event": False,
+            "effective_structured_event": False,
+            "forward_event": False,
+            "high_confidence_company_news": False,
+            "directional_catalyst_hit": False,
+            "theme_news_count": 0,
+        },
+    }
+    candidate["dimensions"]["risk"] = {"score": 35}
+
+    assert pick_ranking.recommendation_bucket(candidate) == "观察为主"
+
+
 def test_rank_market_items_uses_lazy_strategy_confidence_for_tie_break(monkeypatch) -> None:
     pick_ranking._STRATEGY_CONFIDENCE_CACHE.clear()
 

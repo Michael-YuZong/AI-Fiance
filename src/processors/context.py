@@ -12,7 +12,7 @@ from src.utils.market import market_regime_proxy
 
 
 def _sort_latest_first(frame: pd.DataFrame) -> pd.DataFrame:
-    order_candidates = ("month", "MONTH", "date", "日期", "月份")
+    order_candidates = ("trade_date", "month", "MONTH", "date", "日期", "月份")
     for column in order_candidates:
         if column not in frame.columns:
             continue
@@ -112,7 +112,7 @@ def _credit_impulse_label(
     return "stable"
 
 
-def load_china_macro_snapshot(config: Dict[str, Any]) -> Dict[str, float]:
+def load_china_macro_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
     collector = ChinaMacroCollector(config)
 
     pmi_frame = _sort_latest_first(collector.get_pmi())
@@ -144,6 +144,22 @@ def load_china_macro_snapshot(config: Dict[str, Any]) -> Dict[str, float]:
 
     lpr_frame = _sort_latest_first(collector.get_lpr())
     lpr, lpr_prev = _series_pair(lpr_frame, ("LPR1Y", "1y"))
+    fx_end = pd.Timestamp.now().strftime("%Y%m%d")
+    fx_start = (pd.Timestamp.now() - pd.Timedelta(days=30)).strftime("%Y%m%d")
+    fx_frame = _sort_latest_first(collector.get_fx_daily("USDCNH.FXCM", start_date=fx_start, end_date=fx_end))
+    usdcnh: float | None = None
+    usdcnh_prev: float | None = None
+    usdcnh_trend = "stable"
+    fx_latest_date = ""
+    if not fx_frame.empty:
+        fx_latest_date = str(fx_frame.attrs.get("latest_date", "") or "").strip()
+        try:
+            usdcnh, usdcnh_prev = _series_pair(fx_frame, ("close",))
+            usdcnh_trend = _pct_trend(usdcnh, usdcnh_prev, tolerance=0.003)
+        except Exception:
+            usdcnh = None
+            usdcnh_prev = None
+            usdcnh_trend = "stable"
 
     pmi_trend = _trend(pmi, pmi_prev, tolerance=0.15)
     cpi_trend = _trend(cpi, cpi_prev, tolerance=0.1)
@@ -218,6 +234,10 @@ def load_china_macro_snapshot(config: Dict[str, Any]) -> Dict[str, float]:
         "credit_impulse": credit_impulse,
         "lpr_1y": lpr,
         "lpr_prev": lpr_prev,
+        "usdcnh": usdcnh,
+        "usdcnh_prev": usdcnh_prev,
+        "usdcnh_trend": usdcnh_trend,
+        "fx_latest_date": fx_latest_date,
     }
 
 
@@ -253,6 +273,12 @@ def macro_lines(china_macro: Dict[str, Any], global_proxy: Dict[str, Any]) -> Li
             f"M1-M2 剪刀差 {china_macro.get('m1_m2_spread', 0.0):+.1f} 个百分点，较前值{spread_trend}；社融近 3 个月均值约 {china_macro.get('social_financing_3m_avg_text', '—')}。"
         )
         lines.append(f"LPR 1Y 最近值 {china_macro['lpr_1y']:.2f}%，信用脉冲判断为 `{china_macro.get('credit_impulse', 'stable')}`。")
+        usdcnh = china_macro.get("usdcnh")
+        if usdcnh is not None:
+            fx_trend = {"rising": "走高", "falling": "回落", "stable": "持平"}.get(str(china_macro.get("usdcnh_trend")), "持平")
+            latest_date = str(china_macro.get("fx_latest_date", "")).strip()
+            date_suffix = f"（{latest_date}）" if latest_date else ""
+            lines.append(f"USDCNH 最近值 {float(usdcnh):.4f}{date_suffix}，较前值{fx_trend}，人民币汇率方向开始有了正式日线快照。")
     if global_proxy:
         if "vix" in global_proxy:
             lines.append(f"VIX 位于 {global_proxy['vix']:.1f}。")

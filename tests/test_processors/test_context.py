@@ -60,6 +60,14 @@ class _FakeMacroCollector:
             }
         )
 
+    def get_fx_daily(self, ts_code: str, *, trade_date: str = "", start_date: str = "", end_date: str = "") -> pd.DataFrame:  # noqa: ARG002
+        return pd.DataFrame(
+            {
+                "trade_date": ["2026-02-02", "2026-02-01"],
+                "close": [7.18, 7.14],
+            }
+        )
+
 
 def test_load_china_macro_snapshot_supports_tushare_columns(monkeypatch) -> None:
     monkeypatch.setattr("src.processors.context.ChinaMacroCollector", _FakeMacroCollector)
@@ -77,6 +85,9 @@ def test_load_china_macro_snapshot_supports_tushare_columns(monkeypatch) -> None
     assert snapshot["lpr_1y"] == 3.0
     assert snapshot["lpr_prev"] == 3.1
     assert snapshot["demand_state"] == "improving"
+    assert snapshot["usdcnh"] == 7.18
+    assert snapshot["usdcnh_prev"] == 7.14
+    assert snapshot["usdcnh_trend"] == "rising"
 
 
 def test_load_china_macro_snapshot_supports_legacy_columns(monkeypatch) -> None:
@@ -103,6 +114,21 @@ def test_load_china_macro_snapshot_supports_legacy_columns(monkeypatch) -> None:
     assert snapshot["lpr_1y"] == 3.1
 
 
+def test_load_china_macro_snapshot_tolerates_missing_fx_frame(monkeypatch) -> None:
+    class _NoFxMacroCollector(_FakeMacroCollector):
+        def get_fx_daily(self, ts_code: str, *, trade_date: str = "", start_date: str = "", end_date: str = "") -> pd.DataFrame:  # noqa: ARG002
+            return pd.DataFrame()
+
+    monkeypatch.setattr("src.processors.context.ChinaMacroCollector", _NoFxMacroCollector)
+
+    snapshot = load_china_macro_snapshot({})
+
+    assert snapshot["usdcnh"] is None
+    assert snapshot["usdcnh_prev"] is None
+    assert snapshot["usdcnh_trend"] == "stable"
+    assert snapshot["fx_latest_date"] == ""
+
+
 def test_macro_lines_surface_leading_indicators() -> None:
     lines = macro_lines(
         {
@@ -119,6 +145,9 @@ def test_macro_lines_surface_leading_indicators() -> None:
             "social_financing_3m_avg_text": "2.56 万亿元",
             "credit_impulse": "expanding",
             "lpr_1y": 3.0,
+            "usdcnh": 7.18,
+            "usdcnh_trend": "rising",
+            "fx_latest_date": "2026-02-02",
         },
         {"dxy": 100.2, "dxy_20d_change": -0.02},
     )
@@ -127,3 +156,4 @@ def test_macro_lines_surface_leading_indicators() -> None:
     assert any("PPI" in line for line in lines)
     assert any("M1-M2" in line for line in lines)
     assert any("信用脉冲" in line for line in lines)
+    assert any("USDCNH" in line for line in lines)

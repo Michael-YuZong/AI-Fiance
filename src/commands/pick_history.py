@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
@@ -41,18 +43,37 @@ def summarize_pick_coverage(analyses: Sequence[Mapping[str, Any]]) -> Dict[str, 
     news_mode = "live" if modes and all(mode == "live" for mode in modes) else ("proxy" if "proxy" in modes else (modes[0] if modes else "unknown"))
     structured_count = 0
     direct_count = 0
+    theme_count = 0
     degraded_count = 0
     for item in rows:
+        asset_type = str(item.get("asset_type", "")).strip()
         coverage = dict(dict(item.get("dimensions", {}).get("catalyst") or {}).get("coverage") or {})
         if coverage.get("structured_event") or coverage.get("forward_event"):
             structured_count += 1
+        elif asset_type in {"cn_etf", "cn_fund", "cn_index"} and (
+            coverage.get("directional_catalyst_hit")
+            or int(coverage.get("theme_news_count") or 0) > 0
+            or int(coverage.get("recent_theme_news_pool_count") or 0) > 0
+        ):
+            structured_count += 1
+            theme_count += 1
         if coverage.get("high_confidence_company_news"):
             direct_count += 1
-        if coverage.get("degraded"):
+        if coverage.get("degraded") and not (
+            asset_type in {"cn_etf", "cn_fund", "cn_index"}
+            and (
+                coverage.get("directional_catalyst_hit")
+                or int(coverage.get("theme_news_count") or 0) > 0
+                or str(coverage.get("diagnosis", "")).strip() in {"theme_only_live", "confirmed_live"}
+            )
+        ):
             degraded_count += 1
     total = len(rows)
-    degraded = news_mode != "live" or degraded_count > 0
-    note = "本轮实时新闻/事件覆盖存在降级，名单更容易偏保守。" if degraded else "本轮新闻/事件覆盖基本正常。"
+    degraded = (news_mode != "live" and theme_count == 0) or degraded_count > 0
+    if theme_count > 0:
+        note = "本轮直连新闻覆盖偏弱，但 ETF/基金主题级延续催化已有命中，不应机械地按零催化理解。"
+    else:
+        note = "本轮实时新闻/事件覆盖存在降级，名单更容易偏保守。" if degraded else "本轮新闻/事件覆盖基本正常。"
     return {
         "news_mode": news_mode,
         "degraded": degraded,
@@ -80,9 +101,13 @@ def grade_pick_delivery(
         item = dict(payload or {})
         if not item:
             return False
+        asset_type = str(item.get("asset_type", "")).strip()
+        rating_rank = int(dict(item.get("rating") or {}).get("rank", 0) or 0)
         narrative = dict(item.get("narrative") or {})
         judgment = dict(narrative.get("judgment") or {})
         action = dict(item.get("action") or {})
+        direction = str(action.get("direction", "")).strip()
+        position = str(action.get("position", "")).strip()
         tokens = " ".join(
             str(value).strip()
             for value in (
@@ -98,17 +123,114 @@ def grade_pick_delivery(
         )
         if not tokens:
             return False
-        observe_markers = ("观察", "回避", "暂不出手", "等待", "持有优于追高", "先按观察仓")
-        return any(marker in tokens for marker in observe_markers)
+        hard_observe_markers = ("观察为主", "回避", "暂不出手", "等待更好窗口", "先按观察仓", "仅观察仓")
+        if (
+            asset_type in {"cn_stock", "cn_etf", "cn_fund", "cn_index"}
+            and rating_rank >= 3
+            and direction in {"做多", "观望偏多", "观望"}
+            and position
+            and "暂不出手" not in position
+        ):
+            return False
+        if any(marker in tokens for marker in hard_observe_markers):
+            return True
+        pullback_execution_markers = ("持有优于追高", "回调更优", "小仓试仓", "分批", "做多")
+        if (
+            asset_type in {"cn_stock", "cn_etf", "cn_fund", "cn_index"}
+            and rating_rank >= 3
+            and any(marker in tokens for marker in pullback_execution_markers)
+        ):
+            return False
+        return "观察" in tokens
+
+    def _winner_preserves_recommendation(payload: Mapping[str, Any] | None) -> bool:
+        item = dict(payload or {})
+        if not item:
+            return False
+        dimensions = dict(item.get("dimensions") or {})
+        asset_type = str(item.get("asset_type", "")).strip()
+        catalyst = dict(dimensions.get("catalyst") or {})
+        coverage = dict(catalyst.get("coverage") or {})
+        rating_rank = int(dict(item.get("rating") or {}).get("rank", 0) or 0)
+        catalyst_score = float(catalyst.get("score") or 0.0)
+        technical_score = float(dict(dimensions.get("technical") or {}).get("score") or 0.0)
+        fundamental_score = float(dict(dimensions.get("fundamental") or {}).get("score") or 0.0)
+        relative_score = float(dict(dimensions.get("relative_strength") or {}).get("score") or 0.0)
+        risk_score = float(dict(dimensions.get("risk") or {}).get("score") or 0.0)
+        has_structured_signal = bool(
+            coverage.get("effective_structured_event")
+            or coverage.get("structured_event")
+            or coverage.get("forward_event")
+        )
+        has_theme_signal = bool(
+            coverage.get("directional_catalyst_hit")
+            or int(coverage.get("theme_news_count") or 0) > 0
+            or int(coverage.get("recent_theme_news_pool_count") or 0) > 0
+        )
+        has_news_signal = bool(
+            coverage.get("high_confidence_company_news")
+            or int(coverage.get("direct_news_count") or 0) > 0
+            or (
+                asset_type not in {"cn_etf", "cn_fund", "cn_index"}
+                and int(coverage.get("news_pool_count") or 0) > 0
+            )
+        )
+        theme_only_signal = (
+            asset_type in {"cn_etf", "cn_fund", "cn_index"}
+            and has_theme_signal
+            and not has_structured_signal
+            and not has_news_signal
+        )
+        etf_theme_continuation = (
+            asset_type in {"cn_etf", "cn_fund", "cn_index"}
+            and rating_rank >= 3
+            and not bool(coverage.get("degraded"))
+            and not theme_only_signal
+            and fundamental_score >= 40
+            and relative_score >= 30
+            and technical_score >= 20
+            and (catalyst_score >= 15 or risk_score >= 50)
+        )
+        stock_resilient_setup = (
+            asset_type == "cn_stock"
+            and rating_rank >= 3
+            and fundamental_score >= 65
+            and relative_score >= 20
+            and technical_score >= 15
+        )
+        if asset_type in {"cn_etf", "cn_fund", "cn_index"} and bool(coverage.get("degraded")) and theme_only_signal:
+            return False
+        return rating_rank >= 2 and not _observe_only_winner(item) and (
+            catalyst_score >= 25
+            or has_structured_signal
+            or has_news_signal
+            or (asset_type in {"cn_etf", "cn_fund", "cn_index"} and has_theme_signal and not bool(coverage.get("degraded")))
+            or etf_theme_continuation
+            or stock_resilient_setup
+        )
 
     coverage_payload = dict(coverage or {})
     degraded = bool(coverage_payload.get("degraded"))
+    winner_resilient = _winner_preserves_recommendation(winner)
+    winner_payload = dict(winner or {})
+    winner_asset_type = str(winner_payload.get("asset_type", "")).strip()
+    winner_catalyst_coverage = dict(dict(dict(winner_payload.get("dimensions") or {}).get("catalyst") or {}).get("coverage") or {})
+    winner_has_direct_or_structured = bool(
+        winner_catalyst_coverage.get("effective_structured_event")
+        or winner_catalyst_coverage.get("structured_event")
+        or winner_catalyst_coverage.get("forward_event")
+        or winner_catalyst_coverage.get("high_confidence_company_news")
+        or int(winner_catalyst_coverage.get("direct_news_count") or 0) > 0
+    )
+    if degraded and winner_asset_type in {"cn_etf", "cn_fund", "cn_index"} and not winner_has_direct_or_structured:
+        winner_resilient = False
     total = int(coverage_payload.get("total") or 0)
     structured_rate = float(coverage_payload.get("structured_rate") or 0.0)
     direct_rate = float(coverage_payload.get("direct_news_rate") or 0.0)
     summary_only = (
         report_type in {"etf_pick", "fund_pick"}
         and degraded
+        and not winner_resilient
         and (total <= 1 or (structured_rate < 0.34 and direct_rate < 0.34))
     )
     label = "标准推荐稿"
@@ -138,10 +260,12 @@ def grade_pick_delivery(
         code = "manual_scope_note"
         label = "定向候选稿"
         notes.append("本次是手动候选范围内的相对比较，不代表完整全市场优选结论。")
-    elif degraded:
+    elif degraded and not winner_resilient:
         code = "degraded_observation"
         label = "降级观察稿"
         notes.append("新闻/事件覆盖存在降级，本次更适合作为观察优先对象，不宜当成强执行型推荐。")
+    elif degraded:
+        notes.append("新闻/事件覆盖存在局部降级，但当前优先标的自身仍有可执行证据，本次仍按标准推荐稿处理。")
     elif report_type in {"etf_pick", "fund_pick"} and _observe_only_winner(winner):
         code = "observe_priority_note"
         label = "观察优先稿"
@@ -153,7 +277,11 @@ def grade_pick_delivery(
         notes.append("可统计覆盖样本比进入完整分析的样本更少，说明部分候选仍有数据缺口。")
 
     observe_only = code != "standard_recommendation"
-    state_line = "今天先给一个观察优先对象，不按正式买入稿理解。" if observe_only else "这份稿件仍可作为正式推荐框架下的单只优先对象。"
+    state_line = (
+        "今天先给一个观察优先对象，不按正式买入稿理解。"
+        if observe_only
+        else "这份稿件当前只代表本轮排序里的单只重点对象，具体执行口径仍以交付等级和首页执行卡为准。"
+    )
     notes.append(state_line)
     return {
         "code": code,
@@ -173,7 +301,7 @@ def enrich_pick_payload_with_score_history(
     model_changelog: Sequence[str],
     rank_key: Callable[[Mapping[str, Any]], Any],
 ) -> Dict[str, Any]:
-    history_store = load_json(snapshot_path, default={}) or {}
+    history_store = _load_history_store(snapshot_path)
     scope_history = _normalize_scope_history(history_store.get(scope) or {})
     current_snapshot = _build_snapshot(payload.get("top", []) or [], str(payload.get("generated_at", "")), model_version)
     current_date = _snapshot_date(str(payload.get("generated_at", "")))
@@ -238,6 +366,19 @@ def enrich_pick_payload_with_score_history(
     }
     save_json(snapshot_path, history_store)
     return payload
+
+
+def _load_history_store(snapshot_path: Path) -> Dict[str, Any]:
+    try:
+        payload = load_json(snapshot_path, default={}) or {}
+    except json.JSONDecodeError:
+        if snapshot_path.exists():
+            quarantine = snapshot_path.with_name(
+                f"{snapshot_path.stem}.corrupt.{datetime.now().strftime('%Y%m%d_%H%M%S')}{snapshot_path.suffix}"
+            )
+            snapshot_path.replace(quarantine)
+        return {}
+    return dict(payload)
 
 
 def _score_value(value: Any) -> Optional[float]:
@@ -450,4 +591,8 @@ def _maybe_apply_catalyst_fallback(
     coverage["fallback_applied"] = True
     catalyst_dimension["coverage"] = coverage
     analysis["dimensions"]["catalyst"] = catalyst_dimension
-    analysis["rating"] = _rating_from_dimensions(analysis["dimensions"], analysis.get("rating", {}).get("warnings", []) or [])
+    analysis["rating"] = _rating_from_dimensions(
+        analysis["dimensions"],
+        analysis.get("rating", {}).get("warnings", []) or [],
+        asset_type=str(analysis.get("asset_type", "") or ""),
+    )

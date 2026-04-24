@@ -96,6 +96,140 @@ profiles:
       news_heat: 10
       forward_event: 5
 
+  通信:
+    themes:
+      - "通信"
+      - "CPO"
+      - "光模块"
+      - "数据中心"
+      - "运营商"
+    keywords:
+      - "通信"
+      - "通信设备"
+      - "光模块"
+      - "光通信"
+      - "CPO"
+      - "共封装光学"
+      - "800G"
+      - "1.6T"
+      - "交换机"
+      - "以太网"
+      - "数据中心"
+      - "IDC"
+      - "运营商"
+      - "5G"
+      - "6G"
+    policy_keywords:
+      - "算力基础设施"
+      - "东数西算"
+      - "万兆光网"
+      - "数据中心"
+      - "5G-A"
+      - "6G"
+      - "数字经济"
+    domestic_leaders:
+      - "中际旭创"
+      - "新易盛"
+      - "天孚通信"
+      - "中兴通讯"
+      - "烽火通信"
+      - "中国移动"
+      - "中国电信"
+    overseas_leaders:
+      - "Broadcom"
+      - "Arista"
+      - "Cisco"
+      - "NVIDIA"
+      - "Coherent"
+      - "Lumentum"
+    earnings_keywords:
+      - "earnings"
+      - "results"
+      - "guidance"
+      - "财报"
+      - "业绩"
+      - "指引"
+      - "订单"
+      - "出货"
+      - "资本开支"
+      - "capex"
+    event_keywords:
+      - "订单"
+      - "扩产"
+      - "出货"
+      - "中标"
+      - "以太网"
+      - "交换机"
+      - "800G"
+      - "1.6T"
+      - "数据中心"
+    factor_max_overrides:
+      policy: 20
+      leader: 20
+      structured: 15
+      overseas: 20
+      news_density: 10
+      news_heat: 10
+      forward_event: 5
+
+  传媒:
+    themes:
+      - "传媒"
+      - "游戏"
+      - "AIGC"
+    keywords:
+      - "传媒"
+      - "游戏"
+      - "动漫"
+      - "影视"
+      - "版号"
+      - "AIGC"
+      - "AI应用"
+      - "广告"
+      - "内容出海"
+    policy_keywords:
+      - "版号"
+      - "文化出海"
+      - "数字内容"
+      - "AIGC"
+      - "游戏"
+    domestic_leaders:
+      - "腾讯控股"
+      - "网易"
+      - "三七互娱"
+      - "恺英网络"
+      - "分众传媒"
+      - "完美世界"
+    overseas_leaders:
+      - "Nintendo"
+      - "Sony"
+      - "Netflix"
+      - "Meta"
+      - "Roblox"
+    earnings_keywords:
+      - "earnings"
+      - "results"
+      - "guidance"
+      - "财报"
+      - "流水"
+      - "版号"
+      - "广告"
+    event_keywords:
+      - "版号"
+      - "公测"
+      - "上线"
+      - "暑期档"
+      - "春节档"
+      - "出海"
+    factor_max_overrides:
+      policy: 20
+      leader: 20
+      structured: 10
+      overseas: 10
+      news_density: 10
+      news_heat: 10
+      forward_event: 10
+
   电网:
     themes:
       - "电网"

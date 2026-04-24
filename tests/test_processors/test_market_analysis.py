@@ -70,6 +70,11 @@ def test_build_market_analysis_returns_core_signal_tables(monkeypatch) -> None:
             {"name": "创业板指", "latest": 31.5, "change_pct": 0.013},
         ],
         "breadth": {"up_count": 3200, "down_count": 1600, "flat_count": 120, "turnover": 14200.0},
+        "market_structure": {
+            "is_fresh": True,
+            "daily_info": [{"ts_name": "深圳市场", "count": 2200, "amount": 4363.01}],
+            "sz_daily_info": [{"ts_name": "深圳A股", "count": 1500, "amount": 1_367_881_852_800.0}],
+        },
     }
     pulse = {
         "zt_pool": pd.DataFrame([{"所属行业": "银行"}, {"所属行业": "电力"}, {"所属行业": "电力"}]),
@@ -102,10 +107,14 @@ def test_build_market_analysis_returns_core_signal_tables(monkeypatch) -> None:
     assert analysis["index_rows"][1][0] == "中证核心(沪深300)"
     assert analysis["market_signal_rows"][0][0] == "市场宽度"
     assert analysis["market_signal_rows"][1][0] == "成交量能"
-    assert analysis["market_signal_rows"][2][0] == "情绪极端"
+    assert analysis["market_signal_rows"][2][0] == "交易结构"
+    assert "成交1.37万亿" in analysis["market_signal_rows"][2][3]
+    assert "136788185" not in analysis["market_signal_rows"][2][3]
+    assert analysis["market_signal_rows"][3][0] == "情绪极端"
     assert any("中证" in line for line in analysis["summary_lines"])
     assert analysis["rotation_rows"][0][0] == "行业"
     assert "防守占优" in analysis["rotation_rows"][0][3]
+    assert any("交易结构快照" in line for line in analysis["market_signal_lines"])
     assert any("情绪极端指标" in line for line in analysis["market_signal_lines"])
 
 

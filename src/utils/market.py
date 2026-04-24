@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import re
 from typing import Any, Dict, List, Mapping, Optional
@@ -13,66 +13,10 @@ import yfinance as yf
 
 from src.collectors import AssetLookupCollector, ChinaMarketCollector, CommodityCollector, HongKongMarketCollector, USMarketCollector
 from src.processors.technical import normalize_ohlcv_frame
+from src.utils.concurrency import run_with_timeout
 from src.utils.config import detect_asset_type, resolve_project_path
 from src.utils.data import load_asset_aliases, load_watchlist
-
-
-def disable_yfinance_sqlite_caches() -> None:
-    try:
-        import yfinance.cache as yf_cache
-    except Exception:
-        return
-
-    for manager_name in ("_TzDBManager", "_CookieDBManager", "_ISINDBManager"):
-        manager = getattr(yf_cache, manager_name, None)
-        close_db = getattr(manager, "close_db", None)
-        if callable(close_db):
-            try:
-                close_db()
-            except Exception:
-                pass
-        if manager is not None and hasattr(manager, "_db"):
-            try:
-                manager._db = None
-            except Exception:
-                pass
-
-    dummy_specs = (
-        ("_TzCacheManager", "_tz_cache", "_TzCacheDummy"),
-        ("_CookieCacheManager", "_Cookie_cache", "_CookieCacheDummy"),
-        ("_ISINCacheManager", "_isin_cache", "_ISINCacheDummy"),
-    )
-    for manager_name, cache_attr, dummy_name in dummy_specs:
-        manager = getattr(yf_cache, manager_name, None)
-        dummy_cls = getattr(yf_cache, dummy_name, None)
-        if manager is None or dummy_cls is None:
-            continue
-        try:
-            setattr(manager, cache_attr, dummy_cls())
-        except Exception:
-            pass
-
-
-def close_yfinance_runtime_caches() -> None:
-    try:
-        import yfinance.cache as yf_cache
-    except Exception:
-        return
-
-    for manager_name in ("_TzDBManager", "_CookieDBManager", "_ISINDBManager"):
-        manager = getattr(yf_cache, manager_name, None)
-        close_db = getattr(manager, "close_db", None)
-        if callable(close_db):
-            try:
-                close_db()
-            except Exception:
-                pass
-        if manager is not None and hasattr(manager, "_db"):
-            try:
-                manager._db = None
-            except Exception:
-                pass
-    disable_yfinance_sqlite_caches()
+from src.utils.yfinance_runtime import close_yfinance_runtime_caches, disable_yfinance_sqlite_caches
 
 
 disable_yfinance_sqlite_caches()
@@ -135,6 +79,91 @@ def _resolve_asset_record(query: str, asset_type: str, config: Mapping[str, Any]
     return {}
 
 
+def _backfill_cn_stock_basic(symbol: str, config: Mapping[str, Any]) -> Dict[str, Any]:
+    code = str(symbol).strip()
+    if not code:
+        return {}
+    collector = ChinaMarketCollector(dict(config))
+    cache_key = "cn_market:ts_stock_basic_snapshot:v1"
+    frame = collector._load_cache(cache_key, ttl_hours=24, allow_stale=True)
+    if frame is None:
+        try:
+            frame = collector._ts_call(
+                "stock_basic",
+                exchange="",
+                list_status="L",
+                fields="ts_code,symbol,name,industry",
+            )
+        except Exception:
+            frame = None
+        if frame is not None and not frame.empty:
+            collector._save_cache(cache_key, frame)
+    if frame is None or frame.empty:
+        return {}
+    working = frame.copy()
+    if "symbol" not in working.columns and "ts_code" in working.columns:
+        working["symbol"] = working["ts_code"].astype(str).str.split(".").str[0]
+    match = working[working.get("symbol", pd.Series(dtype=str)).astype(str).str.strip() == code]
+    if match.empty:
+        return {}
+    row = match.iloc[0]
+    return {
+        "symbol": code,
+        "name": str(row.get("name", "")).strip(),
+        "sector": str(row.get("industry", "")).strip(),
+        "source": "tushare_stock_basic_cache",
+        "match_type": "direct_symbol_backfill",
+    }
+
+
+def _backfill_cn_stock_company(symbol: str, config: Mapping[str, Any]) -> Dict[str, Any]:
+    code = str(symbol).strip()
+    if not code:
+        return {}
+    collector = ChinaMarketCollector(dict(config))
+    to_ts_code = getattr(collector, "_to_ts_code", None)
+    if callable(to_ts_code):
+        ts_code = str(to_ts_code(code)).strip()
+    else:
+        exchange = "SZ" if code.startswith(("0", "1", "2", "3")) else "SH"
+        ts_code = f"{code}.{exchange}"
+    cache_key = f"cn_market:ts_stock_company:{ts_code}:v1"
+    frame = collector._load_cache(cache_key, ttl_hours=24 * 7, allow_stale=True)
+    if frame is None:
+        try:
+            frame = collector._ts_call("stock_company", ts_code=ts_code)
+        except Exception:
+            frame = None
+        if frame is not None and not frame.empty:
+            collector._save_cache(cache_key, frame)
+    if frame is None or frame.empty:
+        return {}
+    row = frame.iloc[0]
+    return {
+        "symbol": code,
+        "company_intro": str(row.get("introduction", "")).strip(),
+        "main_business": str(row.get("main_business", "")).strip(),
+        "business_scope": str(row.get("business_scope", "")).strip(),
+        "province": str(row.get("province", "")).strip(),
+        "city": str(row.get("city", "")).strip(),
+        "company_profile_source": "tushare_stock_company_cache",
+    }
+
+
+def _backfill_direct_symbol_record(query: str, asset_type: str, config: Mapping[str, Any]) -> Dict[str, Any]:
+    hinted_type = str(asset_type or "").strip()
+    backfill: Dict[str, Any] = {}
+    if hinted_type == "cn_stock":
+        backfill.update(_backfill_cn_stock_basic(query, config))
+        company_profile = _backfill_cn_stock_company(query, config)
+        for key, value in company_profile.items():
+            if value not in (None, "", []):
+                backfill[key] = value
+    if str(backfill.get("name", "")).strip():
+        return backfill
+    return _resolve_asset_record(query, hinted_type, config)
+
+
 def _can_fast_path_direct_symbol(query: str, asset_type: str) -> bool:
     normalized = str(query).strip().upper()
     hinted_type = str(asset_type or "").strip()
@@ -159,11 +188,42 @@ def get_asset_context(symbol: str, asset_type: str, config: Dict[str, Any]) -> A
             "source": "direct_symbol",
             "match_type": "direct_symbol",
         }
+        if not str(resolved.get("name", "")).strip():
+            backfill = _backfill_direct_symbol_record(requested, hinted_type, config)
+            for key in (
+                "name",
+                "sector",
+                "chain_nodes",
+                "region",
+                "proxy_symbol",
+                "asset_type",
+                "main_business",
+                "business_scope",
+                "company_intro",
+                "province",
+                "city",
+                "company_profile_source",
+            ):
+                value = backfill.get(key)
+                if value not in (None, "", []):
+                    resolved[key] = value
     else:
         resolved = _resolve_asset_record(requested, hinted_type, config)
     canonical_symbol = str(resolved.get("symbol", "") or requested)
     metadata = _asset_metadata_by_symbol(canonical_symbol, config)
-    for key in ("name", "sector", "chain_nodes", "region", "proxy_symbol"):
+    for key in (
+        "name",
+        "sector",
+        "chain_nodes",
+        "region",
+        "proxy_symbol",
+        "main_business",
+        "business_scope",
+        "company_intro",
+        "province",
+        "city",
+        "company_profile_source",
+    ):
         value = resolved.get(key)
         if value not in (None, "", []):
             metadata[key] = value
@@ -211,10 +271,13 @@ def fetch_asset_history(
 
 def fetch_intraday_history(symbol: str, asset_type: str, config: Dict[str, Any]) -> pd.DataFrame:
     context = get_asset_context(symbol, asset_type, config)
-    if asset_type == "cn_etf":
+    if asset_type in {"cn_etf", "cn_stock"}:
         from src.collectors.intraday import IntradayCollector
 
-        return IntradayCollector(config).get_intraday_chart(context.source_symbol)
+        collector = IntradayCollector(config)
+        if asset_type == "cn_stock":
+            return collector.get_cn_stock_intraday_chart(context.source_symbol)
+        return collector.get_intraday_chart(context.source_symbol)
     ticker = yf.Ticker(context.source_symbol)
     frame = ticker.history(period="1d", interval="1m", auto_adjust=False)
     if frame.empty:
@@ -598,6 +661,8 @@ def build_intraday_snapshot(
             "first_30m_change": float(metrics.get("first_30m_change_pct", 0.0)),
             "first_30m_volume_share": float(metrics.get("first_30m_volume_share", 0.0)),
             "trend": trend,
+            "snapshot_time": snapshot_time,
+            "updated_at": snapshot_time,
             "auction_price": _to_float(auction.get("auction_price")),
             "auction_gap": _to_float(auction.get("auction_gap")),
             "auction_amount": _to_float(auction.get("auction_amount")),
@@ -650,20 +715,21 @@ def _ticker_history_with_timeout(
     auto_adjust: bool = False,
     timeout_seconds: float = 8.0,
 ) -> pd.DataFrame:
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(
-        yf.Ticker(ticker).history,
-        period=period,
-        auto_adjust=auto_adjust,
+    def _load_history() -> pd.DataFrame:
+        try:
+            return yf.Ticker(ticker).history(
+                period=period,
+                auto_adjust=auto_adjust,
+            )
+        finally:
+            close_yfinance_runtime_caches()
+
+    return run_with_timeout(
+        _load_history,
+        timeout_seconds=timeout_seconds,
+        timeout_exc=TimeoutError(f"market_regime_proxy timeout for {ticker}"),
+        thread_name=f"market_regime_proxy_{ticker}",
     )
-    try:
-        return future.result(timeout=timeout_seconds)
-    except FutureTimeoutError as exc:
-        future.cancel()
-        raise TimeoutError(f"market_regime_proxy timeout for {ticker}") from exc
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-        close_yfinance_runtime_caches()
 
 
 def market_regime_proxy() -> Dict[str, Any]:

@@ -600,6 +600,26 @@ class BaseCollector:
         dates = self._recent_open_trade_dates(lookback_days=lookback_days, exchange=exchange)
         return dates[-1] if dates else ""
 
+    def _trade_day_gap(self, earlier: Any, later: Any, lookback_days: int = 40, exchange: str = "SSE") -> int | None:
+        """Return the open-trading-day gap between two dates when trade_cal is available."""
+        earlier_text = self._normalize_date_text(earlier)
+        later_text = self._normalize_date_text(later)
+        if not earlier_text or not later_text:
+            return None
+        dates = sorted(
+            {
+                self._normalize_date_text(item)
+                for item in self._recent_open_trade_dates(lookback_days=lookback_days, exchange=exchange)
+                if self._normalize_date_text(item)
+            }
+        )
+        if earlier_text in dates and later_text in dates:
+            return max(dates.index(later_text) - dates.index(earlier_text), 0)
+        try:
+            return max((pd.Timestamp(later_text) - pd.Timestamp(earlier_text)).days, 0)
+        except Exception:
+            return None
+
     @staticmethod
     def _first_existing_column(frame: pd.DataFrame, candidates: Sequence[str]) -> str | None:
         """Return the first matching column name from ``candidates``."""
@@ -1016,8 +1036,16 @@ class BaseCollector:
         max_age_seconds = effective_ttl * 3600
         if not allow_stale and effective_ttl >= 0 and time.time() - cache_path.stat().st_mtime > max_age_seconds:
             return None
-        with cache_path.open("rb") as handle:
-            return pickle.load(handle)
+        try:
+            with cache_path.open("rb") as handle:
+                return pickle.load(handle)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"{self.name} cache decode failed for {cache_key}; dropping corrupt cache: {exc}")
+            try:
+                cache_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None
 
     def _save_cache(self, cache_key: str, payload: Any) -> None:
         cache_path = self._cache_path(cache_key)

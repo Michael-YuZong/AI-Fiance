@@ -7,7 +7,7 @@ import pandas as pd
 from src.output.opportunity_report import OpportunityReportRenderer
 
 
-def _sample_analysis(symbol: str, name: str) -> dict:
+def _sample_analysis(symbol: str, name: str, asset_type: str = "cn_etf") -> dict:
     history = pd.DataFrame(
         {
             "date": pd.date_range("2025-10-01", periods=80, freq="B"),
@@ -33,7 +33,7 @@ def _sample_analysis(symbol: str, name: str) -> dict:
     return {
         "symbol": symbol,
         "name": name,
-        "asset_type": "cn_etf",
+        "asset_type": asset_type,
         "generated_at": "2026-03-09 08:00:00",
         "regime": {"current_regime": "stagflation"},
         "day_theme": {"label": "能源冲击 + 地缘风险"},
@@ -172,6 +172,62 @@ def test_opportunity_renderer_scan_surfaces_strategy_background_confidence_in_fo
     assert "只作辅助加分，不单独替代当前事实层" in rendered
 
 
+def test_opportunity_renderer_scan_surfaces_tdx_structure_layer() -> None:
+    analysis = _sample_analysis("300308", "中际旭创")
+    analysis["market_event_rows"] = [
+        [
+            "2026-04-01",
+            "TDX 结构框架：中际旭创 通信设备 / 进攻 / CN（+3.60%）",
+            "TDX结构专题",
+            "高",
+            "通信设备",
+            "",
+            "标准结构归因",
+            "偏利多，`中际旭创` 的标准板块/风格/地区框架已可直接用来解释当前强弱。",
+        ]
+    ]
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+
+    assert "## 结构辅助层" in rendered
+    assert "TDX 结构框架：中际旭创 通信设备 / 进攻 / CN（+3.60%）" in rendered
+    assert "TDX结构专题" in rendered
+    assert "标准结构归因" in rendered
+
+
+def test_opportunity_renderer_scan_surfaces_dc_and_report_rc_layers() -> None:
+    analysis = _sample_analysis("300308", "中际旭创")
+    analysis["market_event_rows"] = [
+        [
+            "2026-04-01",
+            "DC 结构框架：中际旭创 光通信 / 进攻 / CN（+2.80%）",
+            "DC结构专题",
+            "中",
+            "光通信",
+            "",
+            "标准结构归因",
+            "偏利多，`中际旭创` 的标准板块/风格/地区框架已可直接用来解释当前强弱。",
+        ],
+        [
+            "2026-04-01",
+            "研报辅助：中际旭创 买入",
+            "研报辅助层",
+            "高",
+            "中际旭创",
+            "",
+            "研报评级/研究报告",
+            "偏利多，研报评级/一致性已命中，只作为辅助证据，不替代正式公告或主线确认。",
+        ],
+    ]
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+
+    assert "## 结构辅助层" in rendered
+    assert "DC 结构框架：中际旭创 光通信 / 进攻 / CN（+2.80%）" in rendered
+    assert "研报辅助：中际旭创 买入" in rendered
+    assert "研报辅助层" in rendered
+
+
 def test_opportunity_renderer_scan_hides_missing_perf_values_and_maps_check_status():
     analysis = _sample_analysis("159698", "粮食ETF")
     analysis["fund_profile"] = {
@@ -301,7 +357,7 @@ def test_opportunity_renderer_scan_visual_section():
     assert "![技术指标](/tmp/demo_indicators.png)" in rendered
 
 
-def test_opportunity_renderer_scan_visual_section_skips_snapshot_fallback():
+def test_opportunity_renderer_scan_visual_section_keeps_snapshot_fallback_dashboard():
     rendered = OpportunityReportRenderer().render_scan(
         _sample_analysis("561380", "电网ETF"),
         visuals={
@@ -310,8 +366,9 @@ def test_opportunity_renderer_scan_visual_section_skips_snapshot_fallback():
             "note": "完整日线历史当前不可用，阶段走势和技术指标图已关闭；这里只展示实时快照降级卡。",
         },
     )
-    assert "## 图表速览" not in rendered
-    assert "### 降级快照卡" not in rendered
+    assert "## 图表速览" in rendered
+    assert "### 降级快照卡" in rendered
+    assert "![分析看板](/tmp/demo_snapshot.png)" in rendered
     assert "### 阶段走势" not in rendered
     assert "### 技术指标总览" not in rendered
 
@@ -417,6 +474,82 @@ def test_opportunity_renderer_discovery_and_compare():
     assert "## 场景化建议" in compare
 
 
+def test_opportunity_renderer_stock_pick_and_discovery_show_representative_theme() -> None:
+    analysis = _sample_analysis("300274", "阳光电源")
+    analysis["asset_type"] = "cn_stock"
+    analysis["theme_playbook"] = {
+        "key": "solar_mainchain",
+        "label": "光伏主链",
+        "playbook_level": "theme",
+        "hard_sector_label": "电力设备 / 新能源设备",
+    }
+    analysis["metadata"]["sector"] = "电力设备"
+    analysis["metadata"]["industry_framework_label"] = "光伏主链"
+    payload = {
+        "generated_at": "2026-04-05 08:00:00",
+        "scan_pool": 12,
+        "passed_pool": 3,
+        "regime": {"current_regime": "recovery"},
+        "day_theme": {"label": "背景宏观主导"},
+        "top": [analysis],
+    }
+
+    stock_pick = OpportunityReportRenderer().render_stock_picks(payload)
+    discovery = OpportunityReportRenderer().render_discovery(
+        {
+            **payload,
+            "pool_summary": {
+                "boundary_note": "当前 discover 只是 pre-screen 入口。",
+                "scan_scope_note": "当前只扫描 ETF 候选池。",
+                "mode_label": "全市场 + watchlist 混合池",
+                "summary_lines": [],
+                "filter_rules": [],
+            },
+            "ready_candidates": [analysis],
+            "observation_candidates": [],
+        }
+    )
+
+    assert "> 代表主题: 光伏主链" in stock_pick
+    assert "> 代表主题: 光伏主链" in discovery
+
+
+def test_opportunity_renderer_surfaces_parallel_day_theme_labels() -> None:
+    analysis = _sample_analysis("300274", "阳光电源")
+    payload = {
+        "generated_at": "2026-04-05 08:00:00",
+        "scan_pool": 12,
+        "passed_pool": 3,
+        "regime": {"current_regime": "recovery"},
+        "day_theme": {
+            "label": "硬科技 / AI硬件链",
+            "secondary_labels": ["创新药 / 医药催化"],
+        },
+        "top": [analysis],
+        "ready_candidates": [analysis],
+        "observation_candidates": [],
+        "pool_summary": {
+            "boundary_note": "当前 discover 只是 pre-screen 入口。",
+            "scan_scope_note": "当前只扫描 ETF 候选池。",
+            "mode_label": "全市场 + watchlist 混合池",
+            "summary_lines": [],
+            "filter_rules": [],
+        },
+    }
+
+    discovery = OpportunityReportRenderer().render_discovery(payload)
+    stock_pick = OpportunityReportRenderer().render_stock_picks(
+        {
+            **payload,
+            "market_label": "A股",
+            "watch_positive": [analysis],
+        }
+    )
+
+    assert "今日主线: 硬科技 / AI硬件链；并行线：创新药 / 医药催化" in discovery
+    assert "主线: 硬科技 / AI硬件链；并行线：创新药 / 医药催化" in stock_pick
+
+
 def test_opportunity_renderer_stock_picks_includes_explainability_sections():
     analysis = _sample_analysis("00700.HK", "腾讯控股")
     analysis["asset_type"] = "hk"
@@ -466,7 +599,8 @@ def test_opportunity_renderer_stock_picks_includes_explainability_sections():
     rendered = OpportunityReportRenderer().render_stock_picks(payload)
     assert "# 个股精选 TOP 1 | 2026-03-10" in rendered
     assert "模型版本" in rendered
-    assert "当日基准版" in rendered
+    assert "今天首个快照版" in rendered
+    assert "当日基准版" not in rendered
     assert "当前输出角色: 当日修正版" in rendered
     assert "## 本版口径变更" in rendered
     assert "分数变动对比基准" in rendered
@@ -521,6 +655,11 @@ def test_opportunity_renderer_stock_picks_downgrades_observe_only_packaging() ->
     analysis["rating"]["rank"] = 1
     analysis["rating"]["label"] = "无信号"
     analysis["rating"]["stars"] = "—"
+    analysis["action"]["horizon"] = {
+        "label": "观察期",
+        "fit_reason": "当前信号还没共振到足以支撑正式动作，继续观察比仓促出手更重要。",
+        "misfit_reason": "现在不适合直接按短线执行仓或长线配置仓去理解。",
+    }
     analysis["action"].update(
         {
             "direction": "观察为主",
@@ -546,6 +685,8 @@ def test_opportunity_renderer_stock_picks_downgrades_observe_only_packaging() ->
     assert "# 个股观察池 TOP 1 | 2026-03-10" in rendered
     assert "**观察重点：**" in rendered
     assert "- 当前是观察稿，先不前置精确仓位、止损和目标模板。" in rendered
+    assert "对中际旭创来说，当前信号还没共振到足以支撑正式动作" in rendered
+    assert "对中际旭创来说，现在不适合直接按短线执行仓或长线配置仓去理解。" in rendered
     assert "## 继续观察名单" in rendered
     assert "- 建议止损：" not in rendered
     assert "- 目标参考：" not in rendered
@@ -636,6 +777,98 @@ def test_opportunity_renderer_compare_includes_etf_product_layer_table():
     assert "当前外部情报仍偏薄" in compare
 
 
+def test_opportunity_renderer_compare_skips_etf_product_layer_for_fund_comparison():
+    analysis_a = _sample_analysis("021740", "前海开源黄金ETF联接C")
+    analysis_a["asset_type"] = "cn_fund"
+    analysis_a["fund_profile"] = {
+        "overview": {"ETF基准指数中文全称": "上海黄金交易所Au99.99现货实盘合约"},
+        "etf_snapshot": {"share_change_text": "净申购 +0.18亿份", "share_as_of": "2026-04-02"},
+        "style": {"taxonomy": {"management_style": "被动跟踪"}},
+    }
+
+    analysis_b = _sample_analysis("022365", "永赢科技智选混合发起C")
+    analysis_b["asset_type"] = "cn_fund"
+    analysis_b["fund_profile"] = {
+        "overview": {
+            "基金类型": "混合型-偏股",
+            "业绩比较基准": "中国战略新兴产业成份指数收益率",
+        },
+        "style": {"taxonomy": {"management_style": "主动管理"}},
+    }
+
+    compare = OpportunityReportRenderer().render_compare(
+        {
+            "generated_at": "2026-04-05 08:00:00",
+            "analyses": [analysis_a, analysis_b],
+            "best_symbol": "021740",
+        }
+    )
+
+    assert "## ETF产品层对比" not in compare
+    assert "跟踪指数 | 最近份额变化 | 场内基金技术状态 | 外部情报" not in compare
+
+
+def test_opportunity_renderer_compare_surfaces_second_stage_signal_snapshot():
+    analysis_a = _sample_analysis("600519", "贵州茅台")
+    analysis_a["asset_type"] = "cn_stock"
+    analysis_a["dimensions"]["relative_strength"]["factors"] = [
+        {
+            "name": "跨市场比价",
+            "display_score": "20/20",
+            "signal": "A/H 比价溢价 +18.40%",
+            "detail": "贵州茅台 vs HK；溢价/折价约 +18.40%",
+            "factor_id": "j3_ah_comparison",
+        }
+    ]
+    analysis_a["dimensions"]["fundamental"]["factors"] = [
+        {
+            "name": "可转债映射",
+            "display_score": "10/10",
+            "signal": "贵州茅台转债映射：偏正面",
+            "detail": "可转债专题给出跨资产参照",
+            "factor_id": "j4_convertible_bond_proxy",
+        }
+    ]
+
+    analysis_b = _sample_analysis("02219", "绿色动力")
+    analysis_b["asset_type"] = "cn_fund"
+    analysis_b["fund_profile"] = {
+        "sales_ratio_snapshot": {
+            "latest_year": "2025",
+            "lead_channel": "商业银行",
+            "summary": "2025年渠道保有结构：商业银行占比最高，约 41.20%。",
+            "channel_mix": [
+                {"channel": "商业银行", "ratio": 41.2},
+                {"channel": "独立基金销售机构", "ratio": 28.5},
+            ],
+        }
+    }
+    analysis_b["dimensions"]["fundamental"]["factors"] = [
+        {
+            "name": "现货锚定",
+            "display_score": "10/10",
+            "signal": "Au99.95 现货锚定",
+            "detail": "黄金现货日线已接入黄金链",
+            "factor_id": "j5_gold_spot_anchor",
+        }
+    ]
+
+    compare = OpportunityReportRenderer().render_compare(
+        {
+            "generated_at": "2026-04-02 08:00:00",
+            "analyses": [analysis_a, analysis_b],
+            "best_symbol": "600519",
+        }
+    )
+
+    assert "## 第二阶段信号快照" in compare
+    assert "| 标的 | A/H 比价 | 可转债映射 | 公募渠道环境 | 现货锚定 |" in compare
+    assert "A/H 比价溢价 +18.40%" in compare
+    assert "贵州茅台转债映射：偏正面" in compare
+    assert "2025 / 商业银行 / 41.20%" in compare
+    assert "Au99.95 现货锚定" in compare
+
+
 def test_opportunity_renderer_compare_surfaces_strategy_confidence_and_linkage_summary():
     analysis_a = _sample_analysis("561380", "电网ETF")
     analysis_b = _sample_analysis("159611", "电力ETF")
@@ -723,8 +956,38 @@ def test_opportunity_renderer_includes_fund_profile_sections():
     assert "### 前十大持仓" in rendered
 
 
+def test_opportunity_renderer_includes_fund_sales_environment_section():
+    analysis = _sample_analysis("022365", "永赢科技智选混合发起C")
+    analysis["asset_type"] = "cn_fund"
+    analysis["fund_profile"] = {
+        "overview": {
+            "基金类型": "混合型-偏股",
+            "基金管理人": "永赢基金",
+            "基金经理人": "任桀",
+            "业绩比较基准": "中国战略新兴产业成份指数收益率*70%+恒生科技指数收益率*10%",
+        },
+        "sales_ratio_snapshot": {
+            "latest_year": "2025",
+            "lead_channel": "商业银行",
+            "summary": "2025年渠道保有结构：商业银行占比最高，约 41.20% 。",
+            "channel_mix": [
+                {"channel": "商业银行", "ratio": 41.2},
+                {"channel": "独立基金销售机构", "ratio": 28.5},
+            ],
+        },
+        "style": {"summary": "这只基金更像在买科技方向的主动选股框架。"},
+    }
+
+    rendered = OpportunityReportRenderer().render_scan(analysis)
+
+    assert "### 公募渠道环境" in rendered
+    assert "| 统计年度 | 2025 |" in rendered
+    assert "| 商业银行 | 41.20% |" in rendered
+
+
 def test_opportunity_renderer_scan_surfaces_weekly_and_monthly_horizon_lines():
     analysis = _sample_analysis("510300", "华泰柏瑞沪深300ETF")
+    analysis["asset_type"] = "cn_etf"
     analysis["index_topic_bundle"] = {
         "index_snapshot": {"index_name": "沪深300"},
         "history_snapshots": {
@@ -751,6 +1014,23 @@ def test_opportunity_renderer_scan_surfaces_weekly_and_monthly_horizon_lines():
     assert "周线：沪深300" in rendered
     assert "月线：沪深300" in rendered
     assert "周月节奏同向偏强" in rendered
+
+    stock = _sample_analysis("300308", "中际旭创")
+    stock["asset_type"] = "cn_stock"
+    stock["index_topic_bundle"] = analysis["index_topic_bundle"]
+    stock_rendered = OpportunityReportRenderer().render_scan(stock)
+
+    assert "## 周月节奏" not in stock_rendered
+
+    active_fund = _sample_analysis("022365", "永赢科技智选混合发起C", "cn_fund")
+    active_fund["fund_profile"] = {
+        "overview": {"基金类型": "混合型-偏股", "业绩比较基准": "中国战略新兴产业成份指数收益率"},
+        "style": {"tags": ["科技主题"]},
+    }
+    active_fund["index_topic_bundle"] = analysis["index_topic_bundle"]
+    active_fund_rendered = OpportunityReportRenderer().render_scan(active_fund)
+
+    assert "## 周月节奏" not in active_fund_rendered
 
 
 def test_opportunity_renderer_includes_etf_profile_and_intraday_sections():

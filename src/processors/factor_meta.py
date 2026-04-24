@@ -239,6 +239,12 @@ FACTOR_REGISTRY: Dict[str, FactorMeta] = {
         visibility_class="daily_close", proxy_level="direct",
         notes="放量突破/缩量回调/放量滞涨等量价结构",
     ),
+    "j1_stk_factor_pro": FactorMeta.production(
+        "j1_stk_factor_pro", "J-1", "price_volume",
+        visibility_class="daily_close", proxy_level="direct",
+        lag_days=1,
+        notes="股票每日技术面因子，Tushare stk_factor_pro",
+    ),
     "j1_volatility_compression": FactorMeta.strategy_challenger(
         "j1_volatility_compression", "J-1", "price_volume",
         visibility_class="daily_close", proxy_level="direct",
@@ -313,6 +319,12 @@ FACTOR_REGISTRY: Dict[str, FactorMeta] = {
         visibility_class="daily_close", proxy_level="market_proxy",
         notes="拥挤度/热度/反身性风险，公募热度代理，极热时只做轻度拖累或风险提示",
     ),
+    "j3_ah_comparison": FactorMeta.scoring_supportive(
+        "j3_ah_comparison", "J-3", "proxy",
+        visibility_class="daily_close", proxy_level="market_proxy",
+        lag_days=1,
+        notes="A/H 跨市场比价，优先用 Tushare stk_ah_comparison，不再回退 DXY 代理",
+    ),
 
     # J-4: Quality / earnings revision / valuation synergy
     "j4_pe_ttm": FactorMeta.production(
@@ -365,6 +377,12 @@ FACTOR_REGISTRY: Dict[str, FactorMeta] = {
         "j4_earnings_momentum", "J-4", "fundamental",
         visibility_class="quarterly", proxy_level="rule_based",
         notes="盈利动量/EPS 修正代理，无可靠 point-in-time 源时停在观察层",
+    ),
+    "j4_convertible_bond_proxy": FactorMeta.scoring_supportive(
+        "j4_convertible_bond_proxy", "J-4", "proxy",
+        visibility_class="daily_close", proxy_level="direct",
+        lag_days=1,
+        notes="A 股个股对应可转债辅助层，Tushare cb_basic / cb_daily / cb_factor_pro",
     ),
 
     # M-1: Macro regime / leading indicators
@@ -444,6 +462,12 @@ FACTOR_REGISTRY: Dict[str, FactorMeta] = {
         lag_days=30,
         notes="场外基金业绩基准拟合度",
     ),
+    "j5_fund_sales_ratio": FactorMeta.scoring_supportive(
+        "j5_fund_sales_ratio", "J-5", "fund_specific",
+        visibility_class="annual", proxy_level="direct",
+        lag_days=30,
+        notes="公募基金销售保有结构，行业级渠道环境信息项",
+    ),
     "j5_style_drift": FactorMeta.scoring_supportive(
         "j5_style_drift", "J-5", "fund_specific",
         visibility_class="quarterly", proxy_level="direct",
@@ -460,6 +484,12 @@ FACTOR_REGISTRY: Dict[str, FactorMeta] = {
         visibility_class="quarterly", proxy_level="direct",
         lag_days=30,
         notes="申赎友好度、费率和确认节奏",
+    ),
+    "j5_gold_spot_anchor": FactorMeta.scoring_supportive(
+        "j5_gold_spot_anchor", "J-5", "etf_specific",
+        visibility_class="daily_close", proxy_level="direct",
+        lag_days=1,
+        notes="黄金现货锚定，基于上海黄金交易所现货日线",
     ),
 }
 

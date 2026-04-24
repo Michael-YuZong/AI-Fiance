@@ -43,8 +43,11 @@ INTRADAY_EVIDENCE_TERMS = (
     "开盘缺口",
     "首30分钟",
     "分钟线",
+    "竞价高开且量比放大",
+    "竞价明显低开",
+    "竞价量比放大",
 )
-AUCTION_EVIDENCE_TERMS = ("竞价成交", "未匹配量", "封单", "开盘缺口", "竞价量能")
+AUCTION_EVIDENCE_TERMS = ("竞价成交", "未匹配量", "封单", "开盘缺口", "竞价量能", "竞价高开且量比放大", "竞价明显低开", "竞价量比放大")
 
 GENERIC_OPERATION_PREFIXES = (
     "介入条件：",
@@ -112,6 +115,13 @@ GENERIC_EVIDENCE_TITLE_KEYS = (
     "stock quote price and forecast",
     "historical prices and data",
 )
+RAW_INTEL_SUMMARY_PREFIXES = (
+    "情报摘要：主题聚类：",
+    "情报摘要：来源分层：",
+    "情报摘要：当前更值得先看的代表情报来自：",
+)
+READABILITY_HEDGE_TOKENS = ("不把", "不等于", "当前更像", "先按")
+MISSING_DISCLOSURE_TOKENS = ("缺失", "降级", "不可用", "空表", "按缺失处理", "覆盖率")
 
 HOMEPAGE_KEY_EVIDENCE_HEADINGS = ("### 关键新闻 / 关键证据", "## 关键证据", "## 今日情报看板")
 GENERIC_MARKET_SIGNAL_PREFIXES = (
@@ -136,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source", default="", help="Path to source/detail Markdown")
     parser.add_argument("--editor-prompt", default="", help="Optional path to editor_prompt.md for sidecar-vs-final consistency checks")
     return parser
+
+
+def is_clean_release_check(findings: List[str] | Tuple[str, ...] | None) -> bool:
+    """Return ``True`` when release findings are empty after trimming."""
+    return not any(str(item).strip() for item in (findings or []))
 
 
 def _read(path: str) -> str:
@@ -176,6 +191,29 @@ def _bullets_in_section(text: str, heading: str) -> List[str]:
         if collecting and stripped.startswith("- "):
             bullets.append(stripped[2:].strip())
     return bullets
+
+
+def _bullets_in_section_any(text: str, headings: Tuple[str, ...]) -> List[str]:
+    for heading in headings:
+        bullets = _bullets_in_section(text, heading)
+        if bullets:
+            return bullets
+    return []
+
+
+def _table_mapping_in_section(text: str, heading: str) -> Dict[str, str]:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != heading:
+            continue
+        _, rows = _parse_markdown_table(lines, index + 1)
+        mapping: Dict[str, str] = {}
+        for row in rows:
+            if len(row) < 2:
+                continue
+            mapping[str(row[0]).strip()] = str(row[1]).strip()
+        return mapping
+    return {}
 
 
 def _section_exists(text: str, heading: str) -> bool:
@@ -314,6 +352,65 @@ def _homepage_v2_findings(client_text: str, report_type: str) -> List[str]:
     return findings
 
 
+def _homepage_decision_layer_findings(client_text: str, report_type: str) -> List[str]:
+    if report_type not in {"stock_pick", "stock_analysis", "etf_pick", "fund_pick", "scan"}:
+        return []
+    findings: List[str] = []
+    theme_items = _section_items(client_text, "### 板块 / 主题认知")
+    micro_items = _section_items(client_text, "### 微观面")
+    action_items = _section_items(client_text, "### 动作建议与结论")
+    macro_items = _section_items(client_text, "### 宏观面")
+
+    if theme_items and not any("赛道判断：" in item for item in theme_items):
+        findings.append(
+            format_lesson_finding(
+                "L040",
+                f"[P1] {report_type} 首页没有把“赛道判断”单独写出来；当前仍容易把主题强弱、载体适配和动作建议混成一个结论。",
+            )
+        )
+    if micro_items and not any("载体判断：" in item for item in micro_items):
+        findings.append(
+            format_lesson_finding(
+                "L040",
+                f"[P1] {report_type} 首页没有把“载体判断”单独写出来；读者会看不清到底是赛道不行，还是当前产品/个股不是最佳主攻载体。",
+            )
+        )
+    execution_items = [item for item in action_items if "执行卡：" in item]
+    if action_items and not execution_items:
+        findings.append(
+            format_lesson_finding(
+                "L040",
+                f"[P1] {report_type} 首页没有显式给出“执行卡”；当前更像研究摘要，不像交易前能快速落地的动作卡。",
+            )
+        )
+    execution_blob = " ".join(execution_items)
+    action_blob = " ".join(action_items)
+    if execution_items and not any(token in execution_blob for token in ("触发", "确认", "承接", "买点")):
+        findings.append(
+            format_lesson_finding(
+                "L040",
+                f"[P2] {report_type} 首页 `执行卡` 没有写清最关键的触发条件，当前仍像方向判断，不像执行判断。",
+            )
+        )
+    price_like = bool(re.search(r"([0-9]+(?:\.[0-9]+)?\s*-\s*[0-9]+(?:\.[0-9]+)?)|([0-9]+\.[0-9]{2,3})", action_blob))
+    if price_like and execution_items and not any(token in execution_blob for token in ("失效位", "止损", "跌破", "减仓", "目标")):
+        findings.append(
+            format_lesson_finding(
+                "L040",
+                f"[P1] {report_type} 首页已经给了精确价位，但 `执行卡` 仍没写清失效位/减仓逻辑，读起来更像机械价位模板，不像交易计划。",
+            )
+        )
+    risk_items = [*macro_items, *micro_items, *action_items]
+    if risk_items and not any("尾部风险：" in item for item in risk_items):
+        findings.append(
+            format_lesson_finding(
+                "L040",
+                f"[P2] {report_type} 首页没有把“尾部风险”单独写出来；macro 和风险约束还在散落描述，没形成真正的风险边界。",
+            )
+        )
+    return findings
+
+
 def _theme_playbook_surface_findings(
     client_text: str,
     report_type: str,
@@ -356,6 +453,18 @@ def _theme_playbook_surface_findings(
             format_lesson_finding(
                 "L002",
                 f"[P2] {report_type} 的 editor_payload 已明确命中 `{playbook_label}`，但首页 `板块 / 主题认知` 没把这条主题显式写出来。",
+            )
+        )
+    hard_sector = str(playbook.get("hard_sector_label") or "").strip()
+    if (
+        hard_sector == "金融"
+        and playbook_label == "高股息 / 红利"
+        and _contains_any(client_text, ("证券", "券商", "非银", "多元金融"))
+    ):
+        findings.append(
+            format_lesson_finding(
+                "L040",
+                f"[P1] {report_type} 把 `证券 / 券商 / 非银` 这类金融子行业直接包装成 `高股息 / 红利`；红利最多只能当软风格线索，首页主主题至少要退回 `金融` 行业层。",
             )
         )
     if playbook_level != "sector":
@@ -472,6 +581,7 @@ def _event_digest_surface_findings(
             )
         )
         return findings
+    normalized_event_section = _normalize_event_digest_surface_text(event_section)
     if status and status not in event_section:
         findings.append(
             format_lesson_finding(
@@ -495,7 +605,7 @@ def _event_digest_surface_findings(
             )
         )
     lead_detail = str(contract.get("lead_detail") or "").strip()
-    if lead_detail and lead_detail not in event_section:
+    if lead_detail and _normalize_event_digest_surface_text(lead_detail) not in normalized_event_section:
         findings.append(
             format_lesson_finding(
                 "L002",
@@ -629,8 +739,35 @@ def _normalize_signal_text(text: str) -> str:
     line = str(text).strip()
     if not line:
         return ""
+    line = re.sub(r"[；;。]\s*当前图形标签：.*$", "", line)
+    replacements = (
+        ("美股开盘前观察", "晚间外盘观察"),
+        ("开盘前观察", "盘前观察"),
+    )
+    for source, target in replacements:
+        line = line.replace(source, target)
     line = re.sub(r"`([^`]+)`", r"\1", line)
     line = re.sub(r"\s+", "", line)
+    return line
+
+
+def _normalize_event_digest_surface_text(text: str) -> str:
+    line = _normalize_signal_text(text)
+    if not line:
+        return ""
+    replacements = (
+        ("当前更像", "更像"),
+        ("现在处在", "更像"),
+        ("不把", "别把"),
+        ("不等于", "不代表"),
+        ("先按", "按"),
+        ("先别", "别"),
+        ("情报属性：", ""),
+        ("当前结论：", "结论："),
+    )
+    for old, new in replacements:
+        line = line.replace(old, new)
+    line = re.sub(r"[。；;，,:：·/（）()\-]+", "", line)
     return line
 
 
@@ -702,6 +839,13 @@ def _stock_pick_feature_retention_findings(text: str) -> List[str]:
     observe_only = "| 报告定位 | 观察稿 |" in text or "当前没有达到正式动作阈值的个股" in text
     if not observe_only:
         return findings
+    if "## 观察名单复核卡" not in text:
+        findings.append(
+            format_lesson_finding(
+                "L041",
+                "[P1] stock_pick 观察稿丢了 `观察名单复核卡`，observe-only 不能只剩触发器表，至少要保住 top 标的的轻量复核层。",
+            )
+        )
     if "### 第二批：继续跟踪" not in text:
         findings.append(
             format_lesson_finding(
@@ -721,6 +865,40 @@ def _stock_pick_feature_retention_findings(text: str) -> List[str]:
             format_lesson_finding(
                 "L041",
                 "[P1] stock_pick 观察稿丢了 `代表样本复核卡`，任何开发改动都不应把代表样本复核层静默吞掉。",
+            )
+        )
+    return findings
+
+
+def _stock_pick_first_screen_execution_findings(text: str) -> List[str]:
+    if "| 报告定位 | 观察稿 |" in text or "当前没有达到正式动作阈值的个股" in text:
+        return []
+    table = _table_mapping_in_section(text, "## 先看执行")
+    if not table:
+        return []
+    findings: List[str] = []
+    trigger_text = str(table.get("怎么触发", "")).strip()
+    position_text = str(table.get("多大仓位", "")).strip()
+    stop_text = str(table.get("哪里止损", "")).strip()
+    if "不硬拼统一买点" in trigger_text or "对应个股复核卡里的介入条件兑现" in trigger_text:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                "[P1] stock_pick 正式稿首屏 `怎么触发` 仍是泛化提示，没有把前排标的各自的建仓区或触发位直接写出来。",
+            )
+        )
+    if "首屏不写统一止损价" in stop_text:
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                "[P1] stock_pick 正式稿首屏 `哪里止损` 仍在回避具体失效位；榜单首屏至少要把前排标的各自的止损/失效位前置出来。",
+            )
+        )
+    if position_text == "单票 `2% - 5%` 试仓":
+        findings.append(
+            format_lesson_finding(
+                "L002",
+                "[P2] stock_pick 正式稿首屏 `多大仓位` 仍是统一模板句，没有把前排标的的首仓口径和组合层约束一起写清。",
             )
         )
     return findings
@@ -978,6 +1156,68 @@ def _pick_delivery_consistency_findings(client_text: str, report_type: str) -> L
     return findings
 
 
+def _preferred_sector_track_findings(client_text: str, report_type: str) -> List[str]:
+    if report_type != "etf_pick":
+        return []
+    match = re.search(r"偏好主题\s*[:：]\s*([^\n|]+)", client_text)
+    if not match:
+        return []
+    preferred_label = match.group(1).strip()
+    preferred = {item.strip() for item in re.split(r"[/／、,，]\s*", preferred_label) if item.strip() and item.strip() != "未指定"}
+    if not preferred:
+        return []
+    allowed_aliases = {
+        "科技": {"科技", "信息技术", "AI硬件", "AI算力", "通信", "半导体", "芯片", "CPO", "光模块", "游戏", "传媒"},
+        "半导体": {"半导体", "芯片", "科创芯片", "半导体设备", "半导体材料"},
+        "通信": {"通信", "通信设备", "CPO", "光模块", "5G", "6G", "数据中心", "运营商"},
+        "医药": {"医药", "创新药", "医疗", "CXO", "CRO", "医疗器械"},
+        "创新药": {"创新药", "港股医药", "医药", "FDA", "临床"},
+        "电网": {"电网", "电力设备", "智能电网", "特高压", "储能"},
+        "传媒": {"传媒", "游戏", "动漫", "AIGC"},
+        "游戏": {"游戏", "传媒", "动漫"},
+        "宽基": {"宽基", "沪深300", "中证A500", "A500", "中证500", "上证50"},
+        "黄金": {"黄金", "贵金属"},
+        "商品": {"黄金", "贵金属", "商品", "能源", "原油", "煤炭"},
+        "能源": {"能源", "原油", "油气", "煤炭", "化工"},
+        "高股息": {"高股息", "红利", "银行", "公用事业", "运营商"},
+    }
+    allowed_terms = set(preferred)
+    for label in preferred:
+        allowed_terms.update(allowed_aliases.get(label, set()))
+
+    sector_markers = {
+        "黄金": ("黄金", "贵金属"),
+        "能源": ("能源", "原油", "油气", "煤炭", "化工"),
+        "高股息": ("红利", "高股息", "银行ETF"),
+        "传媒": ("游戏", "传媒", "动漫"),
+        "医药": ("创新药", "医药", "医疗", "CXO", "CRO", "医疗器械"),
+        "通信": ("通信", "CPO", "光模块", "5G", "6G", "数据中心", "运营商"),
+        "半导体": ("半导体", "芯片", "科创芯片"),
+        "电网": ("电网", "电力", "特高压", "智能电网", "储能"),
+    }
+    track_lines = [
+        line.strip()
+        for line in client_text.splitlines()
+        if re.match(r"^\|\s*(优先观察|次级观察|补充观察|第一推荐|第二推荐|第三推荐|短线|中线|波段)\s*\|", line.strip())
+    ]
+    findings: List[str] = []
+    for line in track_lines:
+        if any(token in line for token in ("对冲", "防守", "避险")):
+            continue
+        for sector, markers in sector_markers.items():
+            if sector in allowed_terms or any(alias in allowed_terms for alias in markers):
+                continue
+            if any(marker in line for marker in markers):
+                findings.append(
+                    format_lesson_finding(
+                        "L032",
+                        f"[P1] {report_type} 当前偏好主题是 `{preferred_label}`，但可见推荐/观察分层混入 `{sector}` 方向：{line}",
+                    )
+                )
+                break
+    return findings
+
+
 def _observe_only_packaging_findings(client_text: str, report_type: str) -> List[str]:
     findings: List[str] = []
     has_formal_pick = bool(re.search(r"\|\s*正式推荐\s*\|", client_text)) or any(
@@ -988,10 +1228,43 @@ def _observe_only_packaging_findings(client_text: str, report_type: str) -> List
     observe_only = (
         "观察" in delivery_label
         or (not has_formal_pick and ("暂不出手" in client_text or "观察为主" in client_text or client_text.count("看好但暂不推荐") >= 2))
-        or any(marker in current_action for marker in ("观察", "暂不出手", "回避", "等待", "持有优于追高"))
+        or any(marker in current_action for marker in ("观察", "暂不出手", "回避", "等待"))
     )
     if not observe_only:
         return findings
+
+    stale_formal_markers = (
+        "## 其余正式推荐",
+        "继续按正式推荐框架",
+        "仍可作为正式推荐框架",
+        "仍按正式推荐框架",
+        "正式推荐框架下的单只优先对象",
+        "标准推荐稿里的单只优先对象",
+        "并入上面的正式推荐层",
+        "并入正式推荐层",
+    )
+    leaked = [marker for marker in stale_formal_markers if marker in client_text]
+    if leaked:
+        findings.append(
+            format_lesson_finding(
+                "L033",
+                f"[P1] {report_type} 当前是观察/降级稿，但仍泄露正式推荐包装：{', '.join(leaked[:3])}",
+            )
+        )
+    hard_action_rows = []
+    for match in re.finditer(r"\|\s*当前(?:建议|动作)\s*\|\s*([^|\n]+?)\s*\|", client_text):
+        value = match.group(1).strip()
+        if any(token in value for token in ("做多", "买入", "加仓", "正式推荐")) and not any(
+            token in value for token in ("观察", "等待", "等右侧", "待确认", "等确认", "不追高", "持有优于追高")
+        ):
+            hard_action_rows.append(value)
+    if hard_action_rows:
+        findings.append(
+            format_lesson_finding(
+                "L033",
+                f"[P1] {report_type} 当前是观察/降级稿，但执行表仍写成硬动作：{', '.join(hard_action_rows[:3])}",
+            )
+        )
 
     first_heading = next((line.strip() for line in client_text.splitlines() if line.strip().startswith("# ")), "")
     if "推荐" in first_heading:
@@ -1168,14 +1441,25 @@ def _pick_source_consistency_findings(client_text: str, source_text: str, report
 def _briefing_source_consistency_findings(client_text: str, source_text: str) -> List[str]:
     findings: List[str] = []
     client_why = _bullets_in_section(client_text, "## 为什么今天这么判断")
-    client_actions = _bullets_in_section(client_text, "## 今天怎么做")
-    source_headlines = _section_items(source_text, "### 1.1 今日主线")
-    source_actions = _section_items_any(source_text, ("### 1.2 今天怎么做", "### 1.2 周末怎么跟踪"))
+    client_actions = _bullets_in_section_any(client_text, ("## 执行补充", "## 今天怎么做"))
+    source_headlines: List[str] = []
+    for heading in ("### 1.1 今日主线", "### 2.1 今日主线回顾", "### 3.2 明日主线预判"):
+        for item in _section_items(source_text, heading):
+            if item not in source_headlines:
+                source_headlines.append(item)
+    source_actions: List[str] = []
+    for heading in ("### 1.2 今天怎么做", "### 1.2 周末怎么跟踪", "### 3.4 明日操作建议"):
+        for item in _section_items(source_text, heading):
+            if item not in source_actions:
+                source_actions.append(item)
+    missing_source_parts = False
     if not source_headlines:
-        findings.append("[P1] briefing 详细稿缺少“1.1 今日主线”内容，无法做源稿一致性校验")
-        return findings
+        findings.append("[P1] briefing 详细稿缺少“1.1 今日主线 / 2.1 今日主线回顾 / 3.2 明日主线预判”内容，无法做源稿一致性校验")
+        missing_source_parts = True
     if not source_actions:
-        findings.append("[P1] briefing 详细稿缺少“1.2 今天怎么做/周末怎么跟踪”内容，无法做源稿一致性校验")
+        findings.append("[P1] briefing 详细稿缺少“1.2 今天怎么做 / 1.2 周末怎么跟踪 / 3.4 明日操作建议”内容，无法做源稿一致性校验")
+        missing_source_parts = True
+    if missing_source_parts:
         return findings
     normalized_headlines = {_normalize_briefing_consistency_line(item) for item in source_headlines}
     normalized_actions = {_normalize_briefing_consistency_line(item) for item in source_actions}
@@ -1469,11 +1753,14 @@ def check_stock_pick_client_report(
     findings.extend(_observe_only_packaging_findings(client_text, "stock_pick"))
     findings.extend(_stock_pick_observe_density_findings(client_text))
     findings.extend(_stock_pick_feature_retention_findings(client_text))
+    findings.extend(_stock_pick_first_screen_execution_findings(client_text))
     findings.extend(_duplicate_explanation_findings(client_text, max_repeat=2))
     findings.extend(_duplicate_operation_findings(client_text, max_repeat=2, scope="客户稿"))
     findings.extend(_duplicate_operation_findings(source_text, max_repeat=2, scope="详细稿"))
     findings.extend(_regime_basis_findings(client_text, "stock_pick"))
     findings.extend(_evidence_quality_findings(client_text, "stock_pick"))
+    findings.extend(_top_signal_readability_findings(client_text, "stock_pick"))
+    findings.extend(_readability_density_findings(client_text, "stock_pick"))
     findings.extend(_stock_section_structure_findings(client_text))
     findings.extend(_stock_section_identity_findings(client_text, source_text))
     findings.extend(_theme_playbook_surface_findings(client_text, "stock_pick", editor_theme_playbook))
@@ -1566,9 +1853,15 @@ def check_generic_client_report(
     findings.extend(_intraday_claim_findings(client_text))
     findings.extend(_execution_safety_findings(client_text, report_type))
     findings.extend(_evidence_quality_findings(client_text, report_type))
+    findings.extend(_external_evidence_vs_packaging_findings(client_text, report_type))
+    findings.extend(_peer_etf_evidence_findings(client_text, report_type))
     findings.extend(_top_signal_quality_findings(client_text, report_type))
+    findings.extend(_top_signal_readability_findings(client_text, report_type))
+    findings.extend(_readability_density_findings(client_text, report_type))
+    findings.extend(_observe_execution_card_findings(client_text, report_type))
     findings.extend(_regime_basis_findings(client_text, report_type))
     findings.extend(_homepage_v2_findings(client_text, report_type))
+    findings.extend(_homepage_decision_layer_findings(client_text, report_type))
     findings.extend(_theme_playbook_surface_findings(client_text, report_type, editor_theme_playbook))
     findings.extend(_editor_prompt_theme_findings(client_text, report_type, editor_prompt_text))
     findings.extend(_event_digest_surface_findings(client_text, report_type, event_digest_contract))
@@ -1580,7 +1873,7 @@ def check_generic_client_report(
     )
 
     required_headings = {
-        "briefing": ["## 执行摘要", "## 为什么今天这么判断", "## 宏观判断依据", "## 宏观领先指标", "## 数据完整度", "## 证据时点与来源", "## 今天怎么做", "## 重点观察", "## 今日A股观察池", "## A股观察池升级条件"],
+        "briefing": [("## 市场结构摘要", "## 执行摘要"), "## 为什么今天这么判断", "## 宏观判断依据", "## 宏观领先指标", "## 数据完整度", "## 证据时点与来源", ("## 怎么用这份晨报", "## 执行补充", "## 今天怎么做"), "## 重点观察", "## 今日A股观察池", "## A股观察池升级条件"],
         "fund_pick": ["## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只基金为什么是这个分", "## 标准化分类"],
         "etf_pick": ["## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只ETF为什么是这个分", "## 标准化分类", "## 关键证据"],
         "scan": ["## 为什么这么判断"] if scan_observe_only else ["## 为什么这么判断", "## 当前更合适的动作"],
@@ -1597,8 +1890,11 @@ def check_generic_client_report(
             findings.append(format_lesson_finding("L002", f"[P2] {report_type} 客户稿缺少解释性章节: {heading}"))
 
     if report_type == "briefing":
-        summary_items = _section_items(client_text, "## 执行摘要")
-        has_summary_table = all(token in client_text for token in ("| 当前判断 |", "| 优先动作 |", "| 中期背景 / 当天主线 |"))
+        summary_items = _section_items_any(client_text, ("## 市场结构摘要", "## 执行摘要"))
+        has_summary_table = (
+            all(token in client_text for token in ("| 当前判断 |", "| 优先动作 |", "| 中期背景 / 当天主线 |"))
+            or all(token in client_text for token in ("| 看不看 |", "| 怎么触发 |", "| 中期背景 / 当天主线 |"))
+        )
         if len(summary_items) < 3 and not has_summary_table:
             findings.append(format_lesson_finding("L002", "[P2] briefing 客户稿缺少高密度执行摘要：至少要先交代判断、动作和背景。"))
         if len(_bullets_in_section(client_text, "## 为什么今天这么判断")) < 3:
@@ -1658,6 +1954,7 @@ def check_generic_client_report(
         findings.extend(_delivery_tier_findings(client_text, source_text, report_type))
         findings.extend(_pick_delivery_consistency_findings(client_text, report_type))
         findings.extend(_observe_only_packaging_findings(client_text, report_type))
+        findings.extend(_preferred_sector_track_findings(client_text, report_type))
         findings.extend(_standard_taxonomy_findings(client_text, report_type))
         findings.extend(_fund_profile_findings(client_text))
         findings.extend(_pick_auxiliary_score_findings(client_text, report_type))
@@ -1746,6 +2043,10 @@ def _intraday_claim_findings(text: str) -> List[str]:
     normalized = normalized.replace("盘中快照", "")
     normalized = normalized.replace("盘中实时/缓存快照", "")
     normalized = normalized.replace("盘中实时快照", "")
+    normalized = re.sub(r"^.*已接入龙虎榜/竞价/涨跌停边界.*$", "", normalized, flags=re.M)
+    normalized = re.sub(r"^.*未命中明确龙虎榜/打板确认.*$", "", normalized, flags=re.M)
+    normalized = re.sub(r"^.*当前未见明确打板过热风险.*$", "", normalized, flags=re.M)
+    normalized = re.sub(r"^.*打板专题接口当前不可用.*$", "", normalized, flags=re.M)
     risky_opening_patterns = (
         r"开盘.{0,8}(做|买|追|加仓|执行|跟随|介入)",
         r"明天开盘.{0,8}(做|买|追|加仓|执行|跟随|介入)",
@@ -1769,19 +2070,51 @@ def _execution_safety_findings(text: str, report_type: str) -> List[str]:
     findings: List[str] = []
     buy_range = _table_value(text, "建议买入区间")
     stop_text = _table_value(text, "止损参考")
+    trim_range = _table_value(text, "建议减仓区间")
     if not buy_range or "暂不设" in buy_range or not stop_text:
-        return findings
-    range_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)", buy_range)
-    stop_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", stop_text)
-    if not range_match or not stop_match:
-        return findings
-    buy_low = float(range_match.group(1))
-    stop_ref = float(stop_match.group(1))
-    if stop_ref >= buy_low:
-        findings.append(format_lesson_finding("L036", f"[P1] {report_type} 的止损参考高于或等于买入区间下沿，执行参数自相矛盾。"))
-        return findings
-    if (buy_low - stop_ref) / buy_low < 0.01:
-        findings.append(format_lesson_finding("L036", f"[P1] {report_type} 的买入区间下沿离止损过近（<1%），实操中容易被正常波动洗掉。"))
+        range_match = None
+        stop_match = None
+    else:
+        range_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)", buy_range)
+        stop_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", stop_text)
+        if range_match and stop_match:
+            buy_low = float(range_match.group(1))
+            stop_ref = float(stop_match.group(1))
+            if stop_ref >= buy_low:
+                findings.append(format_lesson_finding("L036", f"[P1] {report_type} 的止损参考高于或等于买入区间下沿，执行参数自相矛盾。"))
+                return findings
+            if (buy_low - stop_ref) / buy_low < 0.01:
+                findings.append(format_lesson_finding("L036", f"[P1] {report_type} 的买入区间下沿离止损过近（<1%），实操中容易被正常波动洗掉。"))
+    if trim_range and report_type in {"etf_pick", "fund_pick", "scan"}:
+        trim_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)", trim_range)
+        if trim_match:
+            trim_low = float(trim_match.group(1))
+            trim_high = float(trim_match.group(2))
+            if trim_low > 0 and (trim_high - trim_low) / trim_low > 0.05:
+                findings.append(format_lesson_finding("L036", f"[P2] {report_type} 的建议减仓区间过宽（>5%），更像模型粗框，不像可执行分批计划。"))
+    if report_type in {"etf_pick", "fund_pick", "scan", "stock_analysis"}:
+        watch_text = " ".join(
+            item
+            for item in (
+                _table_value(text, "怎么触发"),
+                _table_value(text, "先看什么"),
+            )
+            if item
+        )
+        upper_match = re.search(r"上沿(?:先|再)看\s*`?([0-9]+(?:\.[0-9]+)?)`?", watch_text)
+        pressure_values: List[float] = []
+        for match in re.finditer(r"(?:高点|前高|压力)[^0-9]{0,12}([0-9]+(?:\.[0-9]+)?)", text):
+            try:
+                value = float(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                pressure_values.append(value)
+        if upper_match and pressure_values:
+            upper_ref = float(upper_match.group(1))
+            nearest_pressure = min(pressure_values)
+            if upper_ref > nearest_pressure * 1.03:
+                findings.append(format_lesson_finding("L036", f"[P2] {report_type} 的首屏上沿 `{upper_ref:.3f}` 跳过了更近的压力位 `{nearest_pressure:.3f}`，执行位和强因子压力位不自洽。"))
     return findings
 
 
@@ -1793,6 +2126,73 @@ def _evidence_quality_findings(text: str, report_type: str) -> List[str]:
         if any(token in lowered for token in GENERIC_EVIDENCE_TITLE_KEYS):
             findings.append(format_lesson_finding("L037", f"[P1] {report_type} 的关键证据混入了通用新闻/行情页，不像可直接支撑催化判断的有效证据: {item}"))
             break
+    return findings
+
+
+def _external_evidence_vs_packaging_findings(text: str, report_type: str) -> List[str]:
+    if report_type not in {"etf_pick", "fund_pick", "scan"}:
+        return []
+    findings: List[str] = []
+    low_direct_news = bool(re.search(r"高置信直接新闻覆盖\s*0%", text))
+    homepage_items = _section_items_any(text, HOMEPAGE_KEY_EVIDENCE_HEADINGS)
+    homepage_no_clickable = any(
+        item.startswith("外部情报：") and "未拿到可点击外部情报" in item
+        for item in homepage_items
+    )
+    if not (low_direct_news or homepage_no_clickable):
+        return findings
+    strong_packaging_markers = (
+        "| 优先推荐 |",
+        "| 交付等级 | 标准推荐稿",
+        "## 为什么推荐它",
+        "# 今日ETF推荐",
+        "# 今日场外基金推荐",
+    )
+    if any(marker in text for marker in strong_packaging_markers):
+        findings.append(
+            format_lesson_finding(
+                "L037",
+                f"[P1] {report_type} 直连外部情报覆盖仍为 0 或首页没有可点击外部情报，却继续使用“优先推荐 / 标准推荐稿”包装；这类样本应先按观察/候选处理。",
+            )
+        )
+    return findings
+
+
+def _peer_etf_evidence_findings(text: str, report_type: str) -> List[str]:
+    if report_type not in {"etf_pick", "scan"}:
+        return []
+    findings: List[str] = []
+    evidence_items = [*_section_items(text, "## 关键证据"), *_section_items(text, "## 催化证据来源")]
+    for item in evidence_items:
+        if "ETF" not in item:
+            continue
+        if not any(token in item for token in ("净申购", "净赎回", "份额净创设", "份额净赎回")):
+            continue
+        if any(
+            marker in item
+            for marker in (
+                "同赛道产品",
+                "赛道热度",
+                "板块热度",
+                "行业热度",
+                "赛道佐证",
+                "份额申赎确认",
+                "本ETF",
+                "本 ETF",
+                "本产品",
+                "当前ETF",
+                "当前 ETF",
+                "当前产品",
+            )
+        ):
+            continue
+        findings.append(
+            format_lesson_finding(
+                "L037",
+                f"[P2] {report_type} 把其他 ETF 的申购/份额变化直接当成核心证据，却没标明它只是赛道热度佐证，容易把同赛道产品信号误读成当前标的自身确认。",
+            )
+        )
+        break
     return findings
 
 
@@ -1809,8 +2209,12 @@ def _top_signal_quality_findings(text: str, report_type: str) -> List[str]:
         item for item in items if ("信号：" in item or "信号类型：" in item) and ("结论：" in item or "主要影响：" in item)
     ]
     market_only_items = [item for item in items if item.startswith(GENERIC_MARKET_SIGNAL_PREFIXES)]
+    disclosed_no_external = any(
+        item.startswith("外部情报：") and "未拿到可点击外部情报" in item
+        for item in items
+    )
 
-    if report_type == "briefing" and not linked_items:
+    if report_type == "briefing" and not linked_items and not disclosed_no_external:
         findings.append(
             format_lesson_finding(
                 "L037",
@@ -1829,6 +2233,127 @@ def _top_signal_quality_findings(text: str, report_type: str) -> List[str]:
             format_lesson_finding(
                 "L037",
                 f"[P1] {report_type} 首页 `关键新闻 / 关键证据` 全被盘面句占满，当前是“盘面句顶替新闻位”，没有真正前置外部情报。",
+            )
+        )
+    return findings
+
+
+def _top_signal_readability_findings(text: str, report_type: str) -> List[str]:
+    if report_type not in {"briefing", "etf_pick", "fund_pick", "scan", "stock_analysis", "stock_pick"}:
+        return []
+    findings: List[str] = []
+    items = _section_items_any(text, HOMEPAGE_KEY_EVIDENCE_HEADINGS)
+    if not items:
+        return findings
+
+    if any(any(prefix in item for prefix in RAW_INTEL_SUMMARY_PREFIXES) for item in items):
+        findings.append(
+            format_lesson_finding(
+                "L037",
+                f"[P1] {report_type} 首页 `关键新闻 / 关键证据` 仍暴露原始情报聚类口径（如 `主题聚类：...`），不像给客户看的可读摘要。",
+            )
+        )
+
+    linked_items = [item for item in items if "http://" in item or "https://" in item]
+    structured_items = [
+        item
+        for item in items
+        if item.startswith("结构证据：")
+        or (not item.startswith("外部情报：") and ("信号：" in item or "信号类型：" in item))
+    ]
+    if linked_items and structured_items:
+        has_external_label = any(item.startswith("外部情报：") for item in linked_items)
+        has_structured_label = any(item.startswith("结构证据：") for item in items)
+        if not (has_external_label and has_structured_label):
+            findings.append(
+                format_lesson_finding(
+                    "L037",
+                    f"[P2] {report_type} 首页把外部情报和结构证据混写在一起，却没有显式标清“外部情报 / 结构证据”，读者很难判断哪条是新闻、哪条是结构判断。",
+                )
+            )
+    return findings
+
+
+def _readability_density_findings(text: str, report_type: str) -> List[str]:
+    if report_type not in {"etf_pick", "fund_pick", "scan", "stock_analysis", "stock_pick"}:
+        return []
+    observe_only_markers = (
+        "| 当前建议 | 观察为主",
+        "| 当前建议 | 观察为主（偏回避）",
+        "| 交付等级 | 观察稿",
+        "| 交付等级 | 代理观察稿",
+        "| 交付等级 | 降级观察稿",
+        "| 报告定位 | 观察稿 |",
+        "当前交付等级：观察稿",
+        "当前交付等级：代理观察稿",
+        "当前交付等级：降级观察稿",
+        "当前交付等级：`观察稿`",
+        "当前交付等级：`代理观察稿`",
+        "当前交付等级：`降级观察稿`",
+        "当前没有达到正式动作阈值的个股",
+        "今天没有正式动作票",
+    )
+    if not any(marker in text for marker in observe_only_markers):
+        return []
+    hedge_total = sum(text.count(token) for token in READABILITY_HEDGE_TOKENS)
+    disclosure_items = [
+        *_section_items(text, "## 数据完整度"),
+        *_section_items(text, "## 交付等级"),
+        *_section_items(text, "## 数据限制与说明"),
+    ]
+    missing_like_items = [
+        item
+        for item in disclosure_items
+        if any(token in item for token in MISSING_DISCLOSURE_TOKENS)
+    ]
+    if hedge_total >= 14 or (len(disclosure_items) >= 8 and len(missing_like_items) >= 6):
+        return [
+            format_lesson_finding(
+                "L003",
+                f"[P2] {report_type} 的边界声明/缺失披露过密，当前更像在反复防误读而不是给结论；缺失项应合并成少量脚注或清单，避免整篇信噪比过低。",
+            )
+        ]
+    return []
+
+
+def _observe_execution_card_findings(text: str, report_type: str) -> List[str]:
+    if report_type not in {"etf_pick", "fund_pick", "scan", "stock_analysis"}:
+        return []
+    findings: List[str] = []
+    observe_only_markers = (
+        "| 交付等级 | 观察稿",
+        "| 交付等级 | 代理观察稿",
+        "| 交付等级 | 降级观察稿",
+        "| 报告定位 | 观察稿 |",
+        "当前交付等级：观察稿",
+        "当前交付等级：代理观察稿",
+        "当前交付等级：降级观察稿",
+        "当前交付等级：`观察稿`",
+        "当前交付等级：`代理观察稿`",
+        "当前交付等级：`降级观察稿`",
+    )
+    if not any(marker in text for marker in observe_only_markers):
+        return []
+    precise_row_markers = (
+        "| 首次仓位 |",
+        "| 止损参考 |",
+        "建议买入区间：",
+        "第一减仓位：",
+        "第二减仓位：",
+    )
+    current_action = _table_value(text, "当前动作")
+    if current_action and any(marker in current_action for marker in ("回避", "暂不")) and "观察" not in current_action:
+        findings.append(
+            format_lesson_finding(
+                "L040",
+                f"[P1] {report_type} 当前已经是观察稿，但动作卡仍把 `当前动作` 直接写成 `{current_action}`；观察稿应明确写成“观察为主（偏回避）”这类观察口径，而不是继续像执行指令。",
+            )
+        )
+    if any(marker in text for marker in precise_row_markers):
+        findings.append(
+            format_lesson_finding(
+                "L040",
+                f"[P1] {report_type} 当前已经是观察稿，但正文仍保留精确仓位/止损/减仓位这类执行卡；观察稿应先收成触发条件和观察重点，不要继续给机械挂单位。",
             )
         )
     return findings

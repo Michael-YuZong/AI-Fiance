@@ -193,7 +193,6 @@ def _event_understanding_summary(payload: Mapping[str, Any] | None) -> str:
     detail = _safe_text(snapshot.get("lead_detail"))
     impact_summary = _safe_text(snapshot.get("impact_summary"))
     thesis_scope = _safe_text(snapshot.get("thesis_scope"))
-    importance_reason = _safe_text(snapshot.get("importance_reason"))
     parts: List[str] = []
     if detail:
         parts.append(f"更该前置的是 `{detail}`")
@@ -201,8 +200,6 @@ def _event_understanding_summary(payload: Mapping[str, Any] | None) -> str:
         parts.append(f"更直接影响 `{impact_summary}`")
     if thesis_scope:
         parts.append(f"先按 `{thesis_scope}` 处理")
-    if importance_reason:
-        parts.append(f"优先级判断是：{importance_reason}")
     return "，".join(parts)
 
 

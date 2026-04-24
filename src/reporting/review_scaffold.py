@@ -14,20 +14,35 @@ from src.reporting.review_record_utils import (
 )
 from src.utils.config import resolve_project_path
 
+_SCAFFOLD_ONLY_MARKERS = (
+    "尚未完成 `Pass A 结构审`",
+    "尚未完成 `Pass B 发散审`",
+    "当前只是自动生成的 review scaffold",
+    "当前还没有独立 reviewer 的框架外 finding",
+    "当前还没有完成零提示发散审",
+)
+
+
+def _is_scaffold_only_review(sections: dict[str, str]) -> bool:
+    joined = "\n".join(
+        str(sections.get(title, ""))
+        for title in ("一句话总评", "主要问题", "独立答案", "框架外问题", "零提示发散审", "收敛结论")
+    )
+    if not joined.strip():
+        return False
+    if not all(marker in joined for marker in _SCAFFOLD_ONLY_MARKERS):
+        return False
+    convergence = parse_bullet_mapping(str(sections.get("收敛结论", "")).splitlines())
+    return str(convergence.get("状态", "")).strip().upper() == "BLOCKED"
+
 
 def _review_prompt_paths(report_type: str) -> dict[str, Path]:
-    if report_type == "strategy":
-        base = "financial"
-    else:
-        base = "financial"
-    if base == "financial":
-        return {
-            "structural": resolve_project_path("docs/prompts/external_financial_structural_reviewer.md"),
-            "divergent": resolve_project_path("docs/prompts/external_financial_divergent_reviewer.md"),
-            "convergence": resolve_project_path("docs/prompts/external_review_convergence_loop.md"),
-            "revision": resolve_project_path("docs/prompts/report_revision_loop.md"),
-        }
-    raise ValueError(f"unsupported review prompt bundle for report_type={report_type}")
+    return {
+        "structural": resolve_project_path("docs/prompts/external_financial_structural_reviewer.md"),
+        "divergent": resolve_project_path("docs/prompts/external_financial_divergent_reviewer.md"),
+        "convergence": resolve_project_path("docs/prompts/external_review_convergence_loop.md"),
+        "revision": resolve_project_path("docs/prompts/report_revision_loop.md"),
+    }
 
 
 def _review_scaffold_title(report_type: str, report_kind: str) -> str:
@@ -94,13 +109,13 @@ def build_external_review_scaffold(
             "",
             "## 建议沉淀",
             "- prompt",
-            "  - 如果这轮发现 strategy final 的共性问题，回写到 formal financial reviewer prompt。",
+            "  - 如果这轮发现当前成稿链的共性问题，回写到 formal financial reviewer prompt。",
             "- hard rule / guard / workflow",
-            "  - 如果这轮发现 strategy final 缺少固定章节或 gate 解释，再回写到 report_guard / release_check。",
+            "  - 如果这轮发现当前成稿链缺少固定章节或 gate 解释，再回写到 report_guard / release_check。",
             "- tests / fixtures",
-            "  - 如果这轮发现结构性遗漏，再补 strategy final 对应回归测试。",
+            "  - 如果这轮发现结构性遗漏，再补当前成稿链对应回归测试。",
             "- lesson / backlog",
-            "  - 当前 strategy 仍需继续做更长窗口 promotion calibration / external review。",
+            "  - 把这轮值得长期保留的 reviewer 发现沉淀到 backlog / lesson，避免 scaffold 一直停在模板口径。",
             "",
             "## 收敛结论",
             "- round：1",
@@ -174,7 +189,10 @@ def maybe_autoclose_external_review(
     if status == "PASS":
         return False
 
-    actionable = any(
+    scaffold_only = _is_scaffold_only_review(sections)
+    if scaffold_only:
+        return False
+    actionable = (not scaffold_only) and any(
         has_actionable_content(sections.get(title, ""))
         for title in ("主要问题", "框架外问题", "零提示发散审")
     )

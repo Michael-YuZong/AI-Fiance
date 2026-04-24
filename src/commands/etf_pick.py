@@ -5,18 +5,21 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
+from datetime import date, datetime, timedelta
+import json
 from pathlib import Path
 import re
 import threading
 from typing import Any, Dict, List, Mapping, Sequence
 
+from src.commands.intel import collect_intel_news_report, collect_market_aware_intel_news_report
 from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery, summarize_pick_coverage
 from src.commands.pick_visuals import attach_visuals_to_analyses
 from src.commands.final_runner import finalize_client_markdown, internal_sidecar_path
 from src.commands.report_guard import ensure_report_task_registered, exported_bundle_lines
 from src.commands.release_check import check_generic_client_report
 from src.collectors.fund_profile import FundProfileCollector
-from src.collectors.news import NewsCollector
+from src.collectors.valuation import ValuationCollector
 from src.output import ClientReportRenderer, OpportunityReportRenderer
 from src.output.catalyst_web_review import (
     attach_catalyst_web_review_to_analysis,
@@ -40,6 +43,8 @@ from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.portfolio_actions import attach_portfolio_overlap_summaries
 from src.processors.opportunity_engine import (
     _client_safe_issue,
+    _discover_ready_for_next_step,
+    _theme_alignment,
     analyze_opportunity,
     build_market_context,
     discover_opportunities,
@@ -50,9 +55,11 @@ from src.utils.config import load_config, resolve_project_path
 from src.utils.data import load_watchlist
 from src.utils.logger import setup_logger
 from src.utils.market import close_yfinance_runtime_caches
+from src.utils.slug import ascii_slug
 
 SNAPSHOT_PATH = resolve_project_path("data/etf_pick_score_history.json")
 MODEL_VERSION = "etf-pick-2026-03-14-candlestick-v4"
+CLIENT_FINAL_BUNDLE_CONTRACT_VERSION = "2026-04-11-etf-direct-intel-v1"
 MODEL_CHANGELOG = [
     "ETF 推荐现在记录同日基准版和重跑快照，后续重跑会展示分数变化而不是静态覆盖旧稿。",
     "催化面在新闻/事件覆盖降级时会按最近一次有效快照做衰减回退，避免把 ETF 催化打成假阴性。",
@@ -134,6 +141,17 @@ _GENERIC_MARKET_ETF_NEWS_TOKENS = (
 _GENERIC_MARKET_ETF_NEWS_SOURCES = (
     "财富号",
 )
+_ETF_BROAD_BENCHMARK_NOISE_TERMS = (
+    "沪深300",
+    "中证500",
+    "中证1000",
+    "中证A500",
+    "创业板",
+    "创业板指",
+    "上证50",
+    "科创50",
+    "恒生科技",
+)
 _THEME_CATALYST_TOKENS = (
     "AI",
     "人工智能",
@@ -170,6 +188,28 @@ _THEME_CATALYST_TOKENS = (
     "供需",
     "半导体设备",
 )
+_ETF_THEME_RELEVANCE_HINTS = (
+    (("有色", "有色金属", "铜铝", "工业金属"), ["有色", "有色金属", "工业金属", "铜", "铝", "铝土矿", "氧化铝", "锌", "铅", "镍", "锡", "稀土", "铜价", "铝价"]),
+    (("黄金", "贵金属"), ["黄金", "贵金属", "金价", "金银", "央行购金", "避险"]),
+    (("半导体", "芯片"), ["半导体", "芯片", "晶圆", "晶圆厂", "设备", "材料", "HBM", "封装", "光刻", "CPO"]),
+    (("算力", "AI"), ["算力", "AI", "数据中心", "服务器", "GPU", "光模块"]),
+)
+_ETF_GENERIC_RELEVANCE_TERMS = {
+    "A股",
+    "AI",
+    "人工智能",
+    "大模型",
+    "公司",
+    "基金",
+    "ETF",
+    "联接",
+    "指数",
+    "主题",
+    "行业",
+    "科技",
+    "信息技术",
+    "综合",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -277,13 +317,151 @@ def _timed_value(loader, *, fallback: Any, timeout_seconds: float) -> Any:
     return result.get("value", fallback)
 
 
+def _parse_report_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("/", "-")
+    if re.fullmatch(r"\d{8}", normalized):
+        normalized = f"{normalized[:4]}-{normalized[4:6]}-{normalized[6:8]}"
+    try:
+        return datetime.fromisoformat(normalized[:10]).date()
+    except ValueError:
+        return None
+
+
+def _format_report_date(value: date | None) -> str:
+    return value.isoformat() if value else ""
+
+
+def _report_period_label(end_date: Any) -> str:
+    parsed = _parse_report_date(end_date)
+    if parsed is None:
+        return "定期报告"
+    suffix = {
+        (3, 31): "一季报",
+        (6, 30): "中报",
+        (9, 30): "三季报",
+        (12, 31): "年报",
+    }.get((parsed.month, parsed.day), "定期报告")
+    return f"{parsed.year}年{suffix}"
+
+
+def _cninfo_disclosure_link(symbol: str) -> str:
+    code = re.sub(r"\D", "", str(symbol or ""))[:6]
+    return f"https://www.cninfo.com.cn/new/disclosure/detail?stockCode={code}" if code else ""
+
+
+def _holding_disclosure_event_rows(
+    analysis: Mapping[str, Any],
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> List[List[str]]:
+    asset_type = str(analysis.get("asset_type") or "").strip()
+    if asset_type not in {"cn_etf", "cn_fund"}:
+        return []
+    fund_profile = dict(analysis.get("fund_profile") or {})
+    holdings = [dict(item or {}) for item in list(fund_profile.get("top_holdings") or [])]
+    if not holdings:
+        return []
+
+    cfg = dict(config or {})
+    holding_limit = max(1, int(cfg.get("etf_holding_disclosure_top_n", 3) or 3))
+    lookahead_days = max(1, int(cfg.get("etf_holding_disclosure_lookahead_days", 7) or 7))
+    as_of = _parse_report_date(analysis.get("generated_at")) or datetime.now().date()
+    end = as_of + timedelta(days=lookahead_days)
+
+    def _loader() -> List[List[str]]:
+        collector = ValuationCollector(cfg)
+        event_rows: List[List[str]] = []
+        seen_symbols: set[str] = set()
+        for holding in holdings[:holding_limit]:
+            symbol = str(holding.get("股票代码") or holding.get("symbol") or "").strip()
+            name = str(holding.get("股票名称") or holding.get("name") or symbol).strip()
+            if not symbol or symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+            try:
+                records = collector.get_cn_stock_disclosure_dates(symbol)
+            except Exception:
+                continue
+            matching_records: List[tuple[date, Mapping[str, Any]]] = []
+            for record in list(records or []):
+                row = dict(record or {})
+                disclosure_date = (
+                    _parse_report_date(row.get("actual_date"))
+                    or _parse_report_date(row.get("pre_date"))
+                    or _parse_report_date(row.get("ann_date"))
+                )
+                if disclosure_date is None or disclosure_date < as_of or disclosure_date > end:
+                    continue
+                matching_records.append((disclosure_date, row))
+            if not matching_records:
+                continue
+            best_date = min(disclosure_date for disclosure_date, _ in matching_records)
+            same_day_records = [row for disclosure_date, row in matching_records if disclosure_date == best_date]
+            same_day_records.sort(key=lambda row: _parse_report_date(dict(row).get("end_date")) or date.min)
+            periods: List[str] = []
+            for row in same_day_records:
+                period_label = _report_period_label(dict(row).get("end_date"))
+                if period_label and period_label not in periods:
+                    periods.append(period_label)
+            weight_text = ""
+            try:
+                weight_value = float(holding.get("占净值比例"))
+                weight_text = f"，持仓占净值约 {weight_value:.2f}%"
+            except (TypeError, ValueError):
+                weight_text = ""
+            period = " / ".join(periods) if periods else "定期报告"
+            event_rows.append(
+                [
+                    _format_report_date(best_date),
+                    f"核心持仓财报窗口：{name}({symbol}) 预约披露 {period}{weight_text}",
+                    "核心持仓财报日历",
+                    "高",
+                    name or symbol,
+                    _cninfo_disclosure_link(symbol),
+                    "核心持仓财报窗口",
+                    "这是 ETF 前排权重股的确定披露日历，会影响持仓兑现预期和短线波动；它不是 ETF 自身公告，但应该作为关键观察事件前置。",
+                ]
+            )
+        return event_rows
+
+    return list(
+        _timed_value(
+            _loader,
+            fallback=[],
+            timeout_seconds=float(cfg.get("etf_holding_disclosure_timeout_seconds", 3) or 3),
+        )
+    )
+
+
+def _merge_market_event_rows(*groups: Sequence[Sequence[Any]]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for group in groups:
+        for row in list(group or []):
+            current = [str(item) for item in list(row or [])]
+            if len(current) < 2:
+                continue
+            key = (
+                current[0].strip() if len(current) > 0 else "",
+                current[1].strip() if len(current) > 1 else "",
+                current[2].strip() if len(current) > 2 else "",
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(current)
+    return rows
+
+
 def _etf_theme_terms(analysis: Mapping[str, Any]) -> List[str]:
     metadata = dict(analysis.get("metadata") or {})
     values = [
         metadata.get("tracked_index_name"),
         metadata.get("index_framework_label"),
         dict(metadata.get("index_topic_bundle") or {}).get("index_snapshot", {}).get("index_name"),
-        analysis.get("benchmark_name"),
         analysis.get("name"),
     ]
     raw_terms: List[str] = []
@@ -296,6 +474,8 @@ def _etf_theme_terms(analysis: Mapping[str, Any]) -> List[str]:
             normalized = normalized.replace(token, " ")
         normalized = re.sub(r"[()/,_\-]+", " ", normalized)
         normalized = re.sub(r"\s+", " ", normalized).strip()
+        if normalized in _ETF_BROAD_BENCHMARK_NOISE_TERMS:
+            continue
         if normalized and normalized not in raw_terms:
             raw_terms.append(normalized)
     for node in list(metadata.get("chain_nodes") or []):
@@ -347,11 +527,44 @@ def _theme_specific_terms(analysis: Mapping[str, Any]) -> List[str]:
             continue
         for part in re.split(r"[\s/,_()\-]+", text):
             cleaned = part.strip()
-            if len(cleaned) < 2 or cleaned in {"综合", "科技", "信息技术"}:
+            if len(cleaned) < 2 or cleaned in _ETF_GENERIC_RELEVANCE_TERMS:
                 continue
             if cleaned not in terms:
                 terms.append(cleaned)
     return terms[:16]
+
+
+def _etf_relevance_terms(analysis: Mapping[str, Any]) -> List[str]:
+    joined = " ".join(_theme_specific_terms(analysis))
+    terms: List[str] = []
+    for item in _theme_specific_terms(analysis):
+        if item not in terms:
+            terms.append(item)
+    for triggers, hints in _ETF_THEME_RELEVANCE_HINTS:
+        if any(token in joined for token in triggers):
+            for hint in hints:
+                if hint not in terms:
+                    terms.append(hint)
+    return terms[:24]
+
+
+def _is_relevant_etf_news_item(item: Mapping[str, Any], analysis: Mapping[str, Any]) -> bool:
+    row = dict(item or {})
+    title = str(row.get("title") or "").strip()
+    source = str(row.get("source") or row.get("configured_source") or "").strip()
+    note = str(row.get("note") or "").strip()
+    if not title:
+        return False
+    blob = " ".join(part for part in (title, source, note) if part)
+    relevance_terms = [term for term in _etf_relevance_terms(analysis) if term not in _ETF_GENERIC_RELEVANCE_TERMS]
+    title_hit = any(term in title for term in relevance_terms if len(term) >= 2)
+    context_hit = any(term in blob for term in relevance_terms if len(term) >= 2)
+    if not context_hit:
+        return False
+    if title_hit:
+        return True
+    # Source/note-only matches are too weak unless the title itself carries a catalyst cue.
+    return sum(1 for token in _THEME_CATALYST_TOKENS if token in title) >= 2
 
 
 def _is_generic_market_etf_news_item(item: Mapping[str, Any], analysis: Mapping[str, Any]) -> bool:
@@ -379,8 +592,48 @@ def _curate_etf_news_items(items: Sequence[Mapping[str, Any]], analysis: Mapping
             continue
         if _is_generic_market_etf_news_item(row, analysis):
             continue
+        if not _is_relevant_etf_news_item(row, analysis):
+            continue
         curated.append(row)
     return curated
+
+
+def _news_item_title_line(item: Mapping[str, Any]) -> str:
+    row = dict(item or {})
+    title = str(row.get("title") or "").strip()
+    source = str(row.get("source") or row.get("configured_source") or "").strip()
+    if title and source:
+        return f"{title} ({source})"
+    return title
+
+
+def _sanitize_etf_analysis_news_payload(analysis: Mapping[str, Any]) -> Dict[str, Any]:
+    """Keep ETF sidecar news aligned with the same relevance filter used by final text."""
+    updated = dict(analysis or {})
+    news_report = dict(updated.get("news_report") or {})
+    if news_report:
+        curated_items = _curate_etf_news_items(list(news_report.get("items") or []), updated)
+        curated_all_items = _curate_etf_news_items(list(news_report.get("all_items") or news_report.get("items") or []), updated)
+        if curated_items or curated_all_items:
+            news_report["items"] = curated_items or curated_all_items[:3]
+            news_report["all_items"] = curated_all_items or curated_items
+            news_report["lines"] = [
+                line
+                for line in (_news_item_title_line(item) for item in news_report["items"])
+                if line
+            ]
+        else:
+            news_report["items"] = []
+            news_report["all_items"] = []
+            news_report["lines"] = []
+        updated["news_report"] = news_report
+    dimensions = dict(updated.get("dimensions") or {})
+    catalyst = dict(dimensions.get("catalyst") or {})
+    if catalyst.get("theme_news"):
+        catalyst["theme_news"] = _curate_etf_news_items(list(catalyst.get("theme_news") or []), updated)
+        dimensions["catalyst"] = catalyst
+        updated["dimensions"] = dimensions
+    return updated
 
 
 def _etf_news_query_groups(analysis: Mapping[str, Any]) -> List[List[str]]:
@@ -459,8 +712,11 @@ def _backfill_etf_news_report(
 ) -> Dict[str, Any]:
     existing = dict(analysis.get("news_report") or {})
     current_items = _curate_etf_news_items(list(existing.get("items") or []), analysis)
+    current_all_items = _curate_etf_news_items(list(existing.get("all_items") or existing.get("items") or []), analysis)
     if current_items != list(existing.get("items") or []):
         existing["items"] = current_items
+    if current_all_items != list(existing.get("all_items") or []):
+        existing["all_items"] = current_all_items or current_items
     linked_items = [item for item in current_items if str(dict(item).get("link") or "").strip()]
     if len(linked_items) >= 2 or (len(current_items) >= 3 and len(linked_items) >= 1):
         existing["lines"] = [str(dict(item).get("title", "")).strip() for item in current_items[:4] if str(dict(item).get("title", "")).strip()]
@@ -471,55 +727,48 @@ def _backfill_etf_news_report(
     if not query_groups:
         return existing
 
+    query_terms: List[str] = []
+    for group in query_groups[:4]:
+        for term in group:
+            text = str(term).strip()
+            if text and text not in query_terms:
+                query_terms.append(text)
+    intel_query = " ".join(query_terms[:8]).strip()
+    if not intel_query:
+        return existing
+
     def _loader() -> Dict[str, Any]:
-        preferred_sources = ["财联社", "证券时报", "上海证券报", "中国证券报", "Reuters", "Bloomberg"]
-        active_query_groups = list(query_groups[:4])
         collector_config = deepcopy(dict(config or {}))
-        collector_config["news_topic_search_enabled"] = True
         collector_config.setdefault("news_feeds_file", "config/news_feeds.briefing_light.yaml")
-        collector = NewsCollector(collector_config)
-        merged = list(current_items)
-        query_terms = [item for group in active_query_groups for item in group]
-        notes: List[str] = []
-
-        try:
-            tushare_hits = collector.get_market_intelligence(query_terms, limit=6, recent_days=7)
-        except Exception:
-            tushare_hits = []
-        if tushare_hits:
-            merged.extend(tushare_hits)
-            notes.append("已按 Tushare 市场情报补充。")
-
-        try:
-            search_hits = collector.search_by_keyword_groups(
-                active_query_groups,
-                preferred_sources=preferred_sources,
+        collector_config["news_topic_search_enabled"] = True
+        intel_report = dict(
+            collect_market_aware_intel_news_report(
+                intel_query,
+                config=collector_config,
+                explicit_symbol=str(analysis.get("symbol") or "").strip(),
+                baseline_report=existing,
+                market_event_rows=list(analysis.get("market_event_rows") or []),
                 limit=6,
-                recent_days=5,
+                recent_days=7,
+                note_prefix="ETF 外部情报",
+                collect_fn=collect_intel_news_report,
             )
-        except Exception:
-            search_hits = []
-        if search_hits:
-            merged.extend(search_hits)
-            notes.append("已按 ETF 名称/指数/主题搜索补充。")
-
-        merged = _curate_etf_news_items(merged, analysis)
-
-        ranked = collector._rank_items(
-            collector._filter_candidate_items(merged, recent_days=7),
-            preferred_sources=preferred_sources + ["Tushare"],
-            query_keywords=query_terms,
         )
-        selected = collector._diversify_items(ranked, 6)
+        merged = _curate_etf_news_items(list(intel_report.get("items") or current_items), analysis)
+        if not merged:
+            return existing
+        ranked = _curate_etf_news_items(list(intel_report.get("all_items") or merged), analysis) or merged
+        selected = merged[:3]
         if not selected:
             return existing
         return {
-            "mode": "live",
+            **intel_report,
+            "mode": "live" if selected else str(intel_report.get("mode") or "proxy"),
             "items": selected,
             "all_items": ranked,
-            "lines": collector._live_lines(selected),
-            "source_list": sorted(collector._present_sources(selected)),
-            "note": "ETF 外部情报已按名称/指数/主题/成分线索回填。" + "".join(notes),
+            "lines": [str(dict(item).get("title", "")).strip() for item in selected if str(dict(item).get("title", "")).strip()],
+            "source_list": sorted({str(dict(item).get("source") or dict(item).get("configured_source") or "").strip() for item in selected if str(dict(item).get("source") or dict(item).get("configured_source") or "").strip()}),
+            "note": "ETF 外部情报已按名称/指数/主题/成分线索回填，并优先复用共享 intel 上游。",
         }
 
     return dict(
@@ -536,16 +785,11 @@ def _hydrate_selected_etf_profiles(
     *,
     config: Mapping[str, Any] | None = None,
     limit: int = 3,
-    context: Mapping[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     hydrated: List[Dict[str, Any]] = []
     collector = FundProfileCollector(config or {})
     max_items = max(int(limit or 0), 0)
-    full_reanalysis_limit = max(int(dict(config or {}).get("etf_full_reanalysis_limit", 0) or 0), 0)
-    full_reanalysis_context: Dict[str, Any] | None = dict(context or {}) if context else None
-    full_reanalysis_config = dict(config or {})
-    full_reanalysis_config["skip_fund_profile"] = False
-    full_reanalysis_config["etf_fund_profile_mode"] = "full"
+    effective_config = dict(config or {})
     for index, raw in enumerate(list(analyses or [])):
         updated = dict(raw)
         if index < max_items:
@@ -557,33 +801,7 @@ def _hydrate_selected_etf_profiles(
                     profile = {}
                 if profile:
                     updated["fund_profile"] = profile
-                    if index < full_reanalysis_limit:
-                        if full_reanalysis_context is None:
-                            full_reanalysis_context = build_market_context(full_reanalysis_config, relevant_asset_types=["cn_etf", "futures"])
-                        metadata = dict(updated.get("metadata") or {})
-                        try:
-                            rerun = analyze_opportunity(
-                                symbol,
-                                "cn_etf",
-                                full_reanalysis_config,
-                                context={**dict(full_reanalysis_context), "config": dict(full_reanalysis_config), "runtime_caches": {}},
-                                metadata_override={
-                                    "name": str(metadata.get("name") or updated.get("name") or symbol),
-                                    "sector": str(metadata.get("sector") or "综合"),
-                                    "chain_nodes": list(metadata.get("chain_nodes") or []),
-                                    "region": str(metadata.get("region") or "CN"),
-                                    "in_watchlist": bool(metadata.get("in_watchlist")),
-                                },
-                            )
-                        except Exception:
-                            rerun = {}
-                        if rerun:
-                            updated = {**updated, **rerun}
-                            updated["fund_profile"] = dict(updated.get("fund_profile") or profile)
-                        else:
-                            updated = refresh_etf_analysis_report_fields(updated, config=full_reanalysis_config)
-                    else:
-                        updated = refresh_etf_analysis_report_fields(updated, config=full_reanalysis_config)
+                updated = refresh_etf_analysis_report_fields(updated, config=effective_config)
         hydrated.append(updated)
     return hydrated
 
@@ -629,6 +847,49 @@ def _etf_share_flow_rank_bonus(analysis: Mapping[str, Any]) -> float:
     if share_value is not None and share_value < 0:
         return -1.0
     return 0.0
+
+
+def _etf_theme_purity_rank_bonus(analysis: Mapping[str, Any]) -> float:
+    asset_type = str(analysis.get("asset_type", "")).strip()
+    if asset_type not in {"cn_etf", "cn_fund", "cn_index"}:
+        return 0.0
+    metadata = dict(analysis.get("metadata") or {})
+    directness = str(metadata.get("theme_directness", "")).strip().lower()
+    theme_role = str(metadata.get("theme_role", "")).strip()
+    explicit_text = " ".join(
+        str(item).strip()
+        for item in (
+            analysis.get("name"),
+            analysis.get("benchmark_name"),
+            metadata.get("tracked_index_name"),
+            metadata.get("index_framework_label"),
+            metadata.get("index_name"),
+        )
+        if str(item).strip()
+    )
+    explicit_terms: List[str] = []
+    for item in [
+        str(metadata.get("primary_chain") or "").strip(),
+        *[str(token).strip() for token in list(metadata.get("evidence_keywords") or [])[:6]],
+    ]:
+        if item and item not in explicit_terms:
+            explicit_terms.append(item)
+    explicit_hits = sum(1 for token in explicit_terms if len(token) >= 2 and token in explicit_text)
+    directness_bonus = {
+        "direct": 1.2,
+        "adjacent": 0.6,
+        "application": 0.5,
+        "non_ai": 0.5,
+        "geopolitical": 0.4,
+        "broad": 0.2,
+        "sidechain": 0.1,
+    }.get(directness, 0.0)
+    bonus = directness_bonus + min(explicit_hits, 3) * 0.8
+    if directness in {"direct", "adjacent", "application", "non_ai", "geopolitical"} and explicit_hits == 0:
+        bonus -= 0.6
+    if "主链" in theme_role and explicit_hits > 0:
+        bonus += 0.4
+    return bonus
 
 
 def _etf_share_snapshot_note(analysis: Mapping[str, Any]) -> str:
@@ -688,13 +949,31 @@ def _rank_score(analysis: Dict[str, Any]) -> float:
         + _score_of(analysis, "risk") * 0.12
         + _score_of(analysis, "macro") * 0.08
     )
-    return base_score + _etf_structure_rank_bonus(analysis) + _etf_share_flow_rank_bonus(analysis)
+    return (
+        base_score
+        + _etf_structure_rank_bonus(analysis)
+        + _etf_share_flow_rank_bonus(analysis)
+        + _etf_theme_purity_rank_bonus(analysis)
+    )
 
 
-def _rank_key(analysis: Mapping[str, Any]) -> tuple[float, float, float, float, float, float]:
+def _theme_rank_priority(analysis: Mapping[str, Any]) -> float:
+    metadata = dict(analysis.get("metadata") or {})
+    if str(analysis.get("name", "")).strip():
+        metadata.setdefault("name", analysis.get("name"))
+    if str(analysis.get("benchmark_name", "")).strip():
+        metadata.setdefault("benchmark_name", analysis.get("benchmark_name"))
+    if str(analysis.get("benchmark_symbol", "")).strip():
+        metadata.setdefault("benchmark_symbol", analysis.get("benchmark_symbol"))
+    day_theme = dict(analysis.get("day_theme") or {})
+    return 1.0 if _theme_alignment(metadata, day_theme) else 0.0
+
+
+def _rank_key(analysis: Mapping[str, Any]) -> tuple[float, ...]:
     rank_score = _rank_score(dict(analysis))
     return (
         0.0 if bool(analysis.get("history_fallback_mode")) else 1.0,
+        _theme_rank_priority(analysis),
         float(int(analysis.get("rating", {}).get("rank", 0) or 0)),
         float(score_band(rank_score)),
         float(portfolio_overlap_bonus(analysis)),
@@ -702,6 +981,31 @@ def _rank_key(analysis: Mapping[str, Any]) -> tuple[float, float, float, float, 
         3 - strategy_confidence_priority(analysis),
         _score_of(dict(analysis), "relative_strength"),
         _score_of(dict(analysis), "catalyst"),
+    )
+
+
+def _is_ready_pick_candidate(analysis: Mapping[str, Any]) -> bool:
+    return _discover_ready_for_next_step(analysis)
+
+
+def _is_observation_pick_candidate(analysis: Mapping[str, Any]) -> bool:
+    if _is_ready_pick_candidate(analysis):
+        return False
+    dimensions = dict(analysis.get("dimensions") or {})
+    technical = int(dict(dimensions.get("technical") or {}).get("score", 0) or 0)
+    fundamental = int(dict(dimensions.get("fundamental") or {}).get("score", 0) or 0)
+    catalyst = int(dict(dimensions.get("catalyst") or {}).get("score", 0) or 0)
+    relative = int(dict(dimensions.get("relative_strength") or {}).get("score", 0) or 0)
+    risk = int(dict(dimensions.get("risk") or {}).get("score", 0) or 0)
+    rating = int(dict(analysis.get("rating") or {}).get("rank", 0) or 0)
+    observe_state = str(dict(dict(analysis.get("narrative") or {}).get("judgment") or {}).get("state", "")).strip()
+    return bool(
+        rating >= 1
+        or "观察" in observe_state
+        or "持有优于追高" in observe_state
+        or (fundamental >= 35 and relative >= 35 and technical >= 20)
+        or (catalyst >= 15 and (technical >= 30 or relative >= 40))
+        or (risk >= 55 and relative >= 30 and technical >= 20)
     )
 
 
@@ -959,7 +1263,7 @@ def _analysis_horizon(analysis: Mapping[str, Any]) -> Dict[str, str]:
 
 def _track_bucket(analysis: Mapping[str, Any]) -> str:
     horizon = _analysis_horizon(analysis)
-    code = str(horizon.get("code", "")).strip()
+    code = str(horizon.get("family_code") or horizon.get("code") or "").strip()
     label = str(horizon.get("label", "")).strip()
     if code in {"short_term", "swing"} or "短线" in label or "波段" in label:
         return "short_term"
@@ -990,12 +1294,50 @@ def _track_payload(analysis: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _recommendation_tracks(ranked: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def _analysis_matches_preferred_sector(analysis: Mapping[str, Any], preferred_sectors: Sequence[str]) -> bool:
+    preferred = [str(item).strip() for item in preferred_sectors if str(item).strip()]
+    if not preferred:
+        return True
+    metadata = dict(analysis.get("metadata") or {})
+    taxonomy = dict(metadata.get("taxonomy") or metadata.get("fund_taxonomy") or {})
+    taxonomy_profile = dict(taxonomy.get("theme_profile") or metadata.get("theme_profile") or {})
+    tokens = [
+        str(analysis.get("name") or ""),
+        str(analysis.get("benchmark_name") or ""),
+        str(metadata.get("sector") or ""),
+        str(metadata.get("industry") or ""),
+        str(metadata.get("industry_framework_label") or ""),
+        str(metadata.get("tracked_index_name") or ""),
+        str(metadata.get("theme_family") or taxonomy.get("theme_family") or taxonomy_profile.get("theme_family") or ""),
+        str(metadata.get("primary_chain") or taxonomy.get("primary_chain") or taxonomy_profile.get("primary_chain") or ""),
+        str(metadata.get("theme_role") or taxonomy.get("theme_role") or taxonomy_profile.get("theme_role") or ""),
+        *[str(item) for item in list(metadata.get("chain_nodes") or [])],
+        *[str(item) for item in list(metadata.get("preferred_sector_aliases") or taxonomy.get("preferred_sector_aliases") or taxonomy_profile.get("preferred_sector_aliases") or [])],
+        *[str(item) for item in list(metadata.get("mainline_tags") or taxonomy.get("mainline_tags") or taxonomy_profile.get("mainline_tags") or [])],
+        *[str(item) for item in list(metadata.get("evidence_keywords") or taxonomy.get("evidence_keywords") or taxonomy_profile.get("evidence_keywords") or [])],
+    ]
+    tokens = [item.strip() for item in tokens if item.strip()]
+    return any(pref in token or token in pref for pref in preferred for token in tokens)
+
+
+def _recommendation_tracks(
+    ranked: Sequence[Mapping[str, Any]],
+    *,
+    preferred_sectors: Sequence[str] | None = None,
+) -> Dict[str, Dict[str, Any]]:
+    ranked_items = [dict(item) for item in ranked]
+    preferred_ranked = [
+        item
+        for item in ranked_items
+        if _analysis_matches_preferred_sector(item, list(preferred_sectors or []))
+    ]
+    if len(preferred_ranked) >= min(3, len(ranked_items)):
+        ranked_items = preferred_ranked
     tracks: Dict[str, Dict[str, Any]] = {}
     used: set[str] = set()
 
-    short_exact = [item for item in ranked if _track_bucket(item) == "short_term"]
-    medium_exact = [item for item in ranked if _track_bucket(item) == "medium_term"]
+    short_exact = [item for item in ranked_items if _track_bucket(item) == "short_term"]
+    medium_exact = [item for item in ranked_items if _track_bucket(item) == "medium_term"]
 
     if short_exact:
         tracks["short_term"] = _track_payload(short_exact[0])
@@ -1009,10 +1351,10 @@ def _recommendation_tracks(ranked: Sequence[Mapping[str, Any]]) -> Dict[str, Dic
             used.add(symbol)
             break
 
-    for bucket_name in ("short_term", "medium_term"):
+    for bucket_name in ("short_term", "medium_term", "third_term"):
         if bucket_name in tracks:
             continue
-        for item in ranked:
+        for item in ranked_items:
             symbol = str(item.get("symbol", ""))
             if symbol in used:
                 continue
@@ -1037,6 +1379,7 @@ def _selection_context(
     scan_pool: int,
     passed_pool: int,
     theme_filter: str = "",
+    preferred_sectors: Sequence[str] | None = None,
     blind_spots: Sequence[str] | None = None,
     coverage: Mapping[str, Any] | None = None,
     model_version: str = "",
@@ -1051,6 +1394,13 @@ def _selection_context(
     coverage_payload = dict(coverage or {})
     delivery = dict(delivery_tier or {})
     total = int(coverage_payload.get("total") or passed_pool or 0)
+    preferred = list(
+        dict.fromkeys(
+            str(item).strip()
+            for item in list(preferred_sectors or [])
+            if str(item).strip()
+        )
+    )
     coverage_lines = []
     if total:
         coverage_lines.append(
@@ -1059,12 +1409,40 @@ def _selection_context(
         coverage_lines.append(
             f"高置信直接新闻覆盖 {coverage_payload.get('direct_news_rate', 0.0) * 100:.0f}%（{int(round(coverage_payload.get('direct_news_rate', 0.0) * total))}/{total}）"
         )
+    delivery_label = str(delivery.get("label", "未标注"))
+    delivery_code = str(delivery.get("code", ""))
+    delivery_observe_only = bool(delivery.get("observe_only"))
+    delivery_summary_only = bool(delivery.get("summary_only"))
+    delivery_notes = [str(item).strip() for item in delivery.get("notes", []) if str(item).strip()]
+    if any("高置信直接新闻覆盖 0%" in item for item in coverage_lines):
+        delivery_observe_only = True
+        delivery_code = "degraded_observation"
+        if not delivery_label or delivery_label == "未标注" or "推荐稿" in delivery_label:
+            delivery_label = "降级观察稿"
+        downgrade_note = "高置信直接新闻覆盖仍为 0，本轮 `ETF` 先按观察/候选处理，不继续沿用正式推荐包装。"
+        if downgrade_note not in delivery_notes:
+            delivery_notes.append(downgrade_note)
+    if delivery_observe_only:
+        formal_note_markers = (
+            "继续按正式推荐框架",
+            "仍可作为正式推荐框架",
+            "仍按正式推荐框架",
+        )
+        delivery_notes = [
+            item for item in delivery_notes
+            if not any(marker in item for marker in formal_note_markers)
+        ]
+        observe_note = "今天先给一个观察优先对象，不按正式买入稿理解。"
+        if observe_note not in delivery_notes:
+            delivery_notes.append(observe_note)
     return {
         "discovery_mode": discovery_mode,
         "discovery_mode_label": _discovery_mode_label(discovery_mode),
         "scan_pool": int(scan_pool),
         "passed_pool": int(passed_pool),
         "theme_filter_label": theme_filter or "未指定",
+        "preferred_sectors": preferred,
+        "preferred_sector_label": " / ".join(preferred) if preferred else "未指定",
         "blind_spots": [str(item).strip() for item in (blind_spots or []) if str(item).strip()],
         "coverage_note": coverage_payload.get("note", ""),
         "coverage_lines": coverage_lines,
@@ -1075,11 +1453,11 @@ def _selection_context(
         "comparison_basis_at": comparison_basis_at,
         "comparison_basis_label": comparison_basis_label,
         "model_version_warning": model_version_warning,
-        "delivery_tier_code": str(delivery.get("code", "")),
-        "delivery_tier_label": str(delivery.get("label", "未标注")),
-        "delivery_observe_only": bool(delivery.get("observe_only")),
-        "delivery_summary_only": bool(delivery.get("summary_only")),
-        "delivery_notes": [str(item).strip() for item in delivery.get("notes", []) if str(item).strip()],
+        "delivery_tier_code": delivery_code,
+        "delivery_tier_label": delivery_label,
+        "delivery_observe_only": delivery_observe_only,
+        "delivery_summary_only": delivery_summary_only,
+        "delivery_notes": delivery_notes,
         "proxy_contract": dict(proxy_contract or {}),
     }
 
@@ -1087,9 +1465,148 @@ def _selection_context(
 def _detail_output_path(generated_at: str, theme: str) -> Path:
     date_str = generated_at[:10]
     base = resolve_project_path("reports/etf_picks/internal")
-    if theme:
-        return base / f"etf_pick_{theme}_{date_str}_internal_detail.md"
+    theme_slug = ascii_slug(theme, fallback_prefix="theme")
+    if theme_slug:
+        return base / f"etf_pick_{theme_slug}_{date_str}_internal_detail.md"
     return base / f"etf_pick_{date_str}_internal_detail.md"
+
+
+def _persist_etf_pick_payload(detail_path: Path, payload: Mapping[str, Any]) -> Path:
+    payload_path = internal_sidecar_path(detail_path, "payload.json")
+    payload_to_write = dict(payload or {})
+    payload_to_write["_client_final_bundle_contract_version"] = CLIENT_FINAL_BUNDLE_CONTRACT_VERSION
+    payload_path.parent.mkdir(parents=True, exist_ok=True)
+    payload_path.write_text(
+        json.dumps(payload_to_write, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    return payload_path
+
+
+def _persist_etf_pick_internal(detail_path: Path, rendered: str, payload: Mapping[str, Any]) -> tuple[Path, Path]:
+    detail_path.parent.mkdir(parents=True, exist_ok=True)
+    detail_path.write_text(str(rendered or ""), encoding="utf-8")
+    payload_path = _persist_etf_pick_payload(detail_path, payload)
+    return detail_path, payload_path
+
+
+def _export_etf_pick_client_final(
+    *,
+    payload: Mapping[str, Any],
+    rendered: str,
+    detail_path: Path,
+    theme_filter: str = "",
+    catalyst_analyses: Sequence[Mapping[str, Any]] | None = None,
+) -> tuple[str, dict[str, Path]]:
+    payload_dict = dict(payload or {})
+    selection_context = dict(payload_dict.get("selection_context") or {})
+    theme_slug = ascii_slug(theme_filter, fallback_prefix="theme")
+    date_str = str(payload_dict.get("generated_at", ""))[:10]
+    filename = f"etf_pick_{theme_slug}_{date_str}_final.md" if theme_slug else f"etf_pick_{date_str}_final.md"
+    markdown_path = resolve_project_path(f"reports/etf_picks/final/{filename}")
+    catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
+    review_lookup = load_catalyst_web_review(catalyst_review_path)
+    if review_lookup and isinstance(payload_dict.get("winner"), Mapping):
+        payload_dict["winner"] = attach_catalyst_web_review_to_analysis(dict(payload_dict.get("winner") or {}), review_lookup)
+
+    client_markdown = ClientReportRenderer().render_etf_pick(payload_dict)
+    editor_packet = build_etf_pick_editor_packet(payload_dict)
+    editor_prompt = render_financial_editor_prompt(editor_packet)
+    catalyst_rows = [
+        dict(item)
+        for item in list(catalyst_analyses or payload_dict.get("catalyst_analyses") or [])
+        if isinstance(item, Mapping)
+    ]
+    catalyst_packet = build_catalyst_web_review_packet(
+        report_type="etf_pick",
+        subject=f"etf_pick {date_str}",
+        generated_at=str(payload_dict.get("generated_at", "")),
+        analyses=catalyst_rows,
+    )
+    text_sidecars = {
+        "editor_prompt": (
+            internal_sidecar_path(detail_path, "editor_prompt.md"),
+            editor_prompt,
+        )
+    }
+    json_sidecars = {
+        "editor_payload": (
+            internal_sidecar_path(detail_path, "editor_payload.json"),
+            editor_packet,
+        )
+    }
+    if list(catalyst_packet.get("items") or []):
+        text_sidecars.update(
+            {
+                "catalyst_web_review_prompt": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review_prompt.md"),
+                    render_catalyst_web_review_prompt(catalyst_packet),
+                ),
+                "catalyst_web_review": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review.md"),
+                    render_catalyst_web_review_scaffold(catalyst_packet),
+                ),
+            }
+        )
+        json_sidecars.update(
+            {
+                "catalyst_web_review_payload": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review_payload.json"),
+                    catalyst_packet,
+                )
+            }
+        )
+    elif catalyst_review_path.exists():
+        text_sidecars["catalyst_web_review"] = (
+            catalyst_review_path,
+            catalyst_review_path.read_text(encoding="utf-8"),
+        )
+
+    bundle = finalize_client_markdown(
+        report_type="etf_pick",
+        client_markdown=client_markdown,
+        markdown_path=markdown_path,
+        detail_markdown=rendered,
+        detail_path=detail_path,
+        extra_manifest={
+            "theme_filter": theme_filter,
+            "winner": dict(payload_dict.get("winner") or {}).get("symbol", ""),
+            "scan_pool": int(selection_context.get("scan_pool") or 0),
+            "passed_pool": int(selection_context.get("passed_pool") or 0),
+            "discovery_mode": str(selection_context.get("discovery_mode", "")),
+            "preferred_sectors": [str(item).strip() for item in list(selection_context.get("preferred_sectors") or []) if str(item).strip()],
+            "preferred_sector_label": str(selection_context.get("preferred_sector_label", "")),
+            "delivery_tier": {
+                "code": str(selection_context.get("delivery_tier_code", "")),
+                "label": str(selection_context.get("delivery_tier_label", "未标注")),
+                "observe_only": bool(selection_context.get("delivery_observe_only")),
+                "summary_only": bool(selection_context.get("delivery_summary_only")),
+                "notes": [str(item).strip() for item in list(selection_context.get("delivery_notes") or []) if str(item).strip()],
+            },
+            "data_coverage": {
+                "note": str(selection_context.get("coverage_note", "")),
+                "lines": list(selection_context.get("coverage_lines") or []),
+                "total": int(selection_context.get("coverage_total") or 0),
+            },
+            "factor_contract": dict(payload_dict.get("factor_contract") or {}),
+            "proxy_contract": dict(selection_context.get("proxy_contract") or {}),
+            "theme_playbook_contract": summarize_theme_playbook_contract(editor_packet.get("theme_playbook") or {}),
+            "event_digest_contract": summarize_event_digest_contract(editor_packet.get("event_digest") or {}),
+            "what_changed_contract": summarize_what_changed_contract(editor_packet.get("what_changed") or {}),
+        },
+        release_checker=lambda markdown_text, source_text: check_generic_client_report(
+            markdown_text,
+            "etf_pick",
+            source_text=source_text,
+            editor_theme_playbook=editor_packet.get("theme_playbook") or {},
+            editor_prompt_text=editor_prompt,
+            event_digest_contract=editor_packet.get("event_digest") or {},
+            what_changed_contract=editor_packet.get("what_changed") or {},
+        ),
+        text_sidecars=text_sidecars,
+        json_sidecars=json_sidecars,
+    )
+    return client_markdown, bundle
 
 
 def _client_final_runtime_overrides(
@@ -1098,7 +1615,7 @@ def _client_final_runtime_overrides(
     client_final: bool,
     explicit_config_path: str = "",
 ) -> tuple[Dict[str, Any], List[str]]:
-    if not client_final or explicit_config_path.strip():
+    if not client_final:
         return deepcopy(dict(config or {})), []
 
     effective = deepcopy(dict(config or {}))
@@ -1122,9 +1639,10 @@ def _client_final_runtime_overrides(
         opportunity["analysis_workers"] = 2
         notes.append("本轮 `client-final` 已自动收窄 ETF 分析并发，优先保证正式稿稳定落盘。")
     current_candidates = int(opportunity.get("max_scan_candidates", 30) or 30)
-    if current_candidates > 12:
-        opportunity["max_scan_candidates"] = 12
-        notes.append("本轮 `client-final` 已自动收窄 ETF 候选池，优先分析更接近正式交付的高流动性样本。")
+    normalized_candidates = 18
+    if current_candidates != normalized_candidates:
+        opportunity["max_scan_candidates"] = normalized_candidates
+        notes.append("本轮 `client-final` 已重设 ETF 候选池到 `18` 只，避免 fast 配置把跨主题正式推荐收窄成单一观察对象。")
     if opportunity:
         effective["opportunity"] = opportunity
 
@@ -1144,6 +1662,8 @@ def _client_final_runtime_overrides(
         notes.append("本轮 `client-final` 已切到 ETF 轻量候选画像，先用 ETF 专用结构链做排序，再只对入围样本补全完整画像。")
     effective.setdefault("etf_news_backfill_timeout_seconds", 12)
     effective.setdefault("news_topic_query_cap", 4)
+    if explicit_config_path.strip():
+        notes.append("显式配置文件仍会继续叠加 `client-final` 的正式稿稳定性与情报补齐 guard，不会因为自定义配置而回退到缺催化链。")
 
     return effective, notes
 
@@ -1161,19 +1681,10 @@ def _etf_discovery_runtime_overrides(config: Mapping[str, Any]) -> tuple[Dict[st
         effective["etf_fund_profile_mode"] = "light"
         notes.append("本轮 ETF discovery 默认启用 `light` 画像，先拿指数代码/跟踪框架，再对入围样本补全 full 画像。")
 
-    if bool(effective.get("news_topic_search_enabled", False)):
-        effective["news_topic_search_enabled"] = False
-        notes.append("本轮 ETF discovery 先按结构链排序，不在全候选阶段逐只跑主题扩搜；入围样本仍会在成稿阶段补外部情报。")
-
-    effective.setdefault("etf_full_reanalysis_limit", 1)
+    effective["skip_catalyst_dynamic_search_runtime"] = True
+    notes.append("本轮 ETF discovery 会先跳过逐候选动态主题扩搜；指数/主题情报加深只留给入围样本，避免把全池都当正式候选。")
 
     return effective, notes
-
-
-def _is_correlation_only_exclusion(analysis: Mapping[str, Any]) -> bool:
-    reasons = [str(item).strip() for item in list(analysis.get("exclusion_reasons") or []) if str(item).strip()]
-    return bool(reasons) and all("相关性过高" in item for item in reasons)
-
 
 def _watchlist_fallback_payload(
     config: Mapping[str, Any],
@@ -1226,14 +1737,10 @@ def _watchlist_fallback_payload(
                     blind_spots.append(_client_safe_issue(f"{item['symbol']} ({item.get('name', item['symbol'])}) 扫描失败", exc))
                     continue
                 if analysis["excluded"]:
-                    if not _is_correlation_only_exclusion(analysis):
-                        continue
-                    passed += 1
-                    coverage_analyses.append(analysis)
                     continue
                 passed += 1
                 coverage_analyses.append(analysis)
-                if analysis["rating"]["rank"] > 0:
+                if _is_ready_pick_candidate(analysis):
                     analyses.append(analysis)
     else:
         for item in pool:
@@ -1255,19 +1762,13 @@ def _watchlist_fallback_payload(
                 blind_spots.append(_client_safe_issue(f"{item['symbol']} ({item.get('name', item['symbol'])}) 扫描失败", exc))
                 continue
             if analysis["excluded"]:
-                if not _is_correlation_only_exclusion(analysis):
-                    continue
-                passed += 1
-                coverage_analyses.append(analysis)
                 continue
             passed += 1
             coverage_analyses.append(analysis)
-            if analysis["rating"]["rank"] > 0:
+            if _is_ready_pick_candidate(analysis):
                 analyses.append(analysis)
-    if coverage_analyses and not analyses:
-        if not any("主题内候选彼此高相关" in item for item in blind_spots):
-            blind_spots.append("主题内候选彼此高相关，本轮保留观察稿而不直接输出正式推荐。")
     analyses.sort(key=_rank_key, reverse=True)
+    coverage_analyses.sort(key=_rank_key, reverse=True)
     return {
         "generated_at": str(analyses[0].get("generated_at", "")) if analyses else "",
         "scan_pool": len(pool),
@@ -1321,6 +1822,9 @@ def _detail_markdown(
         f"- 完整分析: `{selection.get('passed_pool', len(analyses))}`",
         f"- 主题过滤: `{selection.get('theme_filter_label', '未指定')}`",
     ]
+    preferred_sector_label = str(selection.get("preferred_sector_label", "")).strip()
+    if preferred_sector_label and preferred_sector_label != "未指定":
+        lines.append(f"- 偏好主题: `{preferred_sector_label}`")
     if selection.get("model_version"):
         lines.append(f"- 模型版本: `{selection.get('model_version')}`")
     if selection.get("baseline_snapshot_at"):
@@ -1389,14 +1893,18 @@ def _payload_from_analyses(
     ranked = sorted(analyses, key=_rank_key, reverse=True)
     winner = ranked[0]
     alternatives = ranked[1:3]
-    recommendation_tracks = _recommendation_tracks(ranked)
+    preferred_for_tracks = list(dict(selection_context or {}).get("preferred_sectors") or [])
+    recommendation_tracks = _recommendation_tracks(ranked, preferred_sectors=preferred_for_tracks)
     catalyst = dict(dict(winner.get("dimensions", {}).get("catalyst") or {}))
     evidence = list(catalyst.get("evidence") or [])
     theme_news = list(catalyst.get("theme_news") or [])
     news_report = dict(winner.get("news_report") or {})
     if config:
         news_report = _backfill_etf_news_report(winner, config=config)
-    market_event_rows = _market_event_rows(winner)
+    market_event_rows = _merge_market_event_rows(
+        _holding_disclosure_event_rows(winner, config=config),
+        _market_event_rows(winner),
+    )
     share_snapshot_notes = _etf_share_snapshot_notes(ranked)
     if not evidence and not theme_news and not list(news_report.get("items") or []) and not market_event_rows:
         coverage = dict(dict(winner.get("dimensions", {}).get("catalyst") or {}).get("coverage") or {})
@@ -1426,6 +1934,7 @@ def _payload_from_analyses(
             "symbol": winner.get("symbol"),
             "asset_type": winner.get("asset_type"),
             "generated_at": winner.get("generated_at"),
+            "rating": dict(winner.get("rating") or {}),
             "strategy_background_confidence": dict(winner.get("strategy_background_confidence") or {}),
             "portfolio_overlap_summary": dict(winner.get("portfolio_overlap_summary") or {}),
             "visuals": dict(winner.get("visuals") or {}),
@@ -1438,6 +1947,8 @@ def _payload_from_analyses(
             "provenance": dict(winner.get("provenance") or {}),
             "intraday": dict(winner.get("intraday") or {}),
             "metadata": dict(winner.get("metadata") or {}),
+            "fund_profile": dict(winner.get("fund_profile") or {}),
+            "theme_playbook": dict(winner.get("theme_playbook") or {}),
             "history": winner.get("history"),
             "benchmark_name": winner.get("benchmark_name"),
             "benchmark_symbol": winner.get("benchmark_symbol"),
@@ -1467,29 +1978,81 @@ def _payload_from_analyses(
 
 
 def _select_pick_analyses(payload: Mapping[str, Any], *, top_n: int) -> List[Dict[str, Any]]:
-    ranked = [dict(item) for item in list(payload.get("top") or []) if isinstance(item, Mapping)]
+    def _analysis_key(item: Mapping[str, Any]) -> tuple[str, str]:
+        return (
+            str(item.get("asset_type", "")).strip(),
+            str(item.get("symbol", "")).strip(),
+        )
+
+    def _observation_rows() -> List[Dict[str, Any]]:
+        payload_rows = [
+            dict(item)
+            for item in list(payload.get("observation_candidates") or [])
+            if isinstance(item, Mapping) and _is_observation_pick_candidate(item)
+        ]
+        if payload_rows:
+            payload_rows.sort(key=_rank_key, reverse=True)
+            return payload_rows
+        top_rows = [
+            dict(item)
+            for item in list(payload.get("top") or [])
+            if isinstance(item, Mapping) and _is_observation_pick_candidate(item)
+        ]
+        if top_rows:
+            top_rows.sort(key=_rank_key, reverse=True)
+            return top_rows
+        coverage_rows = [
+            dict(item)
+            for item in list(payload.get("coverage_analyses") or [])
+            if isinstance(item, Mapping) and _is_observation_pick_candidate(item)
+        ]
+        coverage_rows.sort(key=_rank_key, reverse=True)
+        return coverage_rows
+
+    ranked = [
+        dict(item)
+        for item in list(payload.get("top") or [])
+        if isinstance(item, Mapping) and _is_ready_pick_candidate(item)
+    ]
     if ranked:
         ranked.sort(key=_rank_key, reverse=True)
-        return ranked[:top_n]
+        if len(ranked) >= top_n:
+            return ranked[:top_n]
+
+        merged: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in ranked:
+            key = _analysis_key(item)
+            if key[1] and key not in seen:
+                merged.append(item)
+                seen.add(key)
+
+        coverage_rows = [dict(item) for item in list(payload.get("coverage_analyses") or []) if isinstance(item, Mapping)]
+        watch_rows = [dict(item) for item in list(payload.get("watch_positive") or []) if isinstance(item, Mapping)]
+        for item in _observation_rows():
+            key = _analysis_key(item)
+            if not key[1] or key in seen:
+                continue
+            merged.append(item)
+            seen.add(key)
+            if len(merged) >= top_n:
+                break
+        for item in sorted([*watch_rows, *coverage_rows], key=_rank_key, reverse=True):
+            key = _analysis_key(item)
+            if not key[1] or key in seen:
+                continue
+            merged.append(item)
+            seen.add(key)
+            if len(merged) >= top_n:
+                break
+        merged.sort(key=_rank_key, reverse=True)
+        return merged[:top_n]
 
     coverage_rows = [dict(item) for item in list(payload.get("coverage_analyses") or []) if isinstance(item, Mapping)]
     if not coverage_rows:
         return []
 
-    observation_rows = [
-        item
-        for item in coverage_rows
-        if (
-            int(dict(item.get("rating") or {}).get("rank", 0) or 0) >= 0
-            and (
-                int(dict(dict(item.get("dimensions") or {}).get("fundamental") or {}).get("score", 0) or 0) >= 60
-                or int(dict(dict(item.get("dimensions") or {}).get("catalyst") or {}).get("score", 0) or 0) >= 50
-                or int(dict(dict(item.get("dimensions") or {}).get("risk") or {}).get("score", 0) or 0) >= 70
-                or "观察" in str(dict(dict(item.get("narrative") or {}).get("judgment") or {}).get("state", ""))
-                or "持有优于追高" in str(dict(dict(item.get("narrative") or {}).get("judgment") or {}).get("state", ""))
-            )
-        )
-    ]
+    observation_rows = _observation_rows()
     selected = observation_rows or coverage_rows
     selected.sort(key=_rank_key, reverse=True)
     return selected[:top_n]
@@ -1518,15 +2081,16 @@ def main() -> None:
     ensure_report_task_registered("etf_pick")
     setup_logger("ERROR")
     base_config = load_config(args.config or None)
-    config, runtime_override_notes = _client_final_runtime_overrides(
+    theme_filter = str(args.theme or "").strip()
+    final_config, runtime_override_notes = _client_final_runtime_overrides(
         base_config,
         client_final=bool(args.client_final),
         explicit_config_path=args.config,
     )
-    config, discovery_override_notes = _etf_discovery_runtime_overrides(config)
+    discovery_config, discovery_override_notes = _etf_discovery_runtime_overrides(final_config)
     runtime_override_notes = [*runtime_override_notes, *[note for note in discovery_override_notes if note not in runtime_override_notes]]
     try:
-        payload = discover_opportunities(config, top_n=max(args.top, 5), theme_filter=args.theme.strip())
+        payload = discover_opportunities(discovery_config, top_n=max(args.top, 5), theme_filter=theme_filter)
         payload = _promote_observation_candidates(
             payload,
             top_n=max(args.top, 5),
@@ -1534,9 +2098,9 @@ def main() -> None:
         )
         if not list(payload.get("top") or []):
             payload = _watchlist_fallback_payload(
-                config,
+                discovery_config,
                 top_n=max(args.top, 5),
-                theme_filter=args.theme.strip(),
+                theme_filter=theme_filter,
             )
             payload = _promote_observation_candidates(
                 payload,
@@ -1545,7 +2109,7 @@ def main() -> None:
             )
         payload = enrich_pick_payload_with_score_history(
             payload,
-            scope=f"theme:{args.theme.strip() or '*'}",
+            scope=f"theme:{theme_filter or '*'}",
             snapshot_path=SNAPSHOT_PATH,
             model_version=MODEL_VERSION,
             model_changelog=MODEL_CHANGELOG,
@@ -1564,19 +2128,19 @@ def main() -> None:
         payload["top"] = _attach_strategy_background_confidence(payload.get("top") or [])
         payload["coverage_analyses"] = _attach_strategy_background_confidence(payload.get("coverage_analyses") or [])
         payload["watch_positive"] = _attach_strategy_background_confidence(payload.get("watch_positive") or [])
-        payload["top"] = attach_portfolio_overlap_summaries(payload.get("top") or [], config)
-        payload["coverage_analyses"] = attach_portfolio_overlap_summaries(payload.get("coverage_analyses") or [], config)
-        payload["watch_positive"] = attach_portfolio_overlap_summaries(payload.get("watch_positive") or [], config)
+        payload["top"] = attach_portfolio_overlap_summaries(payload.get("top") or [], final_config)
+        payload["coverage_analyses"] = attach_portfolio_overlap_summaries(payload.get("coverage_analyses") or [], final_config)
+        payload["watch_positive"] = attach_portfolio_overlap_summaries(payload.get("watch_positive") or [], final_config)
         analyses = _select_pick_analyses(payload, top_n=max(args.top, 5))
         if not analyses:
             raise SystemExit("当前 ETF 推荐池没有可用候选，请稍后重试或放宽主题过滤。")
         analyses = _hydrate_selected_etf_profiles(
             analyses,
-            config=config,
-            limit=max(1, min(args.top, 2)),
-            context=payload.get("runtime_context"),
+            config=final_config,
+            limit=len(analyses),
         )
-        attach_visuals_to_analyses(analyses[:3])
+        analyses = sorted(analyses, key=_rank_key, reverse=True)
+        attach_visuals_to_analyses(analyses[:3], render_theme_variants=args.client_final)
         delivery_tier = grade_pick_delivery(
             report_type="etf_pick",
             discovery_mode=str(payload.get("discovery_mode", "")),
@@ -1589,7 +2153,8 @@ def main() -> None:
             discovery_mode=str(payload.get("discovery_mode", "")),
             scan_pool=int(payload.get("scan_pool") or 0),
             passed_pool=int(payload.get("passed_pool") or 0),
-            theme_filter=args.theme.strip(),
+            theme_filter=theme_filter,
+            preferred_sectors=list(payload.get("preferred_sectors") or []),
             blind_spots=payload.get("blind_spots") or [],
             coverage=payload.get("pick_coverage") or payload.get("data_coverage") or summarize_pick_coverage(analyses),
             model_version=str(payload.get("model_version", "")),
@@ -1606,7 +2171,7 @@ def main() -> None:
             selection_context=selection_context,
             regime=payload.get("regime") or {},
             day_theme=payload.get("day_theme") or {},
-            config=config,
+            config=final_config,
         )
         delivery_tier = grade_pick_delivery(
             report_type="etf_pick",
@@ -1620,7 +2185,8 @@ def main() -> None:
             discovery_mode=str(payload.get("discovery_mode", "")),
             scan_pool=int(payload.get("scan_pool") or 0),
             passed_pool=int(payload.get("passed_pool") or 0),
-            theme_filter=args.theme.strip(),
+            theme_filter=theme_filter,
+            preferred_sectors=list(payload.get("preferred_sectors") or []),
             blind_spots=payload.get("blind_spots") or [],
             coverage=payload.get("pick_coverage") or payload.get("data_coverage") or summarize_pick_coverage(analyses),
             model_version=str(payload.get("model_version", "")),
@@ -1632,115 +2198,46 @@ def main() -> None:
             delivery_tier=delivery_tier,
             proxy_contract=payload.get("proxy_contract") or {},
         )
-        date_str = str(client_payload.get("generated_at", ""))[:10]
-        theme = args.theme.strip().replace("/", "_").replace(" ", "_")
-        detail_path = _detail_output_path(str(client_payload.get("generated_at", "")), theme)
+        detail_path = _detail_output_path(str(client_payload.get("generated_at", "")), theme_filter)
+        factor_contract = summarize_factor_contracts_from_analyses(list(payload.get("coverage_analyses") or analyses), sample_limit=16)
         if args.client_final:
             catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
             review_lookup = load_catalyst_web_review(catalyst_review_path)
             if review_lookup:
                 analyses = [attach_catalyst_web_review_to_analysis(item, review_lookup) for item in analyses]
+                analyses = sorted(analyses, key=_rank_key, reverse=True)
                 client_payload = _payload_from_analyses(
                     analyses,
                     selection_context=selection_context,
                     regime=payload.get("regime") or {},
                     day_theme=payload.get("day_theme") or {},
-                    config=config,
+                    config=final_config,
                 )
         client_payload["selection_context"] = selection_context
+        client_payload["factor_contract"] = factor_contract
+        client_payload["catalyst_analyses"] = [
+            _sanitize_etf_analysis_news_payload(item)
+            for item in analyses
+            if isinstance(item, Mapping)
+        ]
         markdown = ClientReportRenderer().render_etf_pick(client_payload)
         if not args.client_final:
             print(markdown)
             return
 
-        filename = f"etf_pick_{theme}_{date_str}_final.md" if theme else f"etf_pick_{date_str}_final.md"
-        markdown_path = resolve_project_path(f"reports/etf_picks/final/{filename}")
         detail_markdown = _detail_markdown(
             analyses,
             str(dict(client_payload.get("winner") or {}).get("symbol", "")),
             selection_context=selection_context,
         )
-        factor_contract = summarize_factor_contracts_from_analyses(list(payload.get("coverage_analyses") or analyses), sample_limit=16)
-        catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
-        editor_packet = build_etf_pick_editor_packet(client_payload)
-        editor_prompt = render_financial_editor_prompt(editor_packet)
-        catalyst_packet = build_catalyst_web_review_packet(
-            report_type="etf_pick",
-            subject=f"etf_pick {date_str}",
-            generated_at=str(client_payload.get("generated_at", "")),
-            analyses=list(payload.get("coverage_analyses") or analyses),
-        )
-        text_sidecars = {
-            "editor_prompt": (
-                internal_sidecar_path(detail_path, "editor_prompt.md"),
-                editor_prompt,
-            )
-        }
-        json_sidecars = {
-            "editor_payload": (
-                internal_sidecar_path(detail_path, "editor_payload.json"),
-                editor_packet,
-            )
-        }
-        if list(catalyst_packet.get("items") or []):
-            text_sidecars.update(
-                {
-                    "catalyst_web_review_prompt": (
-                        internal_sidecar_path(detail_path, "catalyst_web_review_prompt.md"),
-                        render_catalyst_web_review_prompt(catalyst_packet),
-                    ),
-                    "catalyst_web_review": (
-                        internal_sidecar_path(detail_path, "catalyst_web_review.md"),
-                        render_catalyst_web_review_scaffold(catalyst_packet),
-                    ),
-                }
-            )
-            json_sidecars.update(
-                {
-                    "catalyst_web_review_payload": (
-                        internal_sidecar_path(detail_path, "catalyst_web_review_payload.json"),
-                        catalyst_packet,
-                )
-            }
-        )
-        elif catalyst_review_path.exists():
-            text_sidecars["catalyst_web_review"] = (
-                catalyst_review_path,
-                catalyst_review_path.read_text(encoding="utf-8"),
-            )
-        bundle = finalize_client_markdown(
-            report_type="etf_pick",
-            client_markdown=markdown,
-            markdown_path=markdown_path,
-            detail_markdown=detail_markdown,
+        _persist_etf_pick_internal(detail_path, detail_markdown, client_payload)
+        client_markdown, bundle = _export_etf_pick_client_final(
+            payload=client_payload,
+            rendered=detail_markdown,
             detail_path=detail_path,
-            extra_manifest={
-                "theme_filter": args.theme.strip(),
-                "winner": dict(client_payload.get("winner") or {}).get("symbol", ""),
-                "scan_pool": int(payload.get("scan_pool") or 0),
-                "passed_pool": int(payload.get("passed_pool") or 0),
-                "discovery_mode": str(payload.get("discovery_mode", "")),
-                "delivery_tier": dict(delivery_tier),
-            "data_coverage": dict(payload.get("pick_coverage") or {}),
-            "factor_contract": factor_contract,
-            "proxy_contract": dict(payload.get("proxy_contract") or {}),
-            "theme_playbook_contract": summarize_theme_playbook_contract(editor_packet.get("theme_playbook") or {}),
-            "event_digest_contract": summarize_event_digest_contract(editor_packet.get("event_digest") or {}),
-            "what_changed_contract": summarize_what_changed_contract(editor_packet.get("what_changed") or {}),
-        },
-        release_checker=lambda markdown_text, source_text: check_generic_client_report(
-            markdown_text,
-            "etf_pick",
-            source_text=source_text,
-            editor_theme_playbook=editor_packet.get("theme_playbook") or {},
-            editor_prompt_text=editor_prompt,
-            event_digest_contract=editor_packet.get("event_digest") or {},
-            what_changed_contract=editor_packet.get("what_changed") or {},
-        ),
-            text_sidecars=text_sidecars,
-            json_sidecars=json_sidecars,
+            theme_filter=theme_filter,
         )
-        print(markdown)
+        print(client_markdown)
         for index, line in enumerate(exported_bundle_lines(bundle)):
             print(f"\n{line}" if index == 0 else line)
     finally:

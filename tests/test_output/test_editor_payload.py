@@ -1,8 +1,16 @@
+import json
+
 import pandas as pd
 
 from src.output.client_report import ClientReportRenderer
 from src.output.editor_payload import (
     _action_lines,
+    _ensure_homepage_news_signal_bundle,
+    _format_homepage_evidence_line,
+    _load_previous_editor_payload_context,
+    _subject_theme_context,
+    _subject_intelligence_keywords,
+    _humanize_news_summary_line,
     _news_lines_with_event_digest,
     _theme_lines,
     build_what_changed_summary,
@@ -21,6 +29,8 @@ from src.output.theme_playbook import (
     HARD_SECTOR_REGISTRY,
     PLAYBOOK_REGISTRY,
     build_theme_playbook_context,
+    classify_hard_sector,
+    infer_theme_trading_role,
     load_sector_playbook,
     load_theme_playbook,
     playbook_hint_line,
@@ -61,6 +71,58 @@ def test_build_theme_playbook_context_resolves_semiconductor() -> None:
     assert playbook["key"] == "semiconductor"
     assert playbook["market_logic"]
     assert playbook["risks"]
+    assert playbook["trading_role_label"] in {"主线核心", "主线扩散"}
+    assert playbook["trading_position_label"] in {"主线仓", "卫星仓"}
+
+
+def test_subject_intelligence_keywords_use_taxonomy_profile_evidence_terms() -> None:
+    keywords = _subject_intelligence_keywords(
+        {
+            "asset_type": "cn_etf",
+            "name": "通信ETF",
+            "metadata": {
+                "sector": "信息技术",
+                "taxonomy": {
+                    "theme_profile": {
+                        "theme_family": "硬科技",
+                        "primary_chain": "CPO/光模块",
+                        "theme_role": "AI硬件主链",
+                        "evidence_keywords": ["CPO", "光模块", "800G", "AI算力"],
+                        "preferred_sector_aliases": ["科技", "通信", "AI硬件"],
+                    }
+                },
+            },
+        },
+        {},
+    )
+
+    assert "CPO" in keywords
+    assert "光模块" in keywords
+    assert "800G" in keywords
+
+
+def test_theme_lines_surface_taxonomy_primary_chain_for_fund_like_subject() -> None:
+    lines = _theme_lines(
+        {
+            "hard_sector_label": "信息技术",
+            "theme_family": "技术路线",
+            "playbook_level": "theme",
+            "label": "AI算力",
+        },
+        {
+            "asset_type": "cn_etf",
+            "metadata": {
+                "sector": "通信",
+                "primary_chain": "CPO/光模块",
+                "theme_role": "AI硬件主链",
+            },
+        },
+    )
+
+    joined = "\n".join(lines)
+    assert "标准分类补充" in joined
+    assert "CPO/光模块" in joined
+    assert "AI硬件主链" in joined
 
 
 def test_news_lines_with_event_digest_prioritize_linked_news_before_digest_summary() -> None:
@@ -103,9 +165,311 @@ def test_news_lines_with_event_digest_prioritize_linked_news_before_digest_summa
     lines = _news_lines_with_event_digest(subject, digest)
 
     assert lines
-    assert any("信号强弱" in line or "结论：" in line for line in lines[:1])
+    assert any(line.startswith("结构证据：") for line in lines)
+    assert any(line.startswith("外部情报：") for line in lines)
+    assert any("信号强弱" in line or "结论：" in line for line in lines[:2])
     assert any("https://example.com/semiconductor" in line for line in lines)
     assert any("财联社" in line for line in lines)
+    assert sum("成分权重结构" in line for line in lines) == 1
+
+
+def test_news_lines_with_event_digest_for_etf_prefers_linked_news_before_digest_lead() -> None:
+    subject = {
+        "asset_type": "cn_etf",
+        "symbol": "159980",
+        "generated_at": "2026-04-06 02:28:00",
+        "news_report": {
+            "items": [
+                {
+                    "title": "几内亚考虑收紧铝土矿供应，铝价中枢或继续抬升",
+                    "source": "新浪财经",
+                    "date": "2026-04-06",
+                    "link": "https://example.com/bauxite",
+                }
+            ]
+        },
+        "dimensions": {"catalyst": {"evidence": [], "coverage": {"directional_catalyst_hit": True}}},
+    }
+    digest = {
+        "status": "已消化",
+        "lead_layer": "行业主题事件",
+        "lead_detail": "主题事件：标准指数框架；结论：先按跟踪指数主链理解。",
+        "lead_title": "跟踪指数框架：大成有色金属期货ETF 跟踪 上海期货交易所有色金属期货价格指数",
+        "signal_type": "标准指数框架",
+        "signal_strength": "中",
+        "signal_conclusion": "先按跟踪指数主链理解。",
+        "changed_what": "这条线当前更直接影响景气 / 资金偏好，但暂不单独升级动作。",
+    }
+
+    lines = _news_lines_with_event_digest(subject, digest)
+
+    assert lines
+    assert "https://example.com/bauxite" in lines[0]
+
+
+def test_news_lines_with_event_digest_prioritizes_subject_news_over_market_background() -> None:
+    subject = {
+        "asset_type": "cn_etf",
+        "name": "国泰中证半导体材料设备主题ETF",
+        "symbol": "159516",
+        "day_theme": {"label": "硬科技 / AI硬件链"},
+        "metadata": {"sector": "信息技术", "chain_nodes": ["AI算力", "半导体"]},
+        "dimensions": {"catalyst": {"coverage": {"directional_catalyst_hit": True}}},
+        "news_report": {
+            "items": [
+                {
+                    "title": "是“真和平”还是“假希望”？一文盘点：投行如何看待美伊临时停火！",
+                    "source": "财联社",
+                    "date": "2026-04-08",
+                    "link": "https://example.com/geopolitics",
+                },
+                {
+                    "title": "半导体设备ETF招商逆势3连阳，国产化与存储扩产双催化",
+                    "source": "财经号",
+                    "date": "2026-04-10",
+                    "link": "https://example.com/semiconductor-equipment",
+                },
+                {
+                    "title": "A股放量大涨，机构眼中的后市机会在哪？",
+                    "source": "新浪财经",
+                    "date": "2026-04-08",
+                    "link": "https://example.com/market-wide",
+                },
+            ]
+        },
+    }
+    digest = {
+        "status": "已消化",
+        "lead_layer": "公告",
+        "lead_title": "半导体设备ETF招商逆势3连阳，国产化与存储扩产双催化",
+        "lead_link": "https://example.com/semiconductor-equipment",
+        "theme_label": "半导体",
+        "signal_type": "公告类型：扩产/投产",
+        "signal_strength": "强",
+        "signal_conclusion": "偏利多，已开始改写 `盈利 / 景气` 这层。",
+        "thesis_scope": "thesis变化",
+    }
+
+    lines = _news_lines_with_event_digest(subject, digest)
+
+    assert "半导体设备ETF招商" in lines[0]
+    assert "美伊" not in lines[0]
+
+
+def test_news_lines_with_event_digest_filters_etf_proxy_news_when_coverage_is_zero() -> None:
+    subject = {
+        "asset_type": "cn_etf",
+        "name": "国泰中证半导体材料设备主题ETF",
+        "symbol": "159516",
+        "metadata": {"tracked_index_name": "中证半导体材料设备主题指数"},
+        "dimensions": {
+            "catalyst": {
+                "coverage": {"directional_catalyst_hit": False, "direct_news_count": 0},
+                "theme_news": [
+                    {"title": "北方华创股价连续上涨，嘉实基金旗下11只基金重仓持有", "source": "财联社", "date": "2026-04-10"},
+                ],
+            }
+        },
+        "news_report": {
+            "items": [
+                {
+                    "title": "半导体设备ETF易方达（159558）盘中获1800万份净申购",
+                    "source": "财联社",
+                    "date": "2026-04-10",
+                    "link": "https://example.com/159558",
+                },
+                {
+                    "title": "【早报】消费领域多个利好来袭，多家A股公司被证监会立案",
+                    "source": "财联社",
+                    "date": "2026-04-10",
+                    "link": "https://example.com/generic",
+                },
+            ]
+        },
+    }
+    digest = {
+        "status": "已消化",
+        "lead_layer": "行业主题事件",
+        "lead_title": "跟踪指数/行业框架：中证半导体材料设备主题指数对应申万二级行业半导体（+1.96%）",
+        "lead_detail": "主题事件：行业/指数框架；结论：只作为跟踪指数背景。",
+        "signal_type": "行业/指数框架",
+        "signal_strength": "中",
+        "signal_conclusion": "只作为跟踪指数背景。",
+    }
+
+    lines = _news_lines_with_event_digest(subject, digest)
+    joined = "\n".join(lines)
+
+    assert any(line.startswith("结构证据：") for line in lines)
+    assert "159558" not in joined
+    assert "消费领域多个利好" not in joined
+    assert "北方华创股价连续上涨" not in joined
+
+    packet = build_scan_editor_packet(
+        {
+            **subject,
+            "generated_at": "2026-04-11 10:00:00",
+            "trade_state": "观察为主",
+            "action": {"direction": "观察为主", "entry": "等右侧确认"},
+        },
+        bucket="观察为主",
+    )
+    subject_sidecar = json.dumps(packet["subject"], ensure_ascii=False)
+    assert "theme_news" not in dict(packet["subject"]["dimensions"]["catalyst"] or {})
+    assert "159558" not in subject_sidecar
+    assert "北方华创股价连续上涨" not in subject_sidecar
+
+
+def test_news_lines_with_event_digest_filters_irrelevant_market_background_when_only_structure_evidence_exists() -> None:
+    subject = {
+        "asset_type": "cn_stock",
+        "name": "中信证券",
+        "symbol": "600030",
+        "day_theme": {"label": "背景宏观主导"},
+        "metadata": {"sector": "金融", "industry": "证券"},
+        "news_report": {
+            "items": [
+                {
+                    "title": "是“真和平”还是“假希望”？一文盘点：投行如何看待美伊临时停火！",
+                    "source": "财联社",
+                    "date": "2026-04-08",
+                    "link": "https://example.com/geopolitics",
+                },
+                {
+                    "title": "美伊冲突“迎曙光”？特朗普同意停火2周，伊朗态度大反转！",
+                    "source": "财联社",
+                    "date": "2026-04-08",
+                    "link": "https://example.com/geopolitics-2",
+                },
+            ]
+        },
+    }
+    digest = {
+        "status": "已消化",
+        "lead_layer": "公告",
+        "lead_title": "中信证券披露现金分红预案",
+        "signal_type": "公告类型：分红/回报",
+        "signal_strength": "中",
+        "signal_conclusion": "中性，当前更多是历史基线，不把它直接当成新增催化。",
+        "thesis_scope": "历史基线",
+    }
+
+    lines = _news_lines_with_event_digest(subject, digest)
+
+    assert all("美伊" not in line and "特朗普" not in line for line in lines)
+    assert any(line.startswith("结构证据：") for line in lines)
+    assert any("本轮未拿到可点击外部情报" in line for line in lines)
+    assert any(
+        "中信证券披露现金分红预案" in line and "信号类型：" in line and "结论：" in line
+        for line in lines
+    )
+
+
+def test_news_lines_with_event_digest_filters_stock_day_theme_background_links() -> None:
+    subject = {
+        "asset_type": "cn_stock",
+        "name": "紫金矿业",
+        "symbol": "601899",
+        "day_theme": {"label": "硬科技 / AI硬件链"},
+        "metadata": {
+            "sector": "有色",
+            "industry": "铜",
+            "chain_nodes": ["工业金属", "铜"],
+        },
+        "theme_playbook": {"label": "黄金 / 有色资源"},
+        "news_report": {
+            "items": [
+                {
+                    "title": "国内创新药“大单品”竞相涌现 商业化进程全面提速 - 证券时报",
+                    "source": "证券时报",
+                    "published_at": "2026-04-21T22:56:00",
+                    "link": "https://example.com/biotech",
+                },
+                {
+                    "title": "国务院重磅部署！事关AI、算力、6G、卫星互联网等 - 财联社",
+                    "source": "财联社",
+                    "published_at": "2026-04-21T09:09:05",
+                    "link": "https://example.com/ai-policy",
+                },
+            ]
+        },
+    }
+    digest = {
+        "status": "已消化",
+        "lead_layer": "财报",
+        "lead_title": "紫金矿业 已于 2026-04-22 披露 2026年一季报",
+        "lead_link": "https://www.cninfo.com.cn/new/disclosure/detail?stockCode=601899",
+        "theme_label": "黄金 / 有色资源",
+        "signal_type": "财报摘要：盈利/指引",
+        "signal_strength": "强",
+        "signal_conclusion": "偏利多，已开始改写 `盈利 / 估值` 这层。",
+        "thesis_scope": "thesis变化",
+    }
+
+    lines = _news_lines_with_event_digest(subject, digest)
+    joined = "\n".join(lines)
+
+    assert "创新药" not in joined
+    assert "AI、算力" not in joined
+    assert any("紫金矿业 已于 2026-04-22 披露 2026年一季报" in line for line in lines)
+    assert any(line.startswith("结构证据：") for line in lines)
+
+
+def test_news_lines_with_event_digest_keeps_structured_label_when_summary_lines_exist() -> None:
+    subject = {
+        "asset_type": "cn_stock",
+        "name": "中信证券",
+        "symbol": "600030",
+        "news_report": {
+            "summary_lines": [
+                "主题聚类：背景线索 7 条",
+                "来源分层：媒体 2 条",
+            ],
+            "items": [],
+        },
+    }
+    digest = {
+        "status": "已消化",
+        "lead_layer": "公告",
+        "lead_title": "中信证券披露现金分红预案",
+        "lead_link": "https://example.com/dividend",
+        "signal_type": "公告类型：分红/回报",
+        "signal_strength": "中",
+        "signal_conclusion": "中性，当前更多是历史基线，不把它直接当成新增催化。",
+        "latest_signal_at": "2026-04-25",
+    }
+
+    lines = _news_lines_with_event_digest(subject, digest)
+
+    assert any(line.startswith("结构证据：") for line in lines)
+    assert any(line.startswith("外部情报：") for line in lines)
+
+
+def test_news_lines_with_event_digest_drops_irrelevant_market_lead_event_link() -> None:
+    subject = {
+        "asset_type": "cn_fund",
+        "name": "天弘国证港股通科技ETF联接A",
+        "symbol": "024885",
+        "day_theme": {"label": "硬科技 / AI硬件链"},
+        "metadata": {"sector": "信息技术"},
+        "news_report": {"items": []},
+    }
+    digest = {
+        "status": "已消化",
+        "lead_layer": "新闻",
+        "lead_title": "是“真和平”还是“假希望”？一文盘点：投行如何看待美伊临时停火！",
+        "lead_link": "https://example.com/geopolitics",
+        "signal_type": "信息环境：新闻/舆情脉冲",
+        "signal_strength": "弱",
+        "signal_conclusion": "中性，别把它单独升级成动作。",
+        "latest_signal_at": "2026-04-08T13:04:00",
+    }
+
+    lines = _news_lines_with_event_digest(subject, digest)
+
+    assert all("美伊" not in line and "投行如何看待" not in line for line in lines)
+    assert any(line.startswith("结构证据：") for line in lines)
+    assert any("本轮未拿到可点击外部情报" in line for line in lines)
 
 
 def test_news_lines_with_event_digest_filters_old_news_lines_for_history_baseline() -> None:
@@ -143,6 +507,34 @@ def test_news_lines_with_event_digest_filters_old_news_lines_for_history_baselin
 
     assert all("旧闻回放" not in line for line in lines)
     assert any("https://example.com/new-progress" in line for line in lines)
+
+
+def test_news_lines_with_event_digest_surfaces_news_summary_lines() -> None:
+    subject = {
+        "symbol": "512400",
+        "generated_at": "2026-04-05 20:00:00",
+        "news_report": {
+            "summary_lines": [
+                "主题聚类：价格/供需 2 条，产业/公司 1 条",
+                "来源分层：主流媒体 1 条，行业/协会 2 条",
+            ],
+            "items": [
+                {
+                    "title": "铜价上行带动有色链活跃",
+                    "source": "财联社",
+                    "date": "2026-04-05",
+                    "link": "https://example.com/nonferrous",
+                }
+            ],
+        },
+        "dimensions": {"catalyst": {"evidence": []}},
+    }
+    digest = {"status": "待补充"}
+
+    lines = _news_lines_with_event_digest(subject, digest)
+
+    assert any("情报摘要：" in line and "价格/供需" in line and "产业/公司" in line for line in lines)
+    assert any("铜价上行带动有色链活跃" in line for line in lines)
 
 
 def test_news_lines_with_event_digest_allows_more_etf_news_and_deduplicates_same_title() -> None:
@@ -244,6 +636,283 @@ def test_build_theme_playbook_context_resolves_ai_computing() -> None:
     assert playbook["bullish_drivers"]
 
 
+def test_build_theme_playbook_context_distinguishes_hardtech_expansion_from_core() -> None:
+    playbook = build_theme_playbook_context(
+        "CPO / 光模块 / 液冷 / PCB / 存储",
+        "硬科技 / AI硬件链",
+        "细分扩散、接力走强、订单验证，当前更像第二梯队而不是绝对核心",
+        {
+            "name": "光模块ETF",
+            "day_theme": {"label": "硬科技 / AI硬件链"},
+            "notes": "CPO、液冷、PCB、存储都在细分扩散",
+            "narrative": {
+                "headline": "AI硬件链细分扩散",
+                "summary_lines": ["第二梯队接力", "景气与订单线索延续"],
+                "drivers": ["扩散", "接力", "细分", "订单"],
+                "judgment": {"state": "扩散走强"},
+            },
+            "dimensions": {
+                "technical": {"score": 56},
+                "fundamental": {"score": 65},
+                "catalyst": {"score": 54},
+                "relative_strength": {"score": 69},
+                "risk": {"score": 58},
+            },
+            "action": {"horizon": {"code": "position_trade", "label": "主线扩散", "style": "趋势参与"}},
+        },
+    )
+    assert playbook["key"] == "ai_computing"
+    assert playbook["trading_role_label"] == "主线扩散"
+    assert playbook["trading_position_label"] == "卫星仓"
+
+
+def test_build_theme_playbook_context_respects_rotation_and_secondary_swing_negation() -> None:
+    rotation = build_theme_playbook_context(
+        "电网 / 特高压 / 配网",
+        "硬科技 / AI硬件链",
+        "防守承接，结构性轮动，高低切，不是当前主线核心",
+        {
+            "name": "电网ETF",
+            "day_theme": {"label": "硬科技 / AI硬件链"},
+            "notes": "高低切、轮动承接、防守属性更明显",
+            "narrative": {
+                "headline": "电网更像轮动承接方向",
+                "summary_lines": ["结构性轮动", "不宜当主攻仓"],
+                "drivers": ["轮动", "高低切", "防守"],
+                "judgment": {"state": "轮动承接"},
+            },
+            "dimensions": {
+                "technical": {"score": 49},
+                "fundamental": {"score": 63},
+                "catalyst": {"score": 26},
+                "relative_strength": {"score": 52},
+                "risk": {"score": 55},
+            },
+            "action": {"horizon": {"code": "swing", "label": "轮动低吸", "style": "低吸分批"}},
+        },
+    )
+    swing = build_theme_playbook_context(
+        "有色 / 黄金 / 铜",
+        "硬科技 / AI硬件链",
+        "资源涨价，副主线，强波段，不是科技主线本体",
+        {
+            "name": "有色ETF",
+            "day_theme": {"label": "硬科技 / AI硬件链"},
+            "notes": "涨价驱动、副主线、顺势但非第一主攻",
+            "narrative": {
+                "headline": "有色更像副主线或强波段",
+                "summary_lines": ["涨价驱动", "顺势但非第一主攻"],
+                "drivers": ["涨价", "副主线", "强波段"],
+                "judgment": {"state": "偏强波段"},
+            },
+            "dimensions": {
+                "technical": {"score": 57},
+                "fundamental": {"score": 66},
+                "catalyst": {"score": 41},
+                "relative_strength": {"score": 58},
+                "risk": {"score": 56},
+            },
+            "action": {"horizon": {"code": "swing", "label": "强波段", "style": "顺势参与"}},
+        },
+    )
+    assert rotation["key"] == "power_grid"
+    assert rotation["trading_role_label"] == "轮动"
+    assert rotation["trading_position_label"] == "轮动仓"
+    assert swing["key"] == "gold_nonferrous"
+    assert swing["trading_role_label"] == "强波段 / 副主线"
+    assert swing["trading_position_label"] == "波段仓"
+
+
+def test_scan_editor_packet_uses_structured_event_evidence_for_mainline_expansion() -> None:
+    packet = build_scan_editor_packet(
+        {
+            "name": "国泰中证半导体材料设备主题ETF",
+            "symbol": "159516",
+            "asset_type": "cn_etf",
+            "day_theme": {"label": "硬科技 / AI硬件链"},
+            "metadata": {
+                "sector": "信息技术",
+                "chain_nodes": ["AI算力", "半导体"],
+            },
+            "notes": ["半导体主线轮动，材料设备分支开始扩散。"],
+            "narrative": {
+                "headline": "半导体材料设备分支承接硬科技扩散。",
+                "summary_lines": ["相对强弱在线", "扩产公告给到景气确认"],
+                "drivers": ["扩散", "订单", "景气", "主线轮动"],
+                "judgment": {"state": "回调更优"},
+            },
+            "action": {
+                "direction": "回调更优",
+                "entry": "等回踩确认",
+                "stop": "跌破支撑重评",
+                "horizon": {"code": "swing", "label": "主线轮动", "style": "几周波段跟踪"},
+            },
+            "dimensions": {
+                "technical": {"score": 34, "max_score": 100},
+                "fundamental": {"score": 53, "max_score": 100},
+                "catalyst": {"score": 23, "max_score": 100},
+                "relative_strength": {"score": 75, "max_score": 100},
+                "risk": {"score": 35, "max_score": 100},
+                "macro": {"score": 7, "max_score": 40},
+            },
+            "market_event_rows": [
+                [
+                    "2026-04-10",
+                    "半导体扩产公告",
+                    "公告专题",
+                    "强",
+                    "半导体",
+                    "",
+                    "公告类型：扩产/投产",
+                    "偏利多，已开始改写 盈利 / 景气 这层。",
+                ],
+            ],
+        },
+        bucket="正式推荐",
+    )
+
+    assert packet["theme_playbook"]["trading_role_label"] == "主线扩散"
+    assert packet["theme_playbook"]["trading_position_label"] == "卫星仓"
+
+
+def test_build_scan_editor_packet_keeps_mainline_expansion_for_etf_with_structural_confirmation() -> None:
+    packet = build_scan_editor_packet(
+        {
+            "name": "国泰中证半导体材料设备主题ETF",
+            "symbol": "159516",
+            "asset_type": "cn_etf",
+            "day_theme": {"label": "硬科技 / AI硬件链"},
+            "trade_state": "回调更优",
+            "metadata": {
+                "sector": "科技",
+                "chain_nodes": ["AI算力", "半导体", "成长股估值修复"],
+            },
+            "notes": [
+                "本轮 `client-final` 保留主题情报扩搜能力，只对全局新闻源走轻量配置，避免把热点方向静默写成零催化。",
+                "本轮 `client-final` 已自动切到轻量新闻源配置，避免单标的扫描稿被全局新闻拉取慢链拖住。",
+            ],
+            "narrative": {
+                "headline": "这是一个中期偏多，但短线仍在整理的标的。",
+                "judgment": {"state": "回调更优"},
+                "drivers": {
+                    "relative": "相对强弱有改善，但行业宽度和龙头确认仍缺失，当前更适合作为低置信代理去看，而不是把它写成完整扩散确认。",
+                    "technical": "技术面最值得看的不是强趋势，而是价格已经回到关键支撑附近；但短线动能还需要再修复。",
+                },
+                "contradiction": "方向并不差，但当前位置赔率已经被明显压缩。",
+                "playbook": {
+                    "trend": "更适合等短线动能重新修复后再跟随，而不是在趋势尚未顺畅时提前抢跑。",
+                    "allocation": "如果你看重的是中期逻辑而不是短线节奏，可以按首次建仓 ≤3% 的框架分批，但不适合一次性追价。",
+                },
+            },
+            "action": {
+                "direction": "观望偏多",
+                "entry": "先等顶背离/假突破消化、MACD/OBV 重新同步，再考虑分批介入",
+                "position": "首次建仓 ≤3%，等结构进一步确认后再加仓",
+                "stop": "跌破支撑重评",
+                "horizon": {
+                    "code": "swing",
+                    "label": "波段跟踪（2-6周）",
+                    "style": "更适合按几周级别的波段节奏去跟踪，等确认和回踩，不靠单日冲动去追。",
+                },
+            },
+            "dimensions": {
+                "technical": {"score": 34, "max_score": 100},
+                "fundamental": {"score": 53, "max_score": 100},
+                "catalyst": {"score": 15, "max_score": 100},
+                "relative_strength": {"score": 75, "max_score": 100},
+                "risk": {"score": 35, "max_score": 100},
+                "macro": {"score": 7, "max_score": 40},
+            },
+            "market_event_rows": [
+                [
+                    "2026-04-11 19:22:46",
+                    "跟踪指数/行业框架：国泰中证半导体材料设备主题ETF 对应 申万二级行业·半导体（+1.96%）",
+                    "申万行业框架",
+                    "中",
+                    "半导体",
+                    "",
+                    "行业/指数框架",
+                    "偏利多，先按 `申万二级行业` 对应的 `半导体` 去理解它的相对强弱和行业扩散。",
+                ],
+                [
+                    "2026-04-11 19:22:46",
+                    "指数技术面：半导体材料设备 修复中 / 动能偏强",
+                    "指数技术面",
+                    "中",
+                    "半导体材料设备",
+                    "",
+                    "技术确认",
+                    "优先按 `修复中` 理解跟踪指数的相对强弱和节奏。",
+                ],
+                [
+                    "2026-04-11 19:22:46",
+                    "份额申赎确认：国泰中证半导体材料设备主题ETF 最近净创设 +0.10 亿份 (+0.04%)",
+                    "ETF份额规模",
+                    "中",
+                    "国泰中证半导体材料设备主题ETF",
+                    "",
+                    "份额净创设",
+                    "偏利多，ETF 份额扩张说明场外申购在配合当前主线，不只是价格抬升。",
+                ],
+            ],
+        },
+        bucket="正式推荐",
+    )
+
+    assert packet["theme_playbook"]["trading_role_label"] == "主线扩散"
+    assert packet["theme_playbook"]["trading_position_label"] == "卫星仓"
+
+
+def test_theme_trading_role_uses_event_digest_before_demoting_to_rotation() -> None:
+    playbook = build_theme_playbook_context("国泰中证半导体材料设备主题ETF", "硬科技 / AI硬件链")
+    subject = {
+        "name": "国泰中证半导体材料设备主题ETF",
+        "symbol": "159516",
+        "asset_type": "cn_etf",
+        "day_theme": {"label": "硬科技 / AI硬件链"},
+        "metadata": {"sector": "信息技术"},
+        "notes": ["轮动、高低切、观察、等确认、修复、暂不、先看"],
+        "narrative": {
+            "headline": "半导体分支还在轮动修复，等待确认。",
+            "summary_lines": ["观察", "修复"],
+            "drivers": ["轮动", "主线轮动"],
+            "judgment": {"state": "回调更优"},
+        },
+        "action": {
+            "direction": "观望偏多",
+            "horizon": {
+                "code": "swing",
+                "label": "波段跟踪（2-6周）",
+                "style": "更适合按几周级别的波段节奏去跟踪，等确认和回踩，不靠单日冲动去追。",
+            },
+        },
+        "dimensions": {
+            "technical": {"score": 34},
+            "fundamental": {"score": 53},
+            "catalyst": {"score": 23},
+            "relative_strength": {"score": 75},
+            "risk": {"score": 35},
+        },
+    }
+
+    stale_role = infer_theme_trading_role(playbook, subject, subject=subject)
+    enriched_subject = {
+        **subject,
+        "event_digest": {
+            "signal_type": "公告类型：扩产/投产",
+            "signal_strength": "强",
+            "signal_conclusion": "偏利多，已开始改写 `盈利 / 景气` 这层。",
+            "thesis_scope": "thesis变化",
+            "importance": "high",
+        },
+    }
+    enriched_role = infer_theme_trading_role(playbook, enriched_subject, subject=enriched_subject)
+
+    assert stale_role["trading_role_label"] == "轮动"
+    assert enriched_role["trading_role_label"] == "主线扩散"
+    assert enriched_role["trading_position_label"] == "卫星仓"
+
+
 def test_build_theme_playbook_context_resolves_policy_and_event_chain() -> None:
     policy = build_theme_playbook_context("信创", "数据要素和国产替代")
     chain = build_theme_playbook_context("事件产业链", "发布会和供应链脉冲")
@@ -308,6 +977,46 @@ def test_build_theme_playbook_context_exposes_hard_sector_and_family() -> None:
     assert playbook["theme_family"] == "政策驱动"
 
 
+def test_build_theme_playbook_context_defers_dividend_overlay_for_broker_financials() -> None:
+    playbook = build_theme_playbook_context(
+        {
+            "name": "中信证券",
+            "sector": "金融",
+            "industry": "证券Ⅱ",
+            "industry_framework_label": "证券Ⅱ",
+            "chain_nodes": ["证券Ⅱ"],
+        },
+        {
+            "headline": "分红预案落地",
+            "summary_lines": ["分红预案带来防守讨论", "但本体仍是券商龙头"],
+        },
+        {
+            "lead_title": "中信证券披露现金分红预案",
+            "signal_type": "公告类型：分红/回报",
+        },
+    )
+    assert playbook["key"] == "sector::financials"
+    assert playbook["theme_match_status"] == "hard_sector_guarded"
+    assert "高股息 / 红利" in list(playbook["theme_match_candidates"] or [])
+
+
+def test_build_theme_playbook_context_allows_dividend_overlay_for_bank_financials() -> None:
+    playbook = build_theme_playbook_context(
+        {
+            "name": "招商银行",
+            "sector": "金融",
+            "industry": "银行",
+            "industry_framework_label": "银行",
+            "chain_nodes": ["银行"],
+        },
+        {
+            "headline": "高股息风格回暖",
+            "summary_lines": ["高股息和分红防守重新回流", "银行权重获得承接"],
+        },
+    )
+    assert playbook["key"] == "dividend_value"
+
+
 def test_build_theme_playbook_context_exposes_extended_theme_metadata() -> None:
     playbook = build_theme_playbook_context("黄金ETF", "金价和央行购金")
     assert playbook["transmission_path"]
@@ -365,6 +1074,133 @@ def test_build_theme_playbook_context_falls_back_to_remaining_broad_sectors() ->
     assert staples["rotation_and_crowding"]
     assert agriculture["falsifiers"]
     assert real_estate["falsifiers"]
+
+
+def test_build_theme_playbook_context_prefers_structured_agriculture_over_market_theme_noise() -> None:
+    values = (
+        {
+            "name": "盐湖股份",
+            "symbol": "000792",
+            "sector": "农业",
+            "industry": "农药化肥",
+            "industry_framework_label": "粮食安全",
+            "business_scope": "旅游业务 住宿服务 餐饮服务 再生资源回收",
+        },
+        "硬科技 / AI硬件链",
+        "总体来看，盐湖股份 的核心逻辑在于 硬科技 / AI硬件链 主线下的 粮食安全 暴露仍有跟踪价值；",
+    )
+    hard_sector = classify_hard_sector(*values)
+    playbook = build_theme_playbook_context(*values)
+
+    assert hard_sector["key"] == "agriculture"
+    assert playbook["key"] == "sector::agriculture"
+    assert playbook["hard_sector_label"] == "农业 / 种植链"
+
+
+def test_build_theme_playbook_context_keeps_legitimate_lithium_battery_soft_theme_for_materials_stock() -> None:
+    values = (
+        {
+            "name": "天赐材料",
+            "symbol": "002709",
+            "sector": "材料",
+            "industry": "化工原料",
+            "industry_framework_label": "电解液 / 锂电材料",
+            "business_scope": "电池制造 电解液 新材料",
+        },
+        "",
+        "",
+    )
+    hard_sector = classify_hard_sector(*values)
+    playbook = build_theme_playbook_context(*values)
+
+    assert hard_sector["key"] == "materials"
+    assert playbook["key"] == "lithium_battery"
+    assert playbook["hard_sector_label"] == "材料"
+    assert playbook["theme_match_status"] == "resolved"
+
+
+def test_subject_theme_context_uses_company_profile_for_same_sector_soft_theme() -> None:
+    subject = {
+        "name": "天赐材料",
+        "symbol": "002709",
+        "metadata": {
+            "name": "天赐材料",
+            "symbol": "002709",
+            "sector": "化工原料",
+            "industry_framework_label": "煤化工",
+            "chain_nodes": ["煤化工", "化工材料", "顺周期"],
+            "business_scope": "基础化学原料制造;电池制造;电池零配件生产;新材料技术推广服务",
+            "company_intro": "核心业务为锂离子电池材料和日化材料及特种化学品两大板块，深耕锂电池电解液业务十余载。",
+            "company_profile_source": "tushare_stock_company_cache",
+        },
+    }
+
+    context = _subject_theme_context(subject)
+
+    assert context["key"] == "lithium_battery"
+    assert context["hard_sector_key"] == "materials"
+    assert context["theme_match_status"] == "resolved"
+
+
+def test_subject_theme_context_refreshes_stale_sector_level_theme_context() -> None:
+    subject = {
+        "name": "天赐材料",
+        "symbol": "002709",
+        "theme_playbook": {
+            "key": "sector::materials",
+            "label": "材料",
+            "playbook_level": "sector",
+            "hard_sector_key": "materials",
+            "hard_sector_label": "材料",
+            "theme_match_status": "none",
+        },
+        "metadata": {
+            "name": "天赐材料",
+            "symbol": "002709",
+            "sector": "化工原料",
+            "industry_framework_label": "煤化工",
+            "chain_nodes": ["煤化工", "化工材料", "顺周期"],
+            "business_scope": "基础化学原料制造;电池制造;电池零配件生产;新材料技术推广服务",
+            "company_intro": "核心业务为锂离子电池材料和日化材料及特种化学品两大板块，深耕锂电池电解液业务十余载。",
+            "company_profile_source": "tushare_stock_company_cache",
+        },
+    }
+
+    context = _subject_theme_context(subject)
+
+    assert context["key"] == "lithium_battery"
+    assert context["hard_sector_key"] == "materials"
+    assert context["theme_match_status"] == "resolved"
+
+
+def test_subject_theme_context_blocks_cross_sector_company_profile_noise() -> None:
+    subject = {
+        "name": "云天化",
+        "symbol": "600096",
+        "metadata": {
+            "name": "云天化",
+            "symbol": "600096",
+            "sector": "农药化肥",
+            "industry_framework_label": "农资 / 钾肥",
+            "business_scope": "化肥,化工原料,新材料,新能源的研发及产品的生产,销售",
+            "company_intro": "重点发展新材料、新能源等新兴产业，但公司主体仍以磷产业和化肥为核心。",
+            "company_profile_source": "tushare_stock_company_cache",
+        },
+    }
+
+    context = _subject_theme_context(subject)
+
+    assert context["key"] == "sector::agriculture"
+    assert context["hard_sector_label"] == "农业 / 种植链"
+    assert context["theme_match_status"] == "hard_sector_guarded"
+
+
+def test_build_theme_playbook_context_maps_a_share_power_equipment_sector_names() -> None:
+    playbook = build_theme_playbook_context("阳光电源", "电气设备")
+    bridge_labels = [item["label"] for item in playbook["subtheme_bridge"]]
+    assert playbook["key"] == "sector::power_equipment"
+    assert playbook["hard_sector_label"] == "电力设备 / 新能源设备"
+    assert bridge_labels[:3] == ["光伏主链", "储能", "电网设备"]
 
 
 def test_build_theme_playbook_context_sector_fallback_exposes_subtheme_bridge() -> None:
@@ -610,6 +1446,7 @@ def test_summarize_theme_playbook_contract_keeps_conflict_and_bridge_fields() ->
     assert contract["subtheme_bridge_confidence"] in {"high", "medium"}
     assert contract["subtheme_bridge_top_label"] in {"半导体", "先进封装 / HBM / Chiplet", "AI算力"}
     assert "AI算力" in contract["subtheme_bridge_candidates"]
+    assert contract["trading_role_label"] in {"观察", "主线扩散"}
 
 
 def test_scan_editor_packet_builds_event_digest_contract_from_announcement() -> None:
@@ -815,12 +1652,12 @@ def test_scan_editor_packet_builds_what_changed_from_prior_thesis(monkeypatch) -
     assert packet["what_changed"]["conclusion_label"] == "升级"
     assert "核心假设是" in packet["what_changed"]["previous_view"]
     assert "主题事件：主题热度/映射" in packet["what_changed"]["previous_view"]
-    assert "当时的优先级判断是：" in packet["what_changed"]["previous_view"]
+    assert "当时的优先级判断是：" not in packet["what_changed"]["previous_view"]
     assert "事件状态从 `待补充` 升到 `已消化`" in packet["what_changed"]["change_summary"]
     assert "当前更该前置的是" in packet["what_changed"]["change_summary"]
     assert "更直接影响 `" in packet["what_changed"]["current_event_understanding"]
     assert "当前更像 `" in packet["what_changed"]["current_event_understanding"]
-    assert "优先级判断是：" in packet["what_changed"]["current_event_understanding"]
+    assert "优先级判断是：" not in packet["what_changed"]["current_event_understanding"]
     assert packet["what_changed"]["state_trigger"] == "事件完成消化"
 
 
@@ -858,6 +1695,39 @@ def test_build_what_changed_summary_uses_state_machine_for_theme_focus_shift(mon
     assert summary["conclusion_label"] == "升级"
     assert summary["state_trigger"] == "主题从热度切到景气验证"
     assert "供需" in summary["change_summary"] or "价格/排产验证" in summary["change_summary"]
+
+
+def test_build_what_changed_summary_prefers_subject_theme_over_day_theme_in_current_view() -> None:
+    summary = build_what_changed_summary(
+        {
+            "symbol": "300274",
+            "day_theme": {"label": "背景宏观主导"},
+            "theme_playbook": {
+                "key": "solar_mainchain",
+                "label": "光伏主链",
+                "playbook_level": "theme",
+                "hard_sector_label": "电力设备 / 新能源设备",
+            },
+            "metadata": {
+                "sector": "电力设备",
+                "industry_framework_label": "光伏主链",
+                "chain_nodes": ["光伏主链", "储能", "电网设备"],
+            },
+            "action": {"direction": "回避"},
+            "narrative": {"judgment": {"state": "观察为主"}},
+        },
+        {
+            "status": "待补充",
+            "lead_layer": "行业主题事件",
+            "lead_detail": "主题事件：景气验证",
+            "lead_title": "光伏链景气验证",
+            "impact_summary": "盈利 / 景气",
+            "thesis_scope": "thesis变化",
+        },
+    )
+
+    assert "光伏主链" in summary["current_view"]
+    assert "背景宏观主导" not in summary["current_view"]
 
 
 def test_scan_editor_packet_carries_since_last_review_intelligence_note(monkeypatch) -> None:
@@ -1274,7 +2144,11 @@ def test_build_stock_analysis_editor_packet_uses_v2_homepage_sections() -> None:
     assert homepage["sentiment_lines"]
     assert homepage["micro_lines"]
     assert homepage["action_lines"]
-    assert "硬分类" in homepage["theme_lines"][0]
+    assert any(line.startswith("赛道判断：") for line in homepage["theme_lines"])
+    assert any(line.startswith("载体判断：") for line in homepage["micro_lines"])
+    assert any(line.startswith("执行卡：") for line in homepage["action_lines"])
+    assert any(line.startswith("尾部风险：") for line in [*homepage["macro_lines"], *homepage["micro_lines"], *homepage["action_lines"]])
+    assert any("硬分类" in line or "行业层" in line for line in homepage["theme_lines"])
     assert any("更像样的理解路径" in line or "轮动和拥挤度" in line for line in homepage["theme_lines"])
 
 
@@ -1337,7 +2211,7 @@ def test_action_lines_normalize_double_prefixed_observe_entry() -> None:
         },
         observe_only=True,
     )
-    assert lines[0] == "空仓先别急着直接找买点，更合理的是先看 `顶背离/假突破消化、MACD/OBV 重新同步` 这类确认。"
+    assert lines[0] == "空仓先别急着直接找买点，升级触发器先看 `顶背离/假突破消化、MACD/OBV 重新同步`。"
     assert "先看 `先等" not in lines[0]
 
 
@@ -1380,7 +2254,7 @@ def test_build_stock_analysis_editor_packet_softens_observe_only_action_template
 
     lines = list(dict(packet.get("homepage") or {}).get("action_lines") or [])
 
-    assert any("不先给精确仓位、止损和目标模板" in line for line in lines)
+    assert any("只按首页的触发、建仓、仓位和失效条件复核" in line for line in lines)
     assert all("止损按" not in line for line in lines)
     assert all("下沿先看" not in line for line in lines)
     assert "观察为主（偏回避）" in str(dict(packet.get("homepage") or {}).get("conclusion"))
@@ -1568,6 +2442,27 @@ def test_render_editor_homepage_surfaces_key_news_when_evidence_exists() -> None
     assert "媒体直连" in rendered
 
 
+def test_render_editor_homepage_sanitizes_sentiment_lines_that_sound_like_direct_catalyst() -> None:
+    packet = {
+        "homepage": {
+            "version": "thesis-first-v2",
+            "total_judgment": "先观察。",
+            "macro_lines": ["宏观中性。"],
+            "theme_lines": ["主题仍在。"],
+            "news_lines": ["证据一般。"],
+            "sentiment_lines": ["热度已经形成直接催化，说明现在可以直接追。"],
+            "micro_lines": ["微观确认不足。"],
+            "action_lines": ["先观察。"],
+            "conclusion": "结论：继续观察。",
+        }
+    }
+    rendered = render_editor_homepage(packet)
+    assert "### 情绪与热度" in rendered
+    assert "直接催化" not in rendered
+    assert "可以直接追" not in rendered
+    assert "更多反映关注度和拥挤度变化" in rendered
+
+
 def test_build_etf_pick_editor_packet_consumes_news_report_items_when_direct_evidence_missing() -> None:
     payload = {
         "generated_at": "2026-04-01 10:00:00",
@@ -1662,6 +2557,152 @@ def test_build_etf_pick_editor_packet_falls_back_to_market_event_rows_when_news_
     assert "A股行业走强：有色（+2.65%）；领涨 紫金矿业" in rendered
 
 
+def test_build_etf_pick_editor_packet_uses_subject_dimensions_to_upgrade_semiconductor_role() -> None:
+    payload = {
+        "generated_at": "2026-04-11 10:00:00",
+        "day_theme": {"label": "背景宏观主导"},
+        "regime": {"current_regime": "recovery"},
+        "selection_context": {"delivery_observe_only": False},
+        "winner": {
+            "name": "国泰中证半导体材料设备主题ETF",
+            "symbol": "159516",
+            "asset_type": "cn_etf",
+            "trade_state": "回调更优",
+            "action": {
+                "direction": "观望偏多",
+                "entry": "先等顶背离/假突破消化后再看",
+                "stop": "跌破支撑重评",
+                "position": "首次建仓 ≤3%",
+                "horizon": {
+                    "code": "swing",
+                    "label": "波段跟踪（2-6周）",
+                    "style": "当前更像主线轮动和催化共振驱动的波段跟踪，核心在未来几周能否继续得到资金确认。",
+                },
+            },
+            "dimensions": {
+                **_sample_dimensions(),
+                "technical": {"score": 34, "max_score": 100, "summary": "技术结构仍偏弱。", "factors": []},
+                "fundamental": {"score": 49, "max_score": 100, "summary": "产品质量中性。", "factors": []},
+                "catalyst": {"score": 64, "max_score": 100, "summary": "有催化苗头。", "factors": [], "evidence": []},
+                "relative_strength": {"score": 75, "max_score": 100, "summary": "相对强弱明显改善。", "factors": []},
+                "risk": {"score": 35, "max_score": 100, "summary": "赔率仍需控制。", "factors": []},
+                "macro": {"score": 7, "max_score": 40, "summary": "宏观并非顺风。", "factors": []},
+            },
+            "metadata": {"chain_nodes": ["AI算力", "半导体", "成长股估值修复"]},
+            "taxonomy_summary": "主暴露属于行业主题。",
+            "narrative": {"judgment": {"state": "回调更优"}},
+        },
+        "alternatives": [],
+        "notes": [],
+    }
+
+    packet = build_etf_pick_editor_packet(payload)
+
+    assert packet["theme_playbook"]["trading_role_label"] == "主线扩散"
+    assert packet["theme_playbook"]["trading_position_label"] == "卫星仓"
+    assert packet["subject"]["dimensions"]["catalyst"]["score"] == 64
+    assert packet["subject"]["day_theme"]["label"] == "背景宏观主导"
+
+
+def test_build_etf_pick_editor_packet_does_not_demote_evidence_rich_mainline_to_rotation() -> None:
+    payload = {
+        "generated_at": "2026-04-11 11:00:00",
+        "day_theme": {"label": "硬科技 / AI硬件链"},
+        "regime": {"current_regime": "recovery"},
+        "selection_context": {"delivery_observe_only": True},
+        "winner": {
+            "name": "国泰中证半导体材料设备主题ETF",
+            "symbol": "159516",
+            "asset_type": "cn_etf",
+            "trade_state": "回调更优",
+            "action": {
+                "direction": "观望偏多",
+                "entry": "先等顶背离/假突破消化后再看",
+                "position": "首次建仓 ≤3%",
+                "horizon": {
+                    "code": "swing",
+                    "label": "波段跟踪（2-6周）",
+                    "style": "当前更像主线轮动和催化共振驱动的波段跟踪，核心在未来几周能否继续得到资金确认。",
+                    "fit_reason": "催化和相对强弱都在线，优势主要集中在未来几周的轮动延续，而不是长周期兑现。",
+                },
+            },
+            "dimensions": {
+                **_sample_dimensions(),
+                "technical": {"score": 34, "max_score": 100, "summary": "技术结构仍偏弱。", "factors": []},
+                "fundamental": {"score": 53, "max_score": 100, "summary": "产品质量中性。", "factors": []},
+                "catalyst": {"score": 64, "max_score": 100, "summary": "有催化苗头。", "factors": [], "evidence": []},
+                "relative_strength": {
+                    "score": 75,
+                    "max_score": 100,
+                    "summary": "相对强弱明显改善。",
+                    "factors": [{"name": "超额拐点", "detail": "相对基准从负转正更接近轮动切换窗口。"}],
+                },
+                "risk": {"score": 35, "max_score": 100, "summary": "赔率仍需控制。", "factors": []},
+                "macro": {"score": 7, "max_score": 40, "summary": "宏观并非顺风。", "factors": []},
+            },
+            "metadata": {"chain_nodes": ["AI算力", "半导体", "成长股估值修复"]},
+            "notes": ["先看右侧确认，暂不追价。"],
+            "narrative": {
+                "judgment": {"state": "回调更优"},
+                "summary_lines": ["外部覆盖不足，但这只是证据降级，不等于这条主线失效。"],
+                "playbook": {"trend": "更适合等短线动能重新修复后再跟随。"},
+            },
+        },
+        "alternatives": [],
+        "notes": [],
+    }
+
+    packet = build_etf_pick_editor_packet(payload)
+
+    assert packet["theme_playbook"]["trading_role_label"] == "主线扩散"
+    assert packet["theme_playbook"]["trading_position_label"] == "卫星仓"
+    assert "普通轮动" in packet["theme_playbook"]["trading_role_summary"]
+    assert any("再小仓试" in line and "不是现在就挂单位" in line for line in packet["homepage"]["action_lines"])
+    assert any("机械挂单位" in line and "买点、止损和目标" in line for line in packet["homepage"]["action_lines"])
+
+
+def test_render_financial_editor_prompt_surfaces_horizon_expression_contract() -> None:
+    payload = {
+        "generated_at": "2026-04-23 10:00:00",
+        "day_theme": {"label": "AI硬件链 / 通信设备"},
+        "regime": {"current_regime": "recovery"},
+        "selection_context": {"delivery_observe_only": True},
+        "winner": {
+            "name": "国泰中证全指通信设备ETF",
+            "symbol": "515880",
+            "asset_type": "cn_etf",
+            "trade_state": "观察为主",
+            "action": {
+                "direction": "观望",
+                "entry": "先等拥挤消化后的再确认",
+                "position": "观察仓",
+                "horizon": {
+                    "code": "watch_crowded_mainline_consolidation",
+                    "family_code": "watch",
+                    "label": "观察期",
+                    "setup_code": "crowded_mainline_consolidation",
+                    "setup_label": "高位拥挤主线分歧",
+                    "fit_reason": "主线和相对强弱未必坏，但高位分歧还在，先等再确认。",
+                },
+            },
+            "dimensions": _sample_dimensions(),
+            "metadata": {"chain_nodes": ["CPO", "通信设备", "AI算力"]},
+            "taxonomy_summary": "主暴露属于通信设备。",
+        },
+        "alternatives": [],
+        "notes": [],
+    }
+
+    packet = build_etf_pick_editor_packet(payload)
+    rendered = render_financial_editor_prompt(packet)
+
+    assert packet["subject"]["horizon_expression"]["setup_code"] == "crowded_mainline_consolidation"
+    assert "## Horizon Expression Contract" in rendered
+    assert "高位拥挤主线分歧" in rendered
+    assert "修复早期" in rendered
+    assert "不能改变推荐等级、动作方向" in rendered
+
+
 def test_render_editor_homepage_uses_top_level_winner_evidence_when_dimension_evidence_missing() -> None:
     payload = {
         "generated_at": "2026-03-26 10:00:00",
@@ -1724,6 +2765,86 @@ def test_render_editor_homepage_falls_back_to_theme_news_when_direct_evidence_mi
     assert "主题级新闻：" in rendered
     assert "先进封装设备链情绪回暖" in rendered
     assert "主题级情报" in rendered
+
+
+def test_humanize_news_summary_line_explains_cluster_count() -> None:
+    assert (
+        _humanize_news_summary_line("主题聚类：价格/供需 6 条")
+        == "这批外部情报主要围绕 价格/供需；这里的 6 条，是把重复报道合并后的线索组数，不是 6 个独立利好。"
+    )
+
+
+def test_humanize_news_summary_line_handles_generic_bucket() -> None:
+    assert (
+        _humanize_news_summary_line("主题聚类：综合/其他 7 条")
+        == "这批外部情报暂时没能稳定归到单一主题；去重后先留下 7 条背景线索，更适合当背景补充，不直接当成新增催化。"
+    )
+
+
+def test_news_lines_with_event_digest_for_etf_labels_external_news_and_structured_evidence() -> None:
+    subject = {
+        "name": "大成有色金属期货ETF",
+        "symbol": "159980",
+        "asset_type": "cn_etf",
+        "metadata": {"tracked_index_name": "上海期货交易所有色金属期货价格指数"},
+        "news_report": {
+            "items": [
+                {
+                    "title": "几内亚铝土矿供应扰动延续，氧化铝价格中枢抬升",
+                    "source": "新浪财经",
+                    "published_at": "2026-03-30T23:30:00",
+                    "link": "https://example.com/bauxite",
+                }
+            ],
+            "summary_lines": ["主题聚类：价格/供需 6 条"],
+        },
+    }
+    event_digest = {
+        "lead_detail": "跟踪指数框架：大成有色金属期货ETF 跟踪 上海期货交易所有色金属期货价格指数",
+        "signal_type": "标准指数框架",
+        "signal_strength": "中",
+        "conclusion": "先按跟踪指数主链理解。",
+        "latest_signal_at": "2026-04-06 02:30:32",
+    }
+
+    lines = _news_lines_with_event_digest(subject, event_digest)
+
+    assert lines[0].startswith("外部情报：")
+    assert any(line.startswith("结构证据：") for line in lines)
+    assert any("不是 6 个独立利好" in line for line in lines)
+    assert any(line.startswith("关系说明：") for line in lines)
+
+
+def test_format_homepage_evidence_line_preserves_signal_bundle_for_linked_news() -> None:
+    line = (
+        "`行业主题事件`：[美伊接近达成停火框架](https://example.com/ceasefire)（华尔街见闻 / 2026-04-15）"
+        "；信号类型：`地缘缓和/风险偏好修复`；信号强弱：`中`；结论：中性偏多，先看 `估值 / 资金偏好` 能否继续拿到确认。"
+        "；情报属性：`新鲜情报 / 结构化披露`；来源层级：`结构化披露`；事件理解：先按新增情报线索处理。"
+    )
+
+    formatted = _format_homepage_evidence_line(line)
+
+    assert formatted.startswith("外部情报：")
+    assert "信号类型：`地缘缓和/风险偏好修复`" in formatted
+    assert "信号强弱：`中`" in formatted
+    assert "结论：中性偏多" in formatted
+    assert "情报属性：" not in formatted
+    assert "来源层级：" not in formatted
+    assert "事件理解：" not in formatted
+
+
+def test_ensure_homepage_news_signal_bundle_adds_conclusion_for_linked_market_news() -> None:
+    line = (
+        "外部情报：2026-04-15T00:00:00 · 华尔街见闻：[美伊接近达成停火框架](https://example.com/ceasefire)"
+        "；信号类型：`地缘缓和`；信号强弱：`中`"
+    )
+
+    enriched = _ensure_homepage_news_signal_bundle(line)
+
+    assert enriched.startswith("外部情报：")
+    assert "信号类型：" in enriched
+    assert "信号强弱：" in enriched
+    assert "结论：" in enriched
 
 
 def test_render_editor_homepage_marks_since_last_review_search_fallback(monkeypatch) -> None:
@@ -1792,12 +2913,13 @@ def test_render_editor_homepage_prefers_theme_news_over_diagnostic_evidence() ->
             "action": {"direction": "观察为主", "entry": "等回踩再看", "stop": "跌破支撑重评"},
             "dimensions": {
                 **_sample_dimensions(),
-                "catalyst": {
-                    "score": 12,
-                    "max_score": 100,
-                    "summary": "直接催化偏弱。",
-                    "factors": [],
-                    "evidence": [
+                    "catalyst": {
+                        "score": 12,
+                        "max_score": 100,
+                        "summary": "直接催化偏弱。",
+                        "coverage": {"directional_catalyst_hit": True},
+                        "factors": [],
+                        "evidence": [
                         {"title": "当前可前置的一手情报有限，判断更多参考结构化事件和行业线索。", "source": "覆盖率摘要"},
                     ],
                     "theme_news": [
@@ -1851,9 +2973,10 @@ def test_render_editor_homepage_preserves_markdown_links_and_bolds_key_action_da
     rendered = render_editor_homepage(build_etf_pick_editor_packet(payload))
 
     assert "[科创成长层迎首批“毕业生”](https://www.cls.cn/detail/2312134)" in rendered
-    assert "**首次建仓 ≤3%**" in rendered
+    assert "**首次建仓 ≤3%**" not in rendered
     assert "**1.420**" in rendered
     assert "**1.784**" in rendered
+    assert "观察稿阶段先记触发、失效和第一次兑现框架" in rendered
 
 
 def test_render_editor_homepage_preserves_event_digest_links_for_key_news() -> None:
@@ -1959,12 +3082,93 @@ def test_build_stock_pick_editor_packet_has_theme_homepage() -> None:
     )
     assert packet["packet_version"] == "editor-v2"
     assert packet["homepage"]["theme_lines"]
-    assert packet["homepage"]["total_judgment"].startswith("今天没有有效动作信号")
+    assert packet["homepage"]["total_judgment"].startswith("今天先按观察稿处理")
     assert "本页重点看 `中金黄金 (600489)`" in packet["homepage"]["total_judgment"]
     assert packet["homepage"]["news_lines"]
 
 
-def test_build_stock_pick_editor_packet_prefers_watch_subject_when_observe_only() -> None:
+def test_build_stock_pick_editor_packet_prefers_existing_subject_theme_playbook() -> None:
+    packet = build_stock_pick_editor_packet(
+        {
+            "generated_at": "2026-04-05 10:00:00",
+            "day_theme": {"label": "背景宏观主导"},
+            "regime": {"current_regime": "recovery"},
+            "market_label": "A股",
+            "top": [
+                {
+                    "name": "阳光电源",
+                    "symbol": "300274",
+                    "asset_type": "cn_stock",
+                    "trade_state": "观察为主",
+                    "action": {"direction": "观察为主"},
+                    "dimensions": _sample_dimensions(),
+                    "metadata": {
+                        "sector": "电力设备",
+                        "industry_framework_label": "光伏主链",
+                        "chain_nodes": ["光伏主链", "储能", "电网设备"],
+                    },
+                    "theme_playbook": {
+                        "key": "solar_mainchain",
+                        "label": "光伏主链",
+                        "playbook_level": "theme",
+                        "hard_sector_label": "电力设备 / 新能源设备",
+                    },
+                }
+            ],
+            "watch_positive": [],
+        }
+    )
+
+    assert packet["theme_playbook"]["key"] == "solar_mainchain"
+    assert packet["theme_playbook"]["label"] == "光伏主链"
+    assert any("光伏主链" in line for line in packet["homepage"]["theme_lines"])
+    assert not any("电网设备当前更像在交易" in line for line in packet["homepage"]["theme_lines"])
+
+
+def test_build_stock_pick_editor_packet_separates_market_day_theme_from_subject_theme() -> None:
+    packet = build_stock_pick_editor_packet(
+        {
+            "generated_at": "2026-04-22 10:00:00",
+            "day_theme": {"label": "硬科技 / AI硬件链"},
+            "regime": {"current_regime": "recovery"},
+            "market_label": "A股",
+            "top": [
+                {
+                    "name": "紫金矿业",
+                    "symbol": "601899",
+                    "asset_type": "cn_stock",
+                    "trade_state": "看好但暂不推荐",
+                    "action": {"direction": "小仓试仓", "entry": "等回踩确认", "position": "首次建仓 2%-5%"},
+                    "rating": {"rank": 2},
+                    "dimensions": {
+                        **_sample_dimensions(),
+                        "technical": {"score": 48, "max_score": 100, "summary": "技术修复中。", "factors": []},
+                        "fundamental": {"score": 78, "max_score": 100, "summary": "基本面仍有支撑。", "factors": []},
+                        "catalyst": {"score": 64, "max_score": 100, "summary": "催化继续跟踪。", "factors": []},
+                        "relative_strength": {"score": 72, "max_score": 100, "summary": "相对强弱占优。", "factors": []},
+                    },
+                    "metadata": {"sector": "有色"},
+                    "theme_playbook": {
+                        "key": "gold_nonferrous",
+                        "label": "黄金 / 有色资源",
+                        "playbook_level": "theme",
+                        "hard_sector_label": "材料",
+                    },
+                }
+            ],
+            "watch_positive": [],
+        }
+    )
+
+    summary = packet["homepage"]["total_judgment"]
+    assert "本页重点看 `紫金矿业 (601899)`" in summary
+    assert "今天这份个股推荐稿更适合按 `A股` 范围理解" in summary
+    assert "当前市场主线背景偏 `硬科技 / AI硬件链`" in summary
+    assert "但这页真正先看 `黄金 / 有色资源` 这条线里谁已经先走到可执行边界。" in summary
+    assert "当前主线偏 `硬科技 / AI硬件链`，已经有少数标的从方向判断走到可执行边界。" not in summary
+
+
+def test_build_stock_pick_editor_packet_prefers_top_subject_when_observe_only() -> None:
     packet = build_stock_pick_editor_packet(
         {
             "generated_at": "2026-03-26 10:00:00",
@@ -1995,11 +3199,11 @@ def test_build_stock_pick_editor_packet_prefers_watch_subject_when_observe_only(
             ],
         }
     )
-    assert packet["homepage"]["total_judgment"].startswith("今天没有有效动作信号")
-    assert "本页重点看 `紫金矿业 (601899)`" in packet["homepage"]["total_judgment"]
+    assert packet["homepage"]["total_judgment"].startswith("今天先按观察稿处理")
+    assert "本页重点看 `恒瑞医药 (600276)`" in packet["homepage"]["total_judgment"]
 
 
-def test_build_stock_pick_editor_packet_prefers_watch_subject_even_when_top_is_non_observe() -> None:
+def test_build_stock_pick_editor_packet_prefers_top_subject_even_when_watch_list_exists() -> None:
     packet = build_stock_pick_editor_packet(
         {
             "generated_at": "2026-03-26 10:00:00",
@@ -2030,7 +3234,7 @@ def test_build_stock_pick_editor_packet_prefers_watch_subject_even_when_top_is_n
             ],
         }
     )
-    assert "本页重点看 `紫金矿业 (601899)`" in packet["homepage"]["total_judgment"]
+    assert "本页重点看 `贵州茅台 (600519)`" in packet["homepage"]["total_judgment"]
 
 
 def test_build_stock_pick_editor_packet_uses_ranked_top_subject_when_watch_list_is_empty() -> None:
@@ -2073,7 +3277,7 @@ def test_build_stock_pick_editor_packet_uses_ranked_top_subject_when_watch_list_
             "watch_positive": [],
         }
     )
-    assert packet["homepage"]["total_judgment"].startswith("今天没有有效动作信号")
+    assert packet["homepage"]["total_judgment"].startswith("今天先按观察稿处理")
     assert "本页重点看 `紫金矿业 (601899)`" in packet["homepage"]["total_judgment"]
     assert "今天这份个股观察稿更适合按 `A股` 范围理解" in packet["homepage"]["total_judgment"]
 
@@ -2409,6 +3613,49 @@ def test_build_etf_pick_editor_packet_surfaces_portfolio_overlap_in_micro_lines(
     assert any("和现有持仓的关系上，这条更像 `同一行业主线加码`" in line for line in packet["homepage"]["micro_lines"])
 
 
+def test_build_etf_pick_editor_packet_prefers_etf_index_identity_over_noisy_chain_nodes() -> None:
+    packet = build_etf_pick_editor_packet(
+        {
+            "generated_at": "2026-04-17 18:21:51",
+            "day_theme": {"label": "硬科技 / AI硬件链"},
+            "regime": {"current_regime": "recovery"},
+            "selection_context": {"delivery_observe_only": True},
+            "winner": {
+                "name": "汇添富中证主要消费ETF",
+                "symbol": "159928",
+                "asset_type": "cn_etf",
+                "trade_state": "回调更优",
+                "action": {"direction": "做多", "entry": "等回踩再看", "stop": "跌破支撑重评"},
+                "dimensions": _sample_dimensions(),
+                "metadata": {
+                    "sector": "消费",
+                    "industry_framework_label": "内需",
+                    "chain_nodes": ["内需", "消费修复", "消费电子零部件及组装", "电子"],
+                },
+                "benchmark_name": "中证主要消费指数",
+                "fund_profile": {
+                    "overview": {
+                        "业绩比较基准": "中证主要消费指数",
+                        "跟踪标的": "中证主要消费指数",
+                    }
+                },
+                "fund_sections": [
+                    "## 基金画像",
+                    "",
+                    "| 项目 | 内容 |",
+                    "| --- | --- |",
+                    "| 业绩比较基准 | 中证主要消费指数 |",
+                ],
+            },
+            "alternatives": [],
+        }
+    )
+
+    assert packet["theme_playbook"]["key"] == "sector::consumer_discretionary"
+    assert packet["theme_playbook"]["hard_sector_label"] in {"消费", "可选消费"}
+    assert packet["theme_playbook"]["label"] != "信息技术"
+
+
 def test_build_fund_pick_editor_packet_has_theme_homepage() -> None:
     packet = build_fund_pick_editor_packet(
         {
@@ -2529,7 +3776,31 @@ def test_observe_packets_frontload_no_signal_notice() -> None:
         }
     )
     for packet in (etf_packet, fund_packet, scan_packet):
-        assert packet["homepage"]["total_judgment"].startswith("今天没有有效动作信号")
+        assert packet["homepage"]["total_judgment"].startswith("今天先按观察稿处理")
+
+
+def test_etf_pick_editor_packet_keeps_recommendation_homepage_for_guanhang_pian_duo() -> None:
+    packet = build_etf_pick_editor_packet(
+        {
+            "generated_at": "2026-03-26 10:00:00",
+            "selection_context": {"delivery_observe_only": False},
+            "winner": {
+                "name": "化工ETF",
+                "symbol": "159870",
+                "asset_type": "cn_etf",
+                "trade_state": "持有优于追高",
+                "action": {
+                    "direction": "观望偏多",
+                    "entry": "等回踩再看",
+                    "position": "首次建仓 ≤3%",
+                    "stop": "跌破支撑",
+                },
+                "dimensions": _sample_dimensions(),
+            },
+        }
+    )
+
+    assert "今天先按观察稿处理" not in packet["homepage"]["total_judgment"]
 
 
 def test_build_scan_editor_packet_surfaces_candidate_conflict_in_micro_lines() -> None:
@@ -2888,6 +4159,30 @@ def test_build_briefing_editor_packet_falls_back_to_market_event_rows_when_raw_n
     news_lines = list(packet["homepage"]["news_lines"] or [])
     assert news_lines
     assert "黄金盘前走强，避险需求回升" in news_lines[0]
+    assert any(item.startswith("外部情报：本轮未拿到可点击外部情报") for item in news_lines)
+
+
+def test_build_briefing_editor_packet_explicitly_discloses_missing_clickable_external_news() -> None:
+    packet = build_briefing_editor_packet(
+        {
+            "generated_at": "2026-04-08 23:00:29",
+            "day_theme": "宽基修复",
+            "regime": {"current_regime": "recovery"},
+            "news_report": {"items": [], "summary_lines": [], "lines": ["实时 RSS 暂不可用"]},
+            "market_event_rows": [
+                ["2026-04-08", "卖方共识升温：宁德时代 本月获 5 家券商金股推荐", "卖方共识专题", "高", "宁德时代", "", "卖方共识升温", "当前更像方向验证，不直接等于全市场主线确认。"],
+            ],
+            "headline_lines": ["主线校验: 价格 ✅ / 盘面 ✅ / 跨市场 ⚠️，通过 2/2 项（跨市场待补）。"],
+            "core_event_lines": [],
+            "action_lines": ["先看宽基和金融权重能否继续扩散。"],
+        }
+    )
+
+    news_lines = list(packet["homepage"]["news_lines"] or [])
+    assert news_lines
+    assert "卖方共识升温：宁德时代" in news_lines[0]
+    assert any(item.startswith("外部情报：本轮未拿到可点击外部情报") for item in news_lines)
+    assert any(item.startswith("结构证据：") for item in news_lines)
 
 
 def test_build_briefing_editor_packet_merges_market_event_rows_and_theme_tracking_rows() -> None:
@@ -2941,12 +4236,127 @@ def test_build_briefing_editor_packet_prioritizes_market_event_rows_over_raw_new
 
     news_lines = list(packet["homepage"]["news_lines"] or [])
     assert news_lines
-    assert "A股概念领涨：创新药" in news_lines[0]
-    assert "信号：`医药催化`" in news_lines[0]
-    assert "结论：偏利多" in news_lines[0]
+    assert news_lines[0].startswith("外部情报：")
+    assert "https://example.com/bloomberg" in news_lines[0]
     joined = "\n".join(news_lines)
+    assert "A股概念领涨：创新药" in joined
+    assert "信号：`医药催化`" in joined
+    assert "结论：偏利多" in joined
     assert "[Global bond investors reassess conflict risks](https://example.com/bloomberg)" in joined
     assert "结论：" in joined
+
+
+def test_build_briefing_editor_packet_keeps_one_linked_external_news_before_structured_rows() -> None:
+    packet = build_briefing_editor_packet(
+        {
+            "generated_at": "2026-04-08 23:00:29",
+            "day_theme": "宽基修复",
+            "regime": {"current_regime": "recovery"},
+            "news_report": {
+                "items": [
+                    {
+                        "title": "美伊接受停火提议，市场风险偏好抬升",
+                        "source": "财联社",
+                        "published_at": "2026-04-08 07:25:00",
+                        "link": "https://example.com/ceasefire",
+                        "category": "geopolitics",
+                    }
+                ]
+            },
+            "market_event_rows": [
+                ["2026-04-08", "卖方共识升温：宁德时代 本月获 5 家券商金股推荐", "卖方共识专题", "高", "宁德时代", "", "卖方共识升温", "券商月度金股名单抬升。"],
+                ["2026-04-08", "宽基/核心资产", "", "", "", "", "", "指数与核心资产修复。"],
+            ],
+        }
+    )
+
+    news_lines = list(packet["homepage"]["news_lines"] or [])
+
+    assert news_lines
+    assert news_lines[0].startswith("外部情报：")
+    assert "https://example.com/ceasefire" in news_lines[0]
+    assert any(line.startswith("结构证据：") for line in news_lines)
+
+
+def test_build_briefing_editor_packet_prioritizes_market_wide_geopolitics_over_theme_news() -> None:
+    packet = build_briefing_editor_packet(
+        {
+            "generated_at": "2026-04-08 23:00:29",
+            "day_theme": "宽基修复",
+            "regime": {"current_regime": "recovery"},
+            "news_report": {
+                "items": [
+                    {
+                        "title": "智谱发布技术报告，Agent 场景渗透提速",
+                        "source": "财联社",
+                        "published_at": "2026-04-08 12:00:00",
+                        "link": "https://example.com/ai",
+                        "category": "topic_search",
+                    },
+                    {
+                        "title": "美伊停火带动全球风险偏好修复",
+                        "source": "财联社",
+                        "published_at": "2026-04-08 07:25:00",
+                        "link": "https://example.com/ceasefire",
+                        "category": "geopolitics",
+                    },
+                ]
+            },
+        }
+    )
+
+    news_lines = list(packet["homepage"]["news_lines"] or [])
+    assert news_lines
+    assert "https://example.com/ceasefire" in news_lines[0]
+
+
+def test_build_scan_editor_packet_prioritizes_interactive_ir_over_generic_framework_rows() -> None:
+    packet = build_scan_editor_packet(
+        {
+            "name": "药明康德",
+            "symbol": "603259",
+            "asset_type": "cn_stock",
+            "generated_at": "2026-04-03 10:00:00",
+            "day_theme": {"label": "创新药"},
+            "regime": {"current_regime": "recovery"},
+            "action": {
+                "direction": "观察为主",
+                "entry": "等右侧确认后再看",
+                "stop": "跌破支撑重评",
+                "horizon": {"label": "观察期", "fit_reason": "先看管理层口径和渠道节奏。"},
+            },
+            "narrative": {"judgment": {"state": "中期逻辑未坏"}},
+            "dimensions": _sample_dimensions(),
+            "market_event_rows": [
+                [
+                    "2026-04-03",
+                    "标准行业框架：药明康德 属于 申万二级行业·化学制药（-1.20%）",
+                    "申万行业框架",
+                    "低",
+                    "化学制药",
+                    "",
+                    "行业框架承压",
+                    "行业指数仍在回落。",
+                ],
+                [
+                    "2026-04-03",
+                    "互动易确认：公司回复海外订单进展",
+                    "互动易/投资者关系",
+                    "中",
+                    "药明康德",
+                    "",
+                    "管理层口径确认",
+                    "先按补充证据处理，不替代正式公告。",
+                ],
+            ],
+        },
+        bucket="观察稿",
+    )
+
+    news_lines = list(packet["homepage"]["news_lines"] or [])
+    assert news_lines
+    assert any(line.startswith("结构证据：") and "管理层口径确认" in line for line in news_lines)
+    assert all("标准行业框架：药明康德 属于 申万二级行业·化学制药（-1.20%）" not in line for line in news_lines)
 
 
 def test_build_briefing_editor_packet_summary_uses_growth_and_geopolitical_signals() -> None:
@@ -2980,7 +4390,7 @@ def test_build_briefing_editor_packet_summary_uses_growth_and_geopolitical_signa
     summary = packet["homepage"]["total_judgment"]
     assert "强修复" in summary
     assert "创新药/医药" in summary
-    assert "AI应用/算力" in summary
+    assert "AI应用/算力" in summary or "AI软件/应用" in summary
     assert "中东缓和" in summary
 
 
@@ -3044,6 +4454,31 @@ def test_build_briefing_editor_packet_treats_ceasefire_as_risk_on_and_skips_work
     assert "A股盘前检查" not in joined
     assert "观察资产走强：港股创新药ETF" in joined
     assert "地缘缓和" in joined
+
+
+def test_build_briefing_editor_packet_keeps_stalled_ceasefire_attack_bearish() -> None:
+    packet = build_briefing_editor_packet(
+        {
+            "generated_at": "2026-04-11 08:30:00",
+            "day_theme": "宽基修复",
+            "regime": {"current_regime": "recovery"},
+            "news_report": {
+                "items": [
+                    {
+                        "title": "美伊停火斡旋陷入僵局 中东最大铝生产商工厂遭袭受损严重",
+                        "source": "财联社",
+                        "published_at": "2026-04-11T07:25:00",
+                        "link": "https://example.com/stalled-ceasefire",
+                        "signal_type": "地缘缓和",
+                    }
+                ]
+            },
+        }
+    )
+
+    joined = "\n".join(packet["homepage"]["news_lines"] or [])
+    assert "地缘扰动" in joined
+    assert "地缘缓和" not in joined
 
 
 def test_build_briefing_editor_packet_skips_close_review_workflow_rows() -> None:
@@ -3224,10 +4659,214 @@ def test_build_scan_editor_packet_uses_thesis_first_v2_for_semiconductor() -> No
     packet = build_scan_editor_packet(analysis, bucket="观察稿")
     assert packet["packet_version"] == "editor-v2"
     assert packet["homepage"]["version"] == "thesis-first-v2"
-    assert packet["homepage"]["total_judgment"].startswith("今天没有有效动作信号")
+    assert packet["homepage"]["total_judgment"].startswith("今天先按观察稿处理")
     assert "本页重点看 `半导体ETF (512480)`" in packet["homepage"]["total_judgment"]
     assert packet["homepage"]["news_lines"]
     rendered = render_editor_homepage(packet)
     assert "## 首页判断" in rendered
     assert "### 板块 / 主题认知" in rendered
     assert "半导体" in rendered
+
+
+def test_build_scan_editor_packet_softens_observe_watch_levels_on_homepage() -> None:
+    analysis = {
+        "name": "半导体ETF",
+        "symbol": "512480",
+        "asset_type": "cn_etf",
+        "generated_at": "2026-04-11 09:30:00",
+        "day_theme": {"label": "硬科技 / AI硬件链"},
+        "regime": {"current_regime": "recovery"},
+        "trade_state": "观察为主",
+        "action": {
+            "direction": "回避",
+            "entry": "等 MACD/OBV 重新同步后再看",
+            "buy_range": "0.870-0.874",
+            "trim_range": "0.966-1.026",
+            "stop": "跌破关键支撑重评",
+        },
+        "dimensions": _sample_dimensions(),
+    }
+
+    packet = build_scan_editor_packet(analysis, bucket="观察稿")
+    action_lines = "\n".join(packet["homepage"]["action_lines"] or [])
+
+    assert "关键支撑承接" in action_lines
+    assert "0.870-0.874" not in action_lines
+    assert "0.966-1.026" not in action_lines
+
+
+def test_build_scan_editor_packet_keeps_rich_subject_snapshot() -> None:
+    analysis = {
+        "name": "半导体ETF",
+        "symbol": "512480",
+        "asset_type": "cn_etf",
+        "generated_at": "2026-04-11 09:30:00",
+        "day_theme": {"label": "背景宏观主导"},
+        "regime": {"current_regime": "recovery"},
+        "trade_state": "观察为主",
+        "action": {"direction": "观察为主", "entry": "等确认", "stop": "跌破支撑"},
+        "dimensions": _sample_dimensions(),
+        "metadata": {"chain_nodes": ["半导体", "AI算力"]},
+        "notes": ["相对强弱继续改善。"],
+    }
+
+    packet = build_scan_editor_packet(analysis, bucket="观察稿")
+
+    assert packet["subject"]["dimensions"]["technical"]["score"] == 32
+    assert packet["subject"]["day_theme"]["label"] == "背景宏观主导"
+    assert packet["subject"]["metadata"]["chain_nodes"] == ["半导体", "AI算力"]
+
+
+def test_build_scan_editor_packet_uses_prior_editor_payload_when_thesis_missing(monkeypatch) -> None:
+    class _EmptyThesisRepo:
+        def get(self, symbol):
+            assert symbol == "159516"
+            return {}
+
+    monkeypatch.setattr("src.output.editor_payload.ThesisRepository", lambda: _EmptyThesisRepo())
+    monkeypatch.setattr(
+        "src.output.editor_payload._load_previous_editor_payload_context",
+        lambda symbol, report_type="", generated_at=None: {
+            "reviewed_at": "2026-04-11 23:53:35",
+            "event_digest": {
+                "status": "已消化",
+                "lead_layer": "行业主题事件",
+                "lead_detail": "主题事件：成分权重结构；结论：先按指数暴露理解。",
+                "lead_title": "指数成分权重：前十权重合计 65.1%",
+                "impact_summary": "景气 / 资金偏好",
+                "thesis_scope": "结构基线",
+            },
+        },
+    )
+
+    packet = build_scan_editor_packet(
+        {
+            "name": "国泰中证半导体材料设备主题ETF",
+            "symbol": "159516",
+            "asset_type": "cn_etf",
+            "generated_at": "2026-04-12 10:00:00",
+            "history": _sample_history(),
+            "action": {"direction": "观察为主", "entry": "等右侧确认"},
+            "narrative": {"judgment": {"state": "等右侧确认"}},
+            "dimensions": _sample_dimensions(),
+        },
+        bucket="观察为主",
+    )
+
+    assert packet["event_digest"]["previous_reviewed_at"] == "2026-04-11 23:53:35"
+    assert packet["what_changed"]["conclusion_label"] != "首次跟踪"
+    assert "事件边界是" in packet["what_changed"]["previous_view"]
+    assert not any("首次跟踪" in line for line in packet["homepage"]["news_lines"])
+
+
+def test_load_previous_editor_payload_context_prefers_prior_day_over_same_day_rerun(tmp_path, monkeypatch) -> None:
+    def _write_payload(path, generated_at: str, *, lead_title: str) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "subject": {"symbol": "159516", "generated_at": generated_at},
+                    "event_digest": {"lead_title": lead_title, "status": "已消化"},
+                    "what_changed": {"conclusion_label": "维持"},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    _write_payload(
+        tmp_path / "scan_159516_2026-04-11_editor_payload.json",
+        "2026-04-11 23:53:35",
+        lead_title="前一日结构基线",
+    )
+    _write_payload(
+        tmp_path / "scan_159516_2026-04-12_editor_payload.json",
+        "2026-04-12 00:10:23",
+        lead_title="同日更早重刷",
+    )
+    monkeypatch.setattr(
+        "src.output.editor_payload._report_editor_payload_dirs",
+        lambda report_type: [tmp_path],
+    )
+
+    context = _load_previous_editor_payload_context(
+        "159516",
+        report_type="scan",
+        generated_at="2026-04-12 10:00:00",
+    )
+
+    assert context["reviewed_at"] == "2026-04-11 23:53:35"
+    assert context["event_digest"]["lead_title"] == "前一日结构基线"
+
+
+def test_build_scan_editor_packet_flags_lagging_relative_strength_when_catalyst_is_zero() -> None:
+    dimensions = _sample_dimensions()
+    dimensions["catalyst"]["score"] = 0
+    dimensions["catalyst"]["summary"] = "催化不足，现在处在静态博弈。"
+    dimensions["relative_strength"]["score"] = 75
+    dimensions["relative_strength"]["summary"] = "相对强弱有改善，但行业宽度/龙头确认仍缺失，先按低置信代理理解。"
+
+    packet = build_scan_editor_packet(
+        {
+            "name": "国泰中证半导体材料设备主题ETF",
+            "symbol": "159516",
+            "asset_type": "cn_etf",
+            "generated_at": "2026-04-12 10:00:00",
+            "history": _sample_history(),
+            "action": {"direction": "观察为主", "entry": "等右侧确认"},
+            "narrative": {"judgment": {"state": "等右侧确认"}},
+            "dimensions": dimensions,
+        },
+        bucket="观察为主",
+    )
+
+    joined = "\n".join(packet["homepage"]["micro_lines"])
+    assert "主线惯性" in joined or "滞后结果" in joined
+    assert "别把这个高分直接读成新一轮确认" in joined
+
+
+def test_build_scan_editor_packet_reconciles_index_strength_and_product_weakness() -> None:
+    packet = build_scan_editor_packet(
+        {
+            "name": "国泰中证半导体材料设备主题ETF",
+            "symbol": "159516",
+            "asset_type": "cn_etf",
+            "generated_at": "2026-04-12 10:00:00",
+            "history": _sample_history(),
+            "action": {"direction": "观察为主", "entry": "等右侧确认"},
+            "narrative": {"judgment": {"state": "等右侧确认"}},
+            "dimensions": _sample_dimensions(),
+            "metadata": {
+                "index_technical_snapshot": {"trend_label": "修复中", "momentum_label": "动能偏强"},
+                "fund_factor_trend_label": "趋势偏弱",
+                "fund_factor_momentum_label": "动能偏弱",
+            },
+        },
+        bucket="观察为主",
+    )
+
+    joined = "\n".join(packet["homepage"]["micro_lines"])
+    assert "赛道背景先看指数" in joined
+    assert "产品层修复为准" in joined
+
+
+def test_build_scan_editor_packet_marks_stale_market_snapshot_in_sentiment_and_macro() -> None:
+    history = _sample_history()
+    history["date"] = pd.date_range("2026-01-02", periods=len(history), freq="B")
+
+    packet = build_scan_editor_packet(
+        {
+            "name": "国泰中证半导体材料设备主题ETF",
+            "symbol": "159516",
+            "asset_type": "cn_etf",
+            "generated_at": "2026-06-30 10:00:00",
+            "history": history,
+            "action": {"direction": "观察为主", "entry": "等右侧确认"},
+            "narrative": {"judgment": {"state": "等右侧确认"}},
+            "regime": {"current_regime": "recovery"},
+            "dimensions": _sample_dimensions(),
+        },
+        bucket="观察为主",
+    )
+
+    assert any("当前仍使用 `" in line for line in packet["homepage"]["sentiment_lines"])
+    assert any("宏观月度因子这轮没有新增月频更新" in line for line in packet["homepage"]["macro_lines"])

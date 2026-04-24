@@ -219,7 +219,6 @@ def test_valuation_etf_nav_returns_empty_without_akshare_fallback(monkeypatch, t
         raise AssertionError(api_name)
 
     monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
-    monkeypatch.setattr(collector, "_require_ak", lambda: (_ for _ in ()).throw(AssertionError("AKShare ETF NAV fallback should not be used")))
 
     frame = collector.get_cn_etf_nav_history("510300", days=30)
     assert frame.empty is True
@@ -241,7 +240,6 @@ def test_valuation_etf_scale_uses_tushare_share_size_without_akshare_fallback(mo
         )
 
     monkeypatch.setattr(collector, "_ts_etf_share_size_snapshot", fake_snapshot)
-    monkeypatch.setattr(collector, "_require_ak", lambda: (_ for _ in ()).throw(AssertionError("AKShare ETF scale fallback should not be used")))
 
     snapshot = collector.get_cn_etf_scale("510300")
     assert snapshot is not None
@@ -289,7 +287,6 @@ def test_cn_stock_financial_proxy_returns_daily_basic_without_akshare_fallback(m
             "ps_ttm": 2.8,
         },
     )
-    monkeypatch.setattr(collector, "_require_ak", lambda: (_ for _ in ()).throw(AssertionError("AKShare stock financial fallback should not be used")))
 
     result = collector.get_cn_stock_financial_proxy("300750")
     assert result["pe_ttm"] == 24.5
@@ -506,7 +503,11 @@ def test_cn_stock_chip_snapshot_permission_block_does_not_fake_fresh_hit(monkeyp
 
 def test_cn_stock_chip_snapshot_stale_match_is_not_fresh(monkeypatch, tmp_path):
     collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
-    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda lookback_days=14, exchange="SSE": ["20260320", "20260401"])  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "_recent_open_trade_dates",
+        lambda lookback_days=14, exchange="SSE": [item.strftime("%Y%m%d") for item in pd.bdate_range("2026-03-20", "2026-04-01")],  # noqa: ARG005
+    )
     monkeypatch.setattr(
         collector,
         "_ts_cyq_perf_snapshot",
@@ -541,4 +542,92 @@ def test_cn_stock_chip_snapshot_stale_match_is_not_fresh(monkeypatch, tmp_path):
     assert snapshot["diagnosis"] == "stale"
     assert snapshot["latest_date"] == "2026-03-20"
     assert snapshot["is_fresh"] is False
+    assert "不按 fresh 命中处理" in snapshot["detail"]
+
+
+def test_cn_stock_chip_snapshot_marks_previous_trade_day_as_t1_direct(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda lookback_days=14, exchange="SSE": ["20260401", "20260402"])  # noqa: ARG005
+    monkeypatch.setattr(
+        collector,
+        "_ts_cyq_perf_snapshot",
+        lambda ts_code="", start_date="", end_date="": pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "ts_code": "300308.SZ",
+                    "trade_date": "20260401",
+                    "cost_15pct": 92.0,
+                    "cost_50pct": 100.0,
+                    "cost_85pct": 109.0,
+                    "weight_avg": 101.0,
+                    "winner_rate": 0.72,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "_ts_cyq_chips_snapshot",
+        lambda ts_code="", trade_date="": pd.DataFrame(  # noqa: ARG005
+            [
+                {"ts_code": "300308.SZ", "trade_date": "20260401", "price": 99.0, "percent": 18.0},
+                {"ts_code": "300308.SZ", "trade_date": "20260401", "price": 104.0, "percent": 22.0},
+            ]
+        ),
+    )
+
+    snapshot = collector.get_cn_stock_chip_snapshot("300308", as_of="2026-04-02", current_price=106.0)
+
+    assert snapshot["status"] == "matched"
+    assert snapshot["diagnosis"] == "stale"
+    assert snapshot["trade_gap_days"] == 1
+    assert "T+1 直连" in snapshot["detail"]
+
+
+def test_cn_stock_factor_snapshot_marks_stale_rows_without_faking_fresh(monkeypatch, tmp_path):
+    collector = ValuationCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda lookback_days=30, exchange="SSE": ["20260401", "20260403"])  # noqa: ARG005
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame:
+        calls.append((api_name, str(kwargs.get("ts_code", "")), str(kwargs.get("start_date", "")) + ":" + str(kwargs.get("end_date", ""))))
+        assert api_name == "stk_factor_pro"
+        assert kwargs.get("ts_code") == "300750.SZ"
+        assert kwargs.get("start_date") == "20260304"
+        assert kwargs.get("end_date") == "20260403"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "300750.SZ",
+                    "trade_date": "20260401",
+                    "close_qfq": 100.0,
+                    "bbi_qfq": 98.0,
+                    "bias1_qfq": 2.1,
+                    "dmi_pdi_qfq": 28.0,
+                    "dmi_mdi_qfq": 18.0,
+                    "dmi_adx_qfq": 31.0,
+                    "pct_chg": 2.5,
+                    "volume_ratio": 1.4,
+                    "turnover_rate": 3.1,
+                    "turnover_rate_f": 2.7,
+                    "atr_qfq": 3.2,
+                    "obv_qfq": 1234567.0,
+                    "rsi_qfq": 58.0,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+
+    snapshot = collector.get_cn_stock_factor_snapshot("300750", as_of="2026-04-03", lookback_days=30)
+
+    assert len(calls) == 1
+    assert snapshot["status"] == "matched"
+    assert snapshot["diagnosis"] == "stale"
+    assert snapshot["latest_date"] == "2026-04-01"
+    assert snapshot["is_fresh"] is False
+    assert snapshot["source"] == "tushare.stk_factor_pro"
+    assert snapshot["trend_label"] == "趋势偏强"
+    assert snapshot["momentum_label"] == "动能改善"
+    assert snapshot["components"]["stk_factor_pro"]["status"] == "matched"
     assert "不按 fresh 命中处理" in snapshot["detail"]

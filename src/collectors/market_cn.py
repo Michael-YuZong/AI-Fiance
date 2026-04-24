@@ -25,6 +25,23 @@ except ImportError:  # pragma: no cover
 class ChinaMarketCollector(BaseCollector):
     """China market collector with Tushare-first research paths."""
 
+    def _default_history_end_date(self) -> str:
+        try:
+            latest_open = self._latest_open_trade_date()
+        except Exception:
+            latest_open = ""
+        return latest_open or self._date_str()
+
+    def _default_history_start_date(self, end_date: str, lookback_days: int = 365 * 3) -> str:
+        normalized = str(end_date).replace("-", "").strip()
+        if normalized.isdigit() and len(normalized) == 8:
+            try:
+                end_dt = datetime.strptime(normalized, "%Y%m%d")
+            except ValueError:
+                return self._date_str(-lookback_days)
+            return (end_dt - timedelta(days=lookback_days)).strftime("%Y%m%d")
+        return self._date_str(-lookback_days)
+
     def _retry_tushare_history(self, fetcher: Callable[[], pd.DataFrame | None], attempts: int = 2) -> pd.DataFrame | None:
         last_exc: Exception | None = None
         for _ in range(max(int(attempts), 1)):
@@ -38,13 +55,64 @@ class ChinaMarketCollector(BaseCollector):
             raise last_exc
         return None
 
-    def _tag_history_frame(self, frame: pd.DataFrame | None, source: str, label: str) -> pd.DataFrame | None:
+    def _tag_history_frame(
+        self,
+        frame: pd.DataFrame | None,
+        source: str,
+        label: str,
+        *,
+        prefer_existing: bool = False,
+    ) -> pd.DataFrame | None:
         if frame is None:
             return None
         tagged = frame.copy()
+        existing_attrs = dict(getattr(frame, "attrs", {}) or {})
+        existing_source = str(existing_attrs.get("history_source", "")).strip()
+        existing_label = str(existing_attrs.get("history_source_label", "")).strip()
+        tagged.attrs["history_source"] = existing_source if prefer_existing and existing_source else source
+        tagged.attrs["history_source_label"] = existing_label if prefer_existing and existing_label else label
+        return tagged
+
+    def _history_cache_fallback(self, cache_key: str, source: str, label: str) -> pd.DataFrame | None:
+        cached = self._load_cache(cache_key, allow_stale=True)
+        if cached is None or getattr(cached, "empty", False):
+            return None
+        tagged = cached.copy()
         tagged.attrs["history_source"] = source
         tagged.attrs["history_source_label"] = label
         return tagged
+
+    def _history_cache_fallback_nearby(
+        self,
+        *,
+        source: str,
+        label: str,
+        start_date: str,
+        end_date: str,
+        key_builder: Callable[[str, str], str],
+        lookback_days: int = 3,
+    ) -> pd.DataFrame | None:
+        normalized_end = str(end_date).replace("-", "").strip()
+        if not (normalized_end.isdigit() and len(normalized_end) == 8):
+            return None
+        try:
+            end_dt = datetime.strptime(normalized_end, "%Y%m%d")
+        except ValueError:
+            return None
+        explicit_start = str(start_date).replace("-", "").strip()
+        candidates: list[str] = []
+        for offset in range(max(int(lookback_days), 0) + 1):
+            candidate_end = (end_dt - timedelta(days=offset)).strftime("%Y%m%d")
+            if offset == 0 and explicit_start:
+                candidate_start = explicit_start
+            else:
+                candidate_start = self._default_history_start_date(candidate_end)
+            candidates.append(key_builder(candidate_start, candidate_end))
+        for candidate_key in dict.fromkeys(candidates):
+            cached = self._history_cache_fallback(candidate_key, source, label)
+            if cached is not None and not getattr(cached, "empty", False):
+                return cached
+        return None
 
     def _ak_function(self, name: str) -> Callable[..., Any]:
         if ak is None:
@@ -60,6 +128,144 @@ class ChinaMarketCollector(BaseCollector):
     def _index_topic_collector(self) -> IndexTopicCollector:
         return IndexTopicCollector(self.config)
 
+    def _resolve_tushare_cb_code(self, ts_code: str, exchange: str = "") -> list[str]:
+        """Return candidate Tushare convertible-bond codes for a bare symbol."""
+        symbol = str(ts_code).strip()
+        if not symbol:
+            return []
+        if "." in symbol:
+            return [symbol]
+        if not (len(symbol) == 6 and symbol.isdigit()):
+            return [symbol]
+
+        exchange = str(exchange).strip().upper()
+        candidates: list[str] = []
+        if exchange in {"SH", "SSE"}:
+            candidates.extend([f"{symbol}.SH", symbol])
+        elif exchange in {"SZ", "SZSE"}:
+            candidates.extend([f"{symbol}.SZ", symbol])
+        else:
+            candidates.extend([f"{symbol}.SH", f"{symbol}.SZ", symbol])
+        return list(dict.fromkeys(candidates))
+
+    def _resolve_tushare_hk_code(self, symbol: str) -> str:
+        """Return a Tushare-friendly HK code when the caller passes a bare code."""
+        cleaned = str(symbol).strip()
+        if not cleaned:
+            return ""
+        if "." in cleaned:
+            return cleaned
+        if len(cleaned) == 5 and cleaned.isdigit():
+            return f"{cleaned}.HK"
+        return cleaned
+
+    def _ts_with_contract(
+        self,
+        frame: pd.DataFrame,
+        *,
+        source: str,
+        diagnosis: str = "live",
+        fallback: str = "none",
+        disclosure: str = "",
+        latest_date: str = "",
+        is_fresh: bool | None = None,
+        as_of: str = "",
+    ) -> pd.DataFrame:
+        """Attach a shared Tushare snapshot contract to a frame."""
+        tagged = frame.copy()
+        latest_text = self._normalize_date_text(latest_date)
+        as_of_text = str(as_of).strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if is_fresh is None:
+            if latest_text:
+                try:
+                    latest_dt = datetime.strptime(latest_text, "%Y-%m-%d")
+                except ValueError:
+                    is_fresh = diagnosis == "live" and not tagged.empty
+                else:
+                    is_fresh = diagnosis == "live" and abs((datetime.now().date() - latest_dt.date()).days) <= 4
+            else:
+                is_fresh = diagnosis == "live" and not tagged.empty
+        tagged.attrs["source"] = source
+        tagged.attrs["as_of"] = as_of_text
+        tagged.attrs["latest_date"] = latest_text
+        tagged.attrs["is_fresh"] = bool(is_fresh)
+        tagged.attrs["fallback"] = fallback
+        tagged.attrs["disclosure"] = disclosure
+        tagged.attrs["diagnosis"] = diagnosis
+        return tagged
+
+    def _requested_snapshot_is_fresh(
+        self,
+        diagnosis: str,
+        frame: pd.DataFrame,
+        *,
+        explicit_dates: tuple[str, ...] = (),
+    ) -> bool | None:
+        if diagnosis != "live" or frame.empty:
+            return False
+        if any(str(item).strip() for item in explicit_dates):
+            return True
+        return None
+
+    def _coerce_numeric_like_columns(self, frame: pd.DataFrame, skip: set[str]) -> pd.DataFrame:
+        """Convert object columns that are numerically parseable into numeric dtype."""
+        tagged = frame.copy()
+        for column in tagged.columns:
+            if column in skip:
+                continue
+            if tagged[column].dtype == object:
+                numeric = pd.to_numeric(tagged[column], errors="coerce")
+                if numeric.notna().any():
+                    tagged[column] = numeric
+        return tagged
+
+    def _latest_non_empty_date(self, frame: pd.DataFrame, columns: tuple[str, ...]) -> str:
+        """Find the latest normalized date across a set of columns."""
+        latest = ""
+        for column in columns:
+            if column not in frame.columns:
+                continue
+            values = [self._normalize_date_text(value) for value in frame[column].dropna().tolist()]
+            values = [value for value in values if value]
+            if values:
+                candidate = max(values)
+                if candidate > latest:
+                    latest = candidate
+        return latest
+
+    def _ts_call_first_non_empty(
+        self,
+        api_name: str,
+        code_field: str,
+        code_candidates: list[str],
+        **kwargs: Any,
+    ) -> tuple[pd.DataFrame | None, str, BaseException | None]:
+        """Call a Tushare API with candidate codes until a non-empty frame appears."""
+        empty_frame: pd.DataFrame | None = None
+        last_error: BaseException | None = None
+        used_code = ""
+        candidates = code_candidates or [""]
+        for candidate in candidates:
+            call_kwargs = dict(kwargs)
+            if candidate:
+                call_kwargs[code_field] = candidate
+            try:
+                raw = self._ts_call(api_name, **call_kwargs)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                diagnosis = self._tushare_failure_diagnosis(exc)
+                if diagnosis in {"permission_blocked", "rate_limited"}:
+                    return None, candidate, exc
+                continue
+            used_code = candidate
+            if raw is None:
+                continue
+            if not raw.empty:
+                return raw, candidate, None
+            if empty_frame is None:
+                empty_frame = raw
+        return empty_frame, used_code, last_error
+
     # ── A 股个股日 K ──────────────────────────────────────────
 
     def get_stock_daily(
@@ -71,14 +277,14 @@ class ChinaMarketCollector(BaseCollector):
         end_date: str = "",
     ) -> pd.DataFrame:
         """A 股个股日 K 线。Tushare daily + adj_factor 优先。"""
-        start = start_date or self._date_str(-365 * 3)
-        end = end_date or self._date_str()
+        end = end_date or self._default_history_end_date()
+        start = start_date or self._default_history_start_date(end)
 
         # ── Tushare (primary) ──
         try:
             frame = self._retry_tushare_history(lambda: self._ts_stock_daily(symbol, start, end, adjust))
             if frame is not None and not frame.empty:
-                return self._tag_history_frame(frame, "tushare", "Tushare 日线")
+                return self._tag_history_frame(frame, "tushare", "Tushare 日线", prefer_existing=True)
         except Exception:
             pass
         return pd.DataFrame()
@@ -110,10 +316,26 @@ class ChinaMarketCollector(BaseCollector):
         cached = self._load_cache(cache_key)
         if cached is not None:
             return cached
+        stale_cached = self._history_cache_fallback(
+            cache_key,
+            "tushare_stale_cache",
+            "Tushare 日线（历史缓存回退）",
+        )
+        if stale_cached is None:
+            stale_cached = self._history_cache_fallback_nearby(
+                source="tushare_stale_cache",
+                label="Tushare 日线（历史缓存回退）",
+                start_date=start,
+                end_date=end,
+                key_builder=lambda candidate_start, candidate_end: f"cn_market:ts_stock_daily:v2:{ts_code}:{candidate_start}:{candidate_end}:{adjust}",
+            )
 
-        raw = self._ts_call("daily", ts_code=ts_code, start_date=start, end_date=end)
+        try:
+            raw = self._ts_call("daily", ts_code=ts_code, start_date=start, end_date=end)
+        except Exception:
+            return stale_cached
         if raw is None or raw.empty:
-            return None
+            return stale_cached
 
         if "amount" in raw.columns:
             raw["amount"] = pd.to_numeric(raw["amount"], errors="coerce") * 1000.0
@@ -201,12 +423,12 @@ class ChinaMarketCollector(BaseCollector):
         end_date: str = "",
     ) -> pd.DataFrame:
         """ETF 日 K 线。研究主链统一使用 Tushare fund_daily。"""
-        start = start_date or self._date_str(-365 * 3)
-        end = end_date or self._date_str()
+        end = end_date or self._default_history_end_date()
+        start = start_date or self._default_history_start_date(end)
 
         frame = self._retry_tushare_history(lambda: self._ts_etf_daily(symbol, start, end, adjust))
         if frame is not None and not frame.empty:
-            return self._tag_history_frame(frame, "tushare", "Tushare 日线")
+            return self._tag_history_frame(frame, "tushare", "Tushare 日线", prefer_existing=True)
         raise RuntimeError(f"Tushare ETF 日线当前不可用：{symbol}")
 
     def _ts_etf_daily(self, symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame | None:
@@ -216,10 +438,26 @@ class ChinaMarketCollector(BaseCollector):
         cached = self._load_cache(cache_key)
         if cached is not None:
             return cached
+        stale_cached = self._history_cache_fallback(
+            cache_key,
+            "tushare_stale_cache",
+            "Tushare 日线（历史缓存回退）",
+        )
+        if stale_cached is None:
+            stale_cached = self._history_cache_fallback_nearby(
+                source="tushare_stale_cache",
+                label="Tushare 日线（历史缓存回退）",
+                start_date=start,
+                end_date=end,
+                key_builder=lambda candidate_start, candidate_end: f"cn_market:ts_etf_daily:v2:{ts_code}:{candidate_start}:{candidate_end}:{adjust}",
+            )
 
-        raw = self._ts_call("fund_daily", ts_code=ts_code, start_date=start, end_date=end)
+        try:
+            raw = self._ts_call("fund_daily", ts_code=ts_code, start_date=start, end_date=end)
+        except Exception:
+            return stale_cached
         if raw is None or raw.empty:
-            return None
+            return stale_cached
 
         if "amount" in raw.columns:
             raw["amount"] = pd.to_numeric(raw["amount"], errors="coerce") * 1000.0
@@ -266,7 +504,7 @@ class ChinaMarketCollector(BaseCollector):
             if not latest_trade_date:
                 continue
 
-            cache_key = f"cn_market:ts_etf_universe:v1:{latest_trade_date}"
+            cache_key = f"cn_market:ts_etf_universe:v2:{latest_trade_date}"
             cached = self._load_cache(cache_key, ttl_hours=6)
             if cached is not None:
                 return cached
@@ -383,8 +621,8 @@ class ChinaMarketCollector(BaseCollector):
         proxy_symbol: str = "",
     ) -> pd.DataFrame:
         """A 股指数历史行情。Tushare index_daily 优先。"""
-        start = start_date or self._date_str(-365 * 3)
-        end = end_date or self._date_str()
+        end = end_date or self._default_history_end_date()
+        start = start_date or self._default_history_start_date(end)
 
         # ── Tushare (primary) ──
         try:
@@ -420,7 +658,7 @@ class ChinaMarketCollector(BaseCollector):
         try:
             frame = self._ts_fund_nav(symbol)
             if frame is not None and not frame.empty:
-                return self._tag_history_frame(frame, "tushare", "Tushare 基金净值")
+                return self._tag_history_frame(frame, "tushare", "Tushare 基金净值", prefer_existing=True)
         except Exception:
             pass
 
@@ -439,10 +677,18 @@ class ChinaMarketCollector(BaseCollector):
         cached = self._load_cache(cache_key)
         if cached is not None:
             return cached
+        stale_cached = self._history_cache_fallback(
+            cache_key,
+            "tushare_stale_cache",
+            "Tushare 基金净值（历史缓存回退）",
+        )
 
-        raw = self._ts_call("fund_nav", ts_code=ts_code)
+        try:
+            raw = self._ts_call("fund_nav", ts_code=ts_code)
+        except Exception:
+            return stale_cached
         if raw is None or raw.empty:
-            return None
+            return stale_cached
 
         date_col = "nav_date" if "nav_date" in raw.columns else "end_date"
         if date_col not in raw.columns or "unit_nav" not in raw.columns:
@@ -461,6 +707,690 @@ class ChinaMarketCollector(BaseCollector):
         result = nav[["date", "open", "high", "low", "close", "volume", "amount"]]
         self._save_cache(cache_key, result)
         return result
+
+    # ── AH 比价 / 可转债专题 ──────────────────────────────────
+
+    def get_stk_ah_comparison(
+        self,
+        ts_code: str = "",
+        hk_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> pd.DataFrame:
+        """AH 股比价快照。Tushare stk_ah_comparison 优先。"""
+        ts_code = self._to_ts_code(ts_code) if ts_code else ""
+        hk_code = str(hk_code).strip()
+        explicit_trade_date = str(trade_date).replace("-", "").strip()
+        explicit_start_date = str(start_date).replace("-", "").strip()
+        explicit_end_date = str(end_date).replace("-", "").strip()
+        trade_date = explicit_trade_date
+        start_date = explicit_start_date
+        end_date = explicit_end_date
+        if not trade_date and not start_date and not end_date:
+            trade_date = self._latest_open_trade_date() or self._date_str()
+
+        cache_key = f"cn_market:ts_stk_ah_comparison:v1:{ts_code}:{hk_code}:{trade_date}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        call_kwargs: dict[str, Any] = {}
+        if hk_code:
+            call_kwargs["hk_code"] = hk_code
+        if trade_date:
+            call_kwargs["trade_date"] = trade_date
+        if start_date:
+            call_kwargs["start_date"] = start_date
+        if end_date:
+            call_kwargs["end_date"] = end_date
+
+        try:
+            raw = self._ts_call("stk_ah_comparison", ts_code=ts_code, **call_kwargs) if ts_code else self._ts_call("stk_ah_comparison", **call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            diagnosis = self._tushare_failure_diagnosis(exc)
+            frame = pd.DataFrame()
+            disclosure = self._blocked_disclosure(diagnosis, source="Tushare stk_ah_comparison")
+            frame = self._ts_with_contract(
+                frame,
+                source="tushare.stk_ah_comparison",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            return frame
+
+        diagnosis = "live"
+        if raw is None:
+            diagnosis = "unavailable"
+        elif raw.empty:
+            diagnosis = "empty"
+        frame = raw.copy() if raw is not None else pd.DataFrame()
+        if frame.empty and diagnosis == "empty":
+            disclosure = "Tushare stk_ah_comparison 当前返回空表，本轮按缺失处理，不伪装成 fresh。"
+            frame = self._ts_with_contract(
+                frame,
+                source="tushare.stk_ah_comparison",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+                latest_date="",
+            )
+            self._save_cache(cache_key, frame)
+            return frame
+        if frame.empty:
+            disclosure = "Tushare stk_ah_comparison 当前不可用，本轮按缺失处理。"
+            return self._ts_with_contract(
+                frame,
+                source="tushare.stk_ah_comparison",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+                latest_date="",
+            )
+
+        if "trade_date" in frame.columns:
+            frame["trade_date"] = frame["trade_date"].map(self._normalize_date_text)
+            frame = frame.sort_values("trade_date", ascending=False, na_position="last").reset_index(drop=True)
+        frame = self._coerce_numeric_like_columns(
+            frame,
+            skip={"ts_code", "hk_code", "a_name", "hk_name", "name", "trade_date"},
+        )
+        latest_date = self._latest_non_empty_date(frame, ("trade_date",))
+        frame = self._ts_with_contract(
+            frame,
+            source="tushare.stk_ah_comparison",
+            diagnosis=diagnosis,
+            fallback="none",
+            disclosure="Tushare stk_ah_comparison 提供 AH 股比价快照；空表或受限时按缺失处理，不伪装成 fresh。",
+            latest_date=latest_date,
+            as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            is_fresh=self._requested_snapshot_is_fresh(
+                diagnosis,
+                frame,
+                explicit_dates=(explicit_trade_date, explicit_start_date, explicit_end_date),
+            ),
+        )
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def get_cb_issue(
+        self,
+        ts_code: str = "",
+        ann_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        exchange: str = "",
+    ) -> pd.DataFrame:
+        """可转债发行信息。Tushare cb_issue 优先。"""
+        ts_code = str(ts_code).strip()
+        explicit_ann_date = str(ann_date).replace("-", "").strip()
+        explicit_start_date = str(start_date).replace("-", "").strip()
+        explicit_end_date = str(end_date).replace("-", "").strip()
+        ann_date = explicit_ann_date
+        start_date = explicit_start_date
+        end_date = explicit_end_date
+        exchange = str(exchange).strip()
+        if not ann_date and not start_date and not end_date:
+            ann_date = self._latest_open_trade_date() or self._date_str()
+
+        cache_key = f"cn_market:ts_cb_issue:v1:{ts_code}:{ann_date}:{start_date}:{end_date}:{exchange}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+
+        call_kwargs: dict[str, Any] = {}
+        if ann_date:
+            call_kwargs["ann_date"] = ann_date
+        if start_date:
+            call_kwargs["start_date"] = start_date
+        if end_date:
+            call_kwargs["end_date"] = end_date
+        if exchange:
+            call_kwargs["exchange"] = exchange
+
+        if ts_code:
+            if "," in ts_code:
+                call_kwargs["ts_code"] = ts_code
+                candidates: list[str] = []
+            else:
+                candidates = self._resolve_tushare_cb_code(ts_code, exchange=exchange)
+        else:
+            candidates = []
+
+        try:
+            if candidates:
+                raw, used_code, error = self._ts_call_first_non_empty("cb_issue", "ts_code", candidates, **call_kwargs)
+            else:
+                raw = self._ts_call("cb_issue", **call_kwargs)
+                used_code = ts_code
+                error = None
+        except Exception as exc:  # noqa: BLE001
+            diagnosis = self._tushare_failure_diagnosis(exc)
+            return self._ts_with_contract(
+                pd.DataFrame(),
+                source="tushare.cb_issue",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=self._blocked_disclosure(diagnosis, source="Tushare cb_issue"),
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+            )
+
+        diagnosis = "live"
+        if error is not None and raw is None:
+            diagnosis = self._tushare_failure_diagnosis(error)
+        elif raw is None:
+            diagnosis = "unavailable"
+        elif raw.empty:
+            diagnosis = "empty"
+
+        frame = raw.copy() if raw is not None else pd.DataFrame()
+        if frame.empty:
+            disclosure = (
+                "Tushare cb_issue 当前返回空表，本轮按缺失处理，不伪装成 fresh。"
+                if diagnosis == "empty"
+                else self._blocked_disclosure(diagnosis, source="Tushare cb_issue")
+            )
+            frame = self._ts_with_contract(
+                frame,
+                source="tushare.cb_issue",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+                latest_date="",
+            )
+            if diagnosis == "empty":
+                self._save_cache(cache_key, frame)
+            return frame
+
+        for column in ("ann_date", "res_ann_date", "issue_date", "list_date", "end_date", "maturity_date"):
+            if column in frame.columns:
+                frame[column] = frame[column].map(self._normalize_date_text)
+        frame = self._coerce_numeric_like_columns(
+            frame,
+            skip={"ts_code", "bond_short_name", "stk_code", "stk_short_name", "ann_date", "res_ann_date", "issue_date", "list_date", "end_date", "maturity_date"},
+        )
+        sort_columns: list[str] = []
+        ascending: list[bool] = []
+        for column, order in (("ann_date", False), ("res_ann_date", False), ("issue_date", False)):
+            if column in frame.columns:
+                sort_columns.append(column)
+                ascending.append(order)
+        if sort_columns:
+            frame = frame.sort_values(sort_columns, ascending=ascending, na_position="last").reset_index(drop=True)
+        latest_date = self._latest_non_empty_date(frame, ("ann_date", "res_ann_date", "issue_date"))
+        frame = self._ts_with_contract(
+            frame,
+            source="tushare.cb_issue",
+            diagnosis=diagnosis,
+            fallback="none",
+            disclosure="Tushare cb_issue 提供可转债发行信息；空表或受限时按缺失处理，不伪装成 fresh。",
+            latest_date=latest_date,
+            as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            is_fresh=self._requested_snapshot_is_fresh(
+                diagnosis,
+                frame,
+                explicit_dates=(explicit_ann_date, explicit_start_date, explicit_end_date),
+            ),
+        )
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def get_cb_share(
+        self,
+        ts_code: str = "",
+        ann_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        exchange: str = "",
+    ) -> pd.DataFrame:
+        """可转债转股结果。Tushare cb_share 优先。"""
+        ts_code = str(ts_code).strip()
+        explicit_ann_date = str(ann_date).replace("-", "").strip()
+        explicit_start_date = str(start_date).replace("-", "").strip()
+        explicit_end_date = str(end_date).replace("-", "").strip()
+        ann_date = explicit_ann_date
+        start_date = explicit_start_date
+        end_date = explicit_end_date
+        exchange = str(exchange).strip()
+        if not ann_date and not start_date and not end_date:
+            ann_date = self._latest_open_trade_date() or self._date_str()
+
+        cache_key = f"cn_market:ts_cb_share:v1:{ts_code}:{ann_date}:{start_date}:{end_date}:{exchange}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+
+        call_kwargs: dict[str, Any] = {}
+        if ann_date:
+            call_kwargs["ann_date"] = ann_date
+        if start_date:
+            call_kwargs["start_date"] = start_date
+        if end_date:
+            call_kwargs["end_date"] = end_date
+        if exchange:
+            call_kwargs["exchange"] = exchange
+
+        if ts_code:
+            if "," in ts_code:
+                call_kwargs["ts_code"] = ts_code
+                candidates: list[str] = []
+            else:
+                candidates = self._resolve_tushare_cb_code(ts_code, exchange=exchange)
+        else:
+            candidates = []
+
+        try:
+            if candidates:
+                raw, used_code, error = self._ts_call_first_non_empty("cb_share", "ts_code", candidates, **call_kwargs)
+            else:
+                raw = self._ts_call("cb_share", **call_kwargs)
+                used_code = ts_code
+                error = None
+        except Exception as exc:  # noqa: BLE001
+            diagnosis = self._tushare_failure_diagnosis(exc)
+            return self._ts_with_contract(
+                pd.DataFrame(),
+                source="tushare.cb_share",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=self._blocked_disclosure(diagnosis, source="Tushare cb_share"),
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+            )
+
+        diagnosis = "live"
+        if error is not None and raw is None:
+            diagnosis = self._tushare_failure_diagnosis(error)
+        elif raw is None:
+            diagnosis = "unavailable"
+        elif raw.empty:
+            diagnosis = "empty"
+
+        frame = raw.copy() if raw is not None else pd.DataFrame()
+        if frame.empty:
+            disclosure = (
+                "Tushare cb_share 当前返回空表，本轮按缺失处理，不伪装成 fresh。"
+                if diagnosis == "empty"
+                else self._blocked_disclosure(diagnosis, source="Tushare cb_share")
+            )
+            frame = self._ts_with_contract(
+                frame,
+                source="tushare.cb_share",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+                latest_date="",
+            )
+            if diagnosis == "empty":
+                self._save_cache(cache_key, frame)
+            return frame
+
+        for column in ("ann_date", "publish_date", "end_date", "issue_date", "maturity_date"):
+            if column in frame.columns:
+                frame[column] = frame[column].map(self._normalize_date_text)
+        frame = self._coerce_numeric_like_columns(
+            frame,
+            skip={
+                "ts_code",
+                "bond_short_name",
+                "publish_date",
+                "end_date",
+                "issue_date",
+                "maturity_date",
+            },
+        )
+        sort_columns: list[str] = []
+        ascending: list[bool] = []
+        for column, order in (("publish_date", False), ("end_date", False), ("ann_date", False)):
+            if column in frame.columns:
+                sort_columns.append(column)
+                ascending.append(order)
+        if sort_columns:
+            frame = frame.sort_values(sort_columns, ascending=ascending, na_position="last").reset_index(drop=True)
+        latest_date = self._latest_non_empty_date(frame, ("publish_date", "end_date", "ann_date"))
+        frame = self._ts_with_contract(
+            frame,
+            source="tushare.cb_share",
+            diagnosis=diagnosis,
+            fallback="none",
+            disclosure="Tushare cb_share 提供可转债转股结果；空表或受限时按缺失处理，不伪装成 fresh。",
+            latest_date=latest_date,
+            as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            is_fresh=self._requested_snapshot_is_fresh(
+                diagnosis,
+                frame,
+                explicit_dates=(explicit_ann_date, explicit_start_date, explicit_end_date),
+            ),
+        )
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def get_cb_basic(
+        self,
+        ts_code: str = "",
+        list_date: str = "",
+        exchange: str = "",
+    ) -> pd.DataFrame:
+        """可转债基础信息。Tushare cb_basic 优先。"""
+        ts_code = str(ts_code).strip()
+        list_date = str(list_date).replace("-", "").strip()
+        exchange = str(exchange).strip()
+        cache_key = f"cn_market:ts_cb_basic:v1:{ts_code}:{list_date}:{exchange}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return cached
+
+        call_kwargs: dict[str, Any] = {}
+        if list_date:
+            call_kwargs["list_date"] = list_date
+        if exchange:
+            call_kwargs["exchange"] = exchange
+
+        candidates = self._resolve_tushare_cb_code(ts_code, exchange=exchange) if ts_code else []
+        try:
+            raw, used_code, error = self._ts_call_first_non_empty("cb_basic", "ts_code", candidates, **call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            diagnosis = self._tushare_failure_diagnosis(exc)
+            frame = self._ts_with_contract(
+                pd.DataFrame(),
+                source="tushare.cb_basic",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=self._blocked_disclosure(diagnosis, source="Tushare cb_basic"),
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+            )
+            return frame
+
+        diagnosis = "live"
+        if error is not None and raw is None:
+            diagnosis = self._tushare_failure_diagnosis(error)
+        elif raw is None:
+            diagnosis = "unavailable"
+        elif raw.empty:
+            diagnosis = "empty"
+
+        frame = raw.copy() if raw is not None else pd.DataFrame()
+        if frame.empty:
+            disclosure = (
+                "Tushare cb_basic 当前返回空表，本轮按缺失处理，不伪装成 fresh。"
+                if diagnosis == "empty"
+                else self._blocked_disclosure(diagnosis, source="Tushare cb_basic")
+            )
+            frame = self._ts_with_contract(
+                frame,
+                source="tushare.cb_basic",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+                latest_date="",
+            )
+            if diagnosis == "empty":
+                self._save_cache(cache_key, frame)
+            return frame
+
+        for column in (
+            "maturity",
+            "par",
+            "issue_price",
+            "issue_size",
+            "remain_size",
+            "coupon_rate",
+            "add_rate",
+            "pay_per_year",
+            "first_conv_price",
+            "conv_price",
+            "maturity_put_price",
+        ):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        for column in ("value_date", "maturity_date", "list_date", "delist_date", "conv_start_date", "conv_end_date", "conv_stop_date"):
+            if column in frame.columns:
+                frame[column] = frame[column].map(self._normalize_date_text)
+        if "list_date" in frame.columns:
+            frame = frame.sort_values(["list_date", "ts_code"], ascending=[False, True], na_position="last").reset_index(drop=True)
+        latest_date = self._latest_non_empty_date(frame, ("list_date",))
+        if not latest_date:
+            latest_date = self._latest_non_empty_date(
+                frame,
+                ("delist_date", "value_date", "maturity_date", "conv_start_date", "conv_end_date", "conv_stop_date"),
+            )
+        frame = self._ts_with_contract(
+            frame,
+            source="tushare.cb_basic",
+            diagnosis=diagnosis,
+            fallback="none",
+            disclosure="Tushare cb_basic 提供可转债基础信息；空表或受限时按缺失处理，不伪装成 fresh。",
+            latest_date=latest_date,
+            as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            is_fresh=diagnosis == "live" and not frame.empty,
+        )
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def get_cb_daily(
+        self,
+        ts_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        exchange: str = "",
+    ) -> pd.DataFrame:
+        """可转债日线行情。Tushare cb_daily 优先。"""
+        ts_code = str(ts_code).strip()
+        explicit_trade_date = str(trade_date).replace("-", "").strip()
+        explicit_start_date = str(start_date).replace("-", "").strip()
+        explicit_end_date = str(end_date).replace("-", "").strip()
+        trade_date = explicit_trade_date
+        start_date = explicit_start_date
+        end_date = explicit_end_date
+        exchange = str(exchange).strip()
+        if not trade_date and not start_date and not end_date:
+            trade_date = self._latest_open_trade_date() or self._date_str()
+
+        cache_key = f"cn_market:ts_cb_daily:v1:{ts_code}:{trade_date}:{start_date}:{end_date}:{exchange}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        call_kwargs: dict[str, Any] = {}
+        if trade_date:
+            call_kwargs["trade_date"] = trade_date
+        if start_date:
+            call_kwargs["start_date"] = start_date
+        if end_date:
+            call_kwargs["end_date"] = end_date
+        if exchange:
+            call_kwargs["exchange"] = exchange
+
+        candidates = self._resolve_tushare_cb_code(ts_code, exchange=exchange) if ts_code else []
+        try:
+            raw, used_code, error = self._ts_call_first_non_empty("cb_daily", "ts_code", candidates, **call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            diagnosis = self._tushare_failure_diagnosis(exc)
+            return self._ts_with_contract(
+                pd.DataFrame(),
+                source="tushare.cb_daily",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=self._blocked_disclosure(diagnosis, source="Tushare cb_daily"),
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+            )
+
+        diagnosis = "live"
+        if error is not None and raw is None:
+            diagnosis = self._tushare_failure_diagnosis(error)
+        elif raw is None:
+            diagnosis = "unavailable"
+        elif raw.empty:
+            diagnosis = "empty"
+
+        frame = raw.copy() if raw is not None else pd.DataFrame()
+        if frame.empty:
+            disclosure = (
+                "Tushare cb_daily 当前返回空表，本轮按缺失处理，不伪装成 fresh。"
+                if diagnosis == "empty"
+                else self._blocked_disclosure(diagnosis, source="Tushare cb_daily")
+            )
+            frame = self._ts_with_contract(
+                frame,
+                source="tushare.cb_daily",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+                latest_date="",
+            )
+            if diagnosis == "empty":
+                self._save_cache(cache_key, frame)
+            return frame
+
+        if "trade_date" in frame.columns:
+            frame["trade_date"] = frame["trade_date"].map(self._normalize_date_text)
+            frame = frame.sort_values("trade_date", ascending=False, na_position="last").reset_index(drop=True)
+        if "amount" in frame.columns:
+            frame["amount"] = pd.to_numeric(frame["amount"], errors="coerce") * 10000.0
+        frame = self._coerce_numeric_like_columns(
+            frame,
+            skip={"ts_code", "bond_short_name", "bond_full_name", "stk_code", "stk_short_name", "trade_date"},
+        )
+        latest_date = str(frame.iloc[0].get("trade_date", "")).strip() if not frame.empty else ""
+        frame = self._ts_with_contract(
+            frame,
+            source="tushare.cb_daily",
+            diagnosis=diagnosis,
+            fallback="none",
+            disclosure="Tushare cb_daily 提供可转债日线行情；空表或受限时按缺失处理，不伪装成 fresh。",
+            latest_date=latest_date,
+            as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            is_fresh=self._requested_snapshot_is_fresh(
+                diagnosis,
+                frame,
+                explicit_dates=(explicit_trade_date, explicit_start_date, explicit_end_date),
+            ),
+        )
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def get_cb_factor_pro(
+        self,
+        ts_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        exchange: str = "",
+    ) -> pd.DataFrame:
+        """可转债技术面因子。Tushare cb_factor_pro 优先。"""
+        ts_code = str(ts_code).strip()
+        explicit_trade_date = str(trade_date).replace("-", "").strip()
+        explicit_start_date = str(start_date).replace("-", "").strip()
+        explicit_end_date = str(end_date).replace("-", "").strip()
+        trade_date = explicit_trade_date
+        start_date = explicit_start_date
+        end_date = explicit_end_date
+        exchange = str(exchange).strip()
+        if not trade_date and not start_date and not end_date:
+            trade_date = self._latest_open_trade_date() or self._date_str()
+
+        cache_key = f"cn_market:ts_cb_factor_pro:v1:{ts_code}:{trade_date}:{start_date}:{end_date}:{exchange}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        call_kwargs: dict[str, Any] = {}
+        if trade_date:
+            call_kwargs["trade_date"] = trade_date
+        if start_date:
+            call_kwargs["start_date"] = start_date
+        if end_date:
+            call_kwargs["end_date"] = end_date
+        if exchange:
+            call_kwargs["exchange"] = exchange
+
+        candidates = self._resolve_tushare_cb_code(ts_code, exchange=exchange) if ts_code else []
+        try:
+            raw, used_code, error = self._ts_call_first_non_empty("cb_factor_pro", "ts_code", candidates, **call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            diagnosis = self._tushare_failure_diagnosis(exc)
+            return self._ts_with_contract(
+                pd.DataFrame(),
+                source="tushare.cb_factor_pro",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=self._blocked_disclosure(diagnosis, source="Tushare cb_factor_pro"),
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+            )
+
+        diagnosis = "live"
+        if error is not None and raw is None:
+            diagnosis = self._tushare_failure_diagnosis(error)
+        elif raw is None:
+            diagnosis = "unavailable"
+        elif raw.empty:
+            diagnosis = "empty"
+
+        frame = raw.copy() if raw is not None else pd.DataFrame()
+        if frame.empty:
+            disclosure = (
+                "Tushare cb_factor_pro 当前返回空表，本轮按缺失处理，不伪装成 fresh。"
+                if diagnosis == "empty"
+                else self._blocked_disclosure(diagnosis, source="Tushare cb_factor_pro")
+            )
+            frame = self._ts_with_contract(
+                frame,
+                source="tushare.cb_factor_pro",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+                latest_date="",
+            )
+            if diagnosis == "empty":
+                self._save_cache(cache_key, frame)
+            return frame
+
+        date_col = self._first_existing_column(frame, ("trade_date", "date"))
+        if date_col:
+            frame[date_col] = frame[date_col].map(self._normalize_date_text)
+            frame = frame.sort_values(date_col, ascending=False, na_position="last").reset_index(drop=True)
+        frame = self._coerce_numeric_like_columns(
+            frame,
+            skip={"ts_code", "bond_short_name", "bond_full_name", "stk_code", "stk_short_name", "trade_date", "date"},
+        )
+        latest_date = str(frame.iloc[0].get(date_col or "trade_date", "")) if not frame.empty else ""
+        frame = self._ts_with_contract(
+            frame,
+            source="tushare.cb_factor_pro",
+            diagnosis=diagnosis,
+            fallback="none",
+            disclosure="Tushare cb_factor_pro 提供可转债技术面因子；空表或受限时按缺失处理，不伪装成 fresh。",
+            latest_date=latest_date,
+            as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            is_fresh=self._requested_snapshot_is_fresh(
+                diagnosis,
+                frame,
+                explicit_dates=(explicit_trade_date, explicit_start_date, explicit_end_date),
+            ),
+        )
+        self._save_cache(cache_key, frame)
+        return frame
 
     # ── 实时行情（Tushare daily_basic 替代实时快照） ───────────
 
@@ -494,6 +1424,27 @@ class ChinaMarketCollector(BaseCollector):
                 return self._normalize_efinance_stock_realtime(frame)
             except Exception:
                 raise primary_exc
+
+    def get_cached_stock_realtime_snapshot(self) -> pd.DataFrame | None:
+        """Return the newest cached A-share stock snapshot without live fetch.
+
+        Used by fast/reporting paths that would rather take a stale local snapshot
+        than block on a slow or unstable live full-market refresh.
+        """
+        daily_basic = self._load_cache("cn_market:ts_daily_basic_snapshot:v3", allow_stale=True)
+        if daily_basic is not None and not getattr(daily_basic, "empty", False):
+            return daily_basic
+
+        akshare = self._load_cache("cn_market:stock_realtime", allow_stale=True)
+        if akshare is not None and not getattr(akshare, "empty", False):
+            return akshare
+
+        if ef is None:
+            return None
+        efinance = self._load_cache("cn_market:stock_realtime:efinance", allow_stale=True)
+        if efinance is not None and not getattr(efinance, "empty", False):
+            return self._normalize_efinance_stock_realtime(efinance)
+        return None
 
     def _ts_daily_basic_snapshot(self) -> pd.DataFrame | None:
         """Tushare 全市场快照。
@@ -721,6 +1672,446 @@ class ChinaMarketCollector(BaseCollector):
             return None
         self._save_cache(cache_key, normalized)
         return normalized
+
+    def get_ggt_top10(
+        self,
+        ts_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        market_type: str = "",
+    ) -> pd.DataFrame:
+        """港股通十大成交股。Tushare ggt_top10 优先。"""
+        ts_code = str(ts_code).strip()
+        explicit_trade_date = str(trade_date).replace("-", "").strip()
+        explicit_start_date = str(start_date).replace("-", "").strip()
+        explicit_end_date = str(end_date).replace("-", "").strip()
+        trade_date = explicit_trade_date
+        start_date = explicit_start_date
+        end_date = explicit_end_date
+        market_type = str(market_type).strip()
+        if not trade_date and not start_date and not end_date:
+            trade_date = self._latest_open_trade_date() or self._date_str()
+
+        cache_key = f"cn_market:ts_ggt_top10:v1:{ts_code}:{trade_date}:{start_date}:{end_date}:{market_type}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        call_kwargs: dict[str, Any] = {}
+        if ts_code:
+            call_kwargs["ts_code"] = ts_code
+        if trade_date:
+            call_kwargs["trade_date"] = trade_date
+        if start_date:
+            call_kwargs["start_date"] = start_date
+        if end_date:
+            call_kwargs["end_date"] = end_date
+        if market_type:
+            call_kwargs["market_type"] = market_type
+
+        try:
+            raw = self._ts_call("ggt_top10", **call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            diagnosis = self._tushare_failure_diagnosis(exc)
+            return self._ts_with_contract(
+                pd.DataFrame(),
+                source="tushare.ggt_top10",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=self._blocked_disclosure(diagnosis, source="Tushare ggt_top10"),
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+            )
+
+        diagnosis = "live"
+        if raw is None:
+            diagnosis = "unavailable"
+        elif raw.empty:
+            diagnosis = "empty"
+
+        frame = raw.copy() if raw is not None else pd.DataFrame()
+        if frame.empty:
+            disclosure = (
+                "Tushare ggt_top10 当前返回空表，本轮按缺失处理，不伪装成 fresh。"
+                if diagnosis == "empty"
+                else self._blocked_disclosure(diagnosis, source="Tushare ggt_top10")
+            )
+            frame = self._ts_with_contract(
+                frame,
+                source="tushare.ggt_top10",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+                latest_date="",
+            )
+            if diagnosis == "empty":
+                self._save_cache(cache_key, frame)
+            return frame
+
+        if "trade_date" in frame.columns:
+            frame["trade_date"] = frame["trade_date"].map(self._normalize_date_text)
+        frame = self._coerce_numeric_like_columns(
+            frame,
+            skip={"ts_code", "name", "trade_date", "market_type"},
+        )
+        sort_columns: list[str] = []
+        ascending: list[bool] = []
+        for column, order in (("trade_date", False), ("market_type", True), ("rank", True)):
+            if column in frame.columns:
+                sort_columns.append(column)
+                ascending.append(order)
+        if sort_columns:
+            frame = frame.sort_values(sort_columns, ascending=ascending, na_position="last").reset_index(drop=True)
+        latest_date = self._latest_non_empty_date(frame, ("trade_date",))
+        frame = self._ts_with_contract(
+            frame,
+            source="tushare.ggt_top10",
+            diagnosis=diagnosis,
+            fallback="none",
+            disclosure="Tushare ggt_top10 提供港股通十大成交股；空表或受限时按缺失处理，不伪装成 fresh。",
+            latest_date=latest_date,
+            as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            is_fresh=self._requested_snapshot_is_fresh(
+                diagnosis,
+                frame,
+                explicit_dates=(explicit_trade_date, explicit_start_date, explicit_end_date),
+            ),
+        )
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def get_ccass_hold(
+        self,
+        ts_code: str = "",
+        hk_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> pd.DataFrame:
+        """中央结算系统持股统计。Tushare ccass_hold 优先。"""
+        ts_code = self._resolve_tushare_hk_code(ts_code)
+        hk_code = str(hk_code).strip()
+        explicit_trade_date = str(trade_date).replace("-", "").strip()
+        explicit_start_date = str(start_date).replace("-", "").strip()
+        explicit_end_date = str(end_date).replace("-", "").strip()
+        trade_date = explicit_trade_date
+        start_date = explicit_start_date
+        end_date = explicit_end_date
+        if not trade_date and not start_date and not end_date:
+            trade_date = self._latest_open_trade_date() or self._date_str()
+
+        cache_key = f"cn_market:ts_ccass_hold:v1:{ts_code}:{hk_code}:{trade_date}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        call_kwargs: dict[str, Any] = {}
+        if ts_code:
+            call_kwargs["ts_code"] = ts_code
+        if hk_code:
+            call_kwargs["hk_code"] = hk_code
+        if trade_date:
+            call_kwargs["trade_date"] = trade_date
+        if start_date:
+            call_kwargs["start_date"] = start_date
+        if end_date:
+            call_kwargs["end_date"] = end_date
+
+        try:
+            raw = self._ts_call("ccass_hold", **call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            diagnosis = self._tushare_failure_diagnosis(exc)
+            return self._ts_with_contract(
+                pd.DataFrame(),
+                source="tushare.ccass_hold",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=self._blocked_disclosure(diagnosis, source="Tushare ccass_hold"),
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+            )
+
+        diagnosis = "live"
+        if raw is None:
+            diagnosis = "unavailable"
+        elif raw.empty:
+            diagnosis = "empty"
+
+        frame = raw.copy() if raw is not None else pd.DataFrame()
+        if frame.empty:
+            disclosure = (
+                "Tushare ccass_hold 当前返回空表，本轮按缺失处理，不伪装成 fresh。"
+                if diagnosis == "empty"
+                else self._blocked_disclosure(diagnosis, source="Tushare ccass_hold")
+            )
+            frame = self._ts_with_contract(
+                frame,
+                source="tushare.ccass_hold",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+                latest_date="",
+            )
+            if diagnosis == "empty":
+                self._save_cache(cache_key, frame)
+            return frame
+
+        if "trade_date" in frame.columns:
+            frame["trade_date"] = frame["trade_date"].map(self._normalize_date_text)
+        frame = self._coerce_numeric_like_columns(
+            frame,
+            skip={"ts_code", "hk_code", "name", "trade_date"},
+        )
+        sort_columns: list[str] = []
+        ascending: list[bool] = []
+        for column, order in (("trade_date", False), ("shareholding", False)):
+            if column in frame.columns:
+                sort_columns.append(column)
+                ascending.append(order)
+        if sort_columns:
+            frame = frame.sort_values(sort_columns, ascending=ascending, na_position="last").reset_index(drop=True)
+        latest_date = self._latest_non_empty_date(frame, ("trade_date",))
+        frame = self._ts_with_contract(
+            frame,
+            source="tushare.ccass_hold",
+            diagnosis=diagnosis,
+            fallback="none",
+            disclosure="Tushare ccass_hold 提供中央结算系统持股统计；空表或受限时按缺失处理，不伪装成 fresh。",
+            latest_date=latest_date,
+            as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            is_fresh=self._requested_snapshot_is_fresh(
+                diagnosis,
+                frame,
+                explicit_dates=(explicit_trade_date, explicit_start_date, explicit_end_date),
+            ),
+        )
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def get_ccass_hold_detail(
+        self,
+        ts_code: str = "",
+        hk_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> pd.DataFrame:
+        """中央结算系统机构席位持股明细。Tushare ccass_hold_detail 优先。"""
+        ts_code = self._resolve_tushare_hk_code(ts_code)
+        hk_code = str(hk_code).strip()
+        explicit_trade_date = str(trade_date).replace("-", "").strip()
+        explicit_start_date = str(start_date).replace("-", "").strip()
+        explicit_end_date = str(end_date).replace("-", "").strip()
+        trade_date = explicit_trade_date
+        start_date = explicit_start_date
+        end_date = explicit_end_date
+        if not trade_date and not start_date and not end_date:
+            trade_date = self._latest_open_trade_date() or self._date_str()
+
+        cache_key = f"cn_market:ts_ccass_hold_detail:v1:{ts_code}:{hk_code}:{trade_date}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        call_kwargs: dict[str, Any] = {}
+        if ts_code:
+            call_kwargs["ts_code"] = ts_code
+        if hk_code:
+            call_kwargs["hk_code"] = hk_code
+        if trade_date:
+            call_kwargs["trade_date"] = trade_date
+        if start_date:
+            call_kwargs["start_date"] = start_date
+        if end_date:
+            call_kwargs["end_date"] = end_date
+
+        try:
+            raw = self._ts_call("ccass_hold_detail", **call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            diagnosis = self._tushare_failure_diagnosis(exc)
+            return self._ts_with_contract(
+                pd.DataFrame(),
+                source="tushare.ccass_hold_detail",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=self._blocked_disclosure(diagnosis, source="Tushare ccass_hold_detail"),
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+            )
+
+        diagnosis = "live"
+        if raw is None:
+            diagnosis = "unavailable"
+        elif raw.empty:
+            diagnosis = "empty"
+
+        frame = raw.copy() if raw is not None else pd.DataFrame()
+        if frame.empty:
+            disclosure = (
+                "Tushare ccass_hold_detail 当前返回空表，本轮按缺失处理，不伪装成 fresh。"
+                if diagnosis == "empty"
+                else self._blocked_disclosure(diagnosis, source="Tushare ccass_hold_detail")
+            )
+            frame = self._ts_with_contract(
+                frame,
+                source="tushare.ccass_hold_detail",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+                latest_date="",
+            )
+            if diagnosis == "empty":
+                self._save_cache(cache_key, frame)
+            return frame
+
+        if "trade_date" in frame.columns:
+            frame["trade_date"] = frame["trade_date"].map(self._normalize_date_text)
+        frame = self._coerce_numeric_like_columns(
+            frame,
+            skip={"ts_code", "hk_code", "name", "trade_date", "col_participant_id", "col_participant_name"},
+        )
+        sort_columns: list[str] = []
+        ascending: list[bool] = []
+        for column, order in (("trade_date", False), ("col_shareholding", False)):
+            if column in frame.columns:
+                sort_columns.append(column)
+                ascending.append(order)
+        if sort_columns:
+            frame = frame.sort_values(sort_columns, ascending=ascending, na_position="last").reset_index(drop=True)
+        latest_date = self._latest_non_empty_date(frame, ("trade_date",))
+        frame = self._ts_with_contract(
+            frame,
+            source="tushare.ccass_hold_detail",
+            diagnosis=diagnosis,
+            fallback="none",
+            disclosure="Tushare ccass_hold_detail 提供中央结算系统机构席位持股明细；空表或受限时按缺失处理，不伪装成 fresh。",
+            latest_date=latest_date,
+            as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            is_fresh=self._requested_snapshot_is_fresh(
+                diagnosis,
+                frame,
+                explicit_dates=(explicit_trade_date, explicit_start_date, explicit_end_date),
+            ),
+        )
+        self._save_cache(cache_key, frame)
+        return frame
+
+    def get_hm_detail(
+        self,
+        trade_date: str = "",
+        ts_code: str = "",
+        hm_name: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> pd.DataFrame:
+        """每日游资交易明细。Tushare hm_detail 优先。"""
+        explicit_trade_date = str(trade_date).replace("-", "").strip()
+        ts_code = self._to_ts_code(str(ts_code).strip()) if ts_code else ""
+        hm_name = str(hm_name).strip()
+        explicit_start_date = str(start_date).replace("-", "").strip()
+        explicit_end_date = str(end_date).replace("-", "").strip()
+        trade_date = explicit_trade_date
+        start_date = explicit_start_date
+        end_date = explicit_end_date
+        if not trade_date and not start_date and not end_date:
+            trade_date = self._latest_open_trade_date() or self._date_str()
+
+        cache_key = f"cn_market:ts_hm_detail:v1:{trade_date}:{ts_code}:{hm_name}:{start_date}:{end_date}"
+        cached = self._load_cache(cache_key, ttl_hours=12)
+        if cached is not None:
+            return cached
+
+        call_kwargs: dict[str, Any] = {}
+        if trade_date:
+            call_kwargs["trade_date"] = trade_date
+        if ts_code:
+            call_kwargs["ts_code"] = ts_code
+        if hm_name:
+            call_kwargs["hm_name"] = hm_name
+        if start_date:
+            call_kwargs["start_date"] = start_date
+        if end_date:
+            call_kwargs["end_date"] = end_date
+
+        try:
+            raw = self._ts_call("hm_detail", **call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            diagnosis = self._tushare_failure_diagnosis(exc)
+            return self._ts_with_contract(
+                pd.DataFrame(),
+                source="tushare.hm_detail",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=self._blocked_disclosure(diagnosis, source="Tushare hm_detail"),
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+            )
+
+        diagnosis = "live"
+        if raw is None:
+            diagnosis = "unavailable"
+        elif raw.empty:
+            diagnosis = "empty"
+
+        frame = raw.copy() if raw is not None else pd.DataFrame()
+        if frame.empty:
+            disclosure = (
+                "Tushare hm_detail 当前返回空表，本轮按缺失处理，不伪装成 fresh。"
+                if diagnosis == "empty"
+                else self._blocked_disclosure(diagnosis, source="Tushare hm_detail")
+            )
+            frame = self._ts_with_contract(
+                frame,
+                source="tushare.hm_detail",
+                diagnosis=diagnosis,
+                fallback="none",
+                disclosure=disclosure,
+                as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_fresh=False,
+                latest_date="",
+            )
+            if diagnosis == "empty":
+                self._save_cache(cache_key, frame)
+            return frame
+
+        if "trade_date" in frame.columns:
+            frame["trade_date"] = frame["trade_date"].map(self._normalize_date_text)
+        frame = self._coerce_numeric_like_columns(
+            frame,
+            skip={"ts_code", "ts_name", "hm_name", "hm_orgs", "tag", "trade_date"},
+        )
+        sort_columns: list[str] = []
+        ascending: list[bool] = []
+        for column, order in (("trade_date", False), ("net_amount", False), ("buy_amount", False)):
+            if column in frame.columns:
+                sort_columns.append(column)
+                ascending.append(order)
+        if sort_columns:
+            frame = frame.sort_values(sort_columns, ascending=ascending, na_position="last").reset_index(drop=True)
+        latest_date = self._latest_non_empty_date(frame, ("trade_date",))
+        frame = self._ts_with_contract(
+            frame,
+            source="tushare.hm_detail",
+            diagnosis=diagnosis,
+            fallback="none",
+            disclosure="Tushare hm_detail 提供游资交易明细；空表或受限时按缺失处理，不伪装成 fresh。",
+            latest_date=latest_date,
+            as_of=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            is_fresh=self._requested_snapshot_is_fresh(
+                diagnosis,
+                frame,
+                explicit_dates=(explicit_trade_date, explicit_start_date, explicit_end_date),
+            ),
+        )
+        self._save_cache(cache_key, frame)
+        return frame
 
     def get_margin_trading(self) -> pd.DataFrame:
         """融资融券汇总数据。Tushare margin 优先。"""

@@ -143,8 +143,10 @@ def test_build_trade_plan_estimates_budget_execution_and_provenance(monkeypatch,
     assert payload["portfolio_overlap"]["style_direction_label"] in {"防守偏重", "进攻偏重", "均衡"}
     assert payload["portfolio_overlap"]["style_priority_hint"]
     assert payload["portfolio_overlap"]["detail_lines"]
-    assert payload["horizon"]["code"] == "position_trade"
-    assert payload["decision_snapshot"]["horizon"]["code"] == "position_trade"
+    assert payload["horizon"]["family_code"] == "position_trade"
+    assert payload["horizon"]["code"] == "position_trade_thesis_stated"
+    assert payload["decision_snapshot"]["horizon"]["family_code"] == "position_trade"
+    assert payload["decision_snapshot"]["horizon"]["code"] == "position_trade_thesis_stated"
     assert payload["current_risk"]["annual_vol"] >= 0
     assert payload["projected_risk"]["annual_vol"] >= 0
     assert "仓位" in payload["headline"]

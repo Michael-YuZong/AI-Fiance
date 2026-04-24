@@ -29,6 +29,12 @@ def test_router_maps_code_lookup_request():
     assert routed.args == ["有色金属ETF代码是多少"]
 
 
+def test_router_maps_intel_request_to_free_intel_command():
+    routed = route_request("收集有色金属相关的情报")
+    assert routed.module == "intel"
+    assert routed.args == ["收集有色金属相关的情报"]
+
+
 def test_router_maps_compare_request_with_resolved_symbols():
     routed = route_request("对比有色金属ETF和黄金ETF", resolved_symbols=["512400", "GLD"])
     assert routed.module == "compare"

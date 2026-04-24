@@ -32,15 +32,10 @@
    - 把 `index_weekly / index_monthly` 的周/月线写法、来源披露和最终收口统一
    - 已被 Tushare 覆盖的 `AKShare` 主路径继续系统性退场，不再长期双轨混跑
    - 可见性、最终收口和 client-safe 披露统一
-   - 把“10000 分已解锁、但还没纳入当前主计划”的第二阶段 backlog 正式排期：
-     - `daily_info / sz_daily_info`
-     - `stk_factor_pro`
-     - `stk_surv`
-     - `stk_ah_comparison`
-     - `fx_basic / fx_daily`
-     - `fund_sales_ratio`
-     - `cb_basic / cb_daily / cb_factor_pro`
-     - `sge_basic / sge_daily`
+   - 继续把第二阶段 backlog 往前推：
+     - 已开始开发并进入主链：`daily_info / sz_daily_info / stk_factor_pro / stk_surv / fx_basic / fx_daily`
+     - 已接入 collector + processor：`stk_ah_comparison / fund_sales_ratio / cb_basic / cb_daily / cb_factor_pro / cb_issue / cb_share / sge_basic / sge_daily / tdx_index / tdx_member / tdx_daily / ggt_top10 / ccass_hold_detail / hm_detail / dc_index / dc_daily / moneyflow_mkt_dc / report_rc`
+     - 当前已前置到 `briefing / compare / fund_pick` 首屏，并开始下沉 `TDX结构专题 / DC结构专题 / 港股辅助层 / 转债辅助层 / 研报辅助层`；下一步重点是把同批信号继续统一到更多成熟稿首屏和长期对比链，而不是再停在辅助因子层
 
    原则不是“多接几个接口”，而是：
    - 优先把剩余接口真正下沉到 `briefing / scan / stock_analysis / stock_pick / etf_pick / fund_pick / risk`

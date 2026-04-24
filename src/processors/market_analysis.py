@@ -183,6 +183,90 @@ def _turnover_text(value: float | None) -> str:
     return f"{value:.0f}亿"
 
 
+def _market_structure_amount_to_yi(value: float | None) -> float | None:
+    if value is None:
+        return None
+    # Tushare daily_info is already close to 亿元, while sz_daily_info can return 元 or 万元.
+    # A single market snapshot above 10,000,000,000 亿元 is impossible, so treat it as 元.
+    if value >= 10_000_000_000:
+        return value / 100_000_000
+    # Values in the millions/billions are usually 万元 for this endpoint.
+    if value >= 1_000_000:
+        return value / 10000
+    return value
+
+
+def _best_market_structure_row(rows: Sequence[Mapping[str, Any]], *, preferred: Sequence[str] = ()) -> Dict[str, Any]:
+    candidates = [dict(row or {}) for row in rows if isinstance(row, Mapping)]
+    if not candidates:
+        return {}
+
+    def _rank(row: Mapping[str, Any]) -> tuple[float, float, float]:
+        name = str(row.get("ts_name", "") or row.get("ts_code", "")).strip()
+        score = 0.0
+        if any(token and token in name for token in preferred):
+            score += 10.0
+        if any(token in name for token in ("A股", "股票", "市场", "主板", "创业板", "科创板")):
+            score += 5.0
+        amount = _market_structure_amount_to_yi(_to_float(row.get("amount"))) or 0.0
+        count = _to_float(row.get("count")) or 0.0
+        return (score, amount, count)
+
+    return dict(max(candidates, key=_rank))
+
+
+def _market_structure_signal(overview: Mapping[str, Any]) -> Dict[str, Any]:
+    structure = dict(overview.get("market_structure") or {})
+    daily_rows = [dict(row or {}) for row in list(structure.get("daily_info") or []) if isinstance(row, Mapping)]
+    sz_rows = [dict(row or {}) for row in list(structure.get("sz_daily_info") or []) if isinstance(row, Mapping)]
+    if not daily_rows and not sz_rows:
+        return {
+            "value": "N/A",
+            "label": "结构缺失",
+            "detail": "暂未拿到 daily_info / sz_daily_info 交易结构快照。",
+            "line": "交易结构快照暂缺，当前先按宽度、量能和轮动判断市场结构。",
+            "bias": "neutral",
+        }
+
+    daily_row = _best_market_structure_row(daily_rows, preferred=("A股", "股票", "市场"))
+    sz_row = _best_market_structure_row(sz_rows, preferred=("A股", "股票", "创业板", "市场"))
+    latest_date = str(structure.get("latest_date", "")).strip()
+    is_fresh = bool(structure.get("is_fresh"))
+    label = "结构快照可用" if is_fresh else "结构快照偏旧"
+
+    segments: List[str] = []
+    summary_bits: List[str] = []
+    for row in (daily_row, sz_row):
+        if not row:
+            continue
+        name = str(row.get("ts_name", "") or row.get("ts_code", "")).strip() or "市场结构"
+        count = _to_float(row.get("count"))
+        amount = _market_structure_amount_to_yi(_to_float(row.get("amount")))
+        summary = name
+        if count is not None:
+            summary += f" {int(count)}家"
+        if amount is not None:
+            summary += f" / 成交{_turnover_text(amount)}"
+        segments.append(summary)
+        summary_bits.append(name)
+
+    if not segments:
+        segments.append("结构快照已接入")
+    detail = "；".join(segments)
+    if latest_date and not is_fresh:
+        detail += f"（最新日期 {latest_date}）"
+    line = "交易结构快照：" + "；".join(segments) + "。"
+    if latest_date and not is_fresh:
+        line += f" 最新日期停在 {latest_date}，当前只作为结构参考，不当成今天 fresh 盘面。"
+    return {
+        "value": " / ".join(summary_bits) if summary_bits else "结构快照",
+        "label": label,
+        "detail": detail,
+        "line": line,
+        "bias": "neutral",
+    }
+
+
 def _analyze_focus_index(
     spec: Mapping[str, str],
     config: Mapping[str, Any],
@@ -536,12 +620,14 @@ def build_market_analysis(
 
     breadth_payload = _breadth_signal(overview, pulse)
     turnover_payload = _turnover_signal(overview, index_payloads)
+    market_structure_payload = _market_structure_signal(overview)
     sentiment_payload = _sentiment_signal(overview, pulse)
     rotation_payload = _rotation_payload(drivers, pulse)
 
     market_signal_rows = [
         ["市场宽度", breadth_payload["value"], breadth_payload["label"], breadth_payload["detail"]],
         ["成交量能", turnover_payload["value"], turnover_payload["label"], turnover_payload["detail"]],
+        ["交易结构", market_structure_payload["value"], market_structure_payload["label"], market_structure_payload["detail"]],
         ["情绪极端", sentiment_payload["value"], sentiment_payload["label"], sentiment_payload["detail"]],
     ]
 
@@ -552,6 +638,7 @@ def build_market_analysis(
         "market_signal_lines": [
             str(breadth_payload.get("line", "")),
             str(turnover_payload.get("line", "")),
+            str(market_structure_payload.get("line", "")),
             str(sentiment_payload.get("line", "")),
         ],
         "rotation_rows": list(rotation_payload.get("rows", [])),

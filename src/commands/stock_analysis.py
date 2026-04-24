@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Tuple
 
 from src.commands.final_runner import finalize_client_markdown, internal_sidecar_path
+from src.commands.intel import collect_intel_news_report, collect_market_aware_intel_news_report
 from src.commands.report_guard import ensure_report_task_registered, exported_bundle_lines
 from src.commands.release_check import check_generic_client_report
 from src.output import AnalysisChartRenderer, ClientReportRenderer, OpportunityReportRenderer
@@ -34,6 +35,63 @@ from src.utils.config import detect_asset_type, load_config, resolve_project_pat
 from src.utils.logger import setup_logger
 
 
+def _shared_intel_news_report(
+    config: Mapping[str, object],
+    *,
+    query: str,
+    explicit_symbol: str = "",
+    baseline_report: Mapping[str, object] | None = None,
+    limit: int = 6,
+    recent_days: int = 7,
+    note_prefix: str = "",
+) -> Dict[str, object]:
+    try:
+        report = collect_market_aware_intel_news_report(
+            query,
+            config=config,
+            explicit_symbol=explicit_symbol,
+            baseline_report=baseline_report,
+            limit=limit,
+            recent_days=recent_days,
+            structured_only=not bool(dict(config or {}).get("news_topic_search_enabled", True)),
+            note_prefix=note_prefix,
+            collect_fn=collect_intel_news_report,
+        )
+    except Exception:
+        return {}
+    if not list(dict(report).get("items") or []):
+        return {}
+    return dict(report)
+
+
+def _attach_shared_intel_news_report(
+    context: Mapping[str, object],
+    config: Mapping[str, object],
+    *,
+    query: str,
+    explicit_symbol: str = "",
+    note_prefix: str = "",
+) -> Dict[str, object]:
+    merged = dict(context or {})
+    existing_report = dict(merged.get("news_report") or {})
+    shared_report = _shared_intel_news_report(
+        config,
+        query=query,
+        explicit_symbol=explicit_symbol,
+        baseline_report=existing_report,
+        note_prefix=note_prefix,
+    )
+    if not shared_report:
+        return merged
+
+    existing_items = list(existing_report.get("items") or [])
+    shared_items = list(shared_report.get("items") or [])
+    if not existing_items or len(shared_items) >= len(existing_items):
+        merged["news_report"] = shared_report
+        merged["intel_news_report"] = shared_report
+    return merged
+
+
 def _client_final_runtime_overrides(
     config: Mapping[str, object],
     *,
@@ -56,10 +114,8 @@ def _client_final_runtime_overrides(
     if changed:
         effective["market_context"] = market_context
         notes.append("为保证个股详细稿 `client-final` 可交付，本轮自动跳过跨市场代理与 market monitor 慢链。")
-
     if bool(effective.get("news_topic_search_enabled", True)):
-        effective["news_topic_search_enabled"] = False
-        notes.append("本轮 `client-final` 已自动关闭主题新闻扩搜，优先使用结构化事件和已命中的新闻线索。")
+        notes.append("本轮 `client-final` 保留主题情报扩搜能力，只对全局新闻源走轻量配置，避免把市场级新情报静默降成空白。")
 
     current_news_feeds = str(effective.get("news_feeds_file", "") or "").strip()
     if current_news_feeds != "config/news_feeds.empty.yaml":
@@ -88,8 +144,20 @@ def run_stock_analysis(
     asset_type = resolved_context.asset_type or detect_asset_type(symbol, config)
     if asset_type not in {"cn_stock", "hk", "us"}:
         raise SystemExit(f"`{symbol}` 当前识别为 `{asset_type}`，不属于个股分析对象。")
+    effective_today_mode = bool(today_mode or (client_final and asset_type == "cn_stock"))
     context = build_market_context(config, relevant_asset_types=[asset_type, "cn_stock", "hk", "us"])
-    analysis = analyze_opportunity(symbol, asset_type, config, context=context, today_mode=today_mode)
+    intel_query_parts = [str(resolved_context.name or symbol).strip(), symbol]
+    sector = str((resolved_context.metadata or {}).get("sector", "")).strip()
+    if sector:
+        intel_query_parts.append(sector)
+    context = _attach_shared_intel_news_report(
+        context,
+        config,
+        query=" ".join(dict.fromkeys(part for part in intel_query_parts if part)),
+        explicit_symbol=symbol,
+        note_prefix="stock_analysis intel: ",
+    )
+    analysis = analyze_opportunity(symbol, asset_type, config, context=context, today_mode=effective_today_mode)
     _attach_signal_confidence([analysis], config, limit=1)
     analysis["portfolio_overlap_summary"] = build_candidate_portfolio_overlap_summary(analysis, config)
     if runtime_notes:
@@ -98,7 +166,7 @@ def run_stock_analysis(
             if item not in notes:
                 notes.append(item)
         analysis["notes"] = notes
-    visuals = AnalysisChartRenderer().render(analysis)
+    visuals = AnalysisChartRenderer(render_theme_variants=client_final).render(analysis)
     analysis["visuals"] = visuals
     report = OpportunityReportRenderer().render_scan(analysis, visuals=visuals)
     return report, analysis

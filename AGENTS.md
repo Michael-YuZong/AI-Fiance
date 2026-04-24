@@ -26,6 +26,7 @@
 只有任务相关时再继续读：
 
 - 配置问题：看 [config/README.md](./config/README.md)
+- 高频 workflow skills：看 `[.codex/skills/ai-finance-report-final/SKILL.md](./.codex/skills/ai-finance-report-final/SKILL.md)`、`[.codex/skills/ai-finance-tushare-rollout/SKILL.md](./.codex/skills/ai-finance-tushare-rollout/SKILL.md)`
 - `Tushare 10000 分` 接口升级：看 [docs/plans/tushare_10000.md](./docs/plans/tushare_10000.md)
 - `strategy`：看 [docs/plans/strategy.md](./docs/plans/strategy.md)
 - 强因子维护：看 [docs/plans/strong_factors.md](./docs/plans/strong_factors.md)
@@ -140,7 +141,7 @@
 ## Current Priority Backlog
 
 1. `Tushare 10000 分` 数据源升级与旧接口替换
-   优先把新解锁的高价值接口接进 mature 主链，并替换旧的低配或不稳定路径。股票链 `ths_member / st / stk_high_shock / stk_alert / cyq_perf / cyq_chips / 个股资金流向 / 两融 / 龙虎榜-竞价-涨跌停边界 / broker_recommend / e互动` 已打通到 `scan / stock_analysis / stock_pick / briefing`；ETF 链 `etf_basic / etf_index / etf_share_size / fund_factor_pro / idx_factor_pro` 也已进入主路径。接下来默认优先做被覆盖旧链的系统性退场、`index_weekly / index_monthly` 这类已接 helper 的成熟消费，以及第二阶段 backlog（`daily_info / sz_daily_info / stk_factor_pro / stk_surv / stk_ah_comparison / fx_basic / fx_daily / fund_sales_ratio / cb_basic / cb_daily / cb_factor_pro / sge_basic / sge_daily`）的正式排期。专项路线见 [docs/plans/tushare_10000.md](./docs/plans/tushare_10000.md)。
+   优先把新解锁的高价值接口接进 mature 主链，并替换旧的低配或不稳定路径。股票链 `ths_member / st / stk_high_shock / stk_alert / cyq_perf / cyq_chips / 个股资金流向 / 两融 / 龙虎榜-竞价-涨跌停边界 / broker_recommend / e互动` 已打通到 `scan / stock_analysis / stock_pick / briefing`；ETF 链 `etf_basic / etf_index / etf_share_size / fund_factor_pro / idx_factor_pro` 也已进入主路径。默认分析合同现已分叉：`cn_stock` 先看公司 + 板块/主题/行业行情与资金承接，不默认跑指数专题；`cn_etf / cn_index / 被动或联接类 cn_fund` 继续保留指数主线、`周月节奏` 和跟踪指数技术状态；主动基金回到基金经理、持仓和风格暴露主线。接下来默认优先做被覆盖旧链的系统性退场、`index_weekly / index_monthly` 这类已接 helper 的成熟消费，以及第二阶段 backlog（`daily_info / sz_daily_info / stk_factor_pro / stk_surv / stk_ah_comparison / fx_basic / fx_daily / fund_sales_ratio / cb_basic / cb_daily / cb_factor_pro / sge_basic / sge_daily`）的正式排期。专项路线见 [docs/plans/tushare_10000.md](./docs/plans/tushare_10000.md)。
 2. 事件消化与研究理解
    把财报 / 公告 / 政策 / 交易所 / IR / 媒体报道这类情报从“抓到”推进到“解释”；优先补事件分层、重要性排序、共享解释层，以及 `财报摘要 / 公告类型 / 政策影响层 + impact_summary + thesis_scope` 的正式合同。
 3. 研究记忆与 thesis ledger
@@ -161,36 +162,22 @@
 
 ## Recent Contract Summary
 
-这里只保留会影响默认开发判断的短摘要；逐日 log 已移到 history 文档。
+这里只保留会影响默认开发判断的短摘要；逐日 log 放到 history 文档，不再堆在这里。
 
-- 2026-04-01：情报链 v1 已收口到 mature 主链，`briefing / scan / stock_analysis / stock_pick / etf_pick / fund_pick` 都已统一到 client-safe 口径与多条相关情报合同。
-- 2026-04-01：`briefing` 已转成“情报总台”写法，优先广覆盖、多外链、多源情报，不再只靠单条 lead item。
-- 2026-04-01：`briefing` 的主情报顺序已进一步收紧为 `A股盘面/热股/观察池 > 外部新闻补充`；盘面行默认带 `信号类型 / 强弱 / 结论`，`briefing_light` 也改成国内盘面优先，避免 Reuters/Bloomberg 宏观标题继续挤掉 A 股热点。
-- 2026-04-01：`briefing / market_drivers / market_pulse` 已补第一版 freshness 合同：`industry_spot / concept_spot / hot_rank / zt_pool / strong_pool / dt_pool` 现在都会显式带 `as_of / latest_date / is_fresh`，`briefing` 只会把 fresh same-day 的 A 股盘面快照前置成“今日信号”；这类高速盘面源也已禁用抓取失败后的 stale cache 回退，避免旧盘面冒充今天结论。
-- 2026-04-01：上面这条 freshness 合同又继续收紧到“同日快盘面不复用缓存”：`industry_spot / concept_spot / hot_rank / zt_pool / strong_pool / dt_pool` 在当天默认 live fetch，不再复用盘中缓存冒充收盘后盘面；`briefing` 的 `_timed_collect` 也改成 daemon-thread timeout，避免超时降级后后台线程继续拖住 `client-final`。
-- 2026-04-01：用户把 Tushare 升到 `10000` 分后，`briefing / market_drivers` 已改成真实优先走 `ths_index + ths_daily` 的同花顺主题/行业盘面，不再默认把 `AKShare board spot` 当主链；`ths_hot` 也不再错误按 `market=A / trade_date` 调空结果，而是改成“全量拉取 -> 过滤 A 股 -> 取最新交易日 + 最新时点”的热股快照。
-- 2026-04-03：`10000` 分升级仍是 repo 级优先主线；股票专题已基本收口，ETF 主链的 `etf_share_size / fund_factor_pro / idx_factor_pro` 也已进入共享 collector + processor + renderer + guard 路径，`etf_pick / scan / compare` 已能同时写出 `跟踪指数 + 份额变化 + 场内基金技术状态 + 外部情报状态`。默认下一步优先做已被覆盖旧链的系统性退场，以及 `index_weekly / index_monthly` 的成熟消费。
-- 2026-04-02：股票链已把 `broker_recommend` 接进共享 collector，并下沉到 `scan / stock_analysis / stock_pick / briefing` 的 `卖方共识热度 / 卖方一致预期过热 / 推荐理由 / 风险提示 / 观察点`；历史月份名单现在显式按 `stale` 披露，不会再伪装成 fresh 共识升温。
-- 2026-04-02：股票链已把 `上证e互动 / 深证互动易` 接进共享 `news` collector，并下沉到 `scan / stock_analysis / stock_pick / briefing` 的 `结构化事件 / 关键证据 / 事件消化 / What Changed`；即使全局新闻走 `proxy/empty`，个股级 `e互动` 也会继续拉取，但只按“补充证据”处理，不会冒充正式公告或 same-day fresh 强催化。
-- 2026-04-01：ETF 链已开始切到 ETF 专用合同：`fund_profile` 现在会补 `etf_snapshot`，显式带 `跟踪指数 / 指数代码 / 交易所 / ETF类型 / 最新份额规模`；`scan` 与 `etf_pick` 的客户稿也已把 `基金画像 / ETF专用信息 / 持仓 / 行业暴露` 作为保功能门禁的一部分，不允许后续开发静默吞掉。
-- 2026-04-03：ETF phase 2 的 `fund_factor_pro` 已接进共享 `fund_profile` collector，并下沉到 `opportunity_engine / etf_pick / scan / client_report / opportunity_report`；客户稿里的 `场内基金技术状态` 现在会显式写出 `趋势/动能 + 日期`，`release_check` 也已补保功能门禁，后续改动不能再把这块静默吞掉。
-- 2026-04-03：ETF phase 2 的剩余缺口也已收口：`etf_share_size` 默认会拉近 7 个开盘日做两点变化，`etf_pick` 的“为什么先看它”和 `compare` 的 `ETF产品层对比` 会把 `跟踪指数 + 份额变化 + 外部情报状态` 一起写出来；`config/config.etf_pick_fast.yaml` 也改成默认保留 `light fund_profile`，不再把 ETF 产品层静默关掉。
-- 2026-04-03：`briefing / stock_pick` 的正式稿现已把 `broker_recommend` 抬到可见证据层；`e互动` 能力也已接进主链，但只在当天真实命中 IR 证据时才允许写进 final，不要为了“展示新功能”硬塞假条目。
-- 2026-04-03：`stock_analysis` 的 PDF 首屏布局已补分页：首页判断层与 `## 一句话结论` 之间默认强制打印分页，避免 PDF 首页把执行摘要挤成一团。
-- 2026-04-03：`briefing / market_event_rows` 的盘面标签已补正负过滤：负涨幅行业和概念不再被写成 `走强 / 领涨`，共享层会按 `承压` 处理。
-- 2026-04-03：`Tushare 10000 分` 计划已补出第二阶段 backlog：`daily_info / sz_daily_info / stk_factor_pro / stk_surv / stk_ah_comparison / fx_basic / fx_daily / fund_sales_ratio / cb_basic / cb_daily / cb_factor_pro / sge_basic / sge_daily` 当前都属于“已解锁、未接、也未排期”的下一批候选接口。
-- 2026-04-01：`briefing --client-final` 现在默认关闭 query-group 搜索回填，优先用 `Tushare market intelligence + 广覆盖 RSS` 完成情报补齐，避免晨报正式稿再次被搜索慢链拖住。
-- 2026-04-01：`briefing` 这套 `signal_type / signal_strength / signal_conclusion` 现已下沉到共享 `event_digest`；`scan / stock_analysis / stock_pick / etf_pick / fund_pick` 的首页 `关键新闻 / 关键证据`、正文 `事件消化` 和证据行都会显式写出“这条情报是什么、强弱如何、当前偏什么结论”，不再只贴标题。
-- 2026-04-01：`stock_pick` observe-only 信息密度已补回，重新保留 `第二批`、`低门槛继续跟踪`、`代表样本复核卡`。
-- 2026-04-02：股票链第一批 `ths_member + st / stk_high_shock / stk_alert` 已接进共享 collector 合同，并下沉到 `scan / stock_analysis / stock_pick / briefing`；这批字段默认都带 `source / as_of / fallback / disclosure`，权限失败/空表/频控时按缺失处理，不再把空结果写成 fresh 命中或“已通过”。
-- 2026-04-02：股票链第二批 `cyq_perf / cyq_chips` 已接进共享筹码快照合同，并下沉到 `scan / stock_analysis / stock_pick / briefing`；如果最新可用筹码日期不是当前交易日，就必须显式标成 `stale / 非当期`，不能把旧筹码写成当天资金确认或 fresh 命中。
-- 2026-04-02：股票链第三批已把 `moneyflow / margin_detail / top_list / top_inst / stk_auction / stk_limit / limit_list_d` 接进共享 collector 合同，并通过 `ths_member + moneyflow_ind_ths / moneyflow_cnt_ths` 做个股主题资金流代理；`scan / stock_analysis / stock_pick / briefing` 现在都会真实消费 `个股资金承接 / 两融拥挤 / 龙虎榜-竞价-涨跌停边界`，把它写进排序、推荐理由、风险提示、关键证据和事件消化。
-- 2026-04-02：上面这批股票 P1 数据默认都带 `source / as_of / latest_date / fallback / disclosure`；权限失败、空表、频控或非当期明细会显式降成 `缺失 / stale / 观察`，不再把旧两融、旧资金流或空的打板专题写成当天 fresh 命中。
-- 2026-04-02：指数/行业标准链第一批已接进共享 `industry_index` collector：`market_drivers.industry_spot` 现在优先走 `申万行业指数 -> 中信行业指数 -> ths 行业盘面 -> AKShare board`，不再让 `AKShare board spot` 充当默认行业主链；`scan / stock_analysis / stock_pick / etf_pick / briefing` 也开始直接消费 `申万/中信行业框架`，不再主要靠 `sector / chain_nodes / 板块名字符串` 模糊匹配。
-- 2026-04-02：指数专题主链第二批已接进共享 `index_topic` collector：`index_basic / index_dailybasic / index_weight / index_daily / idx_factor_pro / index_global` 现在会统一进入 `valuation / market_cn / market_overview`，并继续下沉到 `scan / stock_analysis / stock_pick / etf_pick / briefing`；这批路径默认都带 `source / as_of / is_fresh / fallback / disclosure`，不再把 `AKShare` 或 `yfinance` 写成默认指数主链。
-- 2026-03-31：`scan / etf_pick / fund_pick / stock_analysis / stock_pick` 的内部 miss 诊断语已从客户稿清掉，空情报窗口统一改成 client-safe 表达。
-- 2026-03-29：连续研究主线已从“有状态”推进到“有队列 / 有复查动作 / 有 What Changed / 有 thesis_state.v1”。
-- 2026-03-28：`strategy` 多标的 validate / experiment 已真实落到正式稿，但当前定位仍是后台置信度层，而不是独立大产品。
+- `briefing / scan / stock_analysis / stock_pick / etf_pick / fund_pick` 现在都按“情报链”口径写作：多条相关情报、`signal_type / signal_strength / signal_conclusion`、client-safe 空情报窗口已进入共享层。
+- `briefing / market_drivers / market_pulse` 已承认 same-day freshness 合同；空 frame 不再写成 fresh，负涨幅行业/概念也不会再被写成 `走强 / 领涨`。
+- `Tushare 10000 分` 第一阶段已基本收口：股票、指数/行业、ETF 非实时主链都已切到 `Tushare-first`；当前重点改成退已被覆盖的 `AKShare` 旧链、统一 `index_weekly / index_monthly` 的可见写法，并推进第二阶段 backlog。
+- 默认分析合同已正式分叉：个股主链不再把指数专题当默认补充层，优先写公司、板块/主题、行业行情和资金承接；ETF / 指数 / 被动或联接类基金保留 `index_topic_bundle / 周月节奏 / 跟踪指数技术状态` 这套指数主线；主动基金回到基金经理、持仓和风格暴露主线。这套主动/被动判断现已抽成共享 helper，并已下沉到 `scan / stock_analysis / fund_pick / compare / renderer`，后续不要再在命令层各写一版启发式。
+- `stock_analysis / scan` 的单标的个股 detailed 现在明确拆成两层：首屏继续只回答 `看不看 / 怎么触发 / 多大仓位 / 哪里止损`，正文前段新增 `公司研究层判断`，单独解释“公司/赛道还值不值得跟”“基本面低分怎么理解”“为什么还不适合中线重仓”。`基本面低分` 默认解释成当前位置/性价比不足，不再默认等同于公司价值判死；同时个股观察稿首屏也必须直接落当前触发位 / 观察仓上限 / 失效位，不再允许退回“先别给精确买点 / 不先给机械止损位”这类泛化提示；ETF / 基金 detailed 仍不进入这层公司研究口径。
+- `etf_pick --client-final` 当前已回到单一路径：不再复用 same-day internal/payload 快路径，也不再对入围 ETF 逐只做 full reanalysis 慢链；现在统一走 `discover -> hydrate full profile for finalists -> refresh shared ETF report fields -> finalize/export`。后续如果要提速，优先修共享 export/runtime，不要再补回旧 bundle 复用分支。
+- `stock_pick / briefing --client-final` 当前也已回到单一路径：仍会落 `payload / editor_payload / prompt` 侧车做审计与 continuity，但默认不再复用 same-day `internal -> finalize/export` 或 `editor fallback` 捷径。后续如果要提速，优先修共享 collector/runtime/export，不要再补回私有复用分支。
+- `stock_pick / stock_analysis / scan` 的 `theme_playbook` 现在默认按“结构化 metadata 优先”收主题：先看 `sector / industry / industry_framework_label / tushare_theme_industry / chain_nodes`，只有 `day_theme` 与个股真实行业对齐时，才允许把它抬成个股主线；`business_scope` 这类超长经营范围默认不再直接参与主题归因，避免把 `旅游 / 餐饮 / 再生资源` 之类噪音误写成个股主题边界。
+- `stock_analysis / scan` 的单标的直跑链这轮也补上了同一套 shared contract：`cn_stock` 在已有标准行业时，`_merge_metadata(...)` 先按 `industry / sector` 做 broad sector 和 chain 节点归因，只有行业仍缺失时才让 `main_business / business_scope / company_intro` 做 fallback。`000792` 的真实 spot check 已确认这能把错误的 `光伏主链` 拉回 `农业 / 种植链`，且 `client-final` 的 `事件消化 / What Changed / 分数口径` 已重新对齐并可交付。
+- `stock_analysis / scan` 的主题收口这轮又补了一层“行业层旧 context 不得压住公司画像重算”合同：如果现成 `theme_playbook` 还只是 sector-level，占位旧上下文不能直接复用；共享 `_subject_theme_context(...)` 必须结合 `business_scope / company_intro` 再重算一次。同样重要的是，新算出来的细主题只有落在该硬行业的默认 bridge 里才允许升级；否则继续退回行业层，避免 `600096` 这类农业票被公司简介里的 `新能源 / 新材料` 反向带偏。真实 spot check 里，`002709` 已能从泛 `材料` 升成 `锂电`，而 `600096 / 000792` 仍稳定停在 `农业 / 种植链`。
+- `etf_pick` 这轮也补上了 ETF 专属主题归因与 payload 合同：`winner` 现在必须把 `fund_profile / theme_playbook` 一起写入 `payload/editor_payload`，不能只留 `fund_sections`；共享 `_subject_theme_context(...)` 对 `cn_etf / cn_fund / cn_index` 会优先按 `跟踪指数 / 业绩比较基准 / sector / industry_framework_label` 识别主题，不再让 `chain_nodes` 里像 `消费电子零部件及组装 / 电子` 这类噪音把消费 ETF 首页误写成 `信息技术 / AI硬件链`。
+- ETF phase 2 已进入稳定消费：`etf_share_size / fund_factor_pro / idx_factor_pro` 已能在 `etf_pick / scan / compare` 中同时写出 `跟踪指数 + 份额变化 + 场内基金技术状态 + 外部情报状态`。
+- `broker_recommend` 与 `上证e互动 / 深证互动易` 已接进共享主链；正式稿只在真实命中时展示，不允许为了“展示新功能”硬塞假证据。
+- `stock_pick observe-only`、`ETF/基金画像`、`持仓/行业暴露` 等高价值块已进入保功能门禁；任何开发改动默认都不能静默吞掉它们。
 
 ## Strategy Status
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 import io
+import json
 import re
 import threading
 import warnings
@@ -31,6 +32,7 @@ from src.collectors import (
     SocialSentimentCollector,
 )
 from src.commands.final_runner import finalize_client_markdown, internal_sidecar_path
+from src.commands.intel import build_news_report_from_intel_payload, collect_intel_news_report
 from src.output.briefing import BriefingRenderer
 from src.output.client_report import ClientReportRenderer
 from src.output.catalyst_web_review import (
@@ -133,11 +135,19 @@ THEME_ASSET_PREFERENCES = {
     "rate_growth": ["美股科技", "港股科技", "成长股", "长久期资产"],
     "power_utilities": ["电力电网", "公用事业", "高股息配套"],
     "china_policy": ["电网基建", "央国企链", "内需顺周期", "高股息配套"],
-    "ai_semis": ["半导体", "算力硬件", "通信", "AI应用"],
+    "ai_semis": ["半导体", "算力硬件", "光模块/CPO", "先进封装/HBM"],
 }
 
 DEFENSIVE_THEMES = {"energy_shock", "gold_defense", "dividend_defense", "defensive_riskoff"}
 STRUCTURAL_THEMES = {"broad_market_repair", "power_utilities", "china_policy", "rate_growth", "ai_semis"}
+FAST_STRUCTURED_STOCK_INTELLIGENCE_APIS = [
+    "forecast",
+    "express",
+    "dividend",
+    "stk_surv",
+    "irm_qa_sh",
+    "irm_qa_sz",
+]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -517,20 +527,8 @@ def _briefing_a_share_watch_rows(
             effective_config["news_topic_search_enabled"] = False
         if str(effective_config.get("stock_news_runtime_mode", "") or "").strip().lower() != "structured_only":
             effective_config["stock_news_runtime_mode"] = "structured_only"
-        if list(effective_config.get("structured_stock_intelligence_apis") or []) != [
-            "forecast",
-            "express",
-            "dividend",
-            "irm_qa_sh",
-            "irm_qa_sz",
-        ]:
-            effective_config["structured_stock_intelligence_apis"] = [
-                "forecast",
-                "express",
-                "dividend",
-                "irm_qa_sh",
-                "irm_qa_sz",
-            ]
+        if list(effective_config.get("structured_stock_intelligence_apis") or []) != FAST_STRUCTURED_STOCK_INTELLIGENCE_APIS:
+            effective_config["structured_stock_intelligence_apis"] = list(FAST_STRUCTURED_STOCK_INTELLIGENCE_APIS)
         if int(effective_config.get("stock_news_limit", 10) or 10) > 4:
             effective_config["stock_news_limit"] = 4
         effective_config["skip_catalyst_dynamic_search_runtime"] = True
@@ -1088,14 +1086,17 @@ def _briefing_news_backfill_groups(
     energy = _board_name(frame, ["石油", "油气", "煤炭", "能源"], "能源/油气")
     power = _board_name(frame, ["电网", "电力", "公用事业"], "电力/电网")
     dividend = _board_name(frame, ["银行", "公用事业", "煤炭", "红利"], "高股息/红利")
-    tech = _board_name(frame, ["半导体", "通信", "IT服务", "消费电子", "软件"], "AI算力链")
+    tech = _board_name(frame, ["半导体", "光模块", "CPO", "液冷", "消费电子", "通信", "存储"], "AI硬件链")
 
     if any(token in snapshot_blob for token in ("创新药", "医药", "制药", "药")):
         _add_group("创新药 医药 A股 大涨", "创新药 医药 财联社")
         _add_group("创新药 license-out 临床 授权", "港股创新药ETF 医药 催化")
-    if any(token in snapshot_blob for token in ("人工智能", "ai", "半导体", "芯片", "算力", "光模块")):
+    if any(token in snapshot_blob for token in ("人工智能", "ai", "半导体", "芯片", "算力", "光模块", "cpo", "液冷", "存储", "pcb")):
         _add_group("智谱 大模型 agent A股", "AI 应用 国产模型")
         _add_group("新易盛 光模块 算力 A股", "CPO 光模块 财联社")
+        _add_group("液冷 PCB 服务器 A股", "AI 硬件链 财联社")
+    if any(token in snapshot_blob for token in ("软件", "应用", "模型", "agent", "智谱", "kimi", "deepseek")):
+        _add_group("智谱 大模型 agent A股", "AI 应用 国产模型")
     if any(token in snapshot_blob for token in ("有色", "黄金", "贵金属", "金属")):
         _add_group("有色 铜 金属 A股", "铜价 金价 金属 风险偏好")
     _add_group("中东 停火 风险偏好", "ceasefire middle east market")
@@ -1106,8 +1107,8 @@ def _briefing_news_backfill_groups(
     if theme in {"energy_shock", "power_utilities"} or any(token in energy + power for token in ("能源", "油气", "电力", "电网")):
         _add_group("原油 能源 OPEC", "oil energy market")
         _add_group("电力 电网 公用事业", "utilities power grid")
-    if theme in {"ai_semis", "rate_growth"} or any(token in tech for token in ("半导体", "AI", "算力")):
-        _add_group("AI 半导体 算力", "semiconductor ai market")
+    if theme in {"ai_semis", "rate_growth"} or any(token in tech for token in ("半导体", "光模块", "CPO", "液冷", "存储", "算力")):
+        _add_group("AI 硬件链 半导体 光模块", "semiconductor ai hardware market")
     if theme in {"broad_market_repair", "china_policy"}:
         _add_group("券商 宽基 修复", "A股 宽基 修复")
     for name, _ in _top_named_movers(
@@ -1137,6 +1138,88 @@ def _briefing_news_backfill_groups(
     return groups
 
 
+def _briefing_priority_backfill_queries(
+    news_report: Mapping[str, Any],
+    query_groups: Sequence[Sequence[str]],
+) -> List[str]:
+    report = dict(news_report or {})
+    if list(report.get("items") or []):
+        return []
+
+    proxy_lines = [str(line).strip() for line in list(report.get("lines") or []) if str(line).strip()]
+    if not proxy_lines:
+        return []
+    joined = " ".join(proxy_lines).lower()
+
+    priority_tokens: List[str] = []
+    explicit_queries: List[str] = []
+    if any(
+        token in joined
+        for token in (
+            "[能源与地缘]".lower(),
+            "[国际局势]".lower(),
+            "国际局势",
+            "地缘",
+            "中东",
+            "停火",
+            "休战",
+            "风险偏好",
+            "风险资产",
+            "原油",
+            "黄金",
+            "ceasefire",
+            "truce",
+            "geopolitics",
+            "oil",
+            "gold",
+        )
+    ):
+        priority_tokens.extend(["中东", "停火", "休战", "ceasefire", "truce", "geopolitics", "原油", "黄金"])
+        explicit_queries.extend(
+            [
+                "美伊 停火 中东 风险偏好 财联社 Reuters",
+                "伊朗 以色列 停火 休战 原油 黄金 财联社 Reuters",
+            ]
+        )
+
+    if any(
+        token in joined
+        for token in (
+            "fed",
+            "federal reserve",
+            "yield",
+            "利率",
+            "降息",
+            "债券",
+        )
+    ):
+        priority_tokens.extend(["fed", "federal reserve", "利率", "降息", "yield"])
+        explicit_queries.append("美联储 降息 利率预期 风险偏好 Reuters 财联社")
+
+    if not priority_tokens:
+        return []
+
+    prioritized: List[str] = []
+    seen: set[str] = set()
+    for query in explicit_queries:
+        normalized = str(query).strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            prioritized.append(normalized)
+    for group in query_groups:
+        terms = [str(term).strip() for term in list(group or []) if str(term).strip()]
+        if not terms:
+            continue
+        haystack = " ".join(terms).lower()
+        if not any(token in haystack for token in priority_tokens):
+            continue
+        query = " ".join(terms).strip()
+        if query and query not in seen:
+            seen.add(query)
+            prioritized.append(query)
+    return prioritized[:2]
+
+
 def _backfill_briefing_news_report(
     news_report: Mapping[str, Any],
     *,
@@ -1146,9 +1229,84 @@ def _backfill_briefing_news_report(
     pulse: Mapping[str, Any] | None = None,
     snapshots: Sequence[BriefingSnapshot] | None = None,
 ) -> Dict[str, Any]:
+    def _primary_query(groups: Sequence[Sequence[str]]) -> str:
+        terms: List[str] = []
+        seen: set[str] = set()
+        for group in list(groups or [])[:2]:
+            for term in group:
+                normalized = str(term).strip()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                terms.append(normalized)
+                if len(terms) >= 4:
+                    return " ".join(terms).strip()
+        return " ".join(terms).strip()
+
+    def _dedupe_news_items(items: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+        deduped: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            title = str(item.get("title") or "").strip()
+            source = str(item.get("source") or item.get("configured_source") or "").strip()
+            link = str(item.get("link") or "").strip()
+            if not title:
+                continue
+            key = (title, source, link)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(dict(item))
+        return deduped
+
+    def _group_covered(group: Sequence[str], items: Sequence[Mapping[str, Any]]) -> bool:
+        haystacks = [
+            " ".join(
+                part
+                for part in (
+                    str(dict(item).get("title") or "").strip(),
+                    str(dict(item).get("note") or "").strip(),
+                    str(dict(item).get("category") or "").strip(),
+                )
+                if part
+            )
+            for item in items
+            if isinstance(item, Mapping)
+        ]
+        query_terms = [str(term).strip() for term in group if len(str(term).strip()) >= 2]
+        if not haystacks or not query_terms:
+            return False
+        return any(any(term in haystack for term in query_terms) for haystack in haystacks)
+
+    def _grouped_summary_rows(items: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+        counts: Counter[str] = Counter()
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            bucket = str(dict(item).get("theme_bucket") or "综合/其他").strip() or "综合/其他"
+            counts[bucket] += 1
+        return [{"label": label, "count": count} for label, count in counts.most_common(3)]
+
+    def _source_tier_rows(items: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+        counts: Counter[tuple[str, str]] = Counter()
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            payload = dict(item)
+            tier = str(payload.get("source_tier") or "search_fallback").strip() or "search_fallback"
+            label = str(payload.get("source_tier_label") or tier).strip() or tier
+            counts[(tier, label)] += 1
+        return [
+            {"tier": tier, "label": label, "count": count}
+            for (tier, label), count in counts.most_common(3)
+        ]
+
     report = dict(news_report or {})
     current_items = list(report.get("items") or [])
-    if len(current_items) >= 3:
+    linked_current_items = [item for item in current_items if str(dict(item).get("link") or "").strip()]
+    if len(linked_current_items) >= 2 or (len(current_items) >= 3 and linked_current_items):
         return report
 
     query_groups = _briefing_news_backfill_groups(
@@ -1159,86 +1317,113 @@ def _backfill_briefing_news_report(
     )
     if not query_groups:
         return report
-
-    preferred_sources = ["财联社", "证券时报", "上海证券报", "中国证券报", "Reuters", "Bloomberg"]
-    merged = list(current_items)
-    query_terms = [item for group in query_groups for item in group]
+    priority_queries = _briefing_priority_backfill_queries(report, query_groups)
+    structured_only = not bool(config.get("briefing_search_backfill_enabled", True))
+    merged_items = list(current_items)
+    merged_ranked_items = list(report.get("all_items") or current_items)
+    source_list = [str(item).strip() for item in list(report.get("source_list") or []) if str(item).strip()]
     notes: List[str] = []
+    disclosure = str(report.get("disclosure") or "").strip()
+    attempts: List[str] = []
 
-    collector = NewsCollector(deepcopy(dict(config or {})))
+    def _merge_intel_report(intel_report: Mapping[str, Any], *, prioritize: bool = False) -> None:
+        nonlocal disclosure
+        group_items = [dict(item) for item in list(intel_report.get("items") or []) if isinstance(item, Mapping)]
+        if group_items:
+            if prioritize:
+                merged_items[:0] = group_items
+            else:
+                merged_items.extend(group_items)
+        group_ranked_items = [
+            dict(item) for item in list(intel_report.get("all_items") or group_items) if isinstance(item, Mapping)
+        ]
+        if group_ranked_items:
+            if prioritize:
+                merged_ranked_items[:0] = group_ranked_items
+            else:
+                merged_ranked_items.extend(group_ranked_items)
+        group_sources = [str(item).strip() for item in list(intel_report.get("source_list") or []) if str(item).strip()]
+        for item in group_sources:
+            if item not in source_list:
+                source_list.append(item)
+        note = str(intel_report.get("note") or "").strip()
+        if note:
+            notes.append(note)
+        if not disclosure:
+            disclosure = str(intel_report.get("disclosure") or "").strip()
 
-    try:
-        tushare_hits = collector.get_market_intelligence(
-            query_terms,
-            limit=6,
-            recent_days=10,
-        )
-    except Exception:
-        tushare_hits = []
-    if tushare_hits:
-        merged.extend(tushare_hits)
-        notes.append("已按 Tushare 市场情报回填。")
-
-    broad_feed_config = deepcopy(dict(config or {}))
-    broad_feed_config["news_feeds_file"] = "config/news_feeds.yaml"
-    broad_feed_collector = NewsCollector(broad_feed_config)
-    try:
-        broad_feed_report = broad_feed_collector.collect(
-            snapshots=[],
-            china_macro={},
-            global_proxy={},
-            preferred_sources=preferred_sources,
-        )
-    except Exception:
-        broad_feed_report = {}
-    broad_feed_hits = list((broad_feed_report or {}).get("items") or [])
-    if broad_feed_hits:
-        merged.extend(broad_feed_hits)
-        notes.append("已按广覆盖 RSS 情报池回填。")
-
-    linked_items = [item for item in merged if str(item.get("link") or "").strip()]
-    should_search_backfill = bool(config.get("briefing_search_backfill_enabled", True)) and (
-        len(merged) < 6 or len(linked_items) < 2
-    )
-    if should_search_backfill:
-        search_config = deepcopy(dict(config or {}))
-        search_config["news_topic_search_enabled"] = True
-        search_collector = NewsCollector(search_config)
+    def _collect_query(query: str, *, prioritize: bool = False) -> None:
+        if not query or query in attempts:
+            return
+        attempts.append(query)
         try:
-            hits = search_collector.search_by_keyword_groups(
-                query_groups[:4],
-                preferred_sources=preferred_sources,
-                limit=4,
-                recent_days=5,
+            intel_report = collect_intel_news_report(
+                query,
+                config=config,
+                limit=6,
+                recent_days=10,
+                structured_only=structured_only,
+                note_prefix="briefing 共享 intel 回填",
             )
         except Exception:
-            hits = []
-        if hits:
-            merged.extend(hits)
-            notes.append("已按宏观/主题 query groups 搜索回填。")
+            return
+        _merge_intel_report(intel_report, prioritize=prioritize)
 
-    if not merged:
+    for query in priority_queries:
+        _collect_query(query, prioritize=True)
+        if len(_dedupe_news_items(merged_items)) >= 2:
+            break
+
+    primary_query = _primary_query(query_groups)
+    if primary_query:
+        _collect_query(primary_query)
+
+    if not structured_only and len(_dedupe_news_items(merged_items)) < 4 and len(query_groups) > 1:
+        uncovered_groups = [group for group in query_groups if not _group_covered(group, merged_items)]
+        fallback_groups = uncovered_groups or list(query_groups)
+        for group in fallback_groups[:2]:
+            query = " ".join(str(term).strip() for term in group if str(term).strip()).strip()
+            if not query:
+                continue
+            _collect_query(query)
+            if len(_dedupe_news_items(merged_items)) >= 6:
+                break
+
+    merged_items = _dedupe_news_items(merged_items)
+    if not merged_items:
         return report
 
-    ranked = broad_feed_collector._rank_items(
-        broad_feed_collector._filter_candidate_items(merged, recent_days=10),
-        preferred_sources=preferred_sources + ["Tushare"],
-        query_keywords=query_terms,
-    )
-    selected = broad_feed_collector._diversify_items(ranked, 6)
-    if not selected:
-        return report
+    merged_ranked_items = _dedupe_news_items(merged_ranked_items or merged_items)
+    intel_payload = {
+        "items": merged_items,
+        "ranked_items": merged_ranked_items,
+        "grouped_items": _grouped_summary_rows(merged_items),
+        "source_tiers": _source_tier_rows(merged_items),
+        "cluster_count": len(merged_items),
+        "source_list": sorted(source_list),
+        "note": "；".join(note for note in notes if note).strip(),
+        "disclosure": disclosure or "共享 intel 回填按缺失处理；空表、旧日期或权限失败不会伪装成 fresh 命中。",
+    }
+    intel_report = build_news_report_from_intel_payload(intel_payload, note_prefix="briefing 共享 intel 回填")
+    latest_as_of = None
+    latest_as_of_text = ""
+    for item in merged_items:
+        candidate_text = str(item.get("published_at") or item.get("date") or item.get("as_of") or "").strip()
+        if not candidate_text:
+            continue
+        candidate_ts = pd.to_datetime(candidate_text, errors="coerce")
+        if pd.isna(candidate_ts):
+            continue
+        if latest_as_of is None or candidate_ts > latest_as_of:
+            latest_as_of = candidate_ts
+            latest_as_of_text = candidate_text
+    if latest_as_of_text:
+        intel_report["as_of"] = latest_as_of_text
+    intel_report["fallback"] = "intel_shared_upstream"
 
-    report.update(
-        {
-            "mode": "live",
-            "items": selected,
-            "all_items": ranked,
-            "lines": broad_feed_collector._live_lines(selected),
-            "source_list": sorted(broad_feed_collector._present_sources(selected)),
-            "note": "轻量 RSS 未命中足够情报，" + "".join(notes),
-        }
-    )
+    report.update(intel_report)
+    if disclosure:
+        report["disclosure"] = disclosure
     return report
 
 
@@ -1719,10 +1904,10 @@ def _theme_watch_keywords(theme: str) -> List[str]:
         "dividend_defense": ["高股息", "红利", "银行", "公用事业", "电力"],
         "defensive_riskoff": ["黄金", "贵金属", "红利", "高股息", "公用事业", "电力"],
         "broad_market_repair": ["宽基", "沪深300", "中证1000", "中证2000", "A500", "券商", "银行", "510", "1599"],
-        "rate_growth": ["科技", "纳指", "QQQM", "HSTECH", "港股科技", "成长", "半导体", "AI"],
+        "rate_growth": ["科技", "纳指", "QQQM", "HSTECH", "港股科技", "成长", "软件", "互联网"],
         "power_utilities": ["电网", "电力", "公用事业", "储能", "逆变器", "561380"],
         "china_policy": ["电网", "基建", "央国企", "建筑", "工程", "中字头", "高股息", "银行"],
-        "ai_semis": ["半导体", "芯片", "算力", "通信", "AI", "科技"],
+        "ai_semis": ["半导体", "芯片", "算力", "光模块", "CPO", "液冷", "存储", "PCB"],
     }
     return mapping.get(theme, [])
 
@@ -1825,6 +2010,12 @@ def _primary_narrative(
     gld = _find_snapshot(snapshots, "GLD")
     grid = _find_snapshot(snapshots, "561380")
     broad = _find_snapshot(snapshots, "510210") or _find_snapshot(snapshots, "510300")
+    chip_snapshots = [
+        _find_snapshot(snapshots, "588200"),
+        _find_snapshot(snapshots, "512480"),
+        _find_snapshot(snapshots, "159516"),
+        _find_snapshot(snapshots, "515070"),
+    ]
 
     tech_1d = 0.0
     if qqqm:
@@ -1836,6 +2027,11 @@ def _primary_narrative(
     dividend_1d = _sector_avg_return(snapshots, "高股息")
     broad_1d = broad.return_1d if broad else _sector_avg_return(snapshots, "宽基")
     broad_5d = broad.return_5d if broad else _sector_avg_return(snapshots, "宽基", field="return_5d")
+    hardtech_proxy_hits = sum(
+        1
+        for snapshot in chip_snapshots
+        if snapshot and (snapshot.return_1d >= 0.015 or snapshot.return_5d >= 0.08)
+    )
 
     scores = {
         "energy_shock": 0,
@@ -1924,10 +2120,14 @@ def _primary_narrative(
         scores["china_policy"] += 2
 
     scores["ai_semis"] += counter["ai"] * 2 + counter["semiconductor"] * 2
-    if any(keyword in top_industry_text for keyword in ["半导体", "消费电子", "通信", "IT服务", "算力"]):
+    if any(keyword in top_industry_text for keyword in ["半导体", "消费电子", "通信", "光模块", "液冷", "存储", "PCB", "算力"]):
         scores["ai_semis"] += 2
     if tech_1d > 0:
         scores["ai_semis"] += 1
+    if hardtech_proxy_hits >= 2:
+        scores["ai_semis"] += 4
+    elif hardtech_proxy_hits == 1:
+        scores["ai_semis"] += 2
 
     watch_boosts = _a_share_watch_theme_boosts(a_share_watch_meta)
     for theme_name, boost in watch_boosts.items():
@@ -1958,7 +2158,7 @@ def _primary_narrative(
         "rate_growth": "利率驱动成长修复",
         "power_utilities": "电网/公用事业",
         "china_policy": "中国政策/内需确定性",
-        "ai_semis": "AI/半导体催化",
+        "ai_semis": "硬科技 / AI硬件链",
         "macro_background": "背景宏观",
     }
 
@@ -1971,7 +2171,7 @@ def _primary_narrative(
         "rate_growth": "今天市场主线更像 `利率预期驱动的成长修复`，重点看科技和估值弹性方向。",
         "power_utilities": "今天交易主线更像 `电网/公用事业`，重点看高确定性、公用事业和电力设备链是否持续获得资金承接。",
         "china_policy": "今天市场主线更像 `中国政策 / 内需确定性`，重点看基建、电网和稳增长传导。",
-        "ai_semis": "今天市场主线更像 `AI / 半导体催化`，重点看算力、芯片和相关硬件链。",
+        "ai_semis": "今天市场主线更像 `硬科技 / AI硬件链`，重点看半导体、光模块、液冷、存储和相关硬件扩散，而不是把软件/应用层提前混成同一层主线。",
         "macro_background": "今天没有单一事件完全压过其他变量，更适合先以宏观背景和盘面结构来组织晨报。",
     }
 
@@ -2187,10 +2387,10 @@ def _catalyst_rows(news_report: Dict[str, Any], narrative: Dict[str, Any]) -> Li
             "重点看政策是否转成板块持续性和资金承接。",
         ],
         "ai_semis": [
-            "AI/半导体",
-            "AI 模型、产品或半导体资本开支新闻成为催化。",
-            "产品/产能 -> 板块热度 -> 硬件链和成长风格扩散。",
-            "重点看半导体、通信、算力链是否接力。",
+            "硬科技 / AI硬件链",
+            "半导体、光模块、液冷、存储或资本开支新闻成为催化。",
+            "订单/产能/资本开支 -> 硬件链热度 -> 风险偏好和细分扩散。",
+            "重点看半导体、光模块、液冷、存储链是否接力，而不是把软件/应用层一起写成主线。",
         ],
     }
     if theme in theme_map:
@@ -2204,7 +2404,7 @@ def _catalyst_rows(news_report: Dict[str, Any], narrative: Dict[str, Any]) -> Li
         "china_macro": ("中国宏观/政策", "国内政策或宏观表态影响风险偏好。", "政策 -> 内需/电网/基建链。", "重点看政策是否带来持续资金承接。"),
         "china_market_domestic": ("A股盘面快讯", "国内快讯补充盘面细节。", "快讯 -> 情绪扩散 -> 题材强弱切换。", "和龙虎榜、涨停池一起判断强度。"),
         "china_macro_domestic": ("国内政策快讯", "国内政策快讯提供更细的落地节奏。", "快讯 -> 政策预期 -> 内需相关板块。", "更适合辅助确认，而不是单独定主线。"),
-        "ai": ("AI 产品", "模型/产品发布或传闻带来催化。", "产品 -> 情绪/估值 -> AI 应用与算力链。", "先看新闻是否真的扩散到板块。"),
+        "ai": ("AI 应用", "模型/产品发布或传闻带来催化。", "产品 -> 情绪/估值 -> AI 应用与软件链。", "先看催化有没有从应用层扩散到价格与成交。"),
         "semiconductor": ("半导体产能", "产能与资本开支新闻改变供需预期。", "资本开支 -> 设备/材料/代工链。", "更适合中期跟踪，不一定立刻成日内主线。"),
     }
 
@@ -3494,10 +3694,10 @@ def _industry_catalyst_text(name: str, narrative: Dict[str, Any], news_report: D
         if is_leader:
             return "电力/电网设备需求预期支撑，资金持续流入。"
         return "前期涨幅获利了结或资金轮动离场。"
-    if any(keyword in lower for keyword in ["半导体", "通信", "消费电子", "it", "软件", "计算机", "电子", "芯片", "元件", "电路"]):
+    if any(keyword in lower for keyword in ["半导体", "通信", "消费电子", "芯片", "元件", "电路", "光模块", "液冷", "存储", "pcb"]):
         if is_leader:
-            return "风险偏好修复，科技成长方向资金回流。"
-        return "科技方向调整，资金从成长切向防守。"
+            return "风险偏好修复，硬科技硬件链资金回流。"
+        return "硬科技硬件链调整，资金从成长切向防守。"
     if any(keyword in lower for keyword in ["医药", "创新药", "生物"]):
         if is_leader:
             return "医药板块催化或估值修复驱动。"
@@ -3520,7 +3720,13 @@ def _generic_headline(title: str) -> bool:
         "breaking stock market news",
         "markets wrap",
     ]
-    return any(phrase in lowered for phrase in generic_phrases)
+    if any(phrase in lowered for phrase in generic_phrases):
+        return True
+    entertainment_ai_noise = ("ai艺人库", "爱奇艺", "明星", "辟谣", "热搜")
+    market_relevance_terms = ("股价", "财报", "业绩", "游戏", "传媒", "广告", "版号", "算力", "cpo", "光模块", "半导体")
+    if any(term in lowered for term in entertainment_ai_noise) and not any(term in lowered for term in market_relevance_terms):
+        return True
+    return False
 
 
 def _industry_rank_rows(drivers: Dict[str, Any], narrative: Dict[str, Any], news_report: Dict[str, Any]) -> List[List[str]]:
@@ -4238,7 +4444,7 @@ def _theme_tracking_rows(
     power = _board_name(frame, ["电网", "电力", "公用事业"], "电力/电网")
     energy = _board_name(frame, ["石油", "油气", "煤炭", "能源"], "能源/油气")
     dividend = _board_name(frame, ["银行", "公用事业", "煤炭", "红利"], "高股息/红利")
-    tech = _board_name(frame, ["半导体", "通信", "IT服务", "消费电子", "软件"], "AI算力链")
+    tech = _board_name(frame, ["半导体", "光模块", "CPO", "液冷", "消费电子", "通信", "存储"], "AI硬件链")
     domestic = _board_name(frame, ["建筑", "工程", "建材", "基建", "电网"], "基建/央国企")
     gold = _board_name(frame, ["贵金属", "黄金"], "黄金/防守")
     theme = str(narrative.get("theme", "macro_background"))
@@ -4690,7 +4896,7 @@ def _theme_tracking_lines(
         "rate_growth": "因为利率与成长风格开始共振，科技与久期资产优先级上升。",
         "power_utilities": "因为电网、公用事业和确定性链条持续获得承接，主线更像高确定性防守进攻平衡。",
         "china_policy": "因为国内政策和稳增长方向的确定性提升，电网/基建链权重上调。",
-        "ai_semis": "因为 AI/半导体催化强化，成长主线重新获得景气验证。",
+        "ai_semis": "因为半导体、光模块、液冷和存储等硬科技硬件链强化，成长主线重新获得景气验证。",
         "macro_background": "因为当前没有单一事件主线完全压制其他方向，先回到背景配置。",
     }
     if not added and not removed:
@@ -5478,6 +5684,20 @@ def _build_evening_payload(
     review_queue_transition_lines: Sequence[str] | None = None,
     review_queue_action_lines: Sequence[str] | None = None,
     calendar_review_trigger_lines: Sequence[str] | None = None,
+    generated_at: str = "",
+    data_coverage: str = "",
+    missing_sources: str = "",
+    macro_items: Sequence[str] | None = None,
+    regime_result: Optional[Dict[str, Any]] = None,
+    proxy_contract: Optional[Dict[str, Any]] = None,
+    evidence_rows: Sequence[Sequence[str]] | None = None,
+    quality_lines: Sequence[str] | None = None,
+    alerts: Sequence[str] | None = None,
+    a_share_watch_rows: Sequence[Sequence[str]] | None = None,
+    a_share_watch_lines: Sequence[str] | None = None,
+    a_share_watch_meta: Optional[Dict[str, Any]] = None,
+    a_share_watch_candidates: Sequence[Mapping[str, Any]] | None = None,
+    market_analysis: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build payload for evening briefing."""
     morning_md = _load_same_day_briefing("daily")
@@ -5490,6 +5710,21 @@ def _build_evening_payload(
     macro_asset_rows = _macro_asset_rows(monitor_rows, anomaly_report)
     catalyst_rows = _catalyst_rows(news_report, narrative)
     capital_flow_lines = _capital_flow_lines(pulse, drivers, liquidity_lines, snapshots)
+    narrative_review_lines = _evening_narrative_review(prior_headline, eval_rows, snapshots, narrative)
+    tomorrow_outlook_lines = _tomorrow_outlook_lines(narrative, snapshots, monitor_rows, overnight_rows)
+    tomorrow_verification_rows = _tomorrow_verification_rows(snapshots, monitor_rows, narrative)
+    tomorrow_action_lines = list(review_queue_action_lines or []) + _tomorrow_action_lines(eval_rows, snapshots, narrative)
+    theme_tracking_rows = _theme_tracking_rows(narrative, drivers)
+    theme_tracking_lines = _theme_tracking_lines(narrative, theme_tracking_rows, "evening")
+    market_snapshot = dict(market_analysis or {})
+    regime_payload = dict(regime_result or {})
+    headline_support_lines: List[str] = []
+    for raw in [*list(narrative_review_lines or []), *list(tomorrow_outlook_lines or [])]:
+        text = str(raw or "").strip()
+        if not text or text in headline_support_lines:
+            continue
+        headline_support_lines.append(text)
+    headline_lines = headline_support_lines or ["收盘后先复盘今天兑现了什么，再看明天先验证什么。"]
     watchlist_change_lines = (
         list(review_queue_transition_lines or [])
         + list(calendar_review_trigger_lines or [])
@@ -5499,7 +5734,17 @@ def _build_evening_payload(
 
     return {
         "title": "收盘晚报",
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at": generated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "news_report": news_report,
+        "data_coverage": data_coverage,
+        "missing_sources": missing_sources,
+        "headline_lines": headline_lines,
+        "action_lines": tomorrow_action_lines[:6],
+        "macro_items": list(macro_items or []),
+        "regime_reasoning_lines": list(regime_payload.get("reasoning") or []),
+        "regime": regime_payload,
+        "day_theme": str(narrative.get("label", "") or ""),
+        "evidence_rows": [list(row or []) for row in list(evidence_rows or [])],
         "watchlist_change_lines": watchlist_change_lines,
         "full_day_eval_rows": eval_rows,
         "full_day_eval_fallback": "暂无今日晨报，跳过全日验证。" if not morning_md else "",
@@ -5510,13 +5755,29 @@ def _build_evening_payload(
         "industry_rows": industry_rows,
         "macro_asset_rows": macro_asset_rows,
         "watchlist_rows": watchlist_rows,
-        "narrative_review_lines": _evening_narrative_review(prior_headline, eval_rows, snapshots, narrative),
+        "index_signal_rows": list(market_snapshot.get("index_rows", [])),
+        "index_signal_lines": list(market_snapshot.get("index_lines", [])),
+        "market_signal_rows": list(market_snapshot.get("market_signal_rows", [])),
+        "market_signal_lines": list(market_snapshot.get("market_signal_lines", [])),
+        "rotation_rows": list(market_snapshot.get("rotation_rows", [])),
+        "rotation_lines": list(market_snapshot.get("rotation_lines", [])),
+        "narrative_review_lines": narrative_review_lines,
         "core_event_lines": _core_event_lines(news_report, catalyst_rows),
+        "theme_tracking_rows": theme_tracking_rows,
+        "theme_tracking_lines": theme_tracking_lines,
         "capital_flow_lines": capital_flow_lines,
         "overnight_rows": overnight_rows,
-        "tomorrow_outlook_lines": _tomorrow_outlook_lines(narrative, snapshots, monitor_rows, overnight_rows),
-        "tomorrow_verification_rows": _tomorrow_verification_rows(snapshots, monitor_rows, narrative),
-        "tomorrow_action_lines": list(review_queue_action_lines or []) + _tomorrow_action_lines(eval_rows, snapshots, narrative),
+        "verification_rows": tomorrow_verification_rows,
+        "tomorrow_outlook_lines": tomorrow_outlook_lines,
+        "tomorrow_verification_rows": tomorrow_verification_rows,
+        "tomorrow_action_lines": tomorrow_action_lines,
+        "quality_lines": list(quality_lines or []),
+        "alerts": list(alerts or []),
+        "a_share_watch_rows": [list(row or []) for row in list(a_share_watch_rows or [])],
+        "a_share_watch_lines": [str(item or "").strip() for item in list(a_share_watch_lines or []) if str(item or "").strip()],
+        "a_share_watch_meta": dict(a_share_watch_meta or {}),
+        "a_share_watch_candidates": [dict(item or {}) for item in list(a_share_watch_candidates or [])],
+        "proxy_contract": dict(proxy_contract or {}),
         "portfolio_lines": _portfolio_lines(config, review_queue=review_queue),
         "portfolio_table_rows": _portfolio_table_rows(config),
         "appendix_technical_rows": _appendix_technical_rows(snapshots),
@@ -5532,6 +5793,7 @@ def _build_market_payload(
     narrative: Dict[str, Any],
     china_macro: Dict[str, Any],
     regime_result: Dict[str, Any],
+    market_analysis: Dict[str, Any] | None = None,
     overview: Dict[str, Any],
     pulse: Dict[str, Any],
     drivers: Dict[str, Any],
@@ -5554,7 +5816,7 @@ def _build_market_payload(
     proxy_contract: Dict[str, Any],
     evidence_rows: List[List[str]],
 ) -> Dict[str, Any]:
-    market_analysis = build_market_analysis(config, overview, pulse, drivers)
+    market_analysis = dict(market_analysis or build_market_analysis(config, overview, pulse, drivers))
     domestic_index_rows, domestic_market_lines = _domestic_overview_rows(overview, pulse)
     style_rows = _style_rows(overview, _fresh_driver_frame(drivers, "industry_spot"))
     industry_rows = _industry_rank_rows(drivers, narrative, news_report)
@@ -5584,6 +5846,7 @@ def _build_market_payload(
         "headline_lines": headline_lines,
         "macro_items": macro_items,
         "action_lines": action_lines,
+        "action_section_title": _action_section_title(),
         "domestic_index_rows": domestic_index_rows,
         "domestic_market_lines": domestic_market_lines + _market_overview_lines(snapshots, regime_result),
         "index_signal_rows": list(market_analysis.get("index_rows", [])),
@@ -5633,9 +5896,15 @@ def _persist_briefing(markdown: str, mode: str) -> Path:
     return md_path
 
 
+def _persist_briefing_payload(detail_path: Path, payload: Mapping[str, Any]) -> Path:
+    payload_path = internal_sidecar_path(detail_path, "payload.json")
+    payload_path.parent.mkdir(parents=True, exist_ok=True)
+    payload_path.write_text(json.dumps(dict(payload or {}), ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    return payload_path
+
+
 def _briefing_internal_dir() -> Path:
     return resolve_project_path("reports/briefings/internal")
-
 
 def _load_same_day_stock_pick_market_event_rows(trade_date: str, *, limit: int = 4) -> List[List[str]]:
     path = resolve_project_path(f"reports/stock_picks/final/stock_picks_cn_{trade_date}_final.md")
@@ -5752,8 +6021,8 @@ def _render_briefing_charts(snapshots: List[BriefingSnapshot]) -> Dict[str, Dict
             "technical_raw": snap.technical,
         }
         base = f"{snap.symbol}_{stamp}"
-        windows_path = renderer.output_dir / f"{base}_windows.png"
-        indicators_path = renderer.output_dir / f"{base}_indicators.png"
+        windows_path = renderer._asset_path(base, "windows")
+        indicators_path = renderer._asset_path(base, "indicators")
         renderer._render_windows(analysis, snap.history.copy(), windows_path)
         renderer._render_indicators(analysis, snap.history.copy(), indicators_path)
         label = f"{snap.name} ({snap.symbol})"
@@ -5765,6 +6034,102 @@ def _render_briefing_charts(snapshots: List[BriefingSnapshot]) -> Dict[str, Dict
         if paths:
             charts[label] = paths
     return charts
+
+
+def _export_briefing_client_final(
+    *,
+    mode: str,
+    payload: Mapping[str, Any],
+    rendered: str,
+    detail_path: Path,
+) -> tuple[str, dict[str, Path]]:
+    payload_dict = dict(payload or {})
+    catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
+    review_lookup = load_catalyst_web_review(catalyst_review_path)
+    if review_lookup:
+        payload_dict["a_share_watch_candidates"] = [
+            attach_catalyst_web_review_to_analysis(item, review_lookup)
+            for item in list(payload_dict.get("a_share_watch_candidates") or [])
+        ]
+
+    client_markdown = ClientReportRenderer().render_briefing(payload_dict)
+    editor_packet = build_briefing_editor_packet({**payload_dict, "mode": mode})
+    editor_prompt = render_financial_editor_prompt(editor_packet)
+    output_path = resolve_project_path("reports/briefings/final") / f"{mode}_briefing_{str(payload_dict.get('generated_at', ''))[:10]}_client_final.md"
+    catalyst_packet = build_catalyst_web_review_packet(
+        report_type="briefing",
+        subject=f"{mode}_briefing {str(payload_dict.get('generated_at', ''))[:10]}",
+        generated_at=str(payload_dict.get("generated_at", "")),
+        analyses=list(payload_dict.get("a_share_watch_candidates") or []),
+    )
+    text_sidecars = {
+        "editor_prompt": (
+            internal_sidecar_path(detail_path, "editor_prompt.md"),
+            editor_prompt,
+        )
+    }
+    json_sidecars = {
+        "editor_payload": (
+            internal_sidecar_path(detail_path, "editor_payload.json"),
+            editor_packet,
+        )
+    }
+    if list(catalyst_packet.get("items") or []):
+        text_sidecars.update(
+            {
+                "catalyst_web_review_prompt": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review_prompt.md"),
+                    render_catalyst_web_review_prompt(catalyst_packet),
+                ),
+                "catalyst_web_review": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review.md"),
+                    render_catalyst_web_review_scaffold(catalyst_packet),
+                ),
+            }
+        )
+        json_sidecars.update(
+            {
+                "catalyst_web_review_payload": (
+                    internal_sidecar_path(detail_path, "catalyst_web_review_payload.json"),
+                    catalyst_packet,
+                )
+            }
+        )
+    elif catalyst_review_path.exists():
+        text_sidecars["catalyst_web_review"] = (
+            catalyst_review_path,
+            catalyst_review_path.read_text(encoding="utf-8"),
+        )
+
+    bundle = finalize_client_markdown(
+        report_type="briefing",
+        client_markdown=client_markdown,
+        markdown_path=output_path,
+        detail_markdown=rendered,
+        detail_path=detail_path,
+        extra_manifest={
+            "mode": mode,
+            "a_share_watch": payload_dict.get("a_share_watch_meta", {}),
+            "market_snapshot_contract": _market_snapshot_contract(payload_dict),
+            "factor_contract": dict(payload_dict.get("a_share_watch_meta", {})).get("factor_contract", {}),
+            "proxy_contract": dict(payload_dict.get("proxy_contract") or {}),
+            "theme_playbook_contract": summarize_theme_playbook_contract(editor_packet.get("theme_playbook") or {}),
+            "event_digest_contract": summarize_event_digest_contract(editor_packet.get("event_digest") or {}),
+            "what_changed_contract": summarize_what_changed_contract(editor_packet.get("what_changed") or {}),
+        },
+        release_checker=lambda markdown, source_text: check_generic_client_report(
+            markdown,
+            "briefing",
+            source_text=source_text,
+            editor_theme_playbook=editor_packet.get("theme_playbook") or {},
+            editor_prompt_text=editor_prompt,
+            event_digest_contract=editor_packet.get("event_digest") or {},
+            what_changed_contract=editor_packet.get("what_changed") or {},
+        ),
+        text_sidecars=text_sidecars,
+        json_sidecars=json_sidecars,
+    )
+    return client_markdown, bundle
 
 
 def main() -> None:
@@ -5858,11 +6223,12 @@ def main() -> None:
     )
     if warning:
         collection_warnings.append(warning)
+    market_analysis = build_market_analysis(config, overview, pulse, drivers)
     a_share_watch_rows: List[List[str]] = []
     a_share_watch_lines: List[str] = []
     a_share_watch_meta: Dict[str, Any] = {}
     a_share_watch_candidates: List[Dict[str, Any]] = []
-    if args.mode in {"daily", "weekly", "market"}:
+    if args.mode in {"daily", "weekly", "market"} or (args.mode == "evening" and args.client_final):
         trade_date = datetime.now().strftime("%Y-%m-%d")
         stock_pick_fallback_rows = _load_same_day_stock_pick_market_event_rows(trade_date)
         stock_pick_fallback_candidates: List[Dict[str, Any]] = []
@@ -5977,6 +6343,23 @@ def main() -> None:
             review_queue_transition_lines=review_queue_transition_lines,
             review_queue_action_lines=review_queue_action_lines,
             calendar_review_trigger_lines=calendar_review_trigger_lines,
+            generated_at=generated_at,
+            data_coverage=data_coverage,
+            missing_sources=missing_sources,
+            macro_items=macro_items,
+            regime_result=regime_result,
+            proxy_contract=proxy_contract,
+            evidence_rows=evidence_rows,
+            quality_lines=_merge_quality_lines(
+                collection_warnings,
+                _quality_lines(news_report, anomaly_report, monitor_rows),
+            ),
+            alerts=alerts,
+            a_share_watch_rows=a_share_watch_rows,
+            a_share_watch_lines=a_share_watch_lines,
+            a_share_watch_meta=a_share_watch_meta,
+            a_share_watch_candidates=a_share_watch_candidates,
+            market_analysis=market_analysis,
         )
         rendered = BriefingRenderer().render_evening(payload)
     elif args.mode == "market":
@@ -5985,6 +6368,7 @@ def main() -> None:
             narrative=narrative,
             china_macro=china_macro,
             regime_result=regime_result,
+            market_analysis=market_analysis,
             overview=overview,
             pulse=pulse,
             drivers=drivers,
@@ -6050,6 +6434,12 @@ def main() -> None:
             "news_report": news_report,
             "data_coverage": data_coverage,
             "missing_sources": missing_sources,
+            "index_signal_rows": list(market_analysis.get("index_rows", [])),
+            "index_signal_lines": list(market_analysis.get("index_lines", [])),
+            "market_signal_rows": list(market_analysis.get("market_signal_rows", [])),
+            "market_signal_lines": list(market_analysis.get("market_signal_lines", [])),
+            "rotation_rows": list(market_analysis.get("rotation_rows", [])),
+            "rotation_lines": list(market_analysis.get("rotation_lines", [])),
             "headline_lines": _compact_headline_lines(narrative, china_macro, monitor_rows, pulse)
             + _compact_validation_lines(
                 narrative,
@@ -6111,202 +6501,19 @@ def main() -> None:
         }
         rendered = BriefingRenderer().render(payload)
     detail_path = _persist_briefing(rendered, args.mode)
+    if args.mode in {"daily", "weekly"}:
+        _persist_briefing_payload(detail_path, payload)
     if not args.client_final:
         print(rendered)
         return
 
-    if args.mode in {"daily", "weekly"}:
-        catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
-        if args.client_final:
-            review_lookup = load_catalyst_web_review(catalyst_review_path)
-            if review_lookup:
-                payload["a_share_watch_candidates"] = [
-                    attach_catalyst_web_review_to_analysis(item, review_lookup)
-                    for item in list(payload.get("a_share_watch_candidates") or [])
-                ]
-        client_markdown = ClientReportRenderer().render_briefing(payload)
-        editor_packet = build_briefing_editor_packet({**payload, "mode": args.mode})
-        editor_prompt = render_financial_editor_prompt(editor_packet)
-        findings = check_generic_client_report(
-            client_markdown,
-            "briefing",
-            source_text=rendered,
-            editor_theme_playbook=editor_packet.get("theme_playbook") or {},
-            editor_prompt_text=editor_prompt,
-            event_digest_contract=editor_packet.get("event_digest") or {},
-            what_changed_contract=editor_packet.get("what_changed") or {},
-        )
-        output_path = resolve_project_path("reports/briefings/final") / f"{args.mode}_briefing_{str(payload.get('generated_at', ''))[:10]}_client_final.md"
-        catalyst_packet = build_catalyst_web_review_packet(
-            report_type="briefing",
-            subject=f"{args.mode}_briefing {str(payload.get('generated_at', ''))[:10]}",
-            generated_at=str(payload.get("generated_at", "")),
-            analyses=list(payload.get("a_share_watch_candidates") or []),
-        )
-        text_sidecars = {
-            "editor_prompt": (
-                internal_sidecar_path(detail_path, "editor_prompt.md"),
-                editor_prompt,
-            )
-        }
-        json_sidecars = {
-            "editor_payload": (
-                internal_sidecar_path(detail_path, "editor_payload.json"),
-                editor_packet,
-            )
-        }
-        if list(catalyst_packet.get("items") or []):
-            text_sidecars.update(
-                {
-                    "catalyst_web_review_prompt": (
-                        internal_sidecar_path(detail_path, "catalyst_web_review_prompt.md"),
-                        render_catalyst_web_review_prompt(catalyst_packet),
-                    ),
-                    "catalyst_web_review": (
-                        internal_sidecar_path(detail_path, "catalyst_web_review.md"),
-                        render_catalyst_web_review_scaffold(catalyst_packet),
-                    ),
-                }
-            )
-            json_sidecars.update(
-                {
-                    "catalyst_web_review_payload": (
-                        internal_sidecar_path(detail_path, "catalyst_web_review_payload.json"),
-                        catalyst_packet,
-                )
-            }
-        )
-        elif catalyst_review_path.exists():
-            text_sidecars["catalyst_web_review"] = (
-                catalyst_review_path,
-                catalyst_review_path.read_text(encoding="utf-8"),
-            )
-        bundle = finalize_client_markdown(
-            report_type="briefing",
-            client_markdown=client_markdown,
-            markdown_path=output_path,
-            detail_markdown=rendered,
-            detail_path=detail_path,
-            extra_manifest={
-                "mode": args.mode,
-                "a_share_watch": payload.get("a_share_watch_meta", {}),
-                "market_snapshot_contract": _market_snapshot_contract(payload),
-                "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
-                "proxy_contract": dict(payload.get("proxy_contract") or {}),
-                "theme_playbook_contract": summarize_theme_playbook_contract(editor_packet.get("theme_playbook") or {}),
-                "event_digest_contract": summarize_event_digest_contract(editor_packet.get("event_digest") or {}),
-                "what_changed_contract": summarize_what_changed_contract(editor_packet.get("what_changed") or {}),
-            },
-            release_checker=lambda markdown, source_text: check_generic_client_report(
-                markdown,
-                "briefing",
-                source_text=source_text,
-                editor_theme_playbook=editor_packet.get("theme_playbook") or {},
-                editor_prompt_text=editor_prompt,
-                event_digest_contract=editor_packet.get("event_digest") or {},
-                what_changed_contract=editor_packet.get("what_changed") or {},
-            ),
-            text_sidecars=text_sidecars,
-            json_sidecars=json_sidecars,
-        )
-        print(client_markdown)
-        from src.commands.report_guard import exported_bundle_lines
-
-        for index, line in enumerate(exported_bundle_lines(bundle)):
-            print(f"\n{line}" if index == 0 else line)
-        return
-
-    editor_packet = build_briefing_editor_packet({**payload, "mode": args.mode})
-    editor_prompt = render_financial_editor_prompt(editor_packet)
-    findings = check_generic_client_report(
-        rendered,
-        "briefing",
-        editor_theme_playbook=editor_packet.get("theme_playbook") or {},
-        editor_prompt_text=editor_prompt,
-        event_digest_contract=editor_packet.get("event_digest") or {},
-        what_changed_contract=editor_packet.get("what_changed") or {},
-    )
-    output_path = resolve_project_path("reports/briefings/final") / f"{args.mode}_briefing_{datetime.now().strftime('%Y-%m-%d')}_client_final.md"
-    catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
-    review_lookup = load_catalyst_web_review(catalyst_review_path)
-    if review_lookup:
-        payload["a_share_watch_candidates"] = [
-            attach_catalyst_web_review_to_analysis(item, review_lookup)
-            for item in list(payload.get("a_share_watch_candidates") or [])
-        ]
-    catalyst_packet = build_catalyst_web_review_packet(
-        report_type="briefing",
-        subject=f"{args.mode}_briefing {datetime.now().strftime('%Y-%m-%d')}",
-        generated_at=str(payload.get("generated_at", "")),
-        analyses=list(payload.get("a_share_watch_candidates") or []),
-    )
-    text_sidecars = {
-        "editor_prompt": (
-            internal_sidecar_path(detail_path, "editor_prompt.md"),
-            editor_prompt,
-        )
-    }
-    json_sidecars = {
-        "editor_payload": (
-            internal_sidecar_path(detail_path, "editor_payload.json"),
-            editor_packet,
-        )
-    }
-    if list(catalyst_packet.get("items") or []):
-        text_sidecars.update(
-            {
-                "catalyst_web_review_prompt": (
-                    internal_sidecar_path(detail_path, "catalyst_web_review_prompt.md"),
-                    render_catalyst_web_review_prompt(catalyst_packet),
-                ),
-                "catalyst_web_review": (
-                    internal_sidecar_path(detail_path, "catalyst_web_review.md"),
-                    render_catalyst_web_review_scaffold(catalyst_packet),
-                ),
-            }
-        )
-        json_sidecars.update(
-            {
-                "catalyst_web_review_payload": (
-                    internal_sidecar_path(detail_path, "catalyst_web_review_payload.json"),
-                    catalyst_packet,
-                )
-            }
-        )
-    elif catalyst_review_path.exists():
-        text_sidecars["catalyst_web_review"] = (
-            catalyst_review_path,
-            catalyst_review_path.read_text(encoding="utf-8"),
-        )
-    bundle = finalize_client_markdown(
-        report_type="briefing",
-        client_markdown=rendered,
-        markdown_path=output_path,
-        detail_markdown=rendered,
+    client_markdown, bundle = _export_briefing_client_final(
+        mode=args.mode,
+        payload=payload,
+        rendered=rendered,
         detail_path=detail_path,
-        extra_manifest={
-            "mode": args.mode,
-            "a_share_watch": payload.get("a_share_watch_meta", {}),
-            "market_snapshot_contract": _market_snapshot_contract(payload),
-            "factor_contract": dict(payload.get("a_share_watch_meta", {})).get("factor_contract", {}),
-            "proxy_contract": dict(payload.get("proxy_contract") or {}),
-            "theme_playbook_contract": summarize_theme_playbook_contract(editor_packet.get("theme_playbook") or {}),
-            "event_digest_contract": summarize_event_digest_contract(editor_packet.get("event_digest") or {}),
-            "what_changed_contract": summarize_what_changed_contract(editor_packet.get("what_changed") or {}),
-        },
-        release_checker=lambda markdown, source_text: check_generic_client_report(
-            markdown,
-            "briefing",
-            source_text=source_text,
-            editor_theme_playbook=editor_packet.get("theme_playbook") or {},
-            editor_prompt_text=editor_prompt,
-            event_digest_contract=editor_packet.get("event_digest") or {},
-            what_changed_contract=editor_packet.get("what_changed") or {},
-        ),
-        text_sidecars=text_sidecars,
-        json_sidecars=json_sidecars,
     )
-    print(rendered)
+    print(client_markdown)
     from src.commands.report_guard import exported_bundle_lines
 
     for index, line in enumerate(exported_bundle_lines(bundle)):

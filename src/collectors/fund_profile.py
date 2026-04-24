@@ -79,7 +79,7 @@ class FundProfileCollector(BaseCollector):
 
     AKShare remains the richer fallback for:
     - open-end fund overview text fields
-    - holdings names / industry allocation
+    - holdings names / industry allocation when Tushare holdings are absent
     - manager AUM / peer-fund enrichment
     - rating tables
 
@@ -232,9 +232,12 @@ class FundProfileCollector(BaseCollector):
         if process_cached is not None:
             return process_cached
         ts_code = self._resolve_tushare_fund_code(symbol, preferred_markets=("E", "O", "L"))
-        trade_date = str(trade_date).replace("-", "").strip()
-        start_date = str(start_date).replace("-", "").strip()
-        end_date = str(end_date).replace("-", "").strip()
+        explicit_trade_date = str(trade_date).replace("-", "").strip()
+        explicit_start_date = str(start_date).replace("-", "").strip()
+        explicit_end_date = str(end_date).replace("-", "").strip()
+        trade_date = explicit_trade_date
+        start_date = explicit_start_date
+        end_date = explicit_end_date
         if not trade_date and not start_date and not end_date:
             recent_open_dates = self._recent_open_trade_dates(lookback_days=14)
             if recent_open_dates:
@@ -268,7 +271,9 @@ class FundProfileCollector(BaseCollector):
             latest_date_text = str(frame.iloc[0].get("trade_date", frame.iloc[0].get("date", ""))).strip()
         latest_date = BaseCollector._normalize_date_text(latest_date_text)
         is_fresh = False
-        if latest_date:
+        if explicit_trade_date or explicit_start_date or explicit_end_date:
+            is_fresh = not frame.empty
+        elif latest_date:
             try:
                 latest_dt = datetime.strptime(latest_date, "%Y-%m-%d")
             except ValueError:
@@ -370,6 +375,42 @@ class FundProfileCollector(BaseCollector):
             self._save_cache(cache_key, raw)
             return raw
         return pd.DataFrame()
+
+    def get_fund_sales_ratio_ts(self, year: str = "") -> pd.DataFrame:
+        """Tushare fund_sales_ratio — 各渠道公募基金销售保有规模占比。"""
+        normalized_year = str(year).strip()
+        cache_suffix = normalized_year or "latest"
+        process_cached = self._shared_frame_cache(f"ts_fund_sales_ratio:{cache_suffix}")
+        if process_cached is not None:
+            return process_cached
+        cache_key = f"fund_profile:ts_fund_sales_ratio:{cache_suffix}"
+        cached = self._load_cache(cache_key, ttl_hours=24)
+        if cached is not None:
+            return self._remember_shared_frame(f"ts_fund_sales_ratio:{cache_suffix}", cached)
+        kwargs = {"year": normalized_year} if normalized_year else {}
+        raw = self._ts_call("fund_sales_ratio", **kwargs)
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+        frame = raw.copy()
+        if "year" in frame.columns:
+            frame["year"] = pd.to_numeric(frame["year"], errors="coerce")
+            frame = frame.sort_values("year", ascending=False, na_position="last")
+        for column in ("bank", "sec_comp", "fund_comp", "indep_comp", "rests"):
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        latest_year = self._normalize_sales_ratio_year(frame.iloc[0].get("year") if not frame.empty else "")
+        latest_date = f"{latest_year}-12-31" if latest_year else ""
+        current_year = datetime.now().year
+        is_fresh = bool(latest_year) and current_year - int(latest_year) <= 1
+        frame.attrs["source"] = "tushare.fund_sales_ratio"
+        frame.attrs["as_of"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        frame.attrs["latest_date"] = latest_date
+        frame.attrs["latest_year"] = latest_year
+        frame.attrs["is_fresh"] = is_fresh
+        frame.attrs["fallback"] = "none"
+        frame.attrs["disclosure"] = "各渠道公募基金销售保有规模占比来自 Tushare fund_sales_ratio；年度更新。空表或旧年不伪装成 fresh。"
+        self._save_cache(cache_key, frame)
+        return self._remember_shared_frame(f"ts_fund_sales_ratio:{cache_suffix}", frame.reset_index(drop=True))
 
     def get_overview(self, symbol: str) -> pd.DataFrame:
         fetcher = self._ak_function("fund_overview_em")
@@ -506,16 +547,30 @@ class FundProfileCollector(BaseCollector):
             ts_company_df = self._safe_frame(self.get_fund_company_ts) if not light_mode else pd.DataFrame()
             ts_div_df = self._safe_frame(self.get_fund_div_ts, symbol) if not light_mode else pd.DataFrame()
             ts_holdings_df = self._safe_frame(self.get_fund_portfolio_ts, symbol) if not light_mode else pd.DataFrame()
-            stock_basic_df = self._safe_frame(self.get_stock_basic_ts) if asset_type == "cn_etf" and not light_mode else pd.DataFrame()
-            overview_df = pd.DataFrame() if asset_type == "cn_etf" else self._safe_frame(self.get_overview, symbol)
+            has_tushare_holdings = isinstance(ts_holdings_df, pd.DataFrame) and not ts_holdings_df.empty
+            stock_basic_df = (
+                self._safe_frame(self.get_stock_basic_ts)
+                if not light_mode and (asset_type == "cn_etf" or has_tushare_holdings)
+                else pd.DataFrame()
+            )
+            if asset_type == "cn_etf":
+                should_load_overview_fallback = (
+                    not light_mode
+                    and self._should_load_etf_overview_enrichment(
+                        symbol,
+                        etf_basic_df=etf_basic_df,
+                        etf_index_df=etf_index_df,
+                        etf_share_size_df=etf_share_size_df,
+                    )
+                )
+                overview_df = self._safe_frame(self.get_overview, symbol) if should_load_overview_fallback else pd.DataFrame()
+            else:
+                overview_df = self._safe_frame(self.get_overview, symbol)
             achievement_df = self._safe_frame(self.get_achievement, symbol) if not light_mode else pd.DataFrame()
             asset_mix_df = self._safe_frame(self.get_asset_allocation, symbol) if not light_mode else pd.DataFrame()
-            etf_tushare_holdings_ready = asset_type == "cn_etf" and isinstance(ts_holdings_df, pd.DataFrame) and not ts_holdings_df.empty
-            ak_holdings_df = (
-                pd.DataFrame()
-                if light_mode or asset_type == "cn_etf" or etf_tushare_holdings_ready
-                else self._safe_frame(self.get_portfolio_hold, symbol)
-            )
+            ak_holdings_df = pd.DataFrame()
+            if not light_mode and not has_tushare_holdings and asset_type == "cn_fund":
+                ak_holdings_df = self._safe_frame(self.get_portfolio_hold, symbol)
             industry_df = self._safe_frame(self.get_industry_allocation, symbol) if not light_mode else pd.DataFrame()
             manager_df = self._safe_frame(self.get_manager_directory) if not light_mode else pd.DataFrame()
             rating_df = self._safe_frame(self.get_rating_table) if not light_mode else pd.DataFrame()
@@ -547,6 +602,7 @@ class FundProfileCollector(BaseCollector):
         if manager and not str(overview.get("基金经理人", "")).strip():
             overview["基金经理人"] = str(manager.get("name", "")).strip()
         style = self._derive_style(overview, top_holdings, top_industries, asset_mix, manager, asset_type=asset_type)
+        sales_ratio_snapshot = self.get_fund_sales_ratio_snapshot() if asset_type == "cn_fund" else {}
 
         if not top_holdings:
             notes.append("基金持仓明细缺失")
@@ -579,11 +635,62 @@ class FundProfileCollector(BaseCollector):
             "dividends": dividends,
             "rating": rating,
             "style": style,
+            "sales_ratio_snapshot": sales_ratio_snapshot,
             "latest_quarter": str(top_holdings[0].get("季度", "")) if top_holdings else "",
             "etf_snapshot": etf_snapshot,
             "fund_factor_snapshot": fund_factor_snapshot,
             "profile_mode": mode,
             "notes": notes,
+        }
+
+    def _should_load_etf_overview_enrichment(
+        self,
+        symbol: str,
+        *,
+        etf_basic_df: pd.DataFrame | None = None,
+        etf_index_df: pd.DataFrame | None = None,
+        etf_share_size_df: pd.DataFrame | None = None,
+    ) -> bool:
+        """Use legacy ETF overview only as an enrichment lane once Tushare
+        already provides the product's core identity.
+
+        This keeps manager/benchmark wording补洞, but retires the old
+        "Tushare 空表 -> AKShare overview 重新接管主链" fallback.
+        """
+
+        has_tushare_core = False
+        if isinstance(etf_basic_df, pd.DataFrame) and not etf_basic_df.empty:
+            has_tushare_core = True
+        elif self._tushare_etf_basic_row(symbol):
+            has_tushare_core = True
+        elif self._tushare_fund_basic_row(symbol):
+            has_tushare_core = True
+        if not has_tushare_core:
+            return False
+
+        has_index_snapshot = isinstance(etf_index_df, pd.DataFrame) and not etf_index_df.empty
+        has_share_snapshot = isinstance(etf_share_size_df, pd.DataFrame) and not etf_share_size_df.empty
+        return not (has_index_snapshot and has_share_snapshot)
+
+    def get_fund_sales_ratio_snapshot(self, year: str = "") -> Dict[str, Any]:
+        """标准化 fund_sales_ratio 快照，便于后续直接下沉到 fund_pick / briefing。"""
+        frame = self.get_fund_sales_ratio_ts(year=year)
+        snapshot = self._build_fund_sales_ratio_snapshot(frame)
+        if snapshot:
+            return snapshot
+        as_of = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        normalized_year = self._normalize_sales_ratio_year(year)
+        latest_date = f"{normalized_year}-12-31" if normalized_year else ""
+        return {
+            "status": "empty",
+            "source": "tushare.fund_sales_ratio",
+            "as_of": as_of,
+            "latest_date": latest_date,
+            "latest_year": normalized_year,
+            "is_fresh": False,
+            "fallback": "none",
+            "disclosure": "各渠道公募基金销售保有规模占比来自 Tushare fund_sales_ratio；年度更新。空表或旧年不伪装成 fresh。",
+            "channel_mix": [],
         }
 
     def _build_etf_snapshot(
@@ -801,6 +908,62 @@ class FundProfileCollector(BaseCollector):
             "momentum_label": momentum_label,
             "signal_strength": signal_strength,
             "detail": " / ".join(detail_parts),
+        }
+
+    def _build_fund_sales_ratio_snapshot(self, ratio_df: pd.DataFrame | None) -> Dict[str, Any]:
+        if not isinstance(ratio_df, pd.DataFrame) or ratio_df.empty:
+            return {}
+
+        latest_row = ratio_df.iloc[0].to_dict()
+        latest_year = self._normalize_sales_ratio_year(
+            latest_row.get("year", ratio_df.attrs.get("latest_year", ""))
+        )
+        latest_date = str(ratio_df.attrs.get("latest_date", "")).strip() or (f"{latest_year}-12-31" if latest_year else "")
+        as_of = str(ratio_df.attrs.get("as_of", "")).strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        source = str(ratio_df.attrs.get("source", "tushare.fund_sales_ratio")).strip() or "tushare.fund_sales_ratio"
+        fallback = str(ratio_df.attrs.get("fallback", "none")).strip() or "none"
+        disclosure = str(ratio_df.attrs.get("disclosure", "")).strip()
+        is_fresh = bool(ratio_df.attrs.get("is_fresh", False))
+
+        channel_specs = [
+            ("bank", "商业银行"),
+            ("sec_comp", "证券公司"),
+            ("fund_comp", "基金公司直销"),
+            ("indep_comp", "独立基金销售机构"),
+            ("rests", "其他"),
+        ]
+        channel_mix: List[Dict[str, Any]] = []
+        for key, label in channel_specs:
+            value = self._to_float(latest_row.get(key))
+            if value is None or pd.isna(value):
+                continue
+            channel_mix.append({"channel": label, "ratio": round(float(value), 2), "key": key})
+        channel_mix.sort(key=lambda item: item.get("ratio", 0.0), reverse=True)
+
+        if not channel_mix:
+            return {}
+
+        lead = channel_mix[0]
+        total = sum(float(item.get("ratio", 0.0)) for item in channel_mix)
+        summary = f"{latest_year or '最新'}年渠道保有结构：{lead['channel']}占比最高，约 {lead['ratio']:.2f}% 。"
+        if len(channel_mix) >= 2:
+            second = channel_mix[1]
+            summary += f" 其次是 {second['channel']} 约 {second['ratio']:.2f}% 。"
+
+        return {
+            "status": "matched",
+            "source": source,
+            "as_of": as_of,
+            "latest_date": latest_date,
+            "latest_year": latest_year,
+            "is_fresh": is_fresh,
+            "fallback": fallback,
+            "disclosure": disclosure,
+            "total_ratio": round(total, 2),
+            "lead_channel": lead["channel"],
+            "lead_ratio": round(float(lead["ratio"]), 2),
+            "channel_mix": channel_mix,
+            "summary": summary.strip(),
         }
 
     def _format_etf_flow_change(
@@ -1048,6 +1211,20 @@ class FundProfileCollector(BaseCollector):
         if text.isdigit() and len(text) == 8:
             return f"{text[:4]}-{text[4:6]}-{text[6:]}"
         return text
+
+    def _normalize_sales_ratio_year(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text or text.lower() == "nan":
+            return ""
+        if text.isdigit() and len(text) == 4:
+            return text
+        if text.isdigit() and len(text) == 8:
+            return text[:4]
+        try:
+            year = int(float(text))
+        except (TypeError, ValueError):
+            return ""
+        return f"{year:04d}"
 
     def _safe_frame(self, method, *args) -> pd.DataFrame:  # noqa: ANN001
         try:
@@ -1463,8 +1640,9 @@ class FundProfileCollector(BaseCollector):
             " ".join(item.get("股票名称", "") for item in top_holdings),
         ]
         sector, chain_nodes = self._infer_theme(" ".join(core_text_parts))
-        if sector == "综合":
-            sector, chain_nodes = self._infer_theme(" ".join(secondary_text_parts))
+        secondary_sector, secondary_chain_nodes = self._infer_theme(" ".join(secondary_text_parts))
+        if sector == "综合" or (is_passive and sector == "科技" and secondary_sector not in {"", "综合", "科技"}):
+            sector, chain_nodes = secondary_sector, secondary_chain_nodes
         if sector == "综合":
             fallback_text = " ".join([*core_text_parts, *secondary_text_parts, " ".join(manager.get("peer_funds", []))])
             sector, chain_nodes = self._infer_theme(fallback_text)
@@ -1549,6 +1727,8 @@ class FundProfileCollector(BaseCollector):
         else:
             summary += "。"
 
+        taxonomy_sector_hint = " ".join([sector, *chain_nodes, *secondary_text_parts]) if is_passive else sector
+
         return {
             "sector": sector,
             "chain_nodes": chain_nodes,
@@ -1560,7 +1740,7 @@ class FundProfileCollector(BaseCollector):
                 benchmark=benchmark_note,
                 tracking_target=tracking_target,
                 asset_type=asset_type or "cn_fund",
-                sector_hint=sector,
+                sector_hint=taxonomy_sector_hint,
                 is_passive=is_passive,
                 commodity_like=commodity_like,
             ),

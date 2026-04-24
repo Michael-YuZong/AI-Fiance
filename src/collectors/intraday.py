@@ -26,3 +26,15 @@ class IntradayCollector(BaseCollector):
             adjust="",
             ttl_hours=0,
         )
+
+    def get_cn_stock_intraday_chart(self, symbol: str, period: str = "1") -> pd.DataFrame:
+        if ak is None:
+            raise RuntimeError("akshare is not installed")
+        return self.cached_call(
+            f"intraday:cn_stock:{symbol}:{period}",
+            ak.stock_zh_a_hist_min_em,
+            symbol=symbol,
+            period=period,
+            adjust="",
+            ttl_hours=0,
+        )

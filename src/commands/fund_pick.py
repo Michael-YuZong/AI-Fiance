@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
 
+from src.commands.intel import collect_intel_news_report, collect_market_aware_intel_news_report
 from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery, summarize_pick_coverage
 from src.commands.pick_visuals import attach_visuals_to_analyses
 from src.commands.final_runner import finalize_client_markdown, internal_sidecar_path
@@ -54,6 +55,28 @@ MODEL_CHANGELOG = [
     "技术面新增 `量价/动量背离` 因子，按最近两组确认摆点检查 RSI / MACD / OBV 与价格是否出现顶/底背离。",
     "K 线形态从“单根 K”升级到“最近 1-3 根组合形态”，会识别吞没、星形、三兵三鸦等常见信号，并结合前序 5 日趋势过滤误报。",
 ]
+
+
+def _is_skippable_fund_candidate_error(exc: Exception) -> bool:
+    return isinstance(exc, ValueError) and "Price dataframe is empty" in str(exc)
+
+
+def _analyze_fund_candidates(
+    candidates: Sequence[str],
+    *,
+    config: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    analyses: list[dict[str, Any]] = []
+    skipped_lines: list[str] = []
+    for symbol in candidates:
+        try:
+            analyses.append(analyze_opportunity(symbol, "cn_fund", dict(config), context=context))
+        except Exception as exc:
+            if not _is_skippable_fund_candidate_error(exc):
+                raise
+            skipped_lines.append(f"`{symbol}` 缺少可用净值/行情，已从本轮场外基金候选中跳过。")
+    return analyses, skipped_lines
 
 
 def _client_final_runtime_overrides(
@@ -199,6 +222,108 @@ def _fund_dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
                 reason = f"{reason} 当前主排序不直接使用这项。".strip()
         rows.append([display_name, display, reason])
     return rows
+
+
+def _merge_news_items(*groups: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for group in groups:
+        for item in list(group or []):
+            if not isinstance(item, Mapping):
+                continue
+            normalized = dict(item)
+            title = str(normalized.get("title") or "").strip()
+            source = str(normalized.get("source") or normalized.get("configured_source") or "").strip()
+            link = str(normalized.get("link") or "").strip()
+            if not title:
+                continue
+            key = (title, source, link)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(normalized)
+    return merged
+
+
+def _fund_intel_query_text(analysis: Mapping[str, Any]) -> str:
+    metadata = dict(analysis.get("metadata") or {})
+    profile = dict(analysis.get("fund_profile") or {})
+    pieces: List[str] = []
+    for value in (
+        analysis.get("name"),
+        analysis.get("symbol"),
+        metadata.get("sector"),
+        metadata.get("tracked_index_name"),
+        analysis.get("benchmark_name"),
+        profile.get("overview", {}).get("业绩比较基准"),
+    ):
+        text = str(value or "").strip()
+        if text and text not in pieces:
+            pieces.append(text)
+    for token in list(metadata.get("fund_style_tags") or [])[:3]:
+        text = str(token).strip()
+        if text and text not in pieces:
+            pieces.append(text)
+    return " ".join(pieces[:8]).strip()
+
+
+def _backfill_fund_news_report(
+    analysis: Mapping[str, Any],
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    existing = dict(analysis.get("news_report") or {})
+    current_items = _merge_news_items(existing.get("items") or [])
+    linked_items = [item for item in current_items if str(dict(item).get("link") or "").strip()]
+    if len(linked_items) >= 2 or (len(current_items) >= 3 and len(linked_items) >= 1):
+        existing["items"] = current_items
+        existing["lines"] = [str(dict(item).get("title", "")).strip() for item in current_items[:4] if str(dict(item).get("title", "")).strip()]
+        existing["source_list"] = sorted(
+            {
+                str(dict(item).get("source") or dict(item).get("configured_source") or "").strip()
+                for item in current_items
+                if str(dict(item).get("source") or dict(item).get("configured_source") or "").strip()
+            }
+        )
+        return existing
+
+    query = _fund_intel_query_text(analysis)
+    if not query:
+        return existing
+
+    collector_config = deepcopy(dict(config or {}))
+    collector_config.setdefault("news_feeds_file", "config/news_feeds.briefing_light.yaml")
+    if not bool(collector_config.get("news_topic_search_enabled", True)):
+        collector_config["news_topic_search_enabled"] = True
+
+    report = dict(
+        collect_market_aware_intel_news_report(
+            query,
+            config=collector_config,
+            explicit_symbol=str(analysis.get("symbol") or "").strip(),
+            baseline_report=existing,
+            market_event_rows=list(analysis.get("market_event_rows") or []),
+            limit=6,
+            recent_days=7,
+            note_prefix="场外基金",
+            collect_fn=collect_intel_news_report,
+        )
+    )
+    merged_items = _merge_news_items(current_items, report.get("items") or [])
+    if not merged_items:
+        return existing
+    report["items"] = merged_items
+    report["all_items"] = _merge_news_items(report.get("all_items") or [], current_items)
+    report["lines"] = [str(dict(item).get("title", "")).strip() for item in merged_items[:4] if str(dict(item).get("title", "")).strip()]
+    report["source_list"] = sorted(
+        {
+            str(dict(item).get("source") or dict(item).get("configured_source") or "").strip()
+            for item in merged_items
+            if str(dict(item).get("source") or dict(item).get("configured_source") or "").strip()
+        }
+    )
+    report["note"] = "场外基金外部情报已优先复用共享 intel 上游。"
+    return report
 
 
 def _score_of(analysis: Dict[str, Any], key: str) -> float:
@@ -492,6 +617,7 @@ def _payload_from_analyses(
     *,
     regime: Mapping[str, Any] | None = None,
     day_theme: Mapping[str, Any] | None = None,
+    config: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     if not analyses:
         raise ValueError("No fund analyses available")
@@ -519,9 +645,12 @@ def _payload_from_analyses(
                 float(winner.get("dimensions", {}).get("technical", {}).get("score") or 0) < 50
                 or float(winner.get("dimensions", {}).get("catalyst", {}).get("score") or 0) < 60
             )
-        ):
+            ):
             winner = gold
     narrative = dict(winner.get("narrative") or {})
+    news_report = dict(winner.get("news_report") or {})
+    if config:
+        news_report = _backfill_fund_news_report(winner, config=config)
     winner_payload = {
         "name": winner.get("name"),
         "symbol": winner.get("symbol"),
@@ -542,6 +671,7 @@ def _payload_from_analyses(
         "history": winner.get("history"),
         "benchmark_name": winner.get("benchmark_name"),
         "benchmark_symbol": winner.get("benchmark_symbol"),
+        "news_report": news_report,
         "narrative": {"playbook": dict(narrative.get("playbook") or {})},
         "positioning_lines": [
             f"首次仓位按 `{winner.get('action', {}).get('position', '计划仓位的 1/3 - 1/2')}` 执行。",
@@ -608,7 +738,8 @@ def main() -> None:
         if theme_filter or style_filter != "all" or manager_filter:
             blind_spots.append("当前使用手动候选模式，主题/风格/管理人参数不会重筛基金池，只用于记录本次偏好。")
         context = build_market_context(config, relevant_asset_types=["cn_fund", "cn_etf", "futures"])
-        analyses = [analyze_opportunity(symbol, "cn_fund", config, context=context) for symbol in candidates]
+        analyses, skipped_lines = _analyze_fund_candidates(candidates, config=config, context=context)
+        blind_spots.extend(skipped_lines)
         scan_pool = len(candidates)
         passed_pool = len(analyses)
         payload: Dict[str, Any] = {
@@ -641,7 +772,8 @@ def main() -> None:
             discovery_mode = "default_candidates_fallback"
             candidates = list(DEFAULT_CANDIDATES)
             context = build_market_context(config, relevant_asset_types=["cn_fund", "cn_etf", "futures"])
-            analyses = [analyze_opportunity(symbol, "cn_fund", config, context=context) for symbol in candidates]
+            analyses, skipped_lines = _analyze_fund_candidates(candidates, config=config, context=context)
+            blind_spots.extend(skipped_lines)
             scan_pool = len(candidates)
             passed_pool = len(analyses)
             payload = {
@@ -653,6 +785,8 @@ def main() -> None:
                 "blind_spots": blind_spots,
                 "data_coverage": summarize_pick_coverage(analyses),
             }
+    if not analyses:
+        raise SystemExit("场外基金候选全部缺少可用净值/行情，本轮无法生成正式稿。")
 
     if runtime_notes:
         blind_spots = [*runtime_notes, *blind_spots]
@@ -678,7 +812,7 @@ def main() -> None:
     payload["coverage_analyses"] = attach_portfolio_overlap_summaries(payload.get("coverage_analyses") or [], config)
     payload["watch_positive"] = attach_portfolio_overlap_summaries(payload.get("watch_positive") or [], config)
     analyses = list(payload.get("top") or [])
-    attach_visuals_to_analyses(analyses[:3])
+    attach_visuals_to_analyses(analyses[:3], render_theme_variants=args.client_final)
     delivery_tier = grade_pick_delivery(
         report_type="fund_pick",
         discovery_mode=discovery_mode,
@@ -710,6 +844,7 @@ def main() -> None:
         selection_context=selection_context,
         regime=payload.get("regime") or {},
         day_theme=payload.get("day_theme") or {},
+        config=config,
     )
     delivery_tier = grade_pick_delivery(
         report_type="fund_pick",
@@ -749,6 +884,7 @@ def main() -> None:
                 selection_context=selection_context,
                 regime=payload.get("regime") or {},
                 day_theme=payload.get("day_theme") or {},
+                config=config,
             )
     report_payload["selection_context"] = selection_context
     markdown = ClientReportRenderer().render_fund_pick(report_payload)

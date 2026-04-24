@@ -23,9 +23,9 @@ from src.collectors import (
     MarketMonitorCollector,
     MarketOverviewCollector,
     MarketPulseCollector,
-    NewsCollector,
     SocialSentimentCollector,
 )
+from src.commands.intel import collect_intel_news_report, collect_market_aware_intel_news_report
 from src.output.event_digest import build_event_digest, summarize_event_digest_contract
 from src.processors.context import (
     derive_regime_inputs,
@@ -417,6 +417,81 @@ def _market_proxy_snapshots(watchlist: Sequence[Mapping[str, Any]], config: Dict
     return snapshots
 
 
+def _watchlist_intel_query(watchlist: Sequence[Mapping[str, Any]]) -> str:
+    terms: List[str] = []
+    for item in list(watchlist or [])[:4]:
+        name = _safe_text(item.get("name"))
+        symbol = _safe_text(item.get("symbol"))
+        sector = _safe_text(item.get("sector"))
+        for value in (name, symbol, sector):
+            if value and value not in terms:
+                terms.append(value)
+    return " ".join(terms) if terms else "A股 市场 情报"
+
+
+def _shared_intel_news_report(
+    config: Mapping[str, Any],
+    *,
+    query: str,
+    explicit_symbol: str = "",
+    baseline_report: Mapping[str, Any] | None = None,
+    limit: int = 12,
+    recent_days: int = 7,
+    note_prefix: str = "",
+) -> Dict[str, Any]:
+    try:
+        report = collect_market_aware_intel_news_report(
+            query,
+            config=config,
+            explicit_symbol=explicit_symbol,
+            baseline_report=baseline_report,
+            limit=limit,
+            recent_days=recent_days,
+            structured_only=not bool(dict(config or {}).get("news_topic_search_enabled", True)),
+            note_prefix=note_prefix,
+            collect_fn=collect_intel_news_report,
+        )
+    except Exception as exc:
+        return {
+            "mode": "proxy",
+            "items": [],
+            "all_items": [],
+            "lines": [],
+            "source_list": [],
+            "note": f"{note_prefix}intel 采集降级: {exc}",
+            "disclosure": "共享 intel 采集失败，按缺失处理，不伪装成 fresh 命中。",
+        }
+    return dict(report)
+
+
+def _attach_shared_intel_news_report(
+    context: Mapping[str, Any],
+    config: Mapping[str, Any],
+    *,
+    query: str,
+    explicit_symbol: str = "",
+    note_prefix: str = "",
+) -> Dict[str, Any]:
+    merged = dict(context or {})
+    existing_report = dict(merged.get("news_report") or {})
+    shared_report = _shared_intel_news_report(
+        config,
+        query=query,
+        explicit_symbol=explicit_symbol,
+        baseline_report=existing_report,
+        note_prefix=note_prefix,
+    )
+    shared_items = list(shared_report.get("items") or [])
+    if not shared_items:
+        return merged
+
+    existing_items = list(existing_report.get("items") or [])
+    if not existing_items or len(shared_items) >= len(existing_items):
+        merged["news_report"] = shared_report
+        merged["intel_news_report"] = shared_report
+    return merged
+
+
 def _light_market_context(config: Dict[str, Any], watchlist: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     notes: List[str] = []
     monitor_rows: List[Dict[str, Any]] = []
@@ -428,13 +503,15 @@ def _light_market_context(config: Dict[str, Any], watchlist: Sequence[Mapping[st
     except Exception as exc:
         notes.append(f"宏观监控数据缺失: {exc}")
     try:
-        news_report = NewsCollector(config).collect(
-            snapshots=list(watchlist)[:6],
-            preferred_sources=(),
+        news_report = _shared_intel_news_report(
+            config,
+            query=_watchlist_intel_query(watchlist),
             limit=12,
+            recent_days=7,
+            note_prefix="research market intel: ",
         )
     except Exception as exc:
-        notes.append(f"新闻链路降级: {exc}")
+        notes.append(f"共享 intel 链路降级: {exc}")
     try:
         pulse = MarketPulseCollector(config).collect()
     except Exception as exc:
@@ -938,6 +1015,21 @@ def _asset_next_step_lines(snapshot: Mapping[str, Any]) -> List[str]:
 def _current_asset_event_digest_payload(symbol: str, config: Dict[str, Any]) -> Dict[str, Any]:
     asset_type = detect_asset_type(symbol, config)
     context = build_market_context(config, relevant_asset_types=[asset_type, "cn_etf", "futures"])
+    intel_query = " ".join(
+        part
+        for part in (
+            str(symbol).strip(),
+            str(asset_type).strip(),
+        )
+        if part
+    )
+    context = _attach_shared_intel_news_report(
+        context,
+        config,
+        query=intel_query or symbol,
+        explicit_symbol=symbol,
+        note_prefix="research asset intel: ",
+    )
     analysis = analyze_opportunity(symbol, asset_type, config, context=context, today_mode=False)
     digest = summarize_event_digest_contract(build_event_digest(analysis))
     status = _safe_text(digest.get("status")) or "待补充"

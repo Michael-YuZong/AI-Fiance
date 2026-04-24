@@ -6,7 +6,7 @@ from datetime import datetime, time
 from typing import Any, Dict, Mapping
 from zoneinfo import ZoneInfo
 
-from src.processors.horizon import infer_horizon_code_from_period
+from src.processors.horizon import horizon_family_code, infer_horizon_code_from_period
 
 _SH_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -38,8 +38,11 @@ def _parse_generated_at(generated_at: Any = None) -> datetime:
 
 def _horizon_code(horizon: Mapping[str, Any] | None) -> str:
     payload = dict(horizon or {})
+    family_code = horizon_family_code(payload, default="")
+    if family_code:
+        return family_code
     label = str(payload.get("label", "")).strip()
-    return str(payload.get("code", "")).strip() or str(infer_horizon_code_from_period(label) or "watch")
+    return str(infer_horizon_code_from_period(label) or "watch")
 
 
 def _asset_family(asset_type: str) -> str:

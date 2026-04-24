@@ -15,14 +15,18 @@ def _analysis_visual_key(analysis: Mapping[str, Any]) -> Tuple[str, str, str]:
     )
 
 
-def attach_visuals_to_analyses(analyses: Sequence[MutableMapping[str, Any]] | Iterable[MutableMapping[str, Any]]) -> None:
+def attach_visuals_to_analyses(
+    analyses: Sequence[MutableMapping[str, Any]] | Iterable[MutableMapping[str, Any]],
+    *,
+    render_theme_variants: bool = False,
+) -> None:
     """Render chart assets for the provided analyses in-place.
 
     The helper is intentionally selective: callers should only pass analyses that
     will actually be surfaced in client/internal pick reports.
     """
 
-    renderer = AnalysisChartRenderer()
+    renderer = AnalysisChartRenderer(render_theme_variants=render_theme_variants)
     seen: set[Tuple[str, str, str]] = set()
     for analysis in analyses:
         if not isinstance(analysis, dict):

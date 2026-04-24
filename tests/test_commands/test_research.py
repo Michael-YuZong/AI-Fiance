@@ -23,6 +23,7 @@ from src.commands.research import (
     _portfolio_risk_payload,
     _pulse_stats,
     _current_asset_event_digest_payload,
+    _light_market_context,
     _render_research_markdown,
     _snapshot_bias,
     _thesis_event_memory_payload,
@@ -226,8 +227,29 @@ def test_thesis_event_memory_payload_records_delta(tmp_path: Path) -> None:
 
 def test_current_asset_event_digest_payload_surfaces_event_depth(monkeypatch) -> None:
     monkeypatch.setattr("src.commands.research.detect_asset_type", lambda symbol, config: "cn_etf")
-    monkeypatch.setattr("src.commands.research.build_market_context", lambda config, relevant_asset_types=None: {})
-    monkeypatch.setattr("src.commands.research.analyze_opportunity", lambda symbol, asset_type, config, context=None, today_mode=False: {"generated_at": "2026-03-29 10:00:00"})
+    monkeypatch.setattr(
+        "src.commands.research.build_market_context",
+        lambda config, relevant_asset_types=None: {"news_report": {"mode": "proxy", "items": []}},
+    )
+    monkeypatch.setattr(
+        "src.commands.research.collect_intel_news_report",
+        lambda query, **kwargs: {  # noqa: ARG005
+            "mode": "live",
+            "items": [{"title": "共享 research intel 线索", "source": "财联社"}],
+            "all_items": [{"title": "共享 research intel 线索", "source": "财联社"}],
+            "lines": ["共享 research intel 线索"],
+            "source_list": ["财联社"],
+            "note": "intel",
+            "disclosure": "—",
+        },
+    )
+    captured: dict[str, str] = {}
+
+    def _fake_analyze(symbol, asset_type, config, context=None, today_mode=False):  # noqa: ANN001,ARG001
+        captured["title"] = str(dict(context.get("news_report") or {}).get("items", [{}])[0].get("title", ""))  # type: ignore[union-attr]
+        return {"generated_at": "2026-03-29 10:00:00"}
+
+    monkeypatch.setattr("src.commands.research.analyze_opportunity", _fake_analyze)
     monkeypatch.setattr("src.commands.research.build_event_digest", lambda analysis: analysis)
     monkeypatch.setattr(
         "src.commands.research.summarize_event_digest_contract",
@@ -245,12 +267,50 @@ def test_current_asset_event_digest_payload_surfaces_event_depth(monkeypatch) ->
 
     payload = _current_asset_event_digest_payload("561380", {"technical": {}})
 
+    assert captured["title"] == "共享 research intel 线索"
     assert payload["contract"]["lead_detail"] == "公告类型：中标/订单"
     assert any("事件细分 `公告类型：中标/订单`" in item for item in payload["evidence_lines"])
     assert any("当前优先级 `high`" in item for item in payload["evidence_lines"])
     assert any("更直接影响 `盈利 / 景气`" in item for item in payload["evidence_lines"])
     assert any("当前更像 `thesis变化`" in item for item in payload["evidence_lines"])
     assert any("优先级判断：优先前置" in item for item in payload["evidence_lines"])
+
+
+def test_light_market_context_uses_shared_intel_news_report(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.commands.research.MarketMonitorCollector",
+        lambda config: SimpleNamespace(collect=lambda: []),
+    )
+    monkeypatch.setattr(
+        "src.commands.research.MarketPulseCollector",
+        lambda config: SimpleNamespace(collect=lambda: {}),
+    )
+    captured: dict[str, str] = {}
+
+    def _fake_intel(query, **kwargs):  # noqa: ANN001,ARG001
+        captured["query"] = query
+        return {
+            "mode": "live",
+            "items": [{"title": "共享 market intel 线索", "source": "财联社"}],
+            "all_items": [{"title": "共享 market intel 线索", "source": "财联社"}],
+            "lines": ["共享 market intel 线索"],
+            "source_list": ["财联社"],
+            "note": "intel",
+            "disclosure": "—",
+        }
+
+    monkeypatch.setattr("src.commands.research.collect_intel_news_report", _fake_intel)
+
+    context = _light_market_context(
+        {},
+        [
+            {"name": "创新药ETF", "symbol": "159992", "sector": "医药"},
+            {"name": "中证A500", "symbol": "000000"},
+        ],
+    )
+
+    assert context["news_report"]["items"][0]["title"] == "共享 market intel 线索"
+    assert "创新药ETF" in captured["query"]
 
 
 def test_run_research_review_persists_internal_artifact_and_summary(tmp_path: Path, monkeypatch) -> None:

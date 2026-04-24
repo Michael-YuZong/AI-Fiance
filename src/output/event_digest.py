@@ -43,6 +43,47 @@ _NEGATIVE_TOKENS = (
     "违约",
     "预亏",
 )
+_NEGATIVE_OVERRIDE_TOKENS = (
+    "破裂",
+    "落空",
+    "失败",
+    "僵局",
+    "受阻",
+    "升级",
+    "加剧",
+    "反悔",
+    "撕毁",
+    "重燃",
+    "遇袭",
+    "遭袭",
+    "袭击",
+    "空袭",
+    "打击",
+    "受损",
+    "受创",
+    "紧张",
+)
+_RISK_ON_NEGATIVE_OVERRIDE_TOKENS = tuple(
+    token for token in _NEGATIVE_OVERRIDE_TOKENS if token not in {"升级", "加剧"}
+) + ("冲突升级", "紧张加剧")
+_POSITIVE_RISK_APPETITE_TOKENS = (
+    "停火",
+    "休战",
+    "ceasefire",
+    "truce",
+    "de-escalat",
+    "缓和",
+    "降温",
+    "结束战争",
+    "风险偏好修复",
+)
+_NEGATIVE_NEUTRAL_PHRASES = (
+    "风险偏好",
+    "risk appetite",
+    "risk-on",
+    "risk on",
+    "风险资产",
+)
 _POLICY_TOKENS = (
     "政策",
     "通知",
@@ -118,6 +159,13 @@ _FIRST_PARTY_SOURCE_TOKENS = (
     "SSE",
     "SZSE",
     "Investor Relations",
+    "投资者关系",
+    "互动易",
+    "互动平台",
+    "投资者问答",
+    "e互动",
+    "路演纪要",
+    "业绩说明会",
     "SEC",
     "HKEX",
     "hkexnews",
@@ -191,11 +239,24 @@ _EARNINGS_DETAIL_TOKENS = (
     ("收入/订单验证", ("收入", "营收", "订单", "出货", "销量")),
 )
 _THEME_EVENT_DETAIL_TOKENS = (
+    ("地缘缓和/风险偏好修复", ("停火", "休战", "ceasefire", "truce", "de-escalat", "缓和", "结束战争", "风险偏好修复", "油价回落")),
+    ("地缘扰动/风险偏好承压", ("陷入僵局", "僵局", "遭袭", "遇袭", "袭击", "空袭", "受损", "受创", "紧张升级", "冲突升级")),
+    ("市场修复/风险偏好回暖", ("放量大涨", "放量上涨", "普涨", "反转", "修复行情", "风险偏好", "风险资产走强")),
     ("价格/排产验证", ("涨价", "价格", "排产", "装机", "出货", "补库", "去库", "开工", "产销", "库存拐点")),
     ("海外映射/链式催化", ("海外映射", "英伟达", "nvidia", "苹果", "apple", "特斯拉", "tesla", "amd", "海外龙头", "海外发布")),
     ("大会/产品催化", ("大会", "展会", "发布会", "新品", "模型")),
     ("情绪热度", ("热度", "情绪升温", "讨论度", "热搜", "刷屏", "涨停潮", "爆发", "发酵", "拥挤")),
     ("产业链映射", ("产业链", "供应链", "映射", "主题")),
+)
+_STRUCTURAL_THEME_DETAIL_TOKENS = (
+    "成分权重结构",
+    "标准指数框架",
+    "行业/指数框架",
+    "标准行业归因",
+    "份额净创设",
+    "份额净赎回",
+    "技术确认",
+    "龙头权重暴露",
 )
 _IMPACT_AXIS_TOKENS = (
     ("盈利", ("盈利", "利润", "净利", "收入", "营收", "毛利", "eps", "业绩", "指引", "订单", "中标", "合同", "减值", "亏损")),
@@ -238,6 +299,60 @@ _DIAGNOSTIC_FACTOR_TOKENS = (
     "个股新增直接情报 0 条",
     "主题/行业情报 0 条",
 )
+_GENERIC_INSTRUMENT_TOPIC_TOKENS = {
+    "etf",
+    "lof",
+    "基金",
+    "指数",
+    "主题",
+    "联接",
+    "增强",
+    "发起",
+    "a",
+    "c",
+    "e",
+    "of",
+    "主暴露属于",
+}
+_GENERIC_MARKET_BACKGROUND_TOKENS = (
+    "后市机会",
+    "机构眼中的后市机会",
+    "早报",
+    "盘前",
+    "盘后",
+    "a股放量",
+    "沪指",
+    "深成指",
+    "创业板",
+    "大盘",
+    "市场大涨",
+    "市场爆涨",
+    "多家a股公司",
+    "证监会立案",
+)
+_SINGLE_STOCK_PROXY_TOKENS = (
+    "股价",
+    "重仓持有",
+    "基金重仓",
+    "龙虎榜",
+    "涨停",
+    "连板",
+    "年报",
+    "季报",
+    "业绩炸裂",
+    "业绩预告",
+)
+_THEME_PROXY_TOKENS = _THEME_EVENT_TOKENS + (
+    "资本开支",
+    "先进封装",
+    "服务器",
+    "供需",
+    "库存",
+    "价格中枢",
+    "涨价",
+    "氧化铝",
+    "铝土矿",
+)
 
 
 def _safe_text(value: Any) -> str:
@@ -263,6 +378,22 @@ def _compact_event_label(value: Any) -> str:
             text = text[len(prefix) :]
             break
     return text.strip("：: ").strip()
+
+
+def _is_negative_event_text(text: Any) -> bool:
+    content = _safe_text(text).lower()
+    if not content:
+        return False
+    has_positive_risk_appetite = _contains_any(content, _POSITIVE_RISK_APPETITE_TOKENS)
+    has_risk_on_blocker = _contains_any(content, _RISK_ON_NEGATIVE_OVERRIDE_TOKENS)
+    if has_positive_risk_appetite:
+        if not has_risk_on_blocker:
+            return False
+        return True
+    normalized = content
+    for phrase in _NEGATIVE_NEUTRAL_PHRASES:
+        normalized = normalized.replace(str(phrase).lower(), "")
+    return _contains_any(normalized, _NEGATIVE_TOKENS)
 
 
 def _compact_changed_what_text(changed_what: Any, *, impact_summary: Any = "", thesis_scope: Any = "") -> str:
@@ -424,6 +555,79 @@ def _item_event_stamp(item: Mapping[str, Any]) -> datetime | None:
 def _contains_any(text: str, tokens: Sequence[str]) -> bool:
     blob = _safe_text(text).lower()
     return any(_safe_text(token).lower() in blob for token in tokens)
+
+
+def _instrument_proxy_topic_terms(payload: Mapping[str, Any]) -> List[str]:
+    metadata = dict(payload.get("metadata") or {})
+    taxonomy = dict(metadata.get("taxonomy") or metadata.get("fund_taxonomy") or {})
+    taxonomy_profile = dict(metadata.get("theme_profile") or taxonomy.get("theme_profile") or {})
+    theme_playbook = dict(payload.get("theme_playbook") or {})
+    day_theme = dict(payload.get("day_theme") or {})
+    asset_type = _safe_text(payload.get("asset_type")).lower()
+    day_theme_label = "" if asset_type in {"cn_stock", "hk", "us"} else day_theme.get("label")
+    raw_values: List[Any] = [
+        payload.get("name"),
+        payload.get("symbol"),
+        metadata.get("sector"),
+        metadata.get("industry"),
+        metadata.get("industry_framework_label"),
+        metadata.get("tracked_index_name"),
+        metadata.get("index_framework_label"),
+        metadata.get("benchmark_name"),
+        payload.get("benchmark_name"),
+        payload.get("taxonomy_summary"),
+        metadata.get("chain_nodes"),
+        metadata.get("theme_family"),
+        metadata.get("primary_chain"),
+        metadata.get("theme_role"),
+        metadata.get("evidence_keywords"),
+        metadata.get("preferred_sector_aliases"),
+        metadata.get("mainline_tags"),
+        taxonomy,
+        taxonomy_profile,
+        theme_playbook.get("label"),
+        day_theme_label,
+    ]
+    taxonomy_summary = _safe_text(payload.get("taxonomy_summary"))
+    match = re.search(r"主暴露属于([^\s。；;,，]+)", taxonomy_summary)
+    if match:
+        raw_values.append(match.group(1))
+    terms: List[str] = []
+    seen: set[str] = set()
+    for token in re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", _flatten_text(*raw_values)):
+        clean = _safe_text(token)
+        if not clean:
+            continue
+        for suffix in ("ETF", "etf", "LOF", "lof", "基金", "指数", "主题", "联接", "增强"):
+            if clean.endswith(suffix) and len(clean) > len(suffix) + 1:
+                clean = clean[: -len(suffix)]
+        lower = clean.lower()
+        if len(clean) < 2 or lower in _GENERIC_INSTRUMENT_TOPIC_TOKENS:
+            continue
+        if clean in seen:
+            continue
+        seen.add(clean)
+        terms.append(clean)
+    return sorted(terms, key=len, reverse=True)
+
+
+def _looks_like_generic_market_background(title: Any) -> bool:
+    return _contains_any(_safe_text(title), _GENERIC_MARKET_BACKGROUND_TOKENS)
+
+
+def _looks_like_single_stock_proxy_noise(title: Any) -> bool:
+    return _contains_any(_safe_text(title), _SINGLE_STOCK_PROXY_TOKENS)
+
+
+def _looks_like_theme_level_proxy_candidate(row: Mapping[str, Any], title: str) -> bool:
+    blob = _flatten_text(
+        row.get("layer"),
+        row.get("category"),
+        row.get("source_note"),
+        row.get("configured_source"),
+        title,
+    )
+    return _contains_any(blob, _THEME_PROXY_TOKENS)
 
 
 def _source_directness_rank(source: Any) -> int:
@@ -654,6 +858,8 @@ def _normalize_event_layer(layer: Any = "", title: Any = "", signal: Any = "", *
     layer_text = _safe_text(layer)
     content_blob = _flatten_text(title, signal)
     blob = _flatten_text(layer, title, signal)
+    if prefer_theme_event or layer_text in {"海外映射", "产品/跟踪方向催化", "主题级关键新闻"}:
+        return "行业主题事件"
     if _contains_any(content_blob, _EARNINGS_TOKENS):
         return "财报"
     if "政策" in layer_text or _contains_any(content_blob, _POLICY_TOKENS):
@@ -703,19 +909,23 @@ def _earnings_detail(text: str, *, negative: bool = False) -> str:
     return label
 
 
-def _theme_event_detail(text: str) -> str:
+def _theme_event_detail(text: str, *, negative: bool = False) -> str:
+    if negative and _contains_any(text, ("陷入僵局", "僵局", "遭袭", "遇袭", "袭击", "空袭", "受损", "受创", "紧张升级", "冲突升级")):
+        return "地缘扰动/风险偏好承压"
     return _first_match_label(text, _THEME_EVENT_DETAIL_TOKENS, fallback="主题热度/映射")
 
 
 def _lead_detail(layer: str, text: str, *, negative: bool = False) -> str:
     if layer == "财报":
+        if _contains_any(text, ("财报窗口", "披露日历", "预约披露", "待披露", "将于", "拟披露")):
+            return "财报日历：待披露窗口"
         return f"财报摘要：{_earnings_detail(text, negative=negative)}"
     if layer == "公告":
         return f"公告类型：{_announcement_type(text)}"
     if layer == "政策":
         return f"政策影响层：{_policy_impact_tier(text)}"
     if layer == "行业主题事件":
-        return f"主题事件：{_theme_event_detail(text)}"
+        return f"主题事件：{_theme_event_detail(text, negative=negative)}"
     return "信息环境：新闻/舆情脉冲"
 
 
@@ -761,6 +971,10 @@ def _default_impact_axes(layer: str, detail: str) -> List[str]:
             return ["景气", "估值"]
         return ["资金偏好", "景气"]
     if layer == "行业主题事件":
+        if "地缘缓和/风险偏好修复" in detail or "市场修复/风险偏好回暖" in detail:
+            return ["估值", "资金偏好"]
+        if "地缘扰动/风险偏好承压" in detail:
+            return ["估值", "资金偏好"]
         if "价格/排产验证" in detail:
             return ["景气", "盈利"]
         if "大会/产品催化" in detail:
@@ -774,6 +988,8 @@ def _default_impact_axes(layer: str, detail: str) -> List[str]:
 
 
 def _impact_axes(layer: str, text: str, detail: str) -> List[str]:
+    if layer == "财报" and "财报日历" in detail:
+        return ["盈利", "资金偏好"]
     if layer == "财报" and "毛利率/费用率改善" in detail:
         return ["盈利", "估值"]
     if layer == "财报" and "现金流/合同负债改善" in detail:
@@ -790,6 +1006,12 @@ def _impact_axes(layer: str, text: str, detail: str) -> List[str]:
         return ["盈利", "估值"]
     if layer == "行业主题事件" and "价格/排产验证" in detail:
         return ["景气", "盈利"]
+    if layer == "行业主题事件" and (
+        "地缘缓和/风险偏好修复" in detail or "市场修复/风险偏好回暖" in detail
+    ):
+        return ["估值", "资金偏好"]
+    if layer == "行业主题事件" and "地缘扰动/风险偏好承压" in detail:
+        return ["估值", "资金偏好"]
     if layer == "行业主题事件" and "大会/产品催化" in detail:
         return ["资金偏好", "景气"]
     if layer == "行业主题事件" and "海外映射/链式催化" in detail:
@@ -851,6 +1073,8 @@ def _signal_conclusion_text(
 ) -> str:
     if thesis_scope == "历史基线":
         return "中性，当前更多是历史基线，不把它直接当成新增催化。"
+    if thesis_scope == "结构基线":
+        return "中性，先作为产品/指数映射的结构背景，不单独升级动作。"
     explicit_text = _safe_text(explicit)
     if explicit_text:
         return explicit_text
@@ -871,6 +1095,10 @@ def _signal_conclusion_text(
         return f"{prefix}，先别把它单独升级成动作。"
     if status == "待补充":
         return "中性，先补更直接的公司/产品级情报。"
+    if "地缘缓和/风险偏好修复" in lead_detail:
+        return "中性偏多，先看风险偏好修复能否继续扩散。"
+    if "市场修复/风险偏好回暖" in lead_detail:
+        return "中性偏多，先看放量修复能否继续扩散到行业宽度。"
     if negative:
         return "偏利空，先看风险会不会继续扩散。"
     if impact_summary:
@@ -885,6 +1113,10 @@ def _thesis_scope(layer: str, score: int, axes: Sequence[str], detail: str, *, n
         return "待确认"
 
     axis_set = {_safe_text(item) for item in list(axes or []) if _safe_text(item)}
+    if layer == "行业主题事件" and any(token in detail for token in _STRUCTURAL_THEME_DETAIL_TOKENS):
+        return "结构基线"
+    if layer == "财报" and "财报日历" in detail:
+        return "待确认" if score >= 68 else "一次性噪音"
     if layer == "财报" and ("资本开支/扩产" in detail or "回购/分红" in detail or "现金流/合同负债改善" in detail):
         return "待确认" if score >= 68 else "一次性噪音"
     if layer == "公告" and (
@@ -899,9 +1131,14 @@ def _thesis_scope(layer: str, score: int, axes: Sequence[str], detail: str, *, n
     if layer == "政策" and ("价格机制/收费调整" in detail or "配套细则" in detail or "方向表态" in detail):
         return "待确认" if score >= 68 else "一次性噪音"
     if layer == "行业主题事件" and (
+        "地缘缓和/风险偏好修复" in detail
+        or "市场修复/风险偏好回暖" in detail
+        or "地缘扰动/风险偏好承压" in detail
+        or
         "大会/产品催化" in detail
         or "海外映射/链式催化" in detail
         or "情绪热度" in detail
+        or "主题热度/映射" in detail
     ):
         return "待确认" if score >= 68 else "一次性噪音"
     if layer in {"财报", "公告", "政策"} and score >= 76:
@@ -937,7 +1174,7 @@ def _importance_score(
     score = _LAYER_BASE_SCORES.get(layer, 50)
     if has_direct_source:
         score += 6
-    if _contains_any(text, _NEGATIVE_TOKENS):
+    if _is_negative_event_text(text):
         score += 4
     if layer == "财报":
         if "上修" in detail or "承压" in detail:
@@ -1166,7 +1403,7 @@ def _candidate_from_evidence(item: Mapping[str, Any], *, as_of: Any = "", prefer
         layer = explicit_layer
     title = _safe_text(item.get("title")) or _safe_text(item.get("signal")) or _event_title_with_source(item)
     text = _flatten_text(item, explicit_detail)
-    negative = _contains_any(text, _NEGATIVE_TOKENS)
+    negative = _is_negative_event_text(text)
     detail = explicit_detail or _lead_detail(layer, text, negative=negative)
     axes = _impact_axes(layer, text, detail)
     event_date = _safe_text(item.get("date"))
@@ -1286,6 +1523,8 @@ def _event_priority_bias(item: Mapping[str, Any]) -> int:
     bias = 0
     if any(token in text for token in ("标准指数框架", "指数成分权重", "标准行业归因", "行业/指数框架", "龙头权重暴露")):
         bias += 12
+    if any(token in text for token in ("互动易", "投资者关系", "e互动", "路演纪要", "业绩说明会", "互动平台", "投资者问答")):
+        bias += 20
     if any(token in text for token in ("周线结构", "月线结构", "指数周线", "指数月线")):
         bias -= 18
     if "缺失" in text and any(token in text for token in ("周线", "月线")):
@@ -1356,7 +1595,7 @@ def _candidate_from_factor(item: Mapping[str, Any], *, as_of: Any = "") -> Dict[
     text = _flatten_text(item)
     layer = _normalize_event_layer(item.get("name"), item.get("signal"), item.get("detail"))
     title = _safe_text(item.get("signal")) or _safe_text(item.get("detail")) or _safe_text(item.get("name"))
-    negative = _contains_any(text, _NEGATIVE_TOKENS)
+    negative = _is_negative_event_text(text)
     detail = _lead_detail(layer, text, negative=negative)
     axes = _impact_axes(layer, text, detail)
     base_score = _importance_score(
@@ -1434,7 +1673,7 @@ def _candidate_from_factor(item: Mapping[str, Any], *, as_of: Any = "") -> Dict[
 def _candidate_from_text(text: Any, *, as_of: Any = "") -> Dict[str, Any]:
     content = _safe_text(text)
     layer = _normalize_event_layer("", content, "", prefer_theme_event=True)
-    negative = _contains_any(content, _NEGATIVE_TOKENS)
+    negative = _is_negative_event_text(content)
     detail = _lead_detail(layer, content, negative=negative)
     axes = _impact_axes(layer, content, detail)
     base_score = _importance_score(layer, as_of=as_of, text=content, detail=detail, axes=axes)
@@ -1490,20 +1729,29 @@ def _candidate_from_market_event_row(row: Any, *, as_of: Any = "") -> Dict[str, 
     link = _safe_text(values[5] if len(values) > 5 else "")
     impact = _safe_text(values[4] if len(values) > 4 else "")
     strength = _safe_text(values[3] if len(values) > 3 else "")
+    blob = _flatten_text(title, source, signal_type, conclusion)
+    is_financial_calendar = _contains_any(blob, ("财报", "年报", "季报", "中报", "业绩披露", "披露日历", "预约披露"))
+    layer = "财报" if is_financial_calendar else "行业主题事件"
+    lead_detail = (
+        _lead_detail(layer, title)
+        if is_financial_calendar
+        else f"主题事件：{signal_type}" + (f"；结论：{conclusion}" if conclusion else "")
+    )
     item = {
         "title": title,
         "source": source,
         "date": date,
         "link": link,
-        "lead_detail": f"主题事件：{signal_type}" + (f"；结论：{conclusion}" if conclusion else ""),
-        "layer": "行业主题事件",
+        "lead_detail": lead_detail,
+        "layer": layer,
         "importance": {"高": "high", "中": "medium", "低": "low"}.get(strength, "medium"),
         "impact_summary": impact,
         "signal_type": signal_type,
         "signal_strength": strength,
         "signal_conclusion": conclusion,
+        "source_note": "structured_disclosure" if is_financial_calendar else "",
     }
-    return _candidate_from_evidence(item, as_of=as_of, prefer_theme_event=True)
+    return _candidate_from_evidence(item, as_of=as_of, prefer_theme_event=not is_financial_calendar)
 
 
 def _collect_candidates(
@@ -1521,9 +1769,13 @@ def _collect_candidates(
             continue
         if _is_diagnostic_intelligence_row(row):
             continue
+        if _should_skip_instrument_proxy_news(payload, row):
+            continue
         candidates.append(_candidate_from_evidence(row, as_of=as_of))
     for item in list(catalyst.get("theme_news") or []):
         row = dict(item or {})
+        if _should_skip_instrument_proxy_news(payload, row):
+            continue
         if _is_placeholder_intelligence_title(row.get("title")) and not _explicit_structured_lead_detail(row):
             continue
         candidates.append(_candidate_from_evidence(row, as_of=as_of, prefer_theme_event=True))
@@ -1534,6 +1786,8 @@ def _collect_candidates(
         if _is_diagnostic_intelligence_row(row):
             continue
         if _is_workflow_event_row(row):
+            continue
+        if _should_skip_instrument_proxy_news(payload, row):
             continue
         candidates.append(_candidate_from_evidence(row, as_of=as_of))
     for row in list(payload.get("market_event_rows") or []):
@@ -1580,14 +1834,79 @@ def _collect_candidates(
     return unique[:6]
 
 
+def _should_skip_instrument_proxy_news(payload: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+    asset_type = _safe_text(payload.get("asset_type")).lower()
+    if asset_type in {"cn_stock", "hk", "us"}:
+        title = _safe_text(row.get("title"))
+        if not title:
+            return True
+        metadata = dict(payload.get("metadata") or {})
+        identity_terms = [
+            _safe_text(payload.get("name")),
+            _safe_text(payload.get("symbol")),
+            _safe_text(metadata.get("name")),
+            _safe_text(metadata.get("ts_code")),
+        ]
+        identity_terms = [term for term in identity_terms if len(term) >= 2]
+        if any(term and term in title for term in identity_terms):
+            return False
+        topic_terms = _instrument_proxy_topic_terms(payload)
+        if any(term and term in title for term in topic_terms):
+            return False
+        if _looks_like_generic_market_background(title):
+            return True
+        if _looks_like_theme_level_proxy_candidate(row, title):
+            return True
+        if _item_source_directness_rank(row) >= 1 or _is_search_fallback_item(row):
+            return True
+        return False
+    if asset_type not in {"cn_etf", "cn_fund", "cn_index"}:
+        return False
+    dimensions = dict(payload.get("dimensions") or {})
+    catalyst = dict(dimensions.get("catalyst") or {})
+    coverage = dict(catalyst.get("coverage") or {})
+    if bool(coverage.get("directional_catalyst_hit")) or int(coverage.get("direct_news_count") or 0) > 0:
+        return False
+    title = _safe_text(row.get("title"))
+    if not title:
+        return True
+    symbol = "".join(ch for ch in _safe_text(payload.get("symbol")) if ch.isdigit())
+    mentioned_codes = re.findall(r"(?<!\d)(\d{5,6})(?!\d)", title)
+    if mentioned_codes and (not symbol or any(code != symbol for code in mentioned_codes)):
+        return True
+    metadata = dict(payload.get("metadata") or {})
+    identity_terms = [
+        _safe_text(payload.get("name")),
+        _safe_text(payload.get("symbol")),
+        _safe_text(metadata.get("tracked_index_name")),
+        _safe_text(metadata.get("index_framework_label")),
+        _safe_text(metadata.get("benchmark_name")),
+        _safe_text(payload.get("benchmark_name")),
+    ]
+    identity_terms = [term for term in identity_terms if len(term) >= 4]
+    if any(term in title for term in identity_terms):
+        return False
+    topic_terms = _instrument_proxy_topic_terms(payload)
+    if any(term in title for term in topic_terms):
+        return False
+    if _looks_like_generic_market_background(title):
+        return True
+    if _looks_like_single_stock_proxy_noise(title):
+        return True
+    if _looks_like_theme_level_proxy_candidate(row, title):
+        return False
+    return False
+
+
 def _latest_signal_at(payload: Mapping[str, Any], candidates: Sequence[Mapping[str, Any]]) -> str:
     catalyst = dict(dict(payload.get("dimensions") or {}).get("catalyst") or {})
     coverage = dict(catalyst.get("coverage") or {})
     latest_coverage = _safe_text(coverage.get("latest_news_at"))
-    if latest_coverage:
-        return latest_coverage
     latest_stamp: datetime | None = None
-    latest_text = ""
+    latest_text = latest_coverage
+    coverage_stamp = _parse_datetime(latest_coverage) if latest_coverage else None
+    if coverage_stamp is not None:
+        latest_stamp = coverage_stamp
     for item in candidates:
         for key in ("date", "published_at", "as_of"):
             value = _safe_text(item.get(key))
@@ -1598,6 +1917,15 @@ def _latest_signal_at(payload: Mapping[str, Any], candidates: Sequence[Mapping[s
                 latest_stamp = stamp
                 latest_text = value
     return latest_text
+
+
+def _candidate_signal_at(item: Mapping[str, Any]) -> str:
+    row = dict(item or {})
+    for key in ("date", "published_at", "as_of"):
+        value = _safe_text(row.get(key))
+        if value:
+            return value
+    return ""
 
 
 def _history_note(payload: Mapping[str, Any], latest_signal_at: str, previous_reviewed_at: str) -> str:
@@ -1708,7 +2036,17 @@ def _changed_what_text(
             f"`{lead_detail or layer or '事件'}` 这条线目前更多像一次性噪音，{impact_part}"
             " 还不足以单独改写 thesis，更适合当辅助理解而不是直接升级动作。"
         ).strip()
+    if thesis_scope == "结构基线":
+        return (
+            f"`{lead_detail or layer or '结构证据'}` 是产品/指数映射的结构基线，{impact_part}"
+            " 它帮助界定暴露和跟踪对象，但不是新增催化，不能单独升级动作。"
+        ).strip()
     if layer == "财报":
+        if "财报日历" in lead_detail:
+            return (
+                f"`{lead_detail}` 把接下来的观察重点推到核心持仓的披露窗口，{impact_part}"
+                " 它提示短线波动和兑现检验将临近，但还不是财报结果本身，不能直接写成业绩已经超预期。"
+            ).strip()
         if "毛利率/费用率改善" in lead_detail:
             return (
                 f"`{lead_detail}` 已把研究重点推进到利润率改善和经营杠杆层，{impact_part}"
@@ -1850,7 +2188,11 @@ def _next_step_text(status: str, layer: str, *, lead_detail: str = "", thesis_sc
         return "补更直接的公司/产品级事件或执行细节。"
     if thesis_scope == "一次性噪音":
         return "继续盯价格确认和后续证据，先别把单条标题直接升级成 thesis。"
+    if thesis_scope == "结构基线":
+        return "继续盯跟踪指数强弱、份额承接和价格确认，别把结构背景当成新增催化。"
     if layer == "财报":
+        if "财报日历" in lead_detail:
+            return "等正式披露后再看营收、净利、毛利率、订单/指引和价格确认，不把预约披露当成业绩兑现。"
         if "毛利率/费用率改善" in lead_detail:
             return "继续盯毛利率、费用纪律、价格传导和利润率持续性。"
         if "现金流/合同负债改善" in lead_detail:
@@ -1918,7 +2260,11 @@ def _importance_reason(
         return f"必须前置复核，因为 `{lead_detail or layer or '事件'}` 可能改写 `{impact_part}`，但证据边界还没收口。"
     if thesis_scope == "一次性噪音":
         return f"先不升级优先级，因为 `{lead_detail or layer or '事件'}` 更像一次性噪音，只把它当 `{impact_part}` 的辅助线索。"
+    if thesis_scope == "结构基线":
+        return f"只作为产品画像和暴露说明展示，因为它界定 `{impact_part}` 的跟踪口径；它不是新增催化，不能单独升级动作。"
     if layer == "财报":
+        if "财报日历" in lead_detail:
+            return f"优先前置，因为它是核心持仓的确定披露窗口，会影响 `{impact_part}` 的短线验证；但它不是财报结果，不能单独升级动作。"
         if "毛利率/费用率改善" in lead_detail:
             return f"优先前置，因为利润率和费用率改善已经开始改写 `{impact_part}`。"
         if "现金流/合同负债改善" in lead_detail:
@@ -2002,6 +2348,8 @@ def build_event_digest(
     previous_reviewed_at: str = "",
 ) -> Dict[str, Any]:
     source = dict(payload or {})
+    if theme_playbook:
+        source["theme_playbook"] = dict(theme_playbook or {})
     symbol = _safe_text(source.get("symbol"))
     as_of = (
         _safe_text(source.get("generated_at"))
@@ -2056,7 +2404,7 @@ def build_event_digest(
         thesis_scope=thesis_scope,
     )
     label = _safe_text(dict(theme_playbook or {}).get("label")) or _safe_text(source.get("name")) or _safe_text(source.get("symbol"))
-    latest_signal_at = _latest_signal_at(source, candidates)
+    latest_signal_at = _candidate_signal_at(lead) or _latest_signal_at(source, candidates)
     history_note = _history_note(source, latest_signal_at, previous_reviewed_at)
     intelligence_attributes = lead_tags or intelligence_attribute_labels(
         {
@@ -2461,6 +2809,12 @@ def event_digest_action_line(payload: Mapping[str, Any], *, observe_only: bool =
         return (
             f"这次 `{compact_label}` 更像 `一次性噪音`，{boundary_reason}；"
             f"{next_step or '继续看价格确认和后续证据。'}"
+        )
+    if thesis_scope == "结构基线":
+        boundary_reason = compact_reason or "它只是产品画像和暴露说明，不是新增催化"
+        return (
+            f"这次 `{compact_label}` 是 `结构基线`，{boundary_reason}；"
+            f"{next_step or '继续看跟踪指数强弱、份额承接和价格确认。'}"
         )
     if thesis_scope == "thesis变化":
         if observe_only:

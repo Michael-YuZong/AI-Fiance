@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import threading
 import time
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from src.commands.briefing import (
     _coverage_metadata,
     _core_event_lines,
     _domestic_overview_rows,
+    _export_briefing_client_final,
     _export_pdf,
     _flow_lines,
     _load_same_day_briefing,
@@ -44,6 +46,7 @@ from src.commands.briefing import (
     _primary_narrative,
     _review_queue_transition_lines,
     _persist_briefing,
+    _persist_briefing_payload,
     _quality_lines,
     _source_quality_lines,
     _style_rows,
@@ -51,6 +54,7 @@ from src.commands.briefing import (
     _theme_information_environment,
     _timed_collect,
     _tomorrow_action_lines,
+    _render_briefing_charts,
     _watchlist_review_trigger_lines,
     _yesterday_review_summary_lines,
     build_parser,
@@ -141,7 +145,7 @@ def test_briefing_a_share_watch_rows_uses_structured_fast_runtime(monkeypatch) -
     effective = captured["config"]
     assert effective["news_topic_search_enabled"] is False
     assert effective["stock_news_runtime_mode"] == "structured_only"
-    assert effective["structured_stock_intelligence_apis"] == ["forecast", "express", "dividend", "irm_qa_sh", "irm_qa_sz"]
+    assert effective["structured_stock_intelligence_apis"] == ["forecast", "express", "dividend", "stk_surv", "irm_qa_sh", "irm_qa_sz"]
     assert effective["skip_catalyst_dynamic_search_runtime"] is True
     assert effective["skip_cn_stock_direct_news_runtime"] is True
     assert effective["skip_analysis_proxy_signals_runtime"] is True
@@ -183,11 +187,112 @@ def test_briefing_export_pdf_prefers_fast_client_export(monkeypatch, tmp_path) -
     assert pdf_path.exists()
 
 
+def test_render_briefing_charts_uses_svg_assets(monkeypatch, tmp_path) -> None:
+    class _FakeRenderer:
+        def __init__(self) -> None:
+            self.enabled = True
+            self.output_dir = tmp_path
+
+        def _asset_path(self, base: str, kind: str) -> Path:
+            return self.output_dir / f"{base}_{kind}.svg"
+
+        def _render_windows(self, analysis, history, path) -> None:  # noqa: ARG002
+            path.write_text("<svg/>", encoding="utf-8")
+
+        def _render_indicators(self, analysis, history, path) -> None:  # noqa: ARG002
+            path.write_text("<svg/>", encoding="utf-8")
+
+    monkeypatch.setattr("src.output.analysis_charts.AnalysisChartRenderer", _FakeRenderer)
+    snapshot = SimpleNamespace(
+        symbol="561380",
+        name="电网ETF",
+        history=pd.DataFrame(
+            {
+                "date": pd.date_range("2026-03-01", periods=5, freq="B"),
+                "open": [1, 1, 1, 1, 1],
+                "high": [1, 1, 1, 1, 1],
+                "low": [1, 1, 1, 1, 1],
+                "close": [1, 1, 1, 1, 1],
+                "volume": [1, 1, 1, 1, 1],
+                "amount": [1, 1, 1, 1, 1],
+            }
+        ),
+        technical={},
+    )
+
+    charts = _render_briefing_charts([snapshot])
+
+    key = "电网ETF (561380)"
+    assert charts[key]["windows"].endswith(".svg")
+    assert charts[key]["indicators"].endswith(".svg")
+
+
+def test_export_briefing_client_final_uses_client_renderer_for_market_mode(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_finalize_client_markdown(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        return {"markdown": kwargs["markdown_path"]}
+
+    monkeypatch.setattr(briefing_module, "finalize_client_markdown", fake_finalize_client_markdown)
+
+    payload = {
+        "generated_at": "2026-03-12 08:30:00",
+        "news_report": {
+            "items": [
+                {
+                    "category": "china_market_domestic",
+                    "title": "国家电网发布新一轮特高压招标",
+                    "source": "CNINFO",
+                    "published_at": "2026-03-12 07:20:00",
+                    "link": "https://example.com/grid",
+                    "freshness_bucket": "fresh",
+                }
+            ]
+        },
+        "headline_lines": ["今天更像结构性行情。", "风险偏好没有全面回暖。", "更适合先看主线确认。"],
+        "action_lines": ["先小仓。", "等确认。"],
+        "theme_tracking_rows": [["新能源", "产业链订单改善", "景气方向还在。", "中线配置", "需要等量价确认。", "当前更多是背景储备和信息环境支持，不等于直接催化已兑现。"]],
+        "verification_rows": [],
+        "macro_asset_rows": [],
+        "macro_items": ["制造业 PMI 50.1，较前值回升；新订单 50.8、生产 51.7。"],
+        "regime": {"current_regime": "recovery", "reasoning": ["PMI 回到 50 上方。"]},
+        "day_theme": "中国政策 / 内需确定性",
+        "data_coverage": "中国宏观 | Watchlist 行情 | RSS新闻",
+        "missing_sources": "跨市场代理",
+        "evidence_rows": [
+            ["分析生成时间", "2026-03-12 08:30:00"],
+            ["A股观察池来源", "Tushare 优先全市场初筛；初筛 `60` 只，完整分析 `8` 只，候选上限 `16` 只。"],
+        ],
+        "quality_lines": ["本次新闻覆盖源: Reuters / 财联社。"],
+        "proxy_contract": {},
+        "a_share_watch_meta": {"pool_size": 60, "complete_analysis_size": 8},
+        "a_share_watch_candidates": [],
+        "a_share_watch_rows": [["1", "宁德时代 (300750)", "新能源", "较强机会", "持有优于追高", "首次建仓 ≤3%"]],
+        "a_share_watch_lines": ["A 股观察池来自 `Tushare 优先` 的全市场快照；初筛池 `60` 只，完整分析 `8` 只。"],
+        "alerts": [],
+    }
+
+    client_markdown, bundle = _export_briefing_client_final(
+        mode="market",
+        payload=payload,
+        rendered="# 全市场行情简报\n\n## 1. 市场结论\n\n- 原始详细稿占位。\n",
+        detail_path=tmp_path / "market_briefing_2026-03-12.md",
+    )
+
+    assert bundle["markdown"].name == "market_briefing_2026-03-12_client_final.md"
+    assert "# 今日晨报 | 2026-03-12" in client_markdown
+    assert "## 先看执行" in client_markdown
+    assert "## 今日A股观察池" in client_markdown
+    assert "# 全市场行情简报" not in client_markdown
+    assert captured["client_markdown"] == client_markdown
+
+
 def test_backfill_briefing_news_report_returns_unchanged_when_existing_items_are_sufficient() -> None:
     report = {
         "items": [
-            {"title": "A", "source": "Reuters"},
-            {"title": "B", "source": "Bloomberg"},
+            {"title": "A", "source": "Reuters", "link": "https://example.com/a"},
+            {"title": "B", "source": "Bloomberg", "link": "https://example.com/b"},
             {"title": "C", "source": "财联社"},
         ],
         "note": "已有情报",
@@ -221,210 +326,299 @@ def test_briefing_news_backfill_groups_include_active_theme_and_geopolitical_que
     assert "中东" in flat
 
 
-def test_backfill_briefing_news_report_uses_search_when_light_feed_is_thin(monkeypatch) -> None:
-    class _FakeCollector:
-        def __init__(self, _config):
-            self.config = dict(_config)
+def test_backfill_briefing_news_report_uses_shared_intel_backfill(monkeypatch) -> None:
+    calls = []
 
-        def collect(self, snapshots=None, china_macro=None, global_proxy=None, preferred_sources=None):  # noqa: ARG002
-            return {"items": []}
+    monkeypatch.setattr(
+        briefing_module,
+        "_briefing_news_backfill_groups",
+        lambda **kwargs: [["黄金", "避险"], ["科技", "修复"]],
+    )
 
-        def search_by_keyword_groups(self, query_groups, preferred_sources=None, limit=6, recent_days=3):  # noqa: ARG002
-            assert self.config["news_topic_search_enabled"] is True
-            assert query_groups
-            return [
-                {
-                    "title": "财联社：A股盘面修复",
-                    "link": "https://example.com/a",
-                    "source": "财联社",
-                    "published_at": "2026-03-31 09:30:00",
-                    "category": "china_macro",
-                }
-            ]
+    def fake_collect_intel_news_report(query, *, config, explicit_symbol="", limit=6, recent_days=7, structured_only=False, note_prefix=""):  # noqa: ARG001
+        calls.append(
+            {
+                "query": query,
+                "structured_only": structured_only,
+                "limit": limit,
+                "recent_days": recent_days,
+                "note_prefix": note_prefix,
+            }
+        )
+        if query == "黄金 避险 科技 修复":
+            return {
+                "mode": "live",
+                "items": [
+                    {
+                        "title": "黄金避险回填",
+                        "link": "https://example.com/gold",
+                        "source": "财联社",
+                        "published_at": "2026-03-31 09:00:00",
+                    }
+                ],
+                "all_items": [
+                    {
+                        "title": "黄金避险回填",
+                        "link": "https://example.com/gold",
+                        "source": "财联社",
+                        "published_at": "2026-03-31 09:00:00",
+                    }
+                ],
+                "source_list": ["财联社"],
+                "note": "共享 intel 已命中黄金避险。",
+                "disclosure": "共享 intel disclosure",
+            }
+        if query == "科技 修复":
+            return {
+                "mode": "live",
+                "items": [
+                    {
+                        "title": "科技修复回填",
+                        "link": "https://example.com/tech",
+                        "source": "Reuters",
+                        "published_at": "2026-03-31 10:00:00",
+                    }
+                ],
+                "all_items": [
+                    {
+                        "title": "科技修复回填",
+                        "link": "https://example.com/tech",
+                        "source": "Reuters",
+                        "published_at": "2026-03-31 10:00:00",
+                    }
+                ],
+                "source_list": ["Reuters"],
+                "note": "共享 intel 已命中科技修复。",
+                "disclosure": "共享 intel disclosure",
+            }
+        return {
+            "mode": "live",
+            "items": [],
+            "all_items": [],
+            "source_list": [],
+            "note": "共享 intel 当前空表。",
+            "disclosure": "共享 intel disclosure",
+        }
 
-        def _filter_candidate_items(self, items, recent_days=7):  # noqa: ARG002
-            return list(items)
-
-        def _rank_items(self, items, preferred_sources=None, query_keywords=None):  # noqa: ARG002
-            return list(items)
-
-        def _diversify_items(self, items, limit):
-            return list(items)[:limit]
-
-        def _live_lines(self, items):
-            return [f"- [{items[0]['title']}]({items[0]['link']})"]
-
-        def _present_sources(self, items):
-            return {item.get("source", "") for item in items if item.get("source")}
-
-    monkeypatch.setattr(briefing_module, "NewsCollector", _FakeCollector)
+    monkeypatch.setattr(briefing_module, "collect_intel_news_report", fake_collect_intel_news_report)
+    monkeypatch.setattr(
+        briefing_module,
+        "NewsCollector",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("backfill should not instantiate NewsCollector")),
+    )
 
     result = briefing_module._backfill_briefing_news_report(
         {"items": [], "lines": []},
-        config={"news_topic_search_enabled": False},
-        narrative={"theme": "broad_market_repair"},
+        config={"briefing_search_backfill_enabled": True},
+        narrative={"theme": "gold_defense"},
         drivers={"industry_spot": pd.DataFrame(), "concept_spot": pd.DataFrame()},
     )
 
+    assert [item["query"] for item in calls] == ["黄金 避险 科技 修复", "科技 修复"]
+    assert all(call["structured_only"] is False for call in calls)
     assert result["mode"] == "live"
-    assert result["items"][0]["link"] == "https://example.com/a"
-    assert any("搜索回填" in line for line in [result["note"]])
-    assert "财联社" in result["source_list"]
+    assert [item["title"] for item in result["items"]] == ["黄金避险回填", "科技修复回填"]
+    assert result["source_list"] == ["Reuters", "财联社"]
+    assert "briefing 共享 intel 回填" in result["note"]
+    assert "共享 intel 已命中黄金避险" in result["note"]
+    assert "共享 intel 已命中科技修复" in result["note"]
+    assert result["disclosure"] == "共享 intel disclosure"
+    assert result["fallback"] == "intel_shared_upstream"
+    assert result["as_of"] == "2026-03-31 10:00:00"
+    assert result["summary_lines"]
+    assert any("主题聚类" in line for line in result["summary_lines"])
+    assert any("来源分层" in line for line in result["summary_lines"])
 
 
-def test_backfill_briefing_news_report_skips_search_when_backfill_search_disabled(monkeypatch) -> None:
-    search_called = {"value": False}
+def test_backfill_briefing_news_report_prioritizes_geopolitics_when_proxy_lines_hint_major_event(monkeypatch) -> None:
+    calls = []
 
-    class _FakeCollector:
-        def __init__(self, _config):
-            self.config = dict(_config)
+    monkeypatch.setattr(
+        briefing_module,
+        "_briefing_news_backfill_groups",
+        lambda **kwargs: [
+            ["智谱 大模型 A股", "AI 应用 国产模型"],
+            ["中东 停火 风险偏好", "ceasefire middle east market"],
+        ],
+    )
 
-        def collect(self, snapshots=None, china_macro=None, global_proxy=None, preferred_sources=None):  # noqa: ARG002
-            return {"items": []}
+    def fake_collect_intel_news_report(query, *, config, explicit_symbol="", limit=6, recent_days=7, structured_only=False, note_prefix=""):  # noqa: ARG001
+        calls.append(query)
+        if "美伊 停火" in query or "中东 停火 风险偏好" in query:
+            return {
+                "mode": "live",
+                "items": [
+                    {
+                        "title": "美伊接受停火提议，国际油价回落、风险资产走强",
+                        "link": "https://example.com/ceasefire",
+                        "source": "财联社",
+                        "published_at": "2026-04-08 07:25:00",
+                        "theme_bucket": "政策/宏观",
+                        "source_tier": "primary_media",
+                        "source_tier_label": "主流媒体",
+                    }
+                ],
+                "all_items": [],
+                "source_list": ["财联社"],
+                "note": "地缘缓和主线已命中。",
+                "disclosure": "共享 intel disclosure",
+            }
+        return {
+            "mode": "live",
+            "items": [],
+            "all_items": [],
+            "source_list": [],
+            "note": "共享 intel 当前空表。",
+            "disclosure": "共享 intel disclosure",
+        }
 
-        def get_market_intelligence(self, keywords, limit=6, recent_days=10):  # noqa: ARG002
-            return []
+    monkeypatch.setattr(briefing_module, "collect_intel_news_report", fake_collect_intel_news_report)
 
-        def search_by_keyword_groups(self, query_groups, preferred_sources=None, limit=6, recent_days=3):  # noqa: ARG002
-            search_called["value"] = True
-            return []
+    result = briefing_module._backfill_briefing_news_report(
+        {
+            "mode": "proxy",
+            "items": [],
+            "lines": [
+                "[能源与地缘] 风险资产相对更稳，说明能源和地缘风险暂未主导盘面。",
+                "[国际局势] 外部风险处于可跟踪但未失控状态。",
+            ],
+        },
+        config={"briefing_search_backfill_enabled": True},
+        narrative={"theme": "ai_semis"},
+        drivers={"industry_spot": pd.DataFrame(), "concept_spot": pd.DataFrame()},
+    )
 
-        def _filter_candidate_items(self, items, recent_days=7):  # noqa: ARG002
-            return list(items)
+    assert calls[0] == "美伊 停火 中东 风险偏好 财联社 Reuters"
+    assert result["items"][0]["title"].startswith("美伊接受停火提议")
+    assert result["mode"] == "live"
 
-        def _rank_items(self, items, preferred_sources=None, query_keywords=None):  # noqa: ARG002
-            return list(items)
 
-        def _diversify_items(self, items, limit):
-            return list(items)[:limit]
+def test_backfill_briefing_news_report_stops_after_primary_combined_query_when_sufficient(monkeypatch) -> None:
+    calls = []
 
-        def _live_lines(self, items):
-            return []
+    monkeypatch.setattr(
+        briefing_module,
+        "_briefing_news_backfill_groups",
+        lambda **kwargs: [["黄金", "避险"], ["科技", "修复"], ["A股", "轮动"]],
+    )
 
-        def _present_sources(self, items):
-            return set()
+    def fake_collect_intel_news_report(query, *, config, explicit_symbol="", limit=6, recent_days=7, structured_only=False, note_prefix=""):  # noqa: ARG001
+        calls.append(query)
+        return {
+            "mode": "live",
+            "items": [
+                {
+                    "title": "黄金避险回填",
+                    "link": "https://example.com/gold",
+                    "source": "财联社",
+                    "published_at": "2026-03-31 09:00:00",
+                    "theme_bucket": "价格/供需",
+                    "source_tier": "primary_media",
+                    "source_tier_label": "主流媒体",
+                },
+                {
+                    "title": "科技修复回填",
+                    "link": "https://example.com/tech",
+                    "source": "Reuters",
+                    "published_at": "2026-03-31 10:00:00",
+                    "theme_bucket": "产业/公司",
+                    "source_tier": "primary_media",
+                    "source_tier_label": "主流媒体",
+                },
+                {
+                    "title": "A股轮动回填",
+                    "link": "https://example.com/market",
+                    "source": "Tushare",
+                    "published_at": "2026-03-31 10:30:00",
+                    "theme_bucket": "资金/交易",
+                    "source_tier": "structured",
+                    "source_tier_label": "结构化",
+                },
+                {
+                    "title": "宏观快讯回填",
+                    "link": "https://example.com/macro",
+                    "source": "中证网",
+                    "published_at": "2026-03-31 11:00:00",
+                    "theme_bucket": "政策/宏观",
+                    "source_tier": "primary_media",
+                    "source_tier_label": "主流媒体",
+                },
+            ],
+            "all_items": [],
+            "source_list": ["Reuters", "Tushare", "中证网", "财联社"],
+            "note": "主合并查询已足够。",
+            "disclosure": "共享 intel disclosure",
+        }
 
-    monkeypatch.setattr(briefing_module, "NewsCollector", _FakeCollector)
+    monkeypatch.setattr(briefing_module, "collect_intel_news_report", fake_collect_intel_news_report)
 
     result = briefing_module._backfill_briefing_news_report(
         {"items": [], "lines": []},
-        config={"briefing_search_backfill_enabled": False, "news_topic_search_enabled": False},
+        config={"briefing_search_backfill_enabled": True},
+        narrative={"theme": "gold_defense"},
+        drivers={"industry_spot": pd.DataFrame(), "concept_spot": pd.DataFrame()},
+    )
+
+    assert calls == ["黄金 避险 科技 修复"]
+    assert len(result["items"]) == 4
+    assert result["cluster_count"] == 4
+    assert any("主题聚类" in line for line in result["summary_lines"])
+
+
+def test_backfill_briefing_news_report_uses_structured_only_when_backfill_search_disabled(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr(
+        briefing_module,
+        "_briefing_news_backfill_groups",
+        lambda **kwargs: [["宏观", "政策"]],
+    )
+
+    def fake_collect_intel_news_report(query, *, config, explicit_symbol="", limit=6, recent_days=7, structured_only=False, note_prefix=""):  # noqa: ARG001
+        calls.append(
+            {
+                "query": query,
+                "structured_only": structured_only,
+                "note_prefix": note_prefix,
+            }
+        )
+        return {
+            "mode": "proxy" if structured_only else "live",
+            "items": [
+                {
+                    "title": "结构化情报回填",
+                    "link": "https://example.com/structured",
+                    "source": "Tushare",
+                    "published_at": "2026-03-31 11:00:00",
+                }
+            ],
+            "all_items": [
+                {
+                    "title": "结构化情报回填",
+                    "link": "https://example.com/structured",
+                    "source": "Tushare",
+                    "published_at": "2026-03-31 11:00:00",
+                }
+            ],
+            "source_list": ["Tushare"],
+            "note": "结构化情报命中。",
+            "disclosure": "structured disclosure",
+        }
+
+    monkeypatch.setattr(briefing_module, "collect_intel_news_report", fake_collect_intel_news_report)
+
+    result = briefing_module._backfill_briefing_news_report(
+        {"items": [], "lines": []},
+        config={"briefing_search_backfill_enabled": False},
         narrative={"theme": "broad_market_repair"},
         drivers={"industry_spot": pd.DataFrame(), "concept_spot": pd.DataFrame()},
     )
 
-    assert result == {"items": [], "lines": []}
-    assert search_called["value"] is False
-
-
-def test_backfill_briefing_news_report_uses_broad_rss_pool_before_search(monkeypatch) -> None:
-    search_called = {"value": False}
-
-    class _FakeCollector:
-        def __init__(self, _config):
-            self.config = dict(_config)
-
-        def collect(self, snapshots=None, china_macro=None, global_proxy=None, preferred_sources=None):  # noqa: ARG002
-            if self.config.get("news_feeds_file") == "config/news_feeds.yaml":
-                return {
-                    "mode": "live",
-                    "items": [
-                        {
-                            "title": "Reuters: global markets steady",
-                            "link": "https://example.com/rss",
-                            "source": "Reuters",
-                            "published_at": "2026-03-31 10:00:00",
-                            "category": "global_macro",
-                        }
-                    ],
-                }
-            return {"items": []}
-
-        def search_by_keyword_groups(self, query_groups, preferred_sources=None, limit=6, recent_days=3):  # noqa: ARG002
-            search_called["value"] = True
-            return []
-
-        def _filter_candidate_items(self, items, recent_days=7):  # noqa: ARG002
-            return list(items)
-
-        def _rank_items(self, items, preferred_sources=None, query_keywords=None):  # noqa: ARG002
-            return list(items)
-
-        def _diversify_items(self, items, limit):
-            return list(items)[:limit]
-
-        def _live_lines(self, items):
-            return [f"- [{items[0]['title']}]({items[0]['link']})"]
-
-        def _present_sources(self, items):
-            return {item.get('source', '') for item in items if item.get('source')}
-
-    monkeypatch.setattr(briefing_module, "NewsCollector", _FakeCollector)
-
-    result = briefing_module._backfill_briefing_news_report(
-        {"items": [], "lines": []},
-        config={"news_topic_search_enabled": False, "news_feeds_file": "config/news_feeds.briefing_light.yaml"},
-        narrative={"theme": "gold_defense"},
-        drivers={"industry_spot": pd.DataFrame(), "concept_spot": pd.DataFrame()},
-    )
-
-    assert result["items"][0]["link"] == "https://example.com/rss"
-    assert "广覆盖 RSS 情报池回填" in result["note"]
-    assert search_called["value"] is True
-
-
-def test_backfill_briefing_news_report_uses_tushare_market_intelligence_before_search(monkeypatch) -> None:
-    search_called = {"value": False}
-
-    class _FakeCollector:
-        def __init__(self, _config):
-            self.config = dict(_config)
-
-        def collect(self, snapshots=None, china_macro=None, global_proxy=None, preferred_sources=None):  # noqa: ARG002
-            return {"items": []}
-
-        def get_market_intelligence(self, keywords, limit=6, recent_days=10):  # noqa: ARG002
-            return [
-                {
-                    "title": "Tushare：央行政策例会释放稳增长信号",
-                    "link": "",
-                    "source": "Tushare",
-                    "published_at": "2026-03-31",
-                    "category": "market_intelligence",
-                }
-            ]
-
-        def search_by_keyword_groups(self, query_groups, preferred_sources=None, limit=6, recent_days=3):  # noqa: ARG002
-            search_called["value"] = True
-            return []
-
-        def _filter_candidate_items(self, items, recent_days=7):  # noqa: ARG002
-            return list(items)
-
-        def _rank_items(self, items, preferred_sources=None, query_keywords=None):  # noqa: ARG002
-            return list(items)
-
-        def _diversify_items(self, items, limit):
-            return list(items)[:limit]
-
-        def _live_lines(self, items):
-            return [items[0]["title"]]
-
-        def _present_sources(self, items):
-            return {item.get("source", "") for item in items if item.get("source")}
-
-    monkeypatch.setattr(briefing_module, "NewsCollector", _FakeCollector)
-
-    result = briefing_module._backfill_briefing_news_report(
-        {"items": [], "lines": []},
-        config={"news_topic_search_enabled": False, "news_feeds_file": "config/news_feeds.briefing_light.yaml"},
-        narrative={"theme": "gold_defense"},
-        drivers={"industry_spot": pd.DataFrame(), "concept_spot": pd.DataFrame()},
-    )
-
-    assert result["items"][0]["title"] == "Tushare：央行政策例会释放稳增长信号"
-    assert "Tushare 市场情报回填" in result["note"]
-    assert search_called["value"] is True
+    assert calls == [{"query": "宏观 政策", "structured_only": True, "note_prefix": "briefing 共享 intel 回填"}]
+    assert result["mode"] == "live"
+    assert result["items"][0]["title"] == "结构化情报回填"
+    assert result["fallback"] == "intel_shared_upstream"
+    assert result["disclosure"] == "structured disclosure"
 
 
 def test_briefing_news_backfill_groups_include_concepts_hot_names_and_pulse() -> None:
@@ -492,6 +686,27 @@ def test_briefing_internal_dir_and_same_day_loader_use_internal_path(tmp_path, m
     assert detail_path == tmp_path / f"reports/briefings/internal/daily_briefing_{expected_date}.md"
     assert _briefing_internal_dir() == tmp_path / "reports/briefings/internal"
     assert _load_same_day_briefing("daily") == "# demo"
+
+
+def test_briefing_payload_sidecar_uses_internal_path(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(briefing_module, "resolve_project_path", lambda path="": tmp_path / str(path))
+    monkeypatch.setattr(briefing_module, "_export_pdf", lambda markdown_text, pdf_path: None)  # noqa: ARG005
+
+    detail_path = _persist_briefing("# demo", "daily")
+    payload_path = _persist_briefing_payload(
+        detail_path,
+        {
+            "generated_at": "2026-04-05 23:00:00",
+            "title": "每日晨报",
+            "a_share_watch_candidates": [{"symbol": "300274"}],
+        },
+    )
+
+    assert payload_path.name.endswith("_payload.json")
+    loaded_payload = __import__("json").loads(payload_path.read_text(encoding="utf-8"))
+    assert detail_path.read_text(encoding="utf-8") == "# demo"
+    assert loaded_payload["title"] == "每日晨报"
+    assert loaded_payload["generated_at"] == "2026-04-05 23:00:00"
 
 
 def test_briefing_coverage_and_quality_disclose_stale_monitor_rows() -> None:
@@ -1020,7 +1235,7 @@ def test_briefing_a_share_watch_rows_use_full_market_disclosure(monkeypatch) -> 
     assert "factor_contract" in meta
     assert candidates[0]["symbol"] == "300750"
     assert captured["context"] is None
-    assert captured["max_candidates"] == 16
+    assert captured["max_candidates"] == 8
     assert captured["attach_signal_confidence"] is False
 
 
@@ -1056,8 +1271,8 @@ def test_briefing_a_share_watch_rows_reuses_shared_context(monkeypatch) -> None:
 
     assert captured["context"] == shared_context
     assert captured["context"]["regime"]["current_regime"] == "recovery"
-    assert captured["context"]["day_theme"]["code"] == "rate_growth"
-    assert captured["max_candidates"] == 16
+    assert captured["context"]["day_theme"]["code"] == "macro_background"
+    assert captured["max_candidates"] == 8
     assert captured["attach_signal_confidence"] is False
 
 
@@ -1087,8 +1302,8 @@ def test_briefing_a_share_watch_rows_discloses_candidate_limit(monkeypatch) -> N
     rows, lines, meta, _ = _briefing_a_share_watch_rows({})
 
     assert rows[0][1] == "宁德时代 (300750)"
-    assert any("候选上限 `16`" in item for item in lines)
-    assert meta["candidate_limit"] == 16
+    assert any("候选上限 `8`" in item for item in lines)
+    assert meta["candidate_limit"] == 8
 
 
 def test_briefing_a_share_watch_rows_softly_prefers_portfolio_style_complement(monkeypatch) -> None:
@@ -1270,6 +1485,80 @@ def test_build_evening_payload_prepends_review_queue_action_lines(monkeypatch) -
     assert payload["watchlist_change_lines"][0].startswith("事件日历触发 thesis 复查：")
 
 
+def test_build_evening_payload_surfaces_client_final_contract_fields(monkeypatch) -> None:
+    monkeypatch.setattr(briefing_module, "_load_same_day_briefing", lambda mode: "")
+    monkeypatch.setattr(briefing_module, "_parse_prior_verification_rows", lambda markdown: [])
+    monkeypatch.setattr(briefing_module, "_parse_prior_headline", lambda markdown: "")
+    monkeypatch.setattr(briefing_module, "_evaluate_prior_verification", lambda prior_rows, snapshots, monitor_rows: [])
+    monkeypatch.setattr(briefing_module, "_domestic_overview_rows", lambda overview, pulse: ([], []))
+    monkeypatch.setattr(briefing_module, "_style_rows", lambda overview, industry_spot: [])
+    monkeypatch.setattr(briefing_module, "_industry_rank_rows", lambda drivers, narrative, news_report: [])
+    monkeypatch.setattr(briefing_module, "_macro_asset_rows", lambda monitor_rows, anomaly_report: [])
+    monkeypatch.setattr(briefing_module, "_catalyst_rows", lambda news_report, narrative: [])
+    monkeypatch.setattr(briefing_module, "_capital_flow_lines", lambda pulse, drivers, liquidity_lines, snapshots: [])
+    monkeypatch.setattr(briefing_module, "_theme_tracking_rows", lambda narrative, drivers: [["AI硬件链", "CPO 承接", "主线还在", "短线观察", "高位波动", "信息环境仍偏支持"]])
+    monkeypatch.setattr(briefing_module, "_theme_tracking_lines", lambda narrative, rows, mode: ["与主线一致性: AI硬件链仍在前排。"])
+    monkeypatch.setattr(briefing_module, "_watchlist_change_lines", lambda snapshots, morning_md: [])
+    monkeypatch.setattr(briefing_module, "_watchlist_review_trigger_lines", lambda snapshots, review_queue: [])
+    monkeypatch.setattr(briefing_module, "_evening_hit_rate_summary", lambda eval_rows: ["全日验证命中率: 1/1。"])
+    monkeypatch.setattr(briefing_module, "_evening_narrative_review", lambda *args, **kwargs: ["AI 算力主线今天虽有分歧，但前排承接还在。", "创新药更像次主线补涨。"])
+    monkeypatch.setattr(briefing_module, "_core_event_lines", lambda news_report, catalyst_rows: ["核心事件 1"])
+    monkeypatch.setattr(briefing_module, "_tomorrow_outlook_lines", lambda narrative, snapshots, monitor_rows, overnight_rows: ["明天先按结构性行情理解，不把今天收盘强弱直接外推成全面 risk-on。"])
+    monkeypatch.setattr(briefing_module, "_tomorrow_verification_rows", lambda snapshots, monitor_rows, narrative: [["1", "主线验证", "前排继续放量", "提高风险暴露", "回到观察"]])
+    monkeypatch.setattr(briefing_module, "_tomorrow_action_lines", lambda eval_rows, snapshots, narrative: ["明天先看 AI 算力和创新药谁先继续拿到量价确认。"])
+    monkeypatch.setattr(briefing_module, "_portfolio_lines", lambda config, review_queue=None: [])
+    monkeypatch.setattr(briefing_module, "_portfolio_table_rows", lambda config: [])
+    monkeypatch.setattr(briefing_module, "_appendix_technical_rows", lambda snapshots: [])
+    monkeypatch.setattr(briefing_module, "_lhb_lines", lambda pulse: [])
+    monkeypatch.setattr(briefing_module, "_flow_lines", lambda snapshots, config: [])
+    monkeypatch.setattr(briefing_module, "_sentiment_lines", lambda snapshots, config: [])
+    monkeypatch.setattr(briefing_module, "_render_briefing_charts", lambda snapshots: [])
+
+    payload = _build_evening_payload(
+        snapshots=[],
+        monitor_rows=[],
+        overview={},
+        pulse={},
+        drivers={},
+        narrative={"label": "科技主线修复"},
+        news_report={"items": [{"title": "AI 算力继续活跃"}]},
+        watchlist_rows=[],
+        config={},
+        anomaly_report={},
+        overnight_rows=[],
+        liquidity_lines=[],
+        review_queue=[],
+        review_queue_transition_lines=[],
+        review_queue_action_lines=[],
+        calendar_review_trigger_lines=[],
+        generated_at="2026-04-22 16:10:00",
+        data_coverage="中国宏观 | 主题跟踪 | A股观察池",
+        missing_sources="无",
+        macro_items=["PMI 继续在扩张区间。", "信用脉冲边际改善。", "当前更匹配的资产偏好: 科技成长。"],
+        regime_result={"current_regime": "recovery", "reasoning": ["PMI 回到 50 上方。", "价格链条边际修复。"]},
+        proxy_contract={"market_flow": {"interpretation": "成长风格重新占优", "confidence_label": "中"}},
+        evidence_rows=[["分析生成时间", "2026-04-22 16:10:00"]],
+        quality_lines=["本次新闻覆盖源: 财联社 / 路透。"],
+        alerts=["高位主线分歧仍需继续验证。"],
+        a_share_watch_rows=[["1", "新易盛 (300502)", "通信", "观察为主", "等待确认", "首次建仓 ≤3%"]],
+        a_share_watch_lines=["A 股观察池来自 Tushare 优先全市场初筛。", "当前先按观察池管理。"],
+        a_share_watch_meta={"pool_size": 24, "complete_analysis_size": 6},
+        a_share_watch_candidates=[],
+        market_analysis={
+            "index_rows": [["上证指数", "3400", "+0.2%", "修复中", "周线改善", "月线修复", "常态量能", "等待确认"]],
+            "market_signal_rows": [["市场宽度", "上涨 3000 / 下跌 1800", "偏强", "涨跌比改善"]],
+            "rotation_rows": [["行业", "通信", "银行", "成长回流"]],
+        },
+    )
+
+    assert payload["headline_lines"][0] == "AI 算力主线今天虽有分歧，但前排承接还在。"
+    assert "明天先按结构性行情理解，不把今天收盘强弱直接外推成全面 risk-on。" in payload["headline_lines"]
+    assert payload["action_lines"][0] == "明天先看 AI 算力和创新药谁先继续拿到量价确认。"
+    assert payload["verification_rows"][0][1] == "主线验证"
+    assert payload["a_share_watch_rows"][0][1] == "新易盛 (300502)"
+    assert payload["theme_tracking_rows"][0][0] == "AI硬件链"
+
+
 def test_action_lines_use_weekend_wording_and_theme_anchor(monkeypatch) -> None:
     class _WeekendDateTime:
         @classmethod
@@ -1401,6 +1690,31 @@ def test_core_event_lines_do_not_fallback_to_proxy_catalyst_rows() -> None:
     )
 
     assert lines == ["当前没有可直接复核的核心事件；以下判断更多依赖主题推演和盘面代理，不把它们当成已验证事件。"]
+
+
+def test_core_event_lines_filter_ai_entertainment_noise_when_not_market_relevant() -> None:
+    lines = _core_event_lines(
+        {
+            "items": [
+                {
+                    "title": "又上热搜！爱奇艺回应“AI艺人库” 多位明星已紧急辟谣",
+                    "source": "财联社",
+                    "category": "china_market_domestic",
+                },
+                {
+                    "title": "午评：创业板指涨0.63% CPO概念大涨",
+                    "source": "证券时报",
+                    "category": "china_market_domestic",
+                },
+            ]
+        },
+        [],
+    )
+
+    joined = "\n".join(lines)
+    assert "爱奇艺" not in joined
+    assert "AI艺人库" not in joined
+    assert "CPO概念大涨" in joined
 
 
 def test_source_quality_lines_explain_displayed_vs_total_sources() -> None:
@@ -2239,6 +2553,59 @@ def test_primary_narrative_uses_a_share_watch_sector_counts_to_boost_theme() -> 
 
     assert narrative["theme"] == "broad_market_repair"
     assert narrative["scores"]["broad_market_repair"] > narrative["scores"]["rate_growth"]
+
+
+def test_primary_narrative_prefers_hard_tech_label_for_ai_hardware_chain() -> None:
+    snapshots = [
+        SimpleNamespace(symbol="QQQM", sector="科技", return_1d=0.012, return_5d=0.028),
+        SimpleNamespace(symbol="HSTECH", sector="科技", return_1d=0.006, return_5d=0.012),
+        SimpleNamespace(symbol="510210", sector="宽基", return_1d=0.001, return_5d=0.008),
+    ]
+    monitor_rows = [
+        {"name": "美国10Y收益率", "return_1d": -0.006},
+        {"name": "美元指数", "return_5d": -0.002},
+        {"name": "VIX波动率", "latest": 18.0},
+    ]
+    drivers = {
+        "industry_spot": pd.DataFrame([{"名称": "半导体"}, {"名称": "光模块"}, {"名称": "液冷服务器"}]),
+        "concept_spot": pd.DataFrame(),
+    }
+    pulse = {"zt_pool": pd.DataFrame(), "strong_pool": pd.DataFrame()}
+    news_report = {"items": [{"category": "ai"}, {"category": "semiconductor"}]}
+    regime = {"current_regime": "recovery", "preferred_assets": ["成长股"]}
+
+    narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime)
+
+    assert narrative["theme"] == "ai_semis"
+    assert narrative["label"] == "硬科技 / AI硬件链"
+
+
+def test_primary_narrative_uses_chip_proxy_strength_to_override_generic_repair() -> None:
+    snapshots = [
+        SimpleNamespace(symbol="QQQM", sector="科技", return_1d=0.009, return_5d=0.024),
+        SimpleNamespace(symbol="HSTECH", sector="科技", return_1d=0.004, return_5d=0.012),
+        SimpleNamespace(symbol="510210", sector="宽基", return_1d=0.012, return_5d=0.031),
+        SimpleNamespace(symbol="588200", sector="科技", return_1d=0.018, return_5d=0.112),
+        SimpleNamespace(symbol="512480", sector="科技", return_1d=0.017, return_5d=0.104),
+        SimpleNamespace(symbol="515070", sector="科技", return_1d=0.021, return_5d=0.110),
+    ]
+    monitor_rows = [
+        {"name": "美国10Y收益率", "return_1d": -0.004},
+        {"name": "美元指数", "return_5d": -0.002},
+        {"name": "VIX波动率", "latest": 18.5},
+    ]
+    drivers = {
+        "industry_spot": pd.DataFrame([{"名称": "证券Ⅱ"}, {"名称": "半导体"}, {"名称": "电池"}]),
+        "concept_spot": pd.DataFrame(),
+    }
+    pulse = {"zt_pool": pd.DataFrame(), "strong_pool": pd.DataFrame([{"所属行业": "光学光电"}, {"所属行业": "通信服务"}])}
+    news_report = {"items": [{"category": "china_macro"}, {"category": "semiconductor"}]}
+    regime = {"current_regime": "recovery", "preferred_assets": ["宽基", "成长股"]}
+
+    narrative = _primary_narrative(news_report, monitor_rows, pulse, snapshots, drivers, regime)
+
+    assert narrative["theme"] == "ai_semis"
+    assert narrative["scores"]["ai_semis"] > narrative["scores"]["broad_market_repair"]
 
 
 def test_build_market_payload_includes_market_analysis_blocks(monkeypatch) -> None:

@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from src.commands.fund_pick import _client_final_runtime_overrides, _payload_from_analyses, _selection_context
+from src.commands.fund_pick import (
+    _analyze_fund_candidates,
+    _backfill_fund_news_report,
+    _client_final_runtime_overrides,
+    _payload_from_analyses,
+    _selection_context,
+)
 
 
 def _analysis(
@@ -96,6 +102,20 @@ def test_client_final_runtime_overrides_respect_explicit_fund_config_path() -> N
     assert "news_topic_search_enabled" not in config
     assert "news_feeds_file" not in config
     assert notes == []
+
+
+def test_analyze_fund_candidates_skips_empty_price_symbol(monkeypatch) -> None:
+    def fake_analyze(symbol, asset_type, config, context=None):  # noqa: ANN001, ARG001
+        if symbol == "021740":
+            raise ValueError("Price dataframe is empty")
+        return {"symbol": symbol, "generated_at": "2026-04-10 21:00:00"}
+
+    monkeypatch.setattr("src.commands.fund_pick.analyze_opportunity", fake_analyze)
+
+    analyses, skipped = _analyze_fund_candidates(["021740", "022365"], config={}, context={})
+
+    assert [item["symbol"] for item in analyses] == ["022365"]
+    assert skipped == ["`021740` 缺少可用净值/行情，已从本轮场外基金候选中跳过。"]
 
 
 def test_payload_keeps_selection_context() -> None:
@@ -217,3 +237,85 @@ def test_payload_softly_prefers_portfolio_style_complement_within_same_score_ban
     payload = _payload_from_analyses([repeat, complement], {})
 
     assert payload["winner"]["symbol"] == "021735"
+
+
+def test_backfill_fund_news_report_uses_shared_intel_upstream(monkeypatch) -> None:
+    analysis = _analysis("021740", "前海开源黄金ETF联接C", "黄金", technical=30, fundamental=45, catalyst=23, relative=35, risk=60)
+    analysis["benchmark_name"] = "中证黄金"
+    analysis["metadata"]["fund_style_tags"] = ["黄金", "避险"]
+
+    seen: dict[str, str] = {}
+
+    def fake_collect_intel_news_report(query, *, config, explicit_symbol="", limit=6, recent_days=7, structured_only=False, note_prefix=""):  # noqa: ANN001, ARG001
+        seen["query"] = query
+        seen["symbol"] = explicit_symbol
+        seen["note_prefix"] = note_prefix
+        return {
+            "mode": "live",
+            "items": [
+                {
+                    "title": "黄金价格走强，避险资金持续流入",
+                    "source": "财联社",
+                    "published_at": "2026-04-04 09:30:00",
+                    "link": "https://example.com/gold-intel",
+                }
+            ],
+            "all_items": [
+                {
+                    "title": "黄金价格走强，避险资金持续流入",
+                    "source": "财联社",
+                    "published_at": "2026-04-04 09:30:00",
+                    "link": "https://example.com/gold-intel",
+                }
+            ],
+            "lines": ["黄金价格走强，避险资金持续流入"],
+            "source_list": ["财联社"],
+            "note": "shared intel",
+            "disclosure": "共享情报快照",
+        }
+
+    monkeypatch.setattr("src.commands.fund_pick.collect_intel_news_report", fake_collect_intel_news_report)
+
+    payload = _payload_from_analyses(
+        [analysis],
+        config={"news_topic_search_enabled": True, "news_feeds_file": "config/news_feeds.briefing_light.yaml"},
+    )
+
+    assert payload["winner"]["news_report"]["items"][0]["title"] == "黄金价格走强，避险资金持续流入"
+    assert payload["winner"]["news_report"]["items"][0]["link"] == "https://example.com/gold-intel"
+    assert "前海开源黄金ETF联接C" in seen["query"]
+    assert seen["symbol"] == "021740"
+    assert seen["note_prefix"] == "场外基金"
+
+
+def test_backfill_fund_news_report_keeps_existing_linked_items(monkeypatch) -> None:
+    analysis = _analysis("021740", "前海开源黄金ETF联接C", "黄金", technical=30, fundamental=45, catalyst=23, relative=35, risk=60)
+    analysis["news_report"] = {
+        "items": [
+            {
+                "title": "黄金 ETF 继续跟踪现货上行",
+                "source": "财联社",
+                "published_at": "2026-04-04 09:00:00",
+                "link": "https://example.com/gold-etf",
+            },
+            {
+                "title": "避险资产延续强势",
+                "source": "证券时报",
+                "published_at": "2026-04-04 08:50:00",
+                "link": "https://example.com/gold-safe",
+            },
+        ]
+    }
+
+    def fail_collect_intel_news_report(*args, **kwargs):  # noqa: ANN001, ARG001
+        raise AssertionError("shared intel should not run when existing linked items already suffice")
+
+    monkeypatch.setattr("src.commands.fund_pick.collect_intel_news_report", fail_collect_intel_news_report)
+
+    payload = _payload_from_analyses(
+        [analysis],
+        config={"news_topic_search_enabled": True, "news_feeds_file": "config/news_feeds.briefing_light.yaml"},
+    )
+
+    assert len(payload["winner"]["news_report"]["items"]) == 2
+    assert payload["winner"]["news_report"]["items"][0]["title"] == "黄金 ETF 继续跟踪现货上行"

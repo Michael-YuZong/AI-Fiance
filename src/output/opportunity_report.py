@@ -9,8 +9,10 @@ import pandas as pd
 
 from src.output.pick_ranking import analysis_is_actionable as _shared_analysis_is_actionable
 from src.output.technical_signal_labels import append_technical_trigger_text, compact_technical_signal_text
+from src.output.theme_playbook import representative_theme_label
 from src.processors.provenance import build_analysis_provenance
 from src.processors.trade_handoff import portfolio_whatif_handoff
+from src.utils.fund_taxonomy import uses_index_mainline
 
 
 DIMENSION_ORDER = [
@@ -41,6 +43,43 @@ SENTIMENT_CATALYST_FACTORS = {
 }
 
 
+def _day_theme_display_label(day_theme: Mapping[str, Any]) -> str:
+    primary = str(day_theme.get("label", "")).strip() or "未识别"
+    secondary = [
+        str(item).strip()
+        for item in day_theme.get("secondary_labels", []) or []
+        if str(item).strip() and str(item).strip() != primary
+    ]
+    if not secondary:
+        return primary
+    return f"{primary}；并行线：{' / '.join(secondary[:2])}"
+
+
+def _observe_stock_entry_fallback_text(analysis: Mapping[str, Any], entry_text: str) -> str:
+    """Avoid leaking slow MA20/MA60 templates into observe-only stock prose."""
+    text = str(entry_text or "").strip()
+    if str(analysis.get("asset_type", "")).strip() != "cn_stock":
+        return text
+    if "MA20 / MA60" not in text and "MA20/MA60" not in text:
+        return text
+    technical = dict(dict(analysis.get("dimensions") or {}).get("technical") or {})
+    near_pressure = ""
+    for raw in list(technical.get("factors") or []):
+        if not isinstance(raw, Mapping):
+            continue
+        name = str(raw.get("name", "")).strip()
+        signal = str(raw.get("signal", "")).strip()
+        if "压力" not in name and "压力" not in signal:
+            continue
+        match = re.search(r"(?:高点|压力)\s*([0-9]+(?:\.[0-9]+)?)", signal)
+        if match:
+            near_pressure = match.group(1)
+            break
+    if near_pressure:
+        return f"短线第一笔先看 {near_pressure} 放量站上并回踩确认；MA20 / MA60 只作为波段或中线确认。"
+    return "短线第一笔先看近端压力放量站上并回踩确认；MA20 / MA60 只作为波段或中线确认。"
+
+
 def _is_missing_scalar(value: Any) -> bool:
     if value is None or value == "":
         return True
@@ -63,6 +102,31 @@ def _table(headers: Sequence[str], rows: Iterable[Sequence[str]]) -> List[str]:
         escaped = [_escape(cell) for cell in row]
         lines.append("| " + " | ".join(escaped) + " |")
     return lines
+
+
+def _contextualize_pick_operation_reason(analysis: Mapping[str, Any], text: Any) -> str:
+    line = str(text).strip()
+    if not line:
+        return ""
+    name = str(analysis.get("name", "")).strip()
+    if name and not line.startswith(f"对{name}来说"):
+        return f"对{name}来说，{line}"
+    return line
+
+
+def _client_safe_comparison_basis_label(label: Any) -> str:
+    text = str(label or "").strip()
+    if text == "当日基准版":
+        return "今天首个快照版"
+    return text or "对比基准"
+
+
+def _contextualize_pick_horizon_line(analysis: Mapping[str, Any], label: Any) -> str:
+    horizon_label = str(label or "").strip() or "未标注"
+    name = str(analysis.get("name", "")).strip()
+    if not name:
+        return horizon_label
+    return f"{horizon_label}；对{name}来说，当前更适合按这个周期理解"
 
 
 def _dimension_rows(analysis: Dict[str, Any]) -> List[List[str]]:
@@ -308,6 +372,9 @@ def _catalyst_structure_rows(dimension: Mapping[str, Any]) -> List[List[str]]:
 
 
 def _catalyst_summary_text(dimension: Mapping[str, Any]) -> str:
+    explicit_summary = str(dimension.get("summary", "")).strip()
+    if explicit_summary and any(token in explicit_summary for token in ("背景催化不是空白", "主题级 live 情报", "主题级背景")):
+        return explicit_summary
     direct_current, direct_max, direct_positive_names = _catalyst_score_snapshot(dimension, DIRECT_CATALYST_FACTORS)
     sentiment_current, sentiment_max, _ = _catalyst_score_snapshot(dimension, SENTIMENT_CATALYST_FACTORS)
     direct_level = _normalize_direct_catalyst_level(_catalyst_level(direct_current, direct_max), direct_positive_names)
@@ -509,7 +576,7 @@ def _analysis_provenance_rows(analysis: Dict[str, Any]) -> List[List[str]]:
         ["催化诊断", provenance.get("catalyst_diagnosis", "—")],
         ["联网复核结论", provenance.get("catalyst_web_review_decision", "—")],
         ["联网复核影响", provenance.get("catalyst_web_review_impact", "—")],
-        ["新闻模式", provenance.get("news_mode", "unknown")],
+        ["情报模式", provenance.get("news_mode", "unknown")],
         ["时点边界", provenance.get("point_in_time_note", "默认只使用生成时点前可见信息。")],
     ]
     for item in list(provenance.get("notes") or [])[:2]:
@@ -753,6 +820,97 @@ def _compare_strategy_confidence_rows(analyses: Sequence[Dict[str, Any]]) -> Lis
     return rows
 
 
+def _compare_compact_text(value: Any, *, max_len: int = 42) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    return f"{text[: max(0, max_len - 1)]}…"
+
+
+def _compare_find_factor(
+    analysis: Mapping[str, Any],
+    *,
+    factor_name: str = "",
+    factor_id: str = "",
+    dimension_key: str = "",
+) -> Dict[str, Any]:
+    dimensions = dict(analysis.get("dimensions") or {})
+    search_keys = [dimension_key] if dimension_key else [key for key, _ in DIMENSION_ORDER]
+    for key in search_keys:
+        dimension = dict(dimensions.get(key) or {})
+        for factor in list(dimension.get("factors") or []):
+            item = dict(factor or {})
+            name = str(item.get("name", "")).strip()
+            fid = str(item.get("factor_id", "")).strip()
+            if factor_name and name == factor_name:
+                return item
+            if factor_id and fid == factor_id:
+                return item
+    return {}
+
+
+def _compare_fund_sales_context(analysis: Mapping[str, Any]) -> str:
+    fund_profile = dict(analysis.get("fund_profile") or {})
+    sales_ratio_snapshot = dict(fund_profile.get("sales_ratio_snapshot") or {})
+    if not sales_ratio_snapshot:
+        return ""
+    latest_year = str(sales_ratio_snapshot.get("latest_year", "") or "").strip()
+    lead_channel = str(sales_ratio_snapshot.get("lead_channel", "") or "").strip()
+    channel_mix = list(sales_ratio_snapshot.get("channel_mix") or [])
+    lead_ratio = ""
+    if channel_mix:
+        top_channel = dict(channel_mix[0] or {})
+        if top_channel.get("channel") not in (None, "", []):
+            lead_channel = lead_channel or str(top_channel.get("channel", "")).strip()
+        if top_channel.get("ratio") is not None:
+            lead_ratio = f"{float(top_channel.get('ratio')):.2f}%"
+    summary = str(sales_ratio_snapshot.get("summary", "") or "").strip()
+    parts = [part for part in [latest_year, lead_channel, lead_ratio] if part]
+    if parts:
+        compact = " / ".join(parts)
+        if summary:
+            return f"{compact}；{_compare_compact_text(summary, max_len=24)}"
+        return compact
+    return _compare_compact_text(summary, max_len=40)
+
+
+def _compare_second_stage_rows(analyses: Sequence[Dict[str, Any]]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for analysis in analyses:
+        ah_factor = _compare_find_factor(
+            analysis,
+            factor_name="跨市场比价",
+            factor_id="j3_ah_comparison",
+            dimension_key="relative_strength",
+        )
+        cb_factor = _compare_find_factor(
+            analysis,
+            factor_name="可转债映射",
+            factor_id="j4_convertible_bond_proxy",
+            dimension_key="fundamental",
+        )
+        gold_factor = _compare_find_factor(
+            analysis,
+            factor_name="现货锚定",
+            factor_id="j5_gold_spot_anchor",
+        )
+        fund_sales = _compare_fund_sales_context(analysis)
+        if not any([ah_factor, cb_factor, gold_factor, fund_sales]):
+            continue
+        rows.append(
+            [
+                f"{analysis.get('name', '—')} ({analysis.get('symbol', '—')})",
+                _compare_compact_text(ah_factor.get("signal") or ah_factor.get("detail") or "—") or "—",
+                _compare_compact_text(cb_factor.get("signal") or cb_factor.get("detail") or "—") or "—",
+                _compare_compact_text(fund_sales or "—") or "—",
+                _compare_compact_text(gold_factor.get("signal") or gold_factor.get("detail") or "—") or "—",
+            ]
+        )
+    return rows
+
+
 def _fmt_number(value: Any, digits: int = 2, suffix: str = "") -> str:
     if _is_missing_scalar(value):
         return "—"
@@ -855,6 +1013,7 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
     dividends = dict(profile.get("dividends") or {})
     style = dict(profile.get("style") or {})
     rating = dict(profile.get("rating") or {})
+    sales_ratio_snapshot = dict(profile.get("sales_ratio_snapshot") or {})
     top_holdings = list(profile.get("top_holdings") or [])
     asset_mix = list(profile.get("asset_allocation") or [])
     industries = list(profile.get("industry_allocation") or [])
@@ -1000,6 +1159,23 @@ def _fund_profile_lines(analysis: Dict[str, Any]) -> List[str]:
     if any(str(row[1]).strip() not in {"", "—"} for row in company_rows):
         lines.extend(["", "### 基金公司补充"])
         lines.extend(_table(["维度", "内容"], company_rows))
+    if sales_ratio_snapshot:
+        sales_rows = [
+            [str(item.get("channel", "—")), f"{float(item.get('ratio')):.2f}%"]
+            for item in list(sales_ratio_snapshot.get("channel_mix") or [])[:5]
+            if item.get("channel") not in (None, "", []) and item.get("ratio") is not None
+        ]
+        if sales_rows:
+            lines.extend(["", "### 公募渠道环境"])
+            lines.extend(
+                _table(
+                    ["渠道", "保有占比"],
+                    [["统计年度", sales_ratio_snapshot.get("latest_year", "—")], ["主导渠道", sales_ratio_snapshot.get("lead_channel", "—")], *sales_rows],
+                )
+            )
+            summary = str(sales_ratio_snapshot.get("summary", "")).strip()
+            if summary:
+                lines.extend(["", f"- {summary}"])
     dividend_rows = list(dividends.get("rows") or [])
     if dividend_rows:
         lines.extend(["", "### 分红记录"])
@@ -1207,23 +1383,36 @@ def _intraday_lines(analysis: Dict[str, Any]) -> List[str]:
         "这部分只回答“今天/现在的执行节奏”，不替代默认的日线评分框架。",
         "",
     ]
+    rows = [
+        ["当前价", _fmt_number(intraday.get("current"), 3)],
+        ["相对昨收", _fmt_pct_point(float(intraday.get("change_vs_prev_close", 0.0)) * 100)],
+        ["相对今开", _fmt_pct_point(float(intraday.get("change_vs_open", 0.0)) * 100)],
+        ["日内高低", f"{_fmt_number(intraday.get('low'), 3)} / {_fmt_number(intraday.get('high'), 3)}"],
+        ["VWAP", _fmt_number(intraday.get("vwap"), 3)],
+        ["日内位置", f"{float(intraday.get('range_position', 0.0)):.0%}"],
+        ["涨跌停边界", f"{_fmt_number(intraday.get('down_limit'), 3)} / {_fmt_number(intraday.get('up_limit'), 3)}" if intraday.get("up_limit") is not None and intraday.get("down_limit") is not None else "—"],
+        ["盘中状态", intraday.get("trend", "—")],
+    ]
+    has_auction_evidence = any(
+        intraday.get(key) is not None
+        for key in ("auction_price", "auction_gap", "auction_amount", "auction_volume_ratio", "auction_turnover_rate")
+    )
+    if has_auction_evidence:
+        rows.extend(
+            [
+                ["开盘缺口", _fmt_pct_point(float(intraday.get("auction_gap") or 0.0) * 100)],
+                ["竞价成交", _fmt_number(intraday.get("auction_amount"), 0)],
+                ["竞价量能", f"{_fmt_number(intraday.get('auction_volume_ratio'), 2)}x"],
+            ]
+        )
     lines.extend(
         _table(
             ["项目", "内容"],
-            [
-                ["当前价", _fmt_number(intraday.get("current"), 3)],
-                ["相对昨收", _fmt_pct_point(float(intraday.get("change_vs_prev_close", 0.0)) * 100)],
-                ["相对今开", _fmt_pct_point(float(intraday.get("change_vs_open", 0.0)) * 100)],
-                ["日内高低", f"{_fmt_number(intraday.get('low'), 3)} / {_fmt_number(intraday.get('high'), 3)}"],
-                ["VWAP", _fmt_number(intraday.get("vwap"), 3)],
-                ["日内位置", f"{float(intraday.get('range_position', 0.0)):.0%}"],
-                ["涨跌停边界", f"{_fmt_number(intraday.get('down_limit'), 3)} / {_fmt_number(intraday.get('up_limit'), 3)}" if intraday.get("up_limit") is not None and intraday.get("down_limit") is not None else "—"],
-                ["盘中状态", intraday.get("trend", "—")],
-            ],
+            rows,
         )
     )
     lines.extend(["", f"- {intraday.get('commentary', '当前没有额外盘中结论。')}"])
-    if intraday.get("auction_commentary"):
+    if has_auction_evidence and intraday.get("auction_commentary"):
         lines.append(f"- {intraday.get('auction_commentary')}")
     if intraday.get("limit_commentary"):
         lines.append(f"- {intraday.get('limit_commentary')}")
@@ -1240,8 +1429,6 @@ def _visual_lines(visuals: Optional[Mapping[str, str]]) -> List[str]:
     indicators = str(visuals.get("indicators", "")).strip()
     mode = str(visuals.get("mode", "")).strip()
     note = str(visuals.get("note", "")).strip()
-    if mode == "snapshot_fallback":
-        return []
     if not any([dashboard, windows, indicators]):
         return []
     lines = [
@@ -1324,7 +1511,13 @@ def _merge_unique_lines(primary: Sequence[str], secondary: Sequence[str], *, max
     return merged
 
 
+def _analysis_uses_index_horizon(analysis: Mapping[str, Any]) -> bool:
+    return uses_index_mainline(analysis)
+
+
 def _index_horizon_lines(analysis: Mapping[str, Any]) -> List[str]:
+    if not _analysis_uses_index_horizon(analysis):
+        return []
     bundle = dict(analysis.get("index_topic_bundle") or {})
     history_snapshots = dict(bundle.get("history_snapshots") or {})
     snapshot = dict(bundle.get("index_snapshot") or {})
@@ -1474,6 +1667,26 @@ class OpportunityReportRenderer:
         fund_profile_lines = _fund_profile_lines(analysis)
         if fund_profile_lines:
             lines.extend(fund_profile_lines)
+        structure_rows = [
+            list(row)
+            for row in (analysis.get("market_event_rows") or [])
+            if str(list(row)[2] if len(list(row)) > 2 else "").strip() in {"TDX结构专题", "DC结构专题", "港股/短线辅助", "转债辅助层", "研报辅助层"}
+        ]
+        if structure_rows:
+            lines.extend(["", "## 结构辅助层", ""])
+            for row in structure_rows[:4]:
+                title = str(row[1] if len(row) > 1 else "").strip()
+                source = str(row[2] if len(row) > 2 else "").strip()
+                strength = str(row[3] if len(row) > 3 else "").strip() or "中"
+                impact = str(row[4] if len(row) > 4 else "").strip() or "观察池核心资产"
+                signal_type = str(row[6] if len(row) > 6 else "").strip() or "辅助层信号"
+                conclusion = str(row[7] if len(row) > 7 else "").strip()
+                if not title:
+                    continue
+                lines.append(
+                    f"- `{source}`：{title}；信号类型：`{signal_type}`；信号强弱：`{strength}`；主要影响：`{impact}`"
+                    + (f"；结论：{conclusion}" if conclusion else "")
+                )
         lines.extend(["", "## 值得继续看的理由"])
         for item in narrative["positives"]:
             lines.append(f"- {item}")
@@ -1481,6 +1694,7 @@ class OpportunityReportRenderer:
         if len(caution_lines) < 2:
             fallback_cautions = []
             entry_text = str(analysis.get("action", {}).get("entry", "")).strip()
+            entry_text = _observe_stock_entry_fallback_text(analysis, entry_text)
             if entry_text:
                 fallback_cautions.append(f"执行层仍要求等待确认：{entry_text}")
             technical_summary = str(dict(analysis.get("dimensions", {}).get("technical") or {}).get("summary", "")).strip()
@@ -1653,6 +1867,10 @@ class OpportunityReportRenderer:
     def render_discovery(self, payload: Dict[str, Any]) -> str:
         regime = payload.get("regime", {})
         day_theme = payload.get("day_theme", {})
+        report_theme = representative_theme_label(
+            payload,
+            item_keys=("ready_candidates", "observation_candidates", "top"),
+        )
         pool_summary = dict(payload.get("pool_summary") or {})
         ready_candidates = list(payload.get("ready_candidates") or [])
         observation_candidates = list(payload.get("observation_candidates") or [])
@@ -1660,8 +1878,10 @@ class OpportunityReportRenderer:
         lines = [
             f"# 每日发现入口 | {payload['generated_at'][:10]}",
             "",
-            f"> 扫描池: {payload.get('scan_pool', 0)}只 | 过硬排除: {payload.get('passed_pool', 0)}只 | 当前 Regime: {regime.get('current_regime', 'unknown')} | 今日主线: {day_theme.get('label', '未识别')}",
+            f"> 扫描池: {payload.get('scan_pool', 0)}只 | 过硬排除: {payload.get('passed_pool', 0)}只 | 当前 Regime: {regime.get('current_regime', 'unknown')} | 今日主线: {_day_theme_display_label(day_theme)}",
         ]
+        if report_theme and report_theme != str(day_theme.get("label", "")).strip():
+            lines.append(f"> 代表主题: {report_theme}")
 
         lines.extend(
             [
@@ -1786,6 +2006,17 @@ class OpportunityReportRenderer:
                 if text:
                     lines.append(f"- {text}")
 
+        second_stage_rows = _compare_second_stage_rows(analyses)
+        if second_stage_rows:
+            lines.extend(["", "## 第二阶段信号快照"])
+            lines.extend(
+                _table(
+                    ["标的", "A/H 比价", "可转债映射", "公募渠道环境", "现货锚定"],
+                    second_stage_rows,
+                )
+            )
+            lines.append("- 这块不计入八维总分，只把已接入但以前埋在因子/画像里的第二阶段信号前置到可见层。")
+
         etf_product_rows = _etf_compare_product_rows(analyses)
         if etf_product_rows:
             lines.extend(["", "## ETF产品层对比"])
@@ -1844,6 +2075,7 @@ class OpportunityReportRenderer:
         """Render stock recommendation report."""
         regime = payload.get("regime", {})
         day_theme = payload.get("day_theme", {})
+        report_theme = representative_theme_label(payload)
         top = payload.get("top", [])
         market_label = payload.get("market_label", "全市场")
         sector_filter = payload.get("sector_filter", "")
@@ -1858,8 +2090,10 @@ class OpportunityReportRenderer:
             f"# {'个股观察池' if observe_only_report else '个股精选'} TOP {len(top)} | {payload['generated_at'][:10]}",
             "",
             f"> 范围: {market_label}" + (f" / {sector_filter}" if sector_filter else ""),
-            f"> 扫描池: {payload.get('scan_pool', 0)}只 | 过门槛: {payload.get('passed_pool', 0)}只 | Regime: {regime.get('current_regime', 'unknown')} | 主线: {day_theme.get('label', '未识别')}",
+            f"> 扫描池: {payload.get('scan_pool', 0)}只 | 过门槛: {payload.get('passed_pool', 0)}只 | Regime: {regime.get('current_regime', 'unknown')} | 主线: {_day_theme_display_label(day_theme)}",
         ]
+        if report_theme and report_theme != str(day_theme.get("label", "")).strip():
+            lines.append(f"> 代表主题: {report_theme}")
 
         market_parts = []
         if cn_count:
@@ -1873,14 +2107,14 @@ class OpportunityReportRenderer:
         if payload.get("model_version"):
             lines.append(f"> 模型版本: `{payload['model_version']}`")
         if payload.get("baseline_snapshot_at"):
-            lines.append(f"> 当日基准版: `{payload['baseline_snapshot_at']}`")
+            lines.append(f"> 今天首个快照版: `{payload['baseline_snapshot_at']}`")
         if payload.get("is_daily_baseline"):
-            lines.append("> 当前输出角色: 当日基准版")
+            lines.append("> 当前输出角色: 今天首个快照版")
         elif payload.get("comparison_basis_at"):
-            basis_label = payload.get("comparison_basis_label", "对比基准")
+            basis_label = _client_safe_comparison_basis_label(payload.get("comparison_basis_label", "对比基准"))
             lines.append(f"> 当前输出角色: 当日修正版（相对{basis_label}显示差异）")
         if payload.get("comparison_basis_at"):
-            basis_label = payload.get("comparison_basis_label", "对比基准")
+            basis_label = _client_safe_comparison_basis_label(payload.get("comparison_basis_label", "对比基准"))
             lines.append(f"> 分数变动对比基准: {basis_label} `{payload['comparison_basis_at']}`")
         if payload.get("model_version_warning"):
             lines.append(f"> 口径变更提示: {payload['model_version_warning']}")
@@ -1912,7 +2146,7 @@ class OpportunityReportRenderer:
                 lines.extend(
                     [
                         "",
-                        f"**分数变化：** 相比 {analysis.get('comparison_basis_label', payload.get('comparison_basis_label', '对比基准'))} `{analysis.get('comparison_snapshot_at', payload.get('comparison_basis_at', '上次快照'))}`，以下维度变化超过 10 分。",
+                        f"**分数变化：** 相比 {_client_safe_comparison_basis_label(analysis.get('comparison_basis_label', payload.get('comparison_basis_label', '对比基准')))} `{analysis.get('comparison_snapshot_at', payload.get('comparison_basis_at', '上次快照'))}`，以下维度变化超过 10 分。",
                     ]
                 )
                 lines.extend(_table(["维度", "分数变化", "主要原因"], _score_change_rows(analysis)))
@@ -1992,15 +2226,15 @@ class OpportunityReportRenderer:
                 [
                     "",
                     "**建议操作：**" if not observe_only_report else "**观察重点：**",
-                    f"- 持有周期：{dict(action.get('horizon') or {}).get('label', action.get('timeframe', '未标注'))}",
-                    f"- 周期理由：{dict(action.get('horizon') or {}).get('fit_reason', dict(action.get('horizon') or {}).get('style', '按当前动作和仓位框架理解即可'))}",
-                    f"- 不适合打法：{dict(action.get('horizon') or {}).get('misfit_reason', '不要自动切换成另一种更长或更短的打法。')}",
+                    f"- 持有周期：{_contextualize_pick_horizon_line(analysis, dict(action.get('horizon') or {}).get('label', action.get('timeframe', '未标注')))}",
+                    f"- 周期理由：{_contextualize_pick_operation_reason(analysis, dict(action.get('horizon') or {}).get('fit_reason', dict(action.get('horizon') or {}).get('style', '按当前动作和仓位框架理解即可')))}",
+                    f"- 不适合打法：{_contextualize_pick_operation_reason(analysis, dict(action.get('horizon') or {}).get('misfit_reason', '不要自动切换成另一种更长或更短的打法。'))}",
                     f"- 介入条件：{action['entry']}",
                     *(
                         [
                             f"- 建议仓位：{action['position']}",
                             f"- 单标的上限：{action.get('max_portfolio_exposure', '—')}",
-                            f"- 加仓节奏：{action.get('scaling_plan', '—')}",
+                            f"- 加仓节奏：{_contextualize_pick_operation_reason(analysis, action.get('scaling_plan', '—'))}",
                             f"- 建议止损：{action.get('stop_loss_pct', '—')}",
                             f"- 止损参考：{action['stop']}",
                             f"- 目标参考：{action.get('target', '待定')}",

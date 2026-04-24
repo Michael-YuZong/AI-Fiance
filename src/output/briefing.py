@@ -296,7 +296,7 @@ class BriefingRenderer:
 
         _append_block(lines, "1. 市场结论")
         _append_subsection(lines, "1.1 今日主线", payload.get("headline_lines", []))
-        _append_subsection(lines, "1.2 仓位与执行", payload.get("action_lines", []))
+        _append_subsection(lines, str(payload.get("action_section_title", "1.2 今天怎么做")), payload.get("action_lines", []))
 
         _append_block(lines, "2. 宏观与市场全景")
         _append_subsection(lines, "2.1 宏观框架", payload.get("macro_items", []))
@@ -366,7 +366,7 @@ class BriefingRenderer:
         _append_table_subsection(
             lines,
             "3.2 主线跟踪",
-            ["方向", "催化剂", "逻辑", "时间维度", "风险点"],
+            ["方向", "催化剂", "逻辑", "时间维度", "风险点", "信息环境"],
             payload.get("theme_tracking_rows", []),
         )
         for item in payload.get("theme_tracking_lines", []) or []:

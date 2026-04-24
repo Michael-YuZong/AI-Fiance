@@ -61,6 +61,19 @@ def test_review_scaffold_uses_custom_generated_by_label(tmp_path: Path) -> None:
     assert "briefing daily --client-final" in text
 
 
+def test_review_scaffold_uses_generic_solidification_copy_for_non_strategy(tmp_path: Path) -> None:
+    review = tmp_path / "reports/reviews/briefings/final/daily_briefing_2026-03-23_client_final__external_review.md"
+    ensure_external_review_scaffold(
+        review_path=review,
+        markdown_path=tmp_path / "reports/briefings/final/daily_briefing_2026-03-23_client_final.md",
+        report_type="briefing",
+    )
+
+    text = review.read_text(encoding="utf-8")
+    assert "当前成稿链" in text
+    assert "strategy final" not in text
+
+
 def test_maybe_autoclose_external_review_writes_round2_pass(tmp_path: Path) -> None:
     review = tmp_path / "reports/reviews/briefings/final/daily_briefing_2026-03-23_client_final__external_review.md"
     review.parent.mkdir(parents=True, exist_ok=True)
@@ -119,3 +132,32 @@ def test_maybe_autoclose_external_review_writes_round2_pass(tmp_path: Path) -> N
     assert "- round：2" in text
     assert "- previous_round：1" in text
     assert "- 状态：PASS" in text
+
+
+def test_maybe_autoclose_external_review_keeps_generated_scaffold_blocked(tmp_path: Path) -> None:
+    review = tmp_path / "reports/reviews/stock_picks/final/stock_picks_cn_2026-04-08_final__external_review.md"
+    target = tmp_path / "reports/stock_picks/final/stock_picks_cn_2026-04-08_final.md"
+    detail = tmp_path / "reports/stock_picks/internal/stock_picks_cn_2026-04-08_internal_detail.md"
+
+    ensure_external_review_scaffold(
+        review_path=review,
+        markdown_path=target,
+        report_type="stock_pick",
+        detail_source=detail,
+        scaffold_generated_by="stock_pick --client-final",
+    )
+
+    changed = maybe_autoclose_external_review(
+        review_path=review,
+        markdown_path=target,
+        report_type="stock_pick",
+        detail_source=detail,
+        scaffold_generated_by="stock_pick --client-final",
+    )
+
+    assert changed is False
+    archived = review.with_name("stock_picks_cn_2026-04-08_final__external_review_round1.md")
+    assert not archived.exists()
+    text = review.read_text(encoding="utf-8")
+    assert "- 状态：BLOCKED" in text
+    assert "自动生成的 review scaffold" in text

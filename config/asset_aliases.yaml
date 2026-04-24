@@ -18,6 +18,17 @@ aliases:
     aliases:
       - "电网ETF"
       - "电网"
+  - symbol: "515880"
+    name: "通信ETF"
+    asset_type: "cn_etf"
+    sector: "通信"
+    chain_nodes: ["CPO", "光模块", "通信设备", "AI算力"]
+    aliases:
+      - "通信ETF"
+      - "通信"
+      - "光模块ETF"
+      - "CPOETF"
+      - "通信设备ETF"
   - symbol: "512480"
     name: "国联安中证半导体ETF"
     asset_type: "cn_etf"
@@ -28,6 +39,26 @@ aliases:
       - "半导体"
       - "芯片ETF"
       - "芯片"
+  - symbol: "513120"
+    name: "港股创新药ETF"
+    asset_type: "cn_etf"
+    sector: "医药"
+    chain_nodes: ["创新药", "港股医药", "FDA"]
+    aliases:
+      - "港股创新药ETF"
+      - "创新药ETF"
+      - "创新药"
+      - "港股创新药"
+  - symbol: "159869"
+    name: "游戏ETF"
+    asset_type: "cn_etf"
+    sector: "科技"
+    chain_nodes: ["游戏", "传媒", "AI应用"]
+    aliases:
+      - "游戏ETF"
+      - "游戏"
+      - "动漫游戏ETF"
+      - "传媒游戏ETF"
   - symbol: "QQQM"
     name: "Invesco NASDAQ 100 ETF"
     asset_type: "us"

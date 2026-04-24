@@ -55,6 +55,10 @@ def route_request(
         return RoutedCommand("briefing", ["daily"], "识别为晨报/日度简报需求。")
     if any(keyword in text for keyword in ["周报", "周度简报"]):
         return RoutedCommand("briefing", ["weekly"], "识别为周报需求。")
+    if any(keyword in text for keyword in ["情报", "催化", "线索", "收集", "最近在交易什么", "跟踪什么"]) and not any(
+        keyword in text for keyword in ["晨报", "早报", "午报", "晚报", "周报", "日报", "报告"]
+    ):
+        return RoutedCommand("intel", [text], "识别为自由情报采集，不直接走成熟成稿链。")
     if any(keyword in text for keyword in ["机会", "发现", "关注什么", "值得看什么", "主动发现", "今日扫描", "扫一下", "有什么值得看的"]):
         event = _extract_event_keyword(text)
         return RoutedCommand("discover", [event] if event else [], "识别为机会发现或关注方向筛选。")

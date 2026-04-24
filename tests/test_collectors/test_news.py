@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import feedparser
+import pandas as pd
 
 from src.collectors.news import NewsCollector
 
@@ -222,6 +223,75 @@ feeds: []
     assert "szse.cn" in joined
 
 
+def test_news_collector_get_market_intelligence_expands_innovation_medicine_theme_terms(monkeypatch):
+    collector = NewsCollector({"news_feeds_file": "config/does_not_exist.yaml"})
+    frame = pd.DataFrame(
+        [
+            {
+                "title": "ASCO前瞻 I ZG006和ZG005入选口头报告，多项临床数据入围",
+                "pub_time": "2026-04-21 09:30:00",
+                "src": "证券时报",
+                "url": "https://example.com/asco",
+            },
+            {
+                "title": "海昇药业：公司产品氯氟脲于2025年通过美国FDA现场检查",
+                "pub_time": "2026-04-21 08:30:00",
+                "src": "证券时报",
+                "url": "https://example.com/fda",
+            },
+            {
+                "title": "光模块景气修复带动通信链活跃",
+                "pub_time": "2026-04-21 07:30:00",
+                "src": "财联社",
+                "url": "https://example.com/cpo",
+            },
+        ]
+    )
+
+    def fake_ts_call(api_name, **_kwargs):  # noqa: ANN001
+        if api_name == "major_news":
+            return frame
+        return None
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    items = collector.get_market_intelligence(["创新药", "港股医药"], limit=4, recent_days=14)
+
+    titles = [str(item.get("title") or "") for item in items]
+    assert any("ASCO" in title for title in titles)
+    assert any("FDA" in title for title in titles)
+
+
+def test_news_collector_get_market_intelligence_expands_cpo_theme_terms(monkeypatch):
+    collector = NewsCollector({"news_feeds_file": "config/does_not_exist.yaml"})
+    frame = pd.DataFrame(
+        [
+            {
+                "title": "光模块需求抬升，头部厂商加速扩产",
+                "pub_time": "2026-04-21 09:30:00",
+                "src": "财联社",
+                "url": "https://example.com/cpo",
+            },
+            {
+                "title": "创新药临床数据更新",
+                "pub_time": "2026-04-21 08:30:00",
+                "src": "证券时报",
+                "url": "https://example.com/biotech",
+            },
+        ]
+    )
+
+    def fake_ts_call(api_name, **_kwargs):  # noqa: ANN001
+        if api_name == "major_news":
+            return frame
+        return None
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    items = collector.get_market_intelligence(["CPO"], limit=4, recent_days=14)
+
+    assert items
+    assert "光模块" in str(items[0].get("title") or "")
+
+
 def test_news_collector_search_by_keywords_ranks_more_relevant_same_source_item_first(tmp_path, monkeypatch):
     config_path = tmp_path / "news.yaml"
     config_path.write_text(
@@ -342,7 +412,7 @@ feeds: []
     )
     collector = NewsCollector({"news_feeds_file": str(config_path)})
 
-    def fake_search(self, keywords, preferred_sources=None, limit=6, recent_days=7):  # noqa: ANN001, ARG001
+    def fake_search(self, keywords, preferred_sources=None, limit=6, recent_days=7, query_cap=None):  # noqa: ANN001, ARG001
         joined = " ".join(keywords)
         if "半导体 芯片" in joined:
             return [{"title": "China chip equipment demand rises - Reuters", "source": "Reuters", "category": "topic_search"}]
@@ -359,6 +429,39 @@ feeds: []
     )
     assert len(items) == 2
     assert any("TSMC raises capex" in item["title"] for item in items)
+
+
+def test_news_collector_search_by_keyword_groups_honors_total_query_cap(tmp_path, monkeypatch):
+    config_path = tmp_path / "news.yaml"
+    config_path.write_text(
+        """
+preferences:
+  preferred_sources: ["Reuters"]
+  required_sources: []
+  max_items_per_feed: 2
+feeds: []
+""".strip(),
+        encoding="utf-8",
+    )
+    collector = NewsCollector({"news_feeds_file": str(config_path)})
+    seen: list[list[str]] = []
+
+    def fake_search(self, keywords, preferred_sources=None, limit=6, recent_days=7, query_cap=None):  # noqa: ANN001, ARG001
+        seen.append(list(keywords))
+        return [{"title": " / ".join(keywords), "source": "Reuters", "category": "topic_search"}]
+
+    monkeypatch.setattr(NewsCollector, "search_by_keywords", fake_search)
+    items = collector.search_by_keyword_groups(
+        [["半导体", "芯片"], ["台积电", "capex"], ["英伟达", "GB200"]],
+        preferred_sources=["Reuters"],
+        limit=4,
+        recent_days=30,
+        query_cap_per_group=1,
+        total_query_cap=2,
+    )
+
+    assert seen == [["半导体", "芯片"], ["台积电", "capex"]]
+    assert len(items) == 2
 
 
 def test_news_collector_search_by_keywords_filters_generic_or_stale_market_pages(tmp_path, monkeypatch):
@@ -770,6 +873,54 @@ def test_news_collector_get_stock_news_merges_tushare_irm_qa_items(monkeypatch):
     assert irm_item["link"] == "https://irm.cninfo.com.cn/"
 
 
+def test_news_collector_get_stk_surv_returns_annotated_snapshot(monkeypatch):
+    collector = NewsCollector({"news_feeds_file": "config/news_feeds.yaml"})
+
+    def fake_stock_identity(symbol: str):  # noqa: ARG001
+        return {"symbol": "002223", "ts_code": "002223.SZ", "name": "鱼跃医疗"}
+
+    def fake_ts_call(api_name: str, **kwargs: object):  # noqa: ANN001, ARG001
+        import pandas as pd
+
+        assert api_name == "stk_surv"
+        assert kwargs.get("ts_code") == "002223.SZ"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "002223.SZ",
+                    "name": "鱼跃医疗",
+                    "surv_date": "20240102",
+                    "fund_visitors": "郝淼",
+                    "rece_place": "电话会议",
+                    "rece_mode": "特定对象调研",
+                    "rece_org": "宝盈基金",
+                    "org_type": "公募基金",
+                    "comp_rece": "董秘办",
+                    "content": "公司表示业务仍在正常推进，机构重点关注经营节奏和新品验证。",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_stock_identity", fake_stock_identity)
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+
+    snapshot = collector.get_stk_surv("002223", limit=5)
+
+    assert snapshot["source"] == "tushare.stk_surv"
+    assert snapshot["latest_date"] == "2024-01-02"
+    assert snapshot["is_fresh"] is False
+    assert snapshot["fallback"] == "none"
+    assert "stk_surv" in snapshot["disclosure"]
+    assert snapshot["items"]
+    item = snapshot["items"][0]
+    assert item["configured_source"] == "Tushare::stk_surv"
+    assert "机构调研" in item["title"]
+    assert item["source_note"] == "structured_disclosure"
+    assert item["note"] == "投资者关系/路演纪要"
+    assert item["link"] == "https://www.cninfo.com.cn/new/disclosure/detail?stockCode=002223"
+    assert item["is_fresh"] is False
+
+
 def test_news_collector_get_stock_news_keeps_irm_lane_under_tight_limit(monkeypatch):
     collector = NewsCollector({"news_feeds_file": "config/news_feeds.yaml", "stock_news_limit": 2})
 
@@ -1135,6 +1286,138 @@ def test_news_collector_get_stock_news_structured_only_runtime_skips_direct_and_
     assert any(item["configured_source"] == "Tushare::forecast" for item in items)
     assert calls["direct"] == 0
     assert calls["search"] == 0
+
+
+def test_news_collector_get_stock_news_focused_runtime_caps_search_groups(monkeypatch):
+    collector = NewsCollector(
+        {
+            "news_feeds_file": "config/news_feeds.yaml",
+            "stock_news_runtime_mode": "focused",
+            "stock_news_official_query_cap": 2,
+            "stock_news_search_query_cap": 1,
+            "stock_news_search_recent_days": 14,
+        }
+    )
+    seen: list[dict[str, object]] = []
+
+    def fake_stock_identity(symbol: str):  # noqa: ARG001
+        return {"symbol": "300308", "ts_code": "300308.SZ", "name": "中际旭创"}
+
+    monkeypatch.setattr(collector, "_stock_identity", fake_stock_identity)
+    monkeypatch.setattr(collector, "_structured_stock_intelligence", lambda *args, **kwargs: [])  # noqa: ARG005
+    monkeypatch.setattr(collector, "_official_stock_intelligence", lambda *args, **kwargs: [])  # noqa: ARG005
+    monkeypatch.setattr(collector, "_needs_stock_tushare_news_backfill", lambda *args, **kwargs: False)  # noqa: ARG005
+    monkeypatch.setattr(collector, "_needs_stock_search_backfill", lambda *args, **kwargs: True)  # noqa: ARG005
+
+    def fake_search_by_keyword_groups(  # noqa: ANN001, ARG001
+        keyword_groups,
+        preferred_sources=None,
+        limit=6,
+        recent_days=7,
+        query_cap_per_group=None,
+        total_query_cap=None,
+    ):
+        groups = [list(group) for group in keyword_groups]
+        seen.append(
+            {
+                "groups": groups,
+                "limit": limit,
+                "recent_days": recent_days,
+                "preferred_sources": list(preferred_sources or []),
+                "query_cap_per_group": query_cap_per_group,
+                "total_query_cap": total_query_cap,
+            }
+        )
+        return []
+
+    monkeypatch.setattr(collector, "search_by_keyword_groups", fake_search_by_keyword_groups)
+
+    collector.get_stock_news("300308", limit=6)
+
+    assert len(seen) == 2
+    assert len(list(dict(seen[0]).get("groups") or [])) == 2
+    assert ["中际旭创", "公告"] in list(dict(seen[0]).get("groups") or [])
+    assert len(list(dict(seen[1]).get("groups") or [])) == 1
+    assert ["中际旭创", "300308"] in list(dict(seen[1]).get("groups") or [])
+    assert int(dict(seen[0]).get("limit") or 0) == 4
+    assert int(dict(seen[1]).get("recent_days") or 0) == 14
+    assert int(dict(seen[0]).get("query_cap_per_group") or 0) == 1
+    assert int(dict(seen[0]).get("total_query_cap") or 0) == 2
+    assert int(dict(seen[1]).get("query_cap_per_group") or 0) == 1
+    assert int(dict(seen[1]).get("total_query_cap") or 0) == 1
+
+
+def test_news_collector_stock_official_query_groups_skip_redundant_symbol_variant_for_cjk_name() -> None:
+    collector = NewsCollector({"news_feeds_file": "config/news_feeds.yaml"})
+
+    groups = collector._stock_official_query_groups(
+        {"symbol": "300308", "ts_code": "300308.SZ", "name": "中际旭创"},
+        query_cap=4,
+    )
+
+    assert groups[:4] == [
+        ["中际旭创", "公告"],
+        ["中际旭创", "业绩预告"],
+        ["中际旭创", "业绩说明会"],
+        ["中际旭创", "互动易"],
+    ]
+    assert ["中际旭创", "300308", "公告"] not in groups
+
+
+def test_news_collector_get_stock_news_finalist_runtime_uses_tighter_search_caps(monkeypatch):
+    collector = NewsCollector(
+        {
+            "news_feeds_file": "config/news_feeds.yaml",
+            "stock_news_runtime_mode": "finalist",
+            "stock_news_finalist_official_query_cap": 2,
+            "stock_news_finalist_search_query_cap": 1,
+            "stock_news_finalist_search_recent_days": 21,
+        }
+    )
+    seen: list[dict[str, object]] = []
+
+    def fake_stock_identity(symbol: str):  # noqa: ARG001
+        return {"symbol": "603259", "ts_code": "603259.SH", "name": "药明康德"}
+
+    monkeypatch.setattr(collector, "_stock_identity", fake_stock_identity)
+    monkeypatch.setattr(collector, "_structured_stock_intelligence", lambda *args, **kwargs: [])  # noqa: ARG005
+    monkeypatch.setattr(collector, "_official_stock_intelligence", lambda *args, **kwargs: [])  # noqa: ARG005
+    monkeypatch.setattr(collector, "_needs_stock_tushare_news_backfill", lambda *args, **kwargs: False)  # noqa: ARG005
+    monkeypatch.setattr(collector, "_needs_stock_search_backfill", lambda *args, **kwargs: True)  # noqa: ARG005
+
+    def fake_search_by_keyword_groups(  # noqa: ANN001, ARG001
+        keyword_groups,
+        preferred_sources=None,
+        limit=6,
+        recent_days=7,
+        query_cap_per_group=None,
+        total_query_cap=None,
+    ):
+        seen.append(
+            {
+                "groups": [list(group) for group in keyword_groups],
+                "limit": limit,
+                "recent_days": recent_days,
+                "preferred_sources": list(preferred_sources or []),
+                "query_cap_per_group": query_cap_per_group,
+                "total_query_cap": total_query_cap,
+            }
+        )
+        return []
+
+    monkeypatch.setattr(collector, "search_by_keyword_groups", fake_search_by_keyword_groups)
+
+    collector.get_stock_news("603259", limit=6)
+
+    assert len(seen) == 2
+    assert len(list(dict(seen[0]).get("groups") or [])) == 2
+    assert len(list(dict(seen[1]).get("groups") or [])) == 1
+    assert int(dict(seen[0]).get("limit") or 0) == 5
+    assert int(dict(seen[1]).get("recent_days") or 0) == 21
+    assert int(dict(seen[0]).get("query_cap_per_group") or 0) == 1
+    assert int(dict(seen[0]).get("total_query_cap") or 0) == 2
+    assert int(dict(seen[1]).get("query_cap_per_group") or 0) == 1
+    assert int(dict(seen[1]).get("total_query_cap") or 0) == 1
 
 
 def test_news_collector_fetch_sse_direct_announcements_parses_official_jsonp(monkeypatch):

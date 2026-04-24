@@ -7,6 +7,7 @@ import html
 import mimetypes
 import os
 import re
+import signal
 import subprocess
 import tempfile
 import time
@@ -18,7 +19,8 @@ from urllib.parse import unquote, urlparse
 
 _EDGE_BINARY = Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_REPORT_THEME = "terminal"
+_DEFAULT_REPORT_THEME = "institutional"
+_DEFAULT_PRINT_REPORT_THEME = "clinical"
 _REPORT_THEME_STORAGE_KEY = "ai-finance-report-theme"
 _REPORT_THEME_PRESETS: Dict[str, tuple[str, Dict[str, str]]] = {
     "terminal": (
@@ -46,10 +48,12 @@ _REPORT_THEME_PRESETS: Dict[str, tuple[str, Dict[str, str]]] = {
             "--code-border": "rgba(89, 208, 194, 0.3)",
             "--shadow": "rgba(0, 0, 0, 0.42)",
             "--hero-glow": "rgba(89, 208, 194, 0.2)",
-            "--positive": "#4ec9b0",
-            "--negative": "#ff8f8f",
+            "--positive": "#ff7b8a",
+            "--negative": "#42c39a",
             "--warning": "#f4c56a",
-            "--panel-radius": "22px",
+            "--panel-radius": "12px",
+            "--section-shadow": "0 4px 6px -1px rgba(0, 0, 0, 0.14), 0 10px 24px -14px rgba(0, 0, 0, 0.24)",
+            "--small-shadow": "0 2px 4px -1px rgba(0, 0, 0, 0.12), 0 8px 18px -14px rgba(0, 0, 0, 0.2)",
         },
     ),
     "abyss-gold": (
@@ -77,10 +81,12 @@ _REPORT_THEME_PRESETS: Dict[str, tuple[str, Dict[str, str]]] = {
             "--code-border": "rgba(197, 160, 89, 0.28)",
             "--shadow": "rgba(0, 0, 0, 0.52)",
             "--hero-glow": "rgba(197, 160, 89, 0.12)",
-            "--positive": "#5d947c",
-            "--negative": "#9b565b",
+            "--positive": "#ba5f63",
+            "--negative": "#678b76",
             "--warning": "#c5a059",
-            "--panel-radius": "24px",
+            "--panel-radius": "12px",
+            "--section-shadow": "0 4px 6px -1px rgba(0, 0, 0, 0.16), 0 10px 24px -14px rgba(0, 0, 0, 0.24)",
+            "--small-shadow": "0 2px 4px -1px rgba(0, 0, 0, 0.12), 0 8px 18px -14px rgba(0, 0, 0, 0.18)",
         },
     ),
     "institutional": (
@@ -88,9 +94,9 @@ _REPORT_THEME_PRESETS: Dict[str, tuple[str, Dict[str, str]]] = {
         {
             "--page-bg": "#000000",
             "--page-bg-2": "#07090c",
-            "--panel-bg": "rgba(6, 8, 11, 0.98)",
-            "--panel-bg-strong": "rgba(4, 5, 7, 0.99)",
-            "--panel-soft": "rgba(11, 15, 20, 0.97)",
+            "--panel-bg": "rgba(7, 10, 14, 0.78)",
+            "--panel-bg-strong": "rgba(5, 7, 10, 0.88)",
+            "--panel-soft": "rgba(12, 17, 24, 0.68)",
             "--heading": "#ffd65a",
             "--text": "#d6dbe2",
             "--text-soft": "#a4adb9",
@@ -100,18 +106,216 @@ _REPORT_THEME_PRESETS: Dict[str, tuple[str, Dict[str, str]]] = {
             "--accent-soft": "rgba(255, 191, 0, 0.14)",
             "--accent-2": "#39ff14",
             "--link": "#8fc5ff",
-            "--rule": "rgba(255, 255, 255, 0.07)",
-            "--rule-strong": "rgba(255, 191, 0, 0.22)",
+            "--rule": "rgba(255, 255, 255, 0.10)",
+            "--rule-strong": "rgba(255, 191, 0, 0.28)",
             "--row-stripe": "rgba(255, 255, 255, 0.015)",
             "--code-bg": "rgba(255, 191, 0, 0.1)",
             "--code-ink": "#ffe082",
             "--code-border": "rgba(255, 191, 0, 0.2)",
             "--shadow": "rgba(0, 0, 0, 0.58)",
             "--hero-glow": "rgba(255, 191, 0, 0.08)",
-            "--positive": "#39ff14",
-            "--negative": "#ff6b6b",
+            "--hero-sheen": "rgba(255, 214, 90, 0.035)",
+            "--positive": "#ff5f72",
+            "--negative": "#48d48a",
             "--warning": "#ffbf00",
-            "--panel-radius": "0px",
+            "--panel-radius": "14px",
+            "--figure-bg": "linear-gradient(180deg, rgba(255, 214, 90, 0.045), rgba(255, 255, 255, 0.01) 28%)",
+            "--section-shadow": "0 10px 30px -22px rgba(0, 0, 0, 0.62), 0 24px 60px -42px rgba(0, 0, 0, 0.48)",
+            "--figure-shadow": "0 18px 44px -34px rgba(0, 0, 0, 0.62), 0 10px 18px -18px rgba(255, 191, 0, 0.08)",
+            "--small-shadow": "0 10px 24px -24px rgba(0, 0, 0, 0.52)",
+            "--card-bg": "linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015))",
+            "--blockquote-bg": "linear-gradient(180deg, rgba(255, 191, 0, 0.075), rgba(255, 255, 255, 0.015))",
+            "--details-bg": "linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.015))",
+            "--details-summary-bg": "linear-gradient(90deg, rgba(255, 191, 0, 0.16), rgba(255, 255, 255, 0.02))",
+        },
+    ),
+    "clinical": (
+        "学术实验室",
+        {
+            "--page-bg": "#fbfbfd",
+            "--page-bg-2": "#eef2f7",
+            "--panel-bg": "rgba(255, 255, 255, 0.9)",
+            "--panel-bg-strong": "rgba(245, 248, 253, 0.96)",
+            "--panel-soft": "rgba(241, 245, 251, 0.95)",
+            "--heading": "#1d1d1f",
+            "--text": "#243040",
+            "--text-soft": "#4e5f73",
+            "--muted": "#86868b",
+            "--accent": "#0071e3",
+            "--accent-strong": "#005bc4",
+            "--accent-soft": "rgba(0, 113, 227, 0.1)",
+            "--accent-2": "#3d8bff",
+            "--link": "#005fcc",
+            "--rule": "rgba(0, 0, 0, 0.06)",
+            "--rule-strong": "rgba(0, 113, 227, 0.18)",
+            "--row-stripe": "rgba(0, 113, 227, 0.035)",
+            "--code-bg": "rgba(0, 113, 227, 0.1)",
+            "--code-ink": "#0c4f9e",
+            "--code-border": "rgba(0, 113, 227, 0.12)",
+            "--shadow": "rgba(15, 35, 66, 0.08)",
+            "--hero-glow": "rgba(0, 113, 227, 0.1)",
+            "--positive": "#e03a3e",
+            "--negative": "#0f8a5f",
+            "--warning": "#d28a16",
+            "--panel-radius": "12px",
+            "--color-scheme": "light",
+            "--toolbar-bg": "rgba(255, 255, 255, 0.84)",
+            "--button-active-top": "rgba(0, 113, 227, 0.08)",
+            "--button-active-inset": "rgba(255, 255, 255, 0.74)",
+            "--hero-sheen": "rgba(0, 113, 227, 0.035)",
+            "--figure-bg": "linear-gradient(180deg, rgba(0, 113, 227, 0.035), rgba(255, 255, 255, 0.65) 32%)",
+            "--table-bg": "rgba(255, 255, 255, 0.88)",
+            "--table-head-bg": "linear-gradient(180deg, rgba(0, 113, 227, 0.08), rgba(0, 113, 227, 0.13))",
+            "--blockquote-bg": "linear-gradient(180deg, rgba(0, 113, 227, 0.035), rgba(255, 255, 255, 0.9))",
+            "--ordered-bg": "linear-gradient(180deg, rgba(0, 113, 227, 0.04), rgba(255, 255, 255, 0.88))",
+            "--details-bg": "linear-gradient(180deg, rgba(0, 113, 227, 0.035), rgba(255, 255, 255, 0.9))",
+            "--details-summary-bg": "linear-gradient(90deg, rgba(0, 113, 227, 0.12), rgba(255, 255, 255, 0.65))",
+            "--link-underline": "rgba(0, 113, 227, 0.28)",
+            "--section-shadow": "0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.03), 0 12px 24px rgba(0, 0, 0, 0.02)",
+            "--figure-shadow": "0 1px 2px rgba(0, 0, 0, 0.03), 0 6px 16px rgba(15, 35, 66, 0.04), 0 12px 24px rgba(15, 35, 66, 0.03)",
+            "--small-shadow": "0 1px 2px rgba(0, 0, 0, 0.03), 0 4px 12px rgba(0, 0, 0, 0.025), 0 12px 24px rgba(0, 0, 0, 0.02)",
+            "--table-rule": "rgba(0, 0, 0, 0.05)",
+            "--table-hover": "rgba(0, 0, 0, 0.02)",
+            "--figure-caption": "#86868b",
+            "--pill-bull-bg": "rgba(224, 58, 62, 0.1)",
+            "--pill-bull-fg": "#e03a3e",
+            "--pill-bull-border": "rgba(224, 58, 62, 0.12)",
+            "--pill-bear-bg": "rgba(15, 138, 95, 0.1)",
+            "--pill-bear-fg": "#0f8a5f",
+            "--pill-bear-border": "rgba(15, 138, 95, 0.12)",
+            "--pill-warn-bg": "rgba(210, 138, 22, 0.12)",
+            "--pill-warn-fg": "#b96d00",
+            "--pill-warn-border": "rgba(210, 138, 22, 0.14)",
+            "--pill-neutral-bg": "rgba(29, 29, 31, 0.06)",
+            "--pill-neutral-fg": "#4e5f73",
+            "--pill-neutral-border": "rgba(29, 29, 31, 0.07)",
+            "--page-pattern": "linear-gradient(transparent, transparent)",
+        },
+    ),
+    "erdtree": (
+        "黄金树微光",
+        {
+            "--page-bg": "#fdfbf7",
+            "--page-bg-2": "#f4ecdc",
+            "--panel-bg": "rgba(255, 250, 242, 0.93)",
+            "--panel-bg-strong": "rgba(249, 243, 233, 0.98)",
+            "--panel-soft": "rgba(245, 238, 224, 0.96)",
+            "--heading": "#3e352c",
+            "--text": "#4b4034",
+            "--text-soft": "#6b5e50",
+            "--muted": "#8b7d6e",
+            "--accent": "#d4af37",
+            "--accent-strong": "#8f6912",
+            "--accent-soft": "rgba(212, 175, 55, 0.1)",
+            "--accent-2": "#6a7a58",
+            "--link": "#8c5e00",
+            "--rule": "rgba(62, 53, 44, 0.06)",
+            "--rule-strong": "rgba(212, 175, 55, 0.18)",
+            "--row-stripe": "rgba(212, 175, 55, 0.05)",
+            "--code-bg": "rgba(212, 175, 55, 0.1)",
+            "--code-ink": "#7f5a00",
+            "--code-border": "rgba(212, 175, 55, 0.12)",
+            "--shadow": "rgba(73, 53, 23, 0.1)",
+            "--hero-glow": "rgba(212, 175, 55, 0.12)",
+            "--positive": "#b24a4a",
+            "--negative": "#6a845d",
+            "--warning": "#d4af37",
+            "--panel-radius": "12px",
+            "--color-scheme": "light",
+            "--toolbar-bg": "rgba(253, 249, 240, 0.9)",
+            "--button-active-top": "rgba(212, 175, 55, 0.1)",
+            "--button-active-inset": "rgba(255, 247, 231, 0.72)",
+            "--hero-sheen": "rgba(212, 175, 55, 0.05)",
+            "--figure-bg": "linear-gradient(180deg, rgba(212, 175, 55, 0.06), rgba(255, 251, 244, 0.78) 32%)",
+            "--table-bg": "rgba(255, 251, 244, 0.88)",
+            "--table-head-bg": "linear-gradient(180deg, rgba(212, 175, 55, 0.1), rgba(212, 175, 55, 0.16))",
+            "--blockquote-bg": "linear-gradient(180deg, rgba(212, 175, 55, 0.05), rgba(255, 249, 238, 0.9))",
+            "--ordered-bg": "linear-gradient(180deg, rgba(212, 175, 55, 0.06), rgba(255, 251, 244, 0.9))",
+            "--details-bg": "linear-gradient(180deg, rgba(212, 175, 55, 0.05), rgba(255, 249, 238, 0.9))",
+            "--details-summary-bg": "linear-gradient(90deg, rgba(212, 175, 55, 0.14), rgba(255, 248, 232, 0.68))",
+            "--link-underline": "rgba(140, 94, 0, 0.28)",
+            "--section-shadow": "0 1px 2px rgba(62, 53, 44, 0.05), 0 4px 12px rgba(87, 64, 30, 0.04), 0 12px 24px rgba(87, 64, 30, 0.03)",
+            "--figure-shadow": "0 1px 2px rgba(62, 53, 44, 0.05), 0 6px 16px rgba(87, 64, 30, 0.05), 0 12px 24px rgba(87, 64, 30, 0.03)",
+            "--small-shadow": "0 1px 2px rgba(62, 53, 44, 0.04), 0 4px 12px rgba(87, 64, 30, 0.03), 0 12px 24px rgba(87, 64, 30, 0.02)",
+            "--table-rule": "rgba(62, 53, 44, 0.05)",
+            "--table-hover": "rgba(62, 53, 44, 0.02)",
+            "--figure-caption": "#8b7d6e",
+            "--pill-bull-bg": "rgba(178, 74, 74, 0.11)",
+            "--pill-bull-fg": "#9b3f3f",
+            "--pill-bull-border": "rgba(178, 74, 74, 0.13)",
+            "--pill-bear-bg": "rgba(106, 132, 93, 0.12)",
+            "--pill-bear-fg": "#546a49",
+            "--pill-bear-border": "rgba(106, 132, 93, 0.14)",
+            "--pill-warn-bg": "rgba(212, 175, 55, 0.12)",
+            "--pill-warn-fg": "#8f6912",
+            "--pill-warn-border": "rgba(212, 175, 55, 0.14)",
+            "--pill-neutral-bg": "rgba(62, 53, 44, 0.06)",
+            "--pill-neutral-fg": "#6b5e50",
+            "--pill-neutral-border": "rgba(62, 53, 44, 0.07)",
+            "--page-pattern": "linear-gradient(transparent, transparent)",
+        },
+    ),
+    "neo-brutal": (
+        "高能波普",
+        {
+            "--page-bg": "#ffffff",
+            "--page-bg-2": "#f7f7fb",
+            "--panel-bg": "#ffffff",
+            "--panel-bg-strong": "#ffffff",
+            "--panel-soft": "#fafafc",
+            "--heading": "#000000",
+            "--text": "#111111",
+            "--text-soft": "#202020",
+            "--muted": "#565656",
+            "--accent": "#00a1d6",
+            "--accent-strong": "#000000",
+            "--accent-soft": "rgba(0, 161, 214, 0.14)",
+            "--accent-2": "#ff8ba7",
+            "--link": "#004bde",
+            "--rule": "#000000",
+            "--rule-strong": "#000000",
+            "--row-stripe": "rgba(255, 139, 167, 0.07)",
+            "--code-bg": "rgba(255, 139, 167, 0.12)",
+            "--code-ink": "#000000",
+            "--code-border": "#000000",
+            "--shadow": "rgba(0, 0, 0, 0.95)",
+            "--hero-glow": "rgba(0, 161, 214, 0.07)",
+            "--positive": "#ff5a5f",
+            "--negative": "#00a36c",
+            "--warning": "#ff8ba7",
+            "--panel-radius": "10px",
+            "--color-scheme": "light",
+            "--toolbar-bg": "rgba(255, 255, 255, 0.94)",
+            "--button-active-top": "rgba(255, 139, 167, 0.22)",
+            "--button-active-inset": "rgba(255, 255, 255, 0.0)",
+            "--hero-sheen": "rgba(255, 139, 167, 0.08)",
+            "--figure-bg": "linear-gradient(180deg, rgba(255, 139, 167, 0.12), rgba(255, 255, 255, 0.72) 28%)",
+            "--table-bg": "#ffffff",
+            "--table-head-bg": "linear-gradient(180deg, rgba(0, 161, 214, 0.12), rgba(255, 139, 167, 0.22))",
+            "--blockquote-bg": "linear-gradient(180deg, rgba(255, 139, 167, 0.1), rgba(255, 255, 255, 0.95))",
+            "--ordered-bg": "linear-gradient(180deg, rgba(0, 161, 214, 0.08), rgba(255, 255, 255, 0.96))",
+            "--details-bg": "linear-gradient(180deg, rgba(255, 139, 167, 0.08), rgba(255, 255, 255, 0.96))",
+            "--details-summary-bg": "linear-gradient(90deg, rgba(0, 161, 214, 0.18), rgba(255, 139, 167, 0.2))",
+            "--link-underline": "rgba(0, 75, 222, 0.35)",
+            "--section-shadow": "6px 6px 0px #000000",
+            "--figure-shadow": "6px 6px 0px #000000",
+            "--small-shadow": "4px 4px 0px #000000",
+            "--table-rule": "rgba(0, 0, 0, 0.09)",
+            "--table-hover": "rgba(0, 0, 0, 0.02)",
+            "--figure-caption": "#565656",
+            "--pill-bull-bg": "rgba(255, 90, 95, 0.14)",
+            "--pill-bull-fg": "#000000",
+            "--pill-bull-border": "#000000",
+            "--pill-bear-bg": "rgba(0, 163, 108, 0.14)",
+            "--pill-bear-fg": "#000000",
+            "--pill-bear-border": "#000000",
+            "--pill-warn-bg": "rgba(255, 139, 167, 0.18)",
+            "--pill-warn-fg": "#000000",
+            "--pill-warn-border": "#000000",
+            "--pill-neutral-bg": "rgba(0, 0, 0, 0.06)",
+            "--pill-neutral-fg": "#000000",
+            "--pill-neutral-border": "#000000",
+            "--page-pattern": "repeating-radial-gradient(circle at 0 0, rgba(0, 0, 0, 0.04) 0 1.2px, transparent 1.2px 18px)",
         },
     ),
 }
@@ -135,6 +339,195 @@ def _render_theme_css() -> str:
     return "\n\n".join(blocks)
 
 
+def _normalize_print_report_theme(default_theme: str | None = None) -> str:
+    candidate = (os.getenv("AI_FINANCE_PRINT_THEME") or "").strip().lower()
+    if not candidate or candidate in {"light", "default", "clinical"}:
+        return "light"
+    if candidate in {"same", "screen", "follow-screen"}:
+        return (default_theme or _normalize_report_theme()).strip().lower()
+    if candidate in _REPORT_THEME_PRESETS:
+        return candidate
+    return "light"
+
+
+def _render_light_print_css() -> str:
+    return """
+@media print {
+  body {
+    padding: 0;
+    background: #ffffff !important;
+    color: #111111 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    --page-bg: #ffffff;
+    --page-bg-2: #ffffff;
+    --panel-bg: #ffffff;
+    --panel-bg-strong: #ffffff;
+    --panel-soft: #ffffff;
+    --heading: #111111;
+    --text: #16181d;
+    --text-soft: #313843;
+    --muted: #5b6574;
+    --accent: #0b57d0;
+    --accent-strong: #0b57d0;
+    --accent-soft: rgba(11, 87, 208, 0.08);
+    --accent-2: #d93025;
+    --link: #0b57d0;
+    --rule: rgba(17, 17, 17, 0.08);
+    --rule-strong: rgba(11, 87, 208, 0.18);
+    --row-stripe: rgba(17, 17, 17, 0.025);
+    --code-bg: rgba(11, 87, 208, 0.06);
+    --code-ink: #0b57d0;
+    --code-border: rgba(11, 87, 208, 0.12);
+    --shadow: rgba(0, 0, 0, 0);
+    --hero-glow: rgba(0, 0, 0, 0);
+    --positive: #d93025;
+    --negative: #188038;
+    --warning: #b26a00;
+    --section-shadow: none;
+    --small-shadow: none;
+    --table-bg: #ffffff;
+    --table-head-bg: rgba(11, 87, 208, 0.08);
+    --blockquote-bg: #f8faff;
+    --ordered-bg: #f8faff;
+    --details-bg: #fafbfd;
+    --details-summary-bg: rgba(11, 87, 208, 0.06);
+    --figure-bg: transparent;
+    --figure-shadow: none;
+    --table-rule: rgba(17, 17, 17, 0.08);
+    --table-hover: transparent;
+    --figure-caption: #5b6574;
+    --pill-bull-bg: rgba(217, 48, 37, 0.08);
+    --pill-bull-fg: #d93025;
+    --pill-bull-border: rgba(217, 48, 37, 0.16);
+    --pill-bear-bg: rgba(24, 128, 56, 0.08);
+    --pill-bear-fg: #188038;
+    --pill-bear-border: rgba(24, 128, 56, 0.16);
+    --pill-warn-bg: rgba(178, 106, 0, 0.08);
+    --pill-warn-fg: #9a5b00;
+    --pill-warn-border: rgba(178, 106, 0, 0.16);
+    --pill-neutral-bg: rgba(17, 17, 17, 0.05);
+    --pill-neutral-fg: #495364;
+    --pill-neutral-border: rgba(17, 17, 17, 0.08);
+    --page-pattern: linear-gradient(transparent, transparent);
+  }
+
+  .report-shell {
+    display: block;
+  }
+
+  .report-sidebar,
+  .report-toolbar {
+    display: none;
+  }
+
+  section.report-hero,
+  section.report-section {
+    background: #ffffff !important;
+    box-shadow: none !important;
+    border: 1px solid rgba(17, 17, 17, 0.06);
+    break-inside: auto !important;
+    page-break-inside: auto !important;
+    overflow: visible !important;
+  }
+
+  figure,
+  table,
+  blockquote,
+  details.report-details,
+  .report-summary-card,
+  .report-callout {
+    background: transparent !important;
+    box-shadow: none;
+  }
+}
+""".strip()
+
+
+def _render_themed_print_css(print_theme_name: str) -> str:
+    _, base_variables = _REPORT_THEME_PRESETS.get(print_theme_name, _REPORT_THEME_PRESETS[_DEFAULT_PRINT_REPORT_THEME])
+    variables = dict(base_variables)
+    variables["--shadow"] = "rgba(0, 0, 0, 0)"
+    variables["--hero-glow"] = "rgba(0, 0, 0, 0)"
+    variables["--section-shadow"] = "none"
+    variables["--small-shadow"] = "none"
+    variables["--figure-shadow"] = "none"
+    variables["--page-pattern"] = "linear-gradient(transparent, transparent)"
+    if print_theme_name in {"terminal", "abyss-gold", "institutional", "neo-brutal"}:
+        variables.setdefault("--color-scheme", "dark")
+    else:
+        variables.setdefault("--color-scheme", "light")
+    variable_lines = "\n".join(f"    {key}: {value};" for key, value in variables.items())
+    return f"""
+@media print {{
+  body {{
+    padding: 0;
+    background:
+      var(--page-pattern, linear-gradient(transparent, transparent)),
+      linear-gradient(180deg, var(--page-bg), var(--page-bg-2)) !important;
+    color: var(--text) !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+{variable_lines}
+  }}
+
+  .report-shell {{
+    display: block;
+  }}
+
+  .report-sidebar,
+  .report-toolbar {{
+    display: none;
+  }}
+
+  section.report-hero,
+  section.report-section {{
+    background: var(--section-bg, var(--panel-bg)) !important;
+    box-shadow: none !important;
+    border: 1px solid var(--rule);
+    break-inside: auto !important;
+    page-break-inside: auto !important;
+    overflow: visible !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }}
+
+  section.report-figure-block,
+  .report-summary-card,
+  .report-callout,
+  details.report-details {{
+    background: var(--panel-soft) !important;
+    box-shadow: none !important;
+  }}
+
+  figure.report-figure img,
+  figure.report-figure img[data-vector-chart="true"] {{
+    background: var(--figure-bg, transparent) !important;
+    border-color: var(--rule) !important;
+    box-shadow: none !important;
+  }}
+
+  table,
+  thead th,
+  tbody tr:nth-child(even) td,
+  blockquote {{
+    box-shadow: none !important;
+  }}
+}}
+""".strip()
+
+
+def _render_print_css(default_theme: str) -> str:
+    print_theme_name = _normalize_print_report_theme(default_theme)
+    if print_theme_name == "light":
+        return _render_light_print_css()
+    return _render_themed_print_css(print_theme_name)
+
+
+def _render_html_style(default_theme: str) -> str:
+    return _HTML_STYLE.replace("__PRINT_CSS__", _render_print_css(default_theme))
+
+
 _HTML_STYLE = (
     """
 @page {
@@ -143,7 +536,16 @@ _HTML_STYLE = (
 }
 
 :root {
-  color-scheme: dark;
+  color-scheme: var(--color-scheme, dark);
+  --body-size: 14px;
+  --prose-max-width: 760px;
+  --section-gap: 34px;
+  --section-padding-y: 28px;
+  --section-padding-x: 28px;
+  --table-cell-y: 10px;
+  --table-cell-x: 16px;
+  --table-font-size: 13px;
+  --card-gap: 18px;
 }
 
 html, body {
@@ -151,7 +553,7 @@ html, body {
   font-family: "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
   color: var(--text);
   line-height: 1.68;
-  font-size: 13px;
+  font-size: var(--body-size);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   font-kerning: normal;
@@ -164,46 +566,137 @@ html, body {
     + """
 
 body {
-  max-width: 1080px;
+  max-width: 1480px;
   margin: 0 auto;
   padding: 14px 18px 28px 18px;
   background:
+    var(--page-pattern, linear-gradient(transparent, transparent)),
     radial-gradient(circle at top right, var(--hero-glow), transparent 38%),
     linear-gradient(180deg, var(--page-bg), var(--page-bg-2));
+}
+
+.report-shell {
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr) 178px;
+  gap: 22px;
+  align-items: start;
+}
+
+.report-sidebar {
+  position: sticky;
+  top: 12px;
+  align-self: start;
+}
+
+.report-sidebar-left,
+.report-sidebar-right {
+  min-width: 0;
 }
 
 main.markdown-body {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--section-gap);
   padding: 1mm 0 4mm 0;
+  min-width: 0;
+}
+
+.report-outline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--panel-bg);
+  border: 1px solid var(--rule);
+  border-radius: calc(var(--panel-radius) * 0.6 + 4px);
+  box-shadow: var(--small-shadow, 0 12px 24px -22px var(--shadow));
+}
+
+.report-outline-title {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 2px 2px 6px 2px;
+}
+
+.report-outline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.report-toc-link {
+  display: block;
+  padding: 9px 12px;
+  border: 1px solid var(--rule);
+  border-left: 3px solid transparent;
+  background: var(--panel-soft);
+  color: var(--text-soft);
+  text-decoration: none;
+  border-radius: calc(var(--panel-radius) * 0.45 + 1px);
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease, transform 0.16s ease;
+}
+
+.report-toc-link:hover,
+.report-toc-link:focus-visible {
+  border-color: var(--rule-strong);
+  background: linear-gradient(180deg, var(--accent-soft), rgba(255, 255, 255, 0.02));
+  color: var(--heading);
+  outline: none;
+  transform: translateX(2px);
+}
+
+.report-toc-link.level-1 {
+  font-weight: 600;
+  color: var(--heading);
+}
+
+.report-toc-link.level-2 {
+  padding-left: 12px;
+}
+
+.report-toc-link.level-3 {
+  padding-left: 20px;
+  font-size: 12px;
+}
+
+.report-toc-link.is-current {
+  border-color: var(--rule-strong);
+  border-left-color: var(--accent);
+  background: var(--toc-active-bg, var(--accent-soft));
+  color: var(--toc-active-color, var(--heading));
+  font-weight: 700;
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .report-toolbar {
   display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  margin: 0 0 14px 0;
+  justify-content: flex-start;
+  align-items: stretch;
+  margin: 0;
   position: sticky;
-  top: 8px;
+  top: 12px;
   z-index: 5;
 }
 
 .report-theme-switcher {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px;
-  background: rgba(8, 10, 14, 0.72);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+  width: 100%;
+  padding: 10px;
+  background: var(--toolbar-bg, rgba(8, 10, 14, 0.72));
   border: 1px solid var(--rule);
-  border-radius: calc(var(--panel-radius) * 0.7 + 4px);
-  box-shadow: 0 16px 32px -28px var(--shadow);
+  border-radius: calc(var(--panel-radius) * 0.55 + 2px);
+  box-shadow: var(--small-shadow, 0 16px 32px -28px var(--shadow));
   backdrop-filter: blur(10px);
 }
 
 .report-theme-switcher::before {
   content: "Theme";
-  padding: 0 8px 0 4px;
+  padding: 0 2px 4px 2px;
   color: var(--muted);
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -213,8 +706,10 @@ main.markdown-body {
 .report-theme-button {
   appearance: none;
   border: 1px solid transparent;
-  padding: 7px 11px;
-  border-radius: calc(var(--panel-radius) * 0.5 + 4px);
+  width: 100%;
+  text-align: left;
+  padding: 8px 11px;
+  border-radius: calc(var(--panel-radius) * 0.35 + 3px);
   background: transparent;
   color: var(--text-soft);
   font: inherit;
@@ -232,21 +727,55 @@ main.markdown-body {
 }
 
 .report-theme-button.is-active {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), var(--accent-soft));
+  background: linear-gradient(180deg, var(--button-active-top, rgba(255, 255, 255, 0.06)), var(--accent-soft));
   border-color: var(--rule-strong);
   color: var(--accent-strong);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+  box-shadow: inset 0 0 0 1px var(--button-active-inset, rgba(255, 255, 255, 0.02));
+}
+
+@media (max-width: 1220px) {
+  .report-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .report-sidebar {
+    position: static;
+  }
+
+  .report-sidebar-left {
+    order: 0;
+  }
+
+  main.markdown-body {
+    order: 1;
+  }
+
+  .report-sidebar-right {
+    order: 2;
+  }
+
+  .report-theme-switcher {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    align-items: center;
+  }
+
+  .report-theme-switcher::before {
+    grid-column: 1 / -1;
+  }
 }
 
 section.report-hero,
 section.report-section {
   position: relative;
   overflow: hidden;
-  padding: 18px 20px 20px 20px;
-  background: linear-gradient(180deg, var(--panel-bg), var(--panel-bg-strong));
+  padding: var(--section-padding-y) var(--section-padding-x);
+  background: var(--section-bg, var(--panel-bg));
   border: 1px solid var(--rule);
   border-radius: var(--panel-radius);
-  box-shadow: 0 22px 36px -30px var(--shadow);
+  box-shadow: var(--section-shadow, 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 12px 24px -16px var(--shadow));
+  backdrop-filter: blur(14px) saturate(115%);
+  -webkit-backdrop-filter: blur(14px) saturate(115%);
   break-inside: avoid;
   page-break-inside: avoid;
 }
@@ -263,10 +792,10 @@ section.report-section::after {
 }
 
 section.report-hero {
-  padding-top: 22px;
+  padding-top: calc(var(--section-padding-y) + 2px);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 28%),
-    linear-gradient(180deg, var(--panel-bg), var(--panel-bg-strong));
+    linear-gradient(180deg, var(--hero-sheen, rgba(255, 255, 255, 0.015)), transparent 28%),
+    var(--hero-bg, var(--section-bg, var(--panel-bg)));
 }
 
 section.report-section > h2:first-child,
@@ -285,7 +814,7 @@ h1, h2, h3, h4 {
 
 h1 {
   position: relative;
-  font-size: 27px;
+  font-size: 28px;
   line-height: 1.24;
   padding-bottom: 12px;
   margin-bottom: 0.8em;
@@ -303,7 +832,8 @@ h1::after {
 }
 
 h2 {
-  font-size: 18px;
+  font-size: 22px;
+  font-weight: 600;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -321,14 +851,16 @@ h2::before {
 }
 
 h3 {
-  font-size: 14px;
+  font-size: 18px;
+  font-weight: 600;
   color: var(--accent-strong);
   padding-bottom: 4px;
   border-bottom: 1px dashed var(--rule);
 }
 
 h4 {
-  font-size: 13px;
+  font-size: 15px;
+  font-weight: 600;
   color: var(--text-soft);
   margin-top: 0.95em;
   margin-bottom: 0.35em;
@@ -336,6 +868,7 @@ h4 {
 
 p, li, blockquote {
   font-family: "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  line-height: 1.76;
 }
 
 table, th, td, code, pre {
@@ -343,11 +876,23 @@ table, th, td, code, pre {
 }
 
 p {
-  margin: 0.5em 0 0.85em;
+  margin: 0.55em 0 0.95em;
   color: var(--text);
   text-align: left;
   letter-spacing: 0.01em;
   word-break: break-word;
+}
+
+section.report-hero > p,
+section.report-hero > blockquote,
+section.report-hero > details.report-details,
+section.report-section > p,
+section.report-section > blockquote,
+section.report-section > details.report-details {
+  width: min(100%, var(--prose-max-width));
+  max-width: var(--prose-max-width);
+  margin-left: 0;
+  margin-right: auto;
 }
 
 h2 + p,
@@ -384,11 +929,50 @@ code {
   font-size: 0.94em;
 }
 
+.report-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.18em 0.58em;
+  margin: 0 0.08em;
+  border-radius: 999px;
+  font-size: 0.92em;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: 0.015em;
+  border: 1px solid transparent;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+.report-pill.is-bull {
+  background: var(--pill-bull-bg, var(--accent-soft));
+  color: var(--pill-bull-fg, var(--positive));
+  border-color: var(--pill-bull-border, transparent);
+}
+
+.report-pill.is-bear {
+  background: var(--pill-bear-bg, rgba(255, 107, 107, 0.14));
+  color: var(--pill-bear-fg, var(--negative));
+  border-color: var(--pill-bear-border, transparent);
+}
+
+.report-pill.is-warn {
+  background: var(--pill-warn-bg, rgba(255, 191, 0, 0.14));
+  color: var(--pill-warn-fg, var(--warning));
+  border-color: var(--pill-warn-border, transparent);
+}
+
+.report-pill.is-neutral {
+  background: var(--pill-neutral-bg, rgba(255, 255, 255, 0.08));
+  color: var(--pill-neutral-fg, var(--text-soft));
+  border-color: var(--pill-neutral-border, transparent);
+}
+
 pre {
   background: var(--panel-soft);
   border: 1px solid var(--rule);
-  border-radius: calc(var(--panel-radius) * 0.7 + 2px);
-  padding: 10px 12px;
+  border-radius: calc(var(--panel-radius) * 0.7 + 1px);
+  padding: 12px 14px;
   overflow: hidden;
 }
 
@@ -397,11 +981,16 @@ img {
   max-width: 100%;
   height: auto;
   display: block;
-  margin: 10px auto 16px auto;
+  margin: 8px auto 18px auto;
+}
+
+picture.report-picture {
+  display: block;
+  width: 100%;
 }
 
 figure.report-figure {
-  margin: 10px auto 16px auto;
+  margin: 14px auto 22px auto;
   text-align: center;
   width: 100%;
 }
@@ -411,16 +1000,24 @@ figure.report-figure img {
   max-width: 100%;
   max-height: none;
   object-fit: contain;
-  border-radius: calc(var(--panel-radius) * 0.75);
+  box-sizing: border-box;
+  border-radius: calc(var(--panel-radius) * 0.9);
   border: 1px solid var(--rule);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 30%);
-  box-shadow: 0 16px 30px -28px var(--shadow);
+  background: var(--figure-bg, transparent);
+  box-shadow: var(--figure-shadow, 0 16px 30px -28px var(--shadow));
+}
+
+figure.report-figure img[data-vector-chart="true"] {
+  padding: 10px 10px 8px 10px;
+  box-sizing: border-box;
+  background: var(--figure-bg, transparent);
 }
 
 figure.report-figure figcaption {
   margin-top: 6px;
   font-size: 11px;
-  color: var(--muted);
+  color: var(--figure-caption, var(--muted));
+  letter-spacing: 0.04em;
 }
 
 h3 + figure.report-figure,
@@ -429,16 +1026,23 @@ h4 + figure.report-figure {
 }
 
 section.report-figure-block {
-  margin: 0 0 14px 0;
+  margin: 4px 0 22px 0;
+  padding: 18px 18px 10px 18px;
+  border: 1px solid var(--rule);
+  border-radius: calc(var(--panel-radius) * 0.9);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.012));
+  box-shadow: var(--small-shadow, 0 12px 22px -24px var(--shadow));
 }
 
 section.report-figure-block > h3,
 section.report-figure-block > h4 {
-  margin-bottom: 0.25em;
+  margin-top: 0;
+  margin-bottom: 0.45em;
+  border-bottom: 0;
 }
 
 section.report-figure-block > figure.report-figure {
-  margin-top: 6px;
+  margin-top: 10px;
 }
 
 table {
@@ -446,43 +1050,112 @@ table {
   border-collapse: separate;
   border-spacing: 0;
   margin: 14px 0 18px 0;
-  font-size: 12px;
-  border: 1px solid var(--rule);
-  border-radius: calc(var(--panel-radius) * 0.72 + 2px);
+  font-size: var(--table-font-size);
+  border: 1px solid var(--table-rule, var(--rule));
+  border-radius: calc(var(--panel-radius) * 0.72 + 1px);
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.012);
+  background: var(--table-bg, rgba(255, 255, 255, 0.012));
 }
 
 th, td {
-  padding: 8px 10px;
+  padding: var(--table-cell-y) var(--table-cell-x);
   vertical-align: top;
   border: 0;
-  border-bottom: 1px solid var(--rule);
+  border-bottom: 1px solid var(--table-rule, var(--rule));
+  line-height: 1.66;
 }
 
 thead th {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), var(--accent-soft));
+  background: var(--table-head-bg, linear-gradient(180deg, rgba(255, 255, 255, 0.06), var(--accent-soft)));
   color: var(--heading);
   font-weight: 700;
   letter-spacing: 0.02em;
+}
+
+th.cell-num,
+td.cell-num {
+  text-align: right;
+}
+
+td.cell-num {
+  font-family: "DIN Alternate", "Inter", "JetBrains Mono", "SFMono-Regular", "Menlo", monospace;
+  font-weight: 600;
+  color: var(--heading);
+  white-space: nowrap;
+}
+
+th.cell-text,
+td.cell-text {
+  text-align: left;
 }
 
 tbody tr:nth-child(even) td {
   background: var(--row-stripe);
 }
 
+@media screen {
+  tbody tr:hover td {
+    background: var(--table-hover, transparent);
+  }
+}
+
 tbody tr:last-child td {
   border-bottom: 0;
 }
 
+.report-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--card-gap);
+  margin: 14px 0 18px 0;
+}
+
+.report-summary-card {
+  position: relative;
+  padding: 18px 18px 16px 18px;
+  border: 1px solid var(--rule);
+  border-radius: calc(var(--panel-radius) * 0.72 + 2px);
+  background: var(--card-bg, var(--panel-soft));
+  box-shadow: var(--small-shadow, 0 12px 22px -24px var(--shadow));
+  overflow: hidden;
+}
+
+.report-summary-card::before {
+  content: "";
+  position: absolute;
+  left: 14px;
+  top: 0;
+  width: 68px;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), transparent);
+}
+
+.report-summary-key {
+  margin: 0 0 8px 0;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.report-summary-value {
+  margin: 0;
+  color: var(--heading);
+  font-family: "DIN Alternate", "Inter", "JetBrains Mono", "SFMono-Regular", "Menlo", monospace;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.58;
+}
+
 blockquote {
   margin: 14px 0;
-  padding: 12px 16px;
+  padding: 14px 18px;
   color: var(--text-soft);
-  background: linear-gradient(180deg, var(--panel-soft), rgba(255, 255, 255, 0.01));
+  background: var(--blockquote-bg, var(--panel-soft));
   border-left: 4px solid var(--accent);
   border-radius: calc(var(--panel-radius) * 0.75);
-  box-shadow: 0 12px 22px -24px var(--shadow);
+  box-shadow: var(--small-shadow, 0 12px 22px -24px var(--shadow));
 }
 
 ul, ol {
@@ -522,11 +1195,11 @@ ol > li {
   position: relative;
   margin: 0 0 10px 0;
   padding: 12px 14px 12px 48px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015));
+  background: var(--ordered-bg, var(--panel-soft));
   border: 1px solid var(--rule);
   border-left: 3px solid var(--accent);
-  border-radius: calc(var(--panel-radius) * 0.75 + 2px);
-  box-shadow: 0 12px 24px -24px var(--shadow);
+  border-radius: calc(var(--panel-radius) * 0.75 + 1px);
+  box-shadow: var(--small-shadow, 0 12px 24px -24px var(--shadow));
 }
 
 ol > li::before {
@@ -546,7 +1219,7 @@ li strong:first-child {
 
 a {
   color: var(--link);
-  text-decoration-color: rgba(141, 183, 255, 0.35);
+  text-decoration-color: var(--link-underline, rgba(141, 183, 255, 0.35));
 }
 
 hr {
@@ -559,9 +1232,9 @@ details.report-details {
   margin: 14px 0 16px 0;
   padding: 0;
   border: 1px solid var(--rule);
-  border-radius: calc(var(--panel-radius) * 0.75 + 4px);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.012));
-  box-shadow: 0 12px 22px -24px var(--shadow);
+  border-radius: calc(var(--panel-radius) * 0.75 + 2px);
+  background: var(--details-bg, var(--panel-soft));
+  box-shadow: var(--small-shadow, 0 12px 22px -24px var(--shadow));
   overflow: hidden;
 }
 
@@ -572,7 +1245,7 @@ details.report-details > summary {
   font-size: 14px;
   font-weight: 600;
   color: var(--accent-strong);
-  background: linear-gradient(90deg, var(--accent-soft), rgba(255, 255, 255, 0.01));
+  background: var(--details-summary-bg, linear-gradient(90deg, var(--accent-soft), rgba(255, 255, 255, 0.01)));
   border-bottom: 1px solid var(--rule);
 }
 
@@ -616,23 +1289,7 @@ details.report-details > *:last-child {
   }
 }
 
-@media print {
-  body {
-    padding: 0;
-    background: var(--page-bg);
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
-
-  .report-toolbar {
-    display: none;
-  }
-
-  section.report-hero,
-  section.report-section {
-    box-shadow: none;
-  }
-}
+__PRINT_CSS__
 """.strip()
 )
 _THEME_SWITCHER_SCRIPT = (
@@ -645,6 +1302,8 @@ _THEME_SWITCHER_SCRIPT = (
     return;
   }
   const buttons = Array.from(document.querySelectorAll("[data-report-theme]"));
+  const themedImages = Array.from(document.querySelectorAll("[data-theme-switchable='true']"));
+  const tocLinks = Array.from(document.querySelectorAll(".report-toc-link"));
   const supported = new Set(buttons.map((button) => button.getAttribute("data-report-theme")));
   const applyTheme = (theme) => {
     if (!supported.has(theme)) {
@@ -659,6 +1318,15 @@ _THEME_SWITCHER_SCRIPT = (
       const active = button.getAttribute("data-report-theme") === theme;
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    themedImages.forEach((image) => {
+      const themedSrc = image.getAttribute(`data-theme-src-${theme}`);
+      if (!themedSrc) {
+        return;
+      }
+      if (image.getAttribute("src") !== themedSrc) {
+        image.setAttribute("src", themedSrc);
+      }
     });
   };
 
@@ -687,6 +1355,63 @@ _THEME_SWITCHER_SCRIPT = (
       }
     });
   });
+
+  const setCurrentToc = (id) => {
+    if (!id) {
+      return;
+    }
+    tocLinks.forEach((link) => {
+      const href = link.getAttribute("href") || "";
+      const targetId = href.startsWith("#") ? decodeURIComponent(href.slice(1)) : "";
+      link.classList.toggle("is-current", targetId === id);
+    });
+  };
+
+  const tocTargets = tocLinks
+    .map((link) => {
+      const href = link.getAttribute("href") || "";
+      const id = href.startsWith("#") ? decodeURIComponent(href.slice(1)) : "";
+      const target = id ? document.getElementById(id) : null;
+      if (!target) {
+        return null;
+      }
+      return { id, target };
+    })
+    .filter(Boolean);
+
+  if (tocTargets.length) {
+    const initialId = decodeURIComponent((window.location.hash || "").replace(/^#/, "")) || tocTargets[0].id;
+    setCurrentToc(initialId);
+    if ("IntersectionObserver" in window) {
+      let activeId = initialId;
+      const observer = new IntersectionObserver(
+        (entries) => {
+          const visible = entries
+            .filter((entry) => entry.isIntersecting)
+            .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+          if (!visible.length) {
+            return;
+          }
+          const nextId = visible[0].target.getAttribute("id");
+          if (nextId && nextId !== activeId) {
+            activeId = nextId;
+            setCurrentToc(activeId);
+          }
+        },
+        {
+          rootMargin: "-18% 0px -70% 0px",
+          threshold: [0.05, 0.2, 0.6],
+        }
+      );
+      tocTargets.forEach(({ target }) => observer.observe(target));
+    }
+    window.addEventListener("hashchange", () => {
+      const currentId = decodeURIComponent((window.location.hash || "").replace(/^#/, ""));
+      if (currentId) {
+        setCurrentToc(currentId);
+      }
+    });
+  }
 })();
 </script>
 """
@@ -695,6 +1420,15 @@ _THEME_SWITCHER_SCRIPT = (
 )
 
 _IMAGE_LINE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
+_THEME_VARIANT_RE = re.compile(r"^(?P<base>.+)\.theme-(?P<theme>[a-z0-9-]+)$")
+_INLINE_STATUS_PATTERNS = [
+    ("bull", ("看多", "做多", "通过", "较强机会", "强势整理", "持有优于追高", "等右侧确认", "温和复苏", "趋势市")),
+    ("bear", ("回避", "偏回避", "偏空", "下行", "空头", "跌破", "未通过", "风险释放前不宜激进")),
+    ("warn", ("观察", "无信号", "暂不出手", "待确认", "待复核", "待识别", "有信号但不充分", "降级观察稿")),
+]
+_NUMERIC_CELL_RE = re.compile(
+    r"^[<>~≈±]?\s*[+-]?\d[\d,]*(?:\.\d+)?(?:/\d[\d,]*(?:\.\d+)?)?(?:%|pct|bp|x|倍|亿|万|元|点|天|周|月|年|星|万份|亿份)?$"
+)
 
 
 @lru_cache(maxsize=512)
@@ -763,16 +1497,158 @@ def _embed_image_src(src: str, source_dir: Path | None = None) -> str:
     return _image_data_uri(str(local_path)) or src
 
 
+def _theme_variant_paths(src: str, source_dir: Path | None = None) -> Dict[str, Path]:
+    local_path = _resolve_local_image_path(src, source_dir)
+    if local_path is None:
+        return {}
+    stem = local_path.stem
+    base_stem = stem
+    match = _THEME_VARIANT_RE.match(stem)
+    if match:
+        base_stem = match.group("base")
+    base_path = local_path.with_name(f"{base_stem}{local_path.suffix}")
+    variants: Dict[str, Path] = {}
+    for theme_name in _REPORT_THEME_PRESETS:
+        variant = base_path.with_name(f"{base_stem}.theme-{theme_name}{base_path.suffix}")
+        if variant.exists() and variant.is_file():
+            variants[theme_name] = variant
+    return variants
+
+
+def _themed_image_sources(src: str, source_dir: Path | None = None) -> Dict[str, str]:
+    variants = _theme_variant_paths(src, source_dir)
+    embedded: Dict[str, str] = {}
+    for theme_name, path in variants.items():
+        embedded_src = _image_data_uri(str(path))
+        if embedded_src:
+            embedded[theme_name] = embedded_src
+    return embedded
+
+
+def _preferred_print_image_src(themed_sources: Dict[str, str], fallback_src: str, *, screen_theme_name: str) -> str:
+    print_theme_name = _normalize_print_report_theme(screen_theme_name)
+    preferred_order: List[str] = []
+    if print_theme_name != "light":
+        preferred_order.append(print_theme_name)
+    for theme_name in (_DEFAULT_PRINT_REPORT_THEME, "erdtree"):
+        if theme_name not in preferred_order:
+            preferred_order.append(theme_name)
+    for theme_name in preferred_order:
+        themed_src = themed_sources.get(theme_name)
+        if themed_src:
+            return themed_src
+    return fallback_src
+
+
 def _build_img_tag(alt: str, src: str, source_dir: Path | None = None) -> str:
-    embedded_src = _embed_image_src(src, source_dir)
-    return (
-        f'<img src="{html.escape(embedded_src, quote=True)}" '
-        f'alt="{html.escape(alt, quote=True)}" loading="eager" decoding="sync" />'
-    )
+    theme_name = _normalize_report_theme()
+    local_path = _resolve_local_image_path(src, source_dir)
+    themed_sources = _themed_image_sources(src, source_dir)
+    embedded_src = themed_sources.get(theme_name) or _embed_image_src(src, source_dir)
+    attrs = [
+        f'src="{html.escape(embedded_src, quote=True)}"',
+        f'alt="{html.escape(alt, quote=True)}"',
+        'loading="eager"',
+        'decoding="sync"',
+    ]
+    if themed_sources:
+        attrs.append('data-theme-switchable="true"')
+        for variant_theme, variant_src in themed_sources.items():
+            attrs.append(
+                f'data-theme-src-{html.escape(variant_theme, quote=True)}="{html.escape(variant_src, quote=True)}"'
+            )
+    source_text = str(local_path or src).lower()
+    if source_text.endswith(".svg"):
+        attrs.append('data-vector-chart="true"')
+    img_tag = "<img " + " ".join(attrs) + " />"
+    print_src = _preferred_print_image_src(themed_sources, embedded_src, screen_theme_name=theme_name)
+    if print_src != embedded_src:
+        return (
+            '<picture class="report-picture">'
+            f'<source media="print" srcset="{html.escape(print_src, quote=True)}" />'
+            f"{img_tag}"
+            "</picture>"
+        )
+    return img_tag
+
+
+def _inline_status_tone(text: str) -> str | None:
+    clean = str(text or "").strip()
+    if not clean or len(clean) > 18:
+        return None
+    if re.search(r"[\\/]|python\b|src\.|config\.|--|\.ya?ml|\.py", clean, flags=re.IGNORECASE):
+        return None
+    for tone, tokens in _INLINE_STATUS_PATTERNS:
+        if any(token in clean for token in tokens):
+            return tone
+    return None
+
+
+def _render_inline_code_or_pill(content: str) -> str:
+    raw = html.unescape(content).strip()
+    safe = html.escape(raw, quote=False)
+    tone = _inline_status_tone(raw)
+    if tone:
+        tone_class = "neutral" if tone == "warn" and "中性" in raw else tone
+        if tone == "warn" and "观察" not in raw and "无信号" not in raw and "待" not in raw and "降级" not in raw:
+            tone_class = "warn"
+        elif tone == "warn":
+            tone_class = "neutral"
+        return f'<span class="report-pill is-{tone_class}">{safe}</span>'
+    return f"<code>{safe}</code>"
+
+
+def _looks_numeric_cell(text: str) -> bool:
+    clean = re.sub(r"`([^`]+)`", r"\1", str(text or "")).strip()
+    clean = clean.replace("＋", "+").replace("－", "-").replace("，", ",")
+    if not clean or len(clean) > 24:
+        return False
+    return bool(_NUMERIC_CELL_RE.fullmatch(clean))
+
+
+def _table_column_classes(header: List[str], body: List[List[str]]) -> List[str]:
+    classes: List[str] = []
+    for col_idx in range(len(header)):
+        samples = [row[col_idx].strip() for row in body if col_idx < len(row) and row[col_idx].strip()]
+        numeric_hits = sum(1 for sample in samples if _looks_numeric_cell(sample))
+        classes.append("cell-num" if samples and numeric_hits >= max(1, len(samples) // 2 + len(samples) % 2) else "cell-text")
+    return classes
+
+
+def _looks_summary_table(header: List[str], body: List[List[str]]) -> bool:
+    if len(header) != 2:
+        return False
+    normalized = [str(cell).strip() for cell in header]
+    if normalized != ["项目", "建议"]:
+        return False
+    if not body or len(body) > 12:
+        return False
+    summary_keys = {"当前建议", "当前动作", "交付等级", "置信度", "适用周期", "观察优先", "补充观察", "适用时段", "主要利好", "主要利空"}
+    first_col = {str(row[0]).strip() for row in body if row}
+    return bool(first_col & summary_keys)
+
+
+def _render_summary_table(body: List[List[str]], source_dir: Path | None = None) -> str:
+    cards: List[str] = []
+    for row in body:
+        if len(row) < 2:
+            continue
+        key = _format_inline(row[0], source_dir)
+        value = _format_inline(row[1], source_dir)
+        cards.append(
+            '<article class="report-summary-card">'
+            f'<div class="report-summary-key">{key}</div>'
+            f'<div class="report-summary-value">{value}</div>'
+            "</article>"
+        )
+    if not cards:
+        return ""
+    return '<section class="report-summary-grid">' + "".join(cards) + "</section>"
 
 
 def _format_inline(text: str, source_dir: Path | None = None) -> str:
     escaped = html.escape(text, quote=False)
+    code_spans: List[str] = []
     escaped = re.sub(
         r"!\[([^\]]*)\]\(([^)]+)\)",
         lambda match: _build_img_tag(
@@ -782,7 +1658,13 @@ def _format_inline(text: str, source_dir: Path | None = None) -> str:
         ),
         escaped,
     )
-    escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+    escaped = re.sub(
+        r"`([^`]+)`",
+        lambda match: (
+            code_spans.append(_render_inline_code_or_pill(match.group(1))) or f"@@CODESPAN{len(code_spans) - 1}@@"
+        ),
+        escaped,
+    )
     escaped = re.sub(r"==([^=\n]+)==", r"<mark>\1</mark>", escaped)
     escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
     escaped = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", escaped)
@@ -795,6 +1677,8 @@ def _format_inline(text: str, source_dir: Path | None = None) -> str:
         ),
         escaped,
     )
+    for index, rendered_code in enumerate(code_spans):
+        escaped = escaped.replace(f"@@CODESPAN{index}@@", rendered_code)
     return escaped
 
 
@@ -829,7 +1713,13 @@ def _render_table(table_lines: Iterable[str], source_dir: Path | None = None) ->
     parsed = [[cell.strip() for cell in _split_markdown_table_row(row)] for row in rows]
     header = parsed[0]
     body = parsed[2:]
-    head_html = "".join(f"<th>{_format_inline(cell, source_dir)}</th>" for cell in header)
+    if _looks_summary_table(header, body):
+        return _render_summary_table(body, source_dir)
+    column_classes = _table_column_classes(header, body)
+    head_html = "".join(
+        f'<th class="{column_classes[index]}">{_format_inline(cell, source_dir)}</th>'
+        for index, cell in enumerate(header)
+    )
     body_html = []
     for row in body:
         if len(row) < len(header):
@@ -837,7 +1727,12 @@ def _render_table(table_lines: Iterable[str], source_dir: Path | None = None) ->
         elif len(row) > len(header):
             row = row[: len(header) - 1] + [" | ".join(row[len(header) - 1 :])]
         body_html.append(
-            "<tr>" + "".join(f"<td>{_format_inline(cell, source_dir)}</td>" for cell in row) + "</tr>"
+            "<tr>"
+            + "".join(
+                f'<td class="{column_classes[index]}">{_format_inline(cell, source_dir)}</td>'
+                for index, cell in enumerate(row)
+            )
+            + "</tr>"
         )
     return "<table><thead><tr>" + head_html + "</tr></thead><tbody>" + "".join(body_html) + "</tbody></table>"
 
@@ -887,6 +1782,32 @@ def _render_theme_switcher(active_theme: str) -> str:
     )
 
 
+def _render_report_outline(headings: List[dict[str, str]]) -> str:
+    toc_items = []
+    for heading in headings:
+        level = int(heading.get("level", "2") or 2)
+        if level > 3:
+            continue
+        anchor_id = str(heading.get("id", "")).strip()
+        label = str(heading.get("label", "")).strip()
+        if not anchor_id or not label:
+            continue
+        toc_items.append(
+            f'<a class="report-toc-link level-{level}" href="#{html.escape(anchor_id, quote=True)}">'
+            f"{html.escape(label, quote=False)}</a>"
+        )
+    if not toc_items:
+        return ""
+    return (
+        '<aside class="report-sidebar report-sidebar-left">'
+        '<div class="report-outline">'
+        '<div class="report-outline-title">目录</div>'
+        '<nav class="report-outline-list" aria-label="报告目录">'
+        + "".join(toc_items)
+        + "</nav></div></aside>"
+    )
+
+
 def _wrap_report_sections(parts: List[str]) -> str:
     if not parts:
         return ""
@@ -901,7 +1822,7 @@ def _wrap_report_sections(parts: List[str]) -> str:
             current_section.clear()
 
     for part in parts:
-        if part.startswith("<h2>"):
+        if re.match(r"<h2(?:\s+[^>]*)?>", part):
             _flush_section()
             current_section.append(part)
             continue
@@ -923,6 +1844,16 @@ def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None 
     theme_name = _normalize_report_theme()
     lines = markdown_text.splitlines()
     parts: List[str] = []
+    headings: List[dict[str, str]] = []
+    heading_index = 0
+
+    def _next_heading_id(label: str, level: int) -> str:
+        nonlocal heading_index
+        heading_index += 1
+        anchor_id = f"report-section-{heading_index}"
+        headings.append({"id": anchor_id, "label": label.strip(), "level": str(level)})
+        return anchor_id
+
     index = 0
     while index < len(lines):
         line = lines[index].rstrip()
@@ -967,6 +1898,8 @@ def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None 
             continue
 
         if stripped.startswith("#### "):
+            heading_text = stripped[5:]
+            heading_id = _next_heading_id(heading_text, 4)
             next_line = _next_nonempty_line(lines, index + 1)
             if next_line:
                 next_index, next_stripped = next_line
@@ -974,16 +1907,18 @@ def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None 
                 if image_html:
                     parts.append(
                         '<section class="report-figure-block">'
-                        f"<h4>{_format_inline(stripped[5:], source_dir)}</h4>"
+                        f'<h4 id="{html.escape(heading_id, quote=True)}">{_format_inline(heading_text, source_dir)}</h4>'
                         f"{image_html}"
                         "</section>"
                     )
                     index = next_index + 1
                     continue
-            parts.append(f"<h4>{_format_inline(stripped[5:], source_dir)}</h4>")
+            parts.append(f'<h4 id="{html.escape(heading_id, quote=True)}">{_format_inline(heading_text, source_dir)}</h4>')
             index += 1
             continue
         if stripped.startswith("### "):
+            heading_text = stripped[4:]
+            heading_id = _next_heading_id(heading_text, 3)
             next_line = _next_nonempty_line(lines, index + 1)
             if next_line:
                 next_index, next_stripped = next_line
@@ -991,21 +1926,25 @@ def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None 
                 if image_html:
                     parts.append(
                         '<section class="report-figure-block">'
-                        f"<h3>{_format_inline(stripped[4:], source_dir)}</h3>"
+                        f'<h3 id="{html.escape(heading_id, quote=True)}">{_format_inline(heading_text, source_dir)}</h3>'
                         f"{image_html}"
                         "</section>"
                     )
                     index = next_index + 1
                     continue
-            parts.append(f"<h3>{_format_inline(stripped[4:], source_dir)}</h3>")
+            parts.append(f'<h3 id="{html.escape(heading_id, quote=True)}">{_format_inline(heading_text, source_dir)}</h3>')
             index += 1
             continue
         if stripped.startswith("## "):
-            parts.append(f"<h2>{_format_inline(stripped[3:], source_dir)}</h2>")
+            heading_text = stripped[3:]
+            heading_id = _next_heading_id(heading_text, 2)
+            parts.append(f'<h2 id="{html.escape(heading_id, quote=True)}">{_format_inline(heading_text, source_dir)}</h2>')
             index += 1
             continue
         if stripped.startswith("# "):
-            parts.append(f"<h1>{_format_inline(stripped[2:], source_dir)}</h1>")
+            heading_text = stripped[2:]
+            heading_id = _next_heading_id(heading_text, 1)
+            parts.append(f'<h1 id="{html.escape(heading_id, quote=True)}">{_format_inline(heading_text, source_dir)}</h1>')
             index += 1
             continue
 
@@ -1048,6 +1987,7 @@ def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None 
 
     body = _wrap_report_sections(parts)
     toolbar = _render_theme_switcher(theme_name)
+    outline = _render_report_outline(headings)
     return (
         "<!doctype html>\n"
         '<html lang="zh-CN">\n'
@@ -1056,15 +1996,20 @@ def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None 
         '<meta name="viewport" content="width=device-width, initial-scale=1" />\n'
         f"<title>{html.escape(title)}</title>\n"
         "<style>\n"
-        f"{_HTML_STYLE}\n"
+        f"{_render_html_style(theme_name)}\n"
         "</style>\n"
         "</head>\n"
         f'<body class="report-body theme-{html.escape(theme_name, quote=True)}" '
         f'data-default-theme="{html.escape(theme_name, quote=True)}">\n'
-        f"{toolbar}\n"
+        '<div class="report-shell">\n'
+        f"{outline}\n"
         '<main class="markdown-body">\n'
         f"{body}\n"
         "</main>\n"
+        '<aside class="report-sidebar report-sidebar-right">\n'
+        f"{toolbar}\n"
+        "</aside>\n"
+        "</div>\n"
         f"{_THEME_SWITCHER_SCRIPT}\n"
         "</body>\n"
         "</html>\n"
@@ -1072,12 +2017,45 @@ def markdown_to_html(markdown_text: str, title: str, *, source_dir: Path | None 
 
 
 def _export_pdf(markdown_text: str, html_path: Path, pdf_path: Path) -> None:
+    def _cleanup_stale_edge_pdf_exports(target_path: Path) -> None:
+        target = f"--print-to-pdf={target_path}"
+        try:
+            subprocess.run(
+                ["/usr/bin/pkill", "-f", target],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception:
+            pass
+
+    def _terminate_edge_process(process: subprocess.Popen, *, force: bool = False) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            if hasattr(os, "killpg") and getattr(process, "pid", 0):
+                os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+                return
+        except ProcessLookupError:
+            return
+        except Exception:
+            pass
+        try:
+            if force:
+                process.kill()
+            else:
+                process.terminate()
+        except Exception:
+            pass
+
     try:
         pdf_path.unlink()
     except FileNotFoundError:
         pass
 
     if _EDGE_BINARY.exists():
+        _cleanup_stale_edge_pdf_exports(pdf_path)
+        process: subprocess.Popen | None = None
         try:
             with tempfile.TemporaryDirectory(prefix="edge-export-", dir="/tmp") as user_data_dir:
                 env = dict(os.environ)
@@ -1091,6 +2069,7 @@ def _export_pdf(markdown_text: str, html_path: Path, pdf_path: Path) -> None:
                     "--disable-domain-reliability",
                     "--no-first-run",
                     "--no-default-browser-check",
+                    "--no-pdf-header-footer",
                     f"--user-data-dir={user_data_dir}",
                     "--allow-file-access-from-files",
                     "--run-all-compositor-stages-before-draw",
@@ -1103,6 +2082,7 @@ def _export_pdf(markdown_text: str, html_path: Path, pdf_path: Path) -> None:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     env=env,
+                    start_new_session=True,
                 )
                 deadline = time.monotonic() + 45.0
                 last_pdf_size = -1
@@ -1122,29 +2102,35 @@ def _export_pdf(markdown_text: str, html_path: Path, pdf_path: Path) -> None:
                             last_pdf_size = pdf_size
                             stable_pdf_ticks = 0
                         if pdf_size > 0 and stable_pdf_ticks >= 2:
-                            process.terminate()
+                            _terminate_edge_process(process)
                             try:
                                 process.wait(timeout=3)
                             except subprocess.TimeoutExpired:
-                                process.kill()
+                                _terminate_edge_process(process, force=True)
                                 process.wait(timeout=3)
                             return
 
                     if time.monotonic() >= deadline:
                         if pdf_path.exists() and pdf_path.stat().st_size > 0:
-                            process.terminate()
+                            _terminate_edge_process(process)
                             try:
                                 process.wait(timeout=3)
                             except subprocess.TimeoutExpired:
-                                process.kill()
+                                _terminate_edge_process(process, force=True)
                                 process.wait(timeout=3)
                             return
-                        process.kill()
+                        _terminate_edge_process(process, force=True)
                         process.wait(timeout=3)
                         raise subprocess.TimeoutExpired(cmd=cmd, timeout=45)
                     time.sleep(0.25)
             return
         except Exception:
+            if process is not None:
+                _terminate_edge_process(process, force=True)
+                try:
+                    process.wait(timeout=3)
+                except Exception:
+                    pass
             pass
 
     try:
@@ -1171,6 +2157,13 @@ def _rewrite_local_report_asset_paths(markdown_text: str, markdown_dir: Path) ->
         except OSError:
             return match.group(0)
         if resolved is None or not resolved.exists() or not resolved.is_file():
+            candidate = Path(unquote(parsed.path if parsed.scheme == "file" else raw_path)).expanduser()
+            if candidate.is_absolute() and "reports" in candidate.parts and "assets" in candidate.parts:
+                try:
+                    relative = os.path.relpath(candidate, base)
+                except ValueError:
+                    return match.group(0)
+                return f"{prefix}{relative}{suffix}"
             return match.group(0)
         try:
             relative = os.path.relpath(resolved, base)
@@ -1181,13 +2174,55 @@ def _rewrite_local_report_asset_paths(markdown_text: str, markdown_dir: Path) ->
     return re.sub(r"(!?\[[^\]]*\]\()([^)\s]+)(\))", _replace, markdown_text)
 
 
+def _is_report_asset_path(path: Path) -> bool:
+    try:
+        path.resolve().relative_to((_PROJECT_ROOT / "reports" / "assets").resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _extract_local_report_assets(markdown_text: str, source_dir: Path) -> set[Path]:
+    assets: set[Path] = set()
+    for match in re.finditer(r"(!?\[[^\]]*\]\()([^)\s]+)(\))", markdown_text):
+        raw_path = match.group(2)
+        parsed = urlparse(raw_path)
+        if parsed.scheme in {"http", "https", "data"}:
+            continue
+        try:
+            resolved = _resolve_local_image_path(raw_path, source_dir=source_dir)
+        except OSError:
+            continue
+        if resolved is None or not resolved.exists() or not resolved.is_file() or not _is_report_asset_path(resolved):
+            continue
+        assets.add(resolved.resolve())
+        for variant in _theme_variant_paths(str(resolved), source_dir=source_dir).values():
+            if variant.exists() and variant.is_file():
+                assets.add(variant.resolve())
+    return assets
+
+
+def _prune_superseded_local_report_assets(previous_markdown: str, current_markdown: str, markdown_dir: Path) -> None:
+    previous_assets = _extract_local_report_assets(previous_markdown, markdown_dir)
+    current_assets = _extract_local_report_assets(current_markdown, markdown_dir)
+    stale_assets = sorted(previous_assets - current_assets)
+    for asset in stale_assets:
+        try:
+            asset.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
 def export_markdown_bundle(markdown_text: str, markdown_path: Path, *, allow_unreviewed_final: bool = False) -> Dict[str, Path]:
     """Persist markdown and export same-style HTML/PDF bundle."""
     if "final" in markdown_path.parts and not allow_unreviewed_final:
         raise RuntimeError("禁止直接写入 final 目录；请先通过外部评审门禁，再使用 report_guard 导出成稿。")
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_markdown = markdown_path.read_text(encoding="utf-8") if markdown_path.exists() else ""
     normalized_markdown = _rewrite_local_report_asset_paths(markdown_text, markdown_path.parent)
     markdown_path.write_text(normalized_markdown, encoding="utf-8")
+    if previous_markdown:
+        _prune_superseded_local_report_assets(previous_markdown, normalized_markdown, markdown_path.parent)
 
     html_path = markdown_path.with_suffix(".html")
     html_path.write_text(

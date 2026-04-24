@@ -44,58 +44,85 @@
 
 | 域 | 当前状态 | 已接入 | 当前剩余缺口 |
 | --- | --- | --- | --- |
-| 股票 | 第一阶段已收口 | `ths_index / ths_daily / ths_hot / ths_member / st / stk_high_shock / stk_alert / cyq_perf / cyq_chips / moneyflow / margin_detail / top_list / top_inst / stk_auction / stk_limit / limit_list_d / broker_recommend / 上证e互动 / 深证互动易` | 继续把已覆盖的旧 AKShare 退掉 |
+| 股票 | 第一阶段已收口，第二阶段继续扩可见性 | `ths_index / ths_daily / ths_hot / ths_member / st / stk_high_shock / stk_alert / cyq_perf / cyq_chips / moneyflow / margin_detail / top_list / top_inst / stk_auction / stk_limit / limit_list_d / broker_recommend / 上证e互动 / 深证互动易 / stk_factor_pro / stk_surv` | 继续把已覆盖的旧 AKShare 退掉，并把 `stk_factor_pro / stk_surv` 的成熟稿可见性继续前置 |
 | 指数/行业 | 第一阶段已收口 | `index_basic / index_daily / index_dailybasic / index_weight / idx_factor_pro / index_global / 申万/中信行业框架 / index_weekly / index_monthly` | 主要剩余是可见性、口径统一和最终收口 |
 | ETF | 第二阶段已收口 | `etf_basic / etf_index / etf_share_size / fund_daily / fund_adj / fund_factor_pro` | 继续把被覆盖旧 `AKShare` 退掉，并补 `compare / portfolio` 的长期收口 |
+| 市场结构/宏观 | 第二阶段进行中 | `daily_info / sz_daily_info / fx_basic / fx_daily / sge_basic / sge_daily` | 继续把 `daily_info` 交易结构、`fx` 外汇口径和黄金现货锚定前置到成熟稿判断层 |
+| 跨市场/转债/基金渠道 | 第二阶段已进入可见层 | `stk_ah_comparison / fund_sales_ratio / cb_basic / cb_daily / cb_factor_pro / cb_issue / cb_share` | `briefing / compare / fund_pick` 已可见，下一步是继续统一到更多 mature 首屏和长期对比链，并视需要单开转债主线 |
+| 板块/港股短线专题 | 第二阶段新收口 | `tdx_index / tdx_member / tdx_daily / ggt_top10 / ccass_hold_detail / hm_detail / dc_index / dc_daily / moneyflow_mkt_dc / report_rc` | 继续把 `TDX 结构专题 / DC 结构专题 / 港股辅助层 / 研报辅助层 / 转债辅助层` 稳定前置到 mature 首页和比较链 |
 
-## 第二阶段 backlog（已解锁、未接、也未排期）
+## 第二阶段 backlog（已接入与继续收口）
 
-下面这批接口当前已经不属于“第一阶段剩余缺口”，而是：
+下面这批接口原来都在“已解锁、未接、也未排期”的列表里；其中第一批已经开始开发，剩余部分继续按研究价值排序。
 
-- `10000` 分已能用
-- repo 里还没接
-- 也还没纳入上一版主计划
-
-后续默认进入第二阶段 backlog，按研究价值继续排序。
-
-### 市场与交易结构
+### 已进入第二阶段开发
 
 - `daily_info / sz_daily_info`
-  - 用途：市场广度、涨跌家数、成交分层、换手结构
-  - 更适合：`briefing / market_overview`
+  - 当前状态：已接到 `market_overview` 共享 collector，并开始进入 `briefing / market_analysis`
+  - 下一步：继续统一成熟稿里的交易结构表达
+- `stk_factor_pro`
+  - 当前状态：已接到 `valuation + opportunity_engine + factor_meta`，开始影响股票技术面维度
+  - 下一步：继续把这层证据往 `stock_analysis / stock_pick` 的正文前置
+- `stk_surv`
+  - 当前状态：已接到 `news` structured intelligence 主链，并已放进 `stock_pick / briefing` fast profile 白名单
+  - 下一步：继续把命中的机构调研证据更稳定前置到成熟稿首页
+- `fx_basic / fx_daily`
+  - 当前状态：已接到 `macro_cn`，并开始进入 `china_macro snapshot / macro_lines`
+  - 下一步：继续把人民币/外汇方向写进 `briefing / portfolio` 的宏观判断
 
 ### 股票补充层
-
-- `stk_factor_pro`
-  - 用途：股票技术面专业因子
-  - 更适合：`scan / stock_analysis / stock_pick`
-- `stk_surv`
-  - 用途：机构调研与问答
-  - 更适合：`stock_analysis / stock_pick / briefing`
 - `stk_ah_comparison`
   - 用途：A/H 比价与港股映射
   - 更适合：`briefing / stock_analysis / compare`
+  - 当前状态：已接到 `market_cn` 共享 collector，并已进入 `opportunity_engine` 的 `跨市场比价` 因子；A/H 标的成熟稿现在会显式披露 `premium_rate / latest_date / disclosure`
 
 ### 宏观与跨资产
 
-- `fx_basic / fx_daily`
-  - 用途：正式外汇主链，补 `USDCNH / 美元 / 风险偏好`
-  - 更适合：`briefing / macro / portfolio`
 - `sge_basic / sge_daily`
   - 用途：黄金现货基础与日线
   - 更适合：`briefing / compare / 黄金链 ETF`
+  - 当前状态：`commodity` 已切到 `Tushare sge_daily` 主链；黄金链 ETF/基金的 `基本面` 维度会显示 `现货锚定`
 
 ### 基金与财富管理
 
 - `fund_sales_ratio`
   - 用途：基金销售保有和渠道结构
   - 更适合：`fund_pick / compare / briefing`
+  - 当前状态：`fund_profile` 已沉淀 `sales_ratio_snapshot`，`client_report / opportunity_report` 已能渲染 `公募渠道环境`
 
 ### 可转债
 
 - `cb_basic / cb_daily / cb_factor_pro`
   - 用途：可转债基础、日线、技术因子
   - 更适合：后续单开可转债研究主线
+  - 当前状态：`market_cn` 已接 collector，`opportunity_engine` 已把它下沉成 A 股个股 `可转债映射` 辅助因子
+- `cb_issue / cb_share`
+  - 用途：可转债发行与转股结果
+  - 更适合：`stock_analysis / stock_pick / compare`
+  - 当前状态：`market_cn` 已接共享 collector，`opportunity_engine` 的 `市场事件行 / 转债辅助层` 已开始消费
+
+### 板块 / 港股短线专题
+
+- `tdx_index / tdx_member / tdx_daily`
+  - 用途：板块/风格/地区专题链
+  - 更适合：`briefing / stock_analysis / stock_pick / scan / etf_pick`
+  - 当前状态：`market_drivers` 已接共享 collector，`opportunity_engine` 已开始下沉 `TDX结构专题`
+- `dc_index / dc_daily`
+  - 用途：东方财富概念/板块专题链
+  - 更适合：`briefing / stock_analysis / stock_pick / scan / etf_pick`
+  - 当前状态：`market_drivers` 已接共享 collector，`opportunity_engine` 已开始下沉 `DC结构专题`
+- `moneyflow_mkt_dc`
+  - 用途：东财大盘资金流视角
+  - 更适合：`briefing / market_overview / market_analysis`
+  - 当前状态：`market_drivers` 已接共享 collector，市场结构/大盘资金流会优先尝试这条主链；权限、频控或 IP 限制按缺失披露，不伪装成 fresh
+- `report_rc`
+  - 用途：卖方盈利预测、目标价和一致预期辅助层
+  - 更适合：`stock_analysis / stock_pick / compare`
+  - 当前状态：`market_drivers` 已接共享 collector，`opportunity_engine / client_report / opportunity_report` 已开始下沉 `研报辅助层`
+- `ggt_top10 / ccass_hold_detail / hm_detail`
+  - 用途：港股通活跃、CCASS 持仓、游资交易明细
+  - 更适合：`briefing / stock_analysis / scan / compare`
+  - 当前状态：`market_cn` 已接共享 collector，`opportunity_engine` 已开始下沉 `港股辅助层`
 
 ## 当前主线
 
@@ -126,12 +153,19 @@
 - `2026-04-02`：指数专题主链第二批已把 `index_basic / index_dailybasic / index_weight / index_daily / idx_factor_pro / index_global` 接进共享 `index_topic` collector；`valuation / market_cn / market_overview` 已改成先吃这条主链，再把结果下沉到 `scan / stock_analysis / stock_pick / etf_pick / briefing`。
 - `2026-04-02`：这批指数主链现在会真实影响 `ETF/指数` 路径的 `估值 / 跟踪指数框架 / 指数技术状态 / 成分权重结构 / 相对强弱`；`market_overview` 的国际指数也不再把 `yfinance` 写成默认主来源。
 - `2026-04-02`：ETF 主链已继续收口：`fund_profile` 现在会优先按 `etf_basic / etf_index / etf_share_size` 构建 `etf_snapshot`，`market_cn.get_etf_daily()` 也已改成只走 `Tushare fund_daily + fund_adj` 主链；只要 ETF 持仓已有 `Tushare fund_portfolio + stock_basic`，就不再默认调用 `AKShare` 持仓补名。`etf_pick` 的排序和“为什么先看它”现在也会真实消费 `跟踪指数结构 + 指数成分权重 + 份额快照`，而不是只把这些字段挂在信息表里。
+- `2026-04-04`：`fund_profile` 的持仓主路进一步退场：`cn_fund` 现在也优先吃 `Tushare fund_portfolio + stock_basic`，只有 Tushare 持仓缺失时才允许 AKShare holdings 兜底；`valuation` 也已不再保留任何实质 AKShare helper，Tushare 主链之外只剩明确的 realtime / side 路。
 - `2026-04-02`：ETF 当前已不再让 `AKShare` 充当默认主链：ETF 概况、ETF 日线、ETF 持仓补名三条被覆盖路径都已退到非主路径；当时主要剩余缺口已经收窄到 `etf_share_size` 的两点变化和 `跟踪指数 + 份额变化 + 外部情报` 的最终融合。
 - `2026-04-03`：`fund_factor_pro` 已从共享 collector 合同真正下沉到 ETF 主链：`fund_profile` 会补 `fund_factor_snapshot`，`opportunity_engine` 会产出 `场内基金技术状态` 因子，`etf_pick / scan` 的 `基金画像 / 推荐理由 / 因子解释` 都会消费它；客户稿默认写出 `趋势 / 动能 + 日期`，缺失时显式按信息项披露，不会把 ETF 产品层技术状态伪装成已确认。这块已不再是主缺口。
 - `2026-04-03`：ETF phase 2 现已收口：`etf_share_size` 默认会拉近 7 个开盘日做两点变化，`etf_pick` 的“为什么先看它”和 `compare` 的 `ETF产品层对比` 会一起写出 `跟踪指数 + 份额变化 + 场内基金技术状态 + 外部情报状态`；`config/config.etf_pick_fast.yaml` 也改成默认保留 `light fund_profile`，不再通过 `skip_fund_profile` 把 ETF 产品层静默关掉。
 - `2026-04-03`：`broker_recommend` 和 `上证e互动 / 深证互动易` 也已经进入共享 collector + processor + renderer + guard 路径，当前主要是稳定披露和例外处理，不再是剩余主缺口。
 - `2026-04-03`：`index_weekly / index_monthly` 已从 helper 层进一步下沉到 mature 稿面；`briefing / scan / stock_analysis / etf_pick` 正文里都会显式出现 `周月节奏`，并把周线、月线和方向性结论写进首页判断、关键证据或趋势节奏，不再只停在 collector / event rows。
 - `2026-04-03`：这轮又继续退掉一批已被 Tushare 覆盖的旧路径：`valuation.get_cn_etf_nav_history()` 不再回退 AKShare ETF 净值，`valuation.get_cn_etf_scale()` 改成 `etf_share_size` 主链，`valuation.get_cn_stock_financial_proxy()` 也不再回退 AKShare 财务代理；当前保留的 AKShare 只剩实时/分钟或尚未被 10000 分一对一覆盖的侧路。
+- `2026-04-04`：第二阶段 backlog 里第一批新接口开始真正接入 mature 主链：`market_overview` 已接 `daily_info / sz_daily_info` 的市场结构快照；`valuation + opportunity_engine + factor_meta` 已接 `stk_factor_pro`；`news` 结构化情报主链已接 `stk_surv`，`stock_pick / briefing` 的 fast runtime 白名单也已放行机构调研；`macro_cn + context` 已接 `fx_basic / fx_daily` 并开始把 `USDCNH` 写进宏观快照和 `macro_lines`。
+- `2026-04-04`：第二阶段 backlog 又向前收了一批：`stk_ah_comparison / fund_sales_ratio / cb_basic / cb_daily / cb_factor_pro / sge_basic / sge_daily` 不再只是待排期清单，而是已经进入 `market_cn / fund_profile / commodity / opportunity_engine / renderer` 的共享主链。
+- `2026-04-04`：第二阶段第二批的可见层也开始收口：`briefing` 首屏已前置 `daily_info / sz_daily_info` 形成的市场结构快照，`compare` 新增 `第二阶段信号快照`，`fund_pick` 的“为什么先看它/为什么推荐它”现在会显式前置 `公募渠道环境 / 黄金现货锚定`。当前真实剩余项不再是“有没有接口”，而是把这批信号继续统一到更多 mature 首屏和长期对比链。
+- `2026-04-05`：第二阶段又收了一批原本未接的值得接接口：`tdx_index / tdx_member / tdx_daily / ggt_top10 / ccass_hold_detail / hm_detail / cb_issue / cb_share / dc_index / dc_daily / moneyflow_mkt_dc / report_rc` 已进入 `market_drivers / market_cn / opportunity_engine / renderer` 的共享主链，并开始下沉 `TDX结构专题 / DC结构专题 / 港股辅助层 / 研报辅助层 / 转债辅助层`。
+- `2026-04-05`：`fx_daily` 在权限、频控或 IP 限制下已改成按缺失快照降级；`briefing / research / regime` 这类依赖宏观上下文的命令不会再因为外汇链异常直接崩溃。
+- `2026-04-05`：这批新接口已补齐对应 collector / processor / renderer 窄测；当前剩余项进一步收窄到“把新信号前置到更多 mature 首页/比较链”和“继续只清理仍可安全退场的旧 realtime/side fallback”，而不是再找主缺口接口。
 
 ## 当前收口项
 
@@ -144,8 +178,8 @@
 - 当前重点不再是补新接口，而是把已覆盖旧链进一步压到非主路径，并同步文档 / guard / 测试 / 可见性。
 
 3. 第二阶段 backlog 正式排期
-- `daily_info / sz_daily_info / stk_factor_pro / stk_surv / stk_ah_comparison / fx_basic / fx_daily / fund_sales_ratio / cb_basic / cb_daily / cb_factor_pro / sge_basic / sge_daily`
-- 这批接口当前都不是“未发现缺口”，而是已确认存在、已确认可用、但还没进入正式开发排期。
+- 已进入主链：`daily_info / sz_daily_info / stk_factor_pro / stk_surv / fx_basic / fx_daily / stk_ah_comparison / fund_sales_ratio / cb_basic / cb_daily / cb_factor_pro / cb_issue / cb_share / sge_basic / sge_daily / tdx_index / tdx_member / tdx_daily / ggt_top10 / ccass_hold_detail / hm_detail`
+- 当前重点：把这批数据的首屏可见性继续从 `briefing / compare / fund_pick` 扩到更多 mature 首页/长期对比链，而不是再停留在 collector 或辅助因子层
 
 ## 优先级
 
@@ -236,7 +270,7 @@
 | `行业关键词 / 板块名字符串 / sector 模糊匹配` | `index_classify + index_member_all + sw_daily + ci_index_member + ci_daily` | 已改成标准行业框架优先 | `briefing / scan / stock_analysis / stock_pick / etf_pick` |
 | `fund_basic(E)` 充当 ETF 主身份 | `etf_basic + etf_index` | 已替换 | `etf_pick / scan / compare / portfolio` |
 | 仅价格判断 ETF 资金变化 | `etf_share_size` | 已接入并进入两点变化主链 | `briefing / etf_pick / scan / compare` |
-| ETF 概况 / 日线 / 持仓补名默认走 AKShare | `etf_basic + etf_index + fund_daily + fund_adj + fund_portfolio + stock_basic` | 已从默认主路径退场 | `etf_pick / scan / compare / portfolio` |
+| ETF / 开放式基金持仓补名默认走 AKShare | `etf_basic + etf_index + fund_daily + fund_adj + fund_portfolio + stock_basic` | 已从默认主路径退场；cn_fund 仅在 Tushare 持仓缺失时才允许 AKShare 兜底 | `etf_pick / scan / compare / portfolio` |
 | 粗粒度筹码描述 | `cyq_perf / cyq_chips` | 已替换主描述层 | `stock_analysis / stock_pick / scan` |
 | 只靠行业/板块代理判断个股资金、拥挤和打板节奏 | `moneyflow + margin_detail + top_list/top_inst + stk_auction + stk_limit + limit_list_d + ths_member/moneyflow_ind_ths/moneyflow_cnt_ths` | 已进入主链 | `briefing / scan / stock_analysis / stock_pick` |
 | 简化 ETF/指数技术判断 | `fund_factor_pro / idx_factor_pro` | 两者都已接入主链；`fund_factor_pro` 当前已进入 `fund_profile / opportunity_engine / etf_pick / scan / client_report / opportunity_report` | `etf_pick / scan / 指数/ETF 客户稿` |

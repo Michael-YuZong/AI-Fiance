@@ -5,6 +5,7 @@ structured_stock_intelligence_apis:
   - forecast
   - express
   - dividend
+  - stk_surv
   - irm_qa_sh
   - irm_qa_sz
 stock_news_limit: 4

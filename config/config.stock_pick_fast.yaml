@@ -1,17 +1,23 @@
-# Stock pick fast profile for weak-network / cached-only reruns.
-news_feeds_file: config/news_feeds.empty.yaml
-news_topic_search_enabled: false
+# Stock pick fast profile for stable-but-not-empty reruns.
+news_feeds_file: config/news_feeds.briefing_light.yaml
+news_topic_search_enabled: true
 structured_stock_intelligence_apis:
   - forecast
   - express
   - dividend
+  - stk_surv
   - irm_qa_sh
   - irm_qa_sz
-stock_news_runtime_mode: structured_only
-stock_news_limit: 6
+stock_news_runtime_mode: focused
+stock_news_limit: 8
+skip_catalyst_dynamic_search_runtime: true
+stock_news_official_query_cap: 2
+stock_news_search_query_cap: 1
+stock_news_search_recent_days: 14
 skip_analysis_proxy_signals_runtime: true
 skip_signal_confidence_runtime: true
 stock_pool_skip_industry_lookup_runtime: true
+stock_pool_prefer_cached_realtime_runtime: true
 
 market:
 
@@ -20,5 +26,5 @@ market_context:
   skip_market_monitor: true
 
 opportunity:
-  analysis_workers: 2
-  stock_max_scan_candidates: 15
+  analysis_workers: 3
+  stock_max_scan_candidates: 18

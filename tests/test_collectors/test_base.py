@@ -23,6 +23,17 @@ def test_cached_call_uses_stale_cache_when_fetch_fails(tmp_path):
     assert result == {"value": 42}
 
 
+def test_load_cache_drops_corrupt_pickle_and_returns_none(tmp_path):
+    collector = BaseCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}}, name="TestCollector")
+    cache_path = collector._cache_path("demo:corrupt")
+    cache_path.write_bytes(b"not-a-valid-pickle")
+
+    payload = collector._load_cache("demo:corrupt", ttl_hours=24)
+
+    assert payload is None
+    assert cache_path.exists() is False
+
+
 def test_cached_call_can_disable_stale_fallback_on_error(tmp_path):
     collector = BaseCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}}, name="TestCollector")
     collector._save_cache("demo:key", {"value": 42})

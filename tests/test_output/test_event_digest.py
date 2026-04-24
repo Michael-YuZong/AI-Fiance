@@ -1,4 +1,5 @@
 from src.output.event_digest import (
+    _instrument_proxy_topic_terms,
     build_event_digest,
     event_digest_action_line,
     event_digest_homepage_lines,
@@ -41,6 +42,72 @@ def test_build_event_digest_structures_earnings_axes_and_scope() -> None:
     assert contract["impact_summary"].startswith("盈利")
     assert contract["thesis_scope"] == "thesis变化"
     assert "盈利" in digest["changed_what"]
+
+
+def test_build_event_digest_treats_etf_top_holding_disclosure_calendar_as_earnings() -> None:
+    digest = build_event_digest(
+        {
+            "name": "通信ETF",
+            "symbol": "515880",
+            "asset_type": "cn_etf",
+            "generated_at": "2026-04-23 15:30:00",
+            "market_event_rows": [
+                [
+                    "2026-04-24",
+                    "核心持仓财报窗口：新易盛(300502) 预约披露 2025年年报，持仓占净值约 15.09%",
+                    "核心持仓财报日历",
+                    "高",
+                    "新易盛",
+                    "https://www.cninfo.com.cn/new/disclosure/detail?stockCode=300502",
+                    "核心持仓财报窗口",
+                    "这是 ETF 前排权重股的确定披露日历，会影响持仓兑现预期和短线波动。",
+                ],
+                [
+                    "2026-04-29",
+                    "核心持仓财报窗口：工业富联(601138) 预约披露 2026年一季报，持仓占净值约 10.48%",
+                    "核心持仓财报日历",
+                    "高",
+                    "工业富联",
+                    "https://www.cninfo.com.cn/new/disclosure/detail?stockCode=601138",
+                    "核心持仓财报窗口",
+                    "这是 ETF 前排权重股的确定披露日历，会影响持仓兑现预期和短线波动。",
+                ],
+            ],
+        }
+    )
+
+    assert digest["lead_layer"] == "财报"
+    assert digest["lead_detail"] == "财报日历：待披露窗口"
+    assert "新易盛" in digest["lead_title"]
+    assert digest["latest_signal_at"] == "2026-04-24"
+    assert "盈利" in digest["impact_axes"]
+    assert digest["thesis_scope"] == "待确认"
+    assert "不是财报结果" in digest["importance_reason"]
+
+
+def test_instrument_proxy_topic_terms_include_taxonomy_profile_evidence_terms() -> None:
+    terms = _instrument_proxy_topic_terms(
+        {
+            "asset_type": "cn_etf",
+            "name": "通信ETF",
+            "metadata": {
+                "sector": "信息技术",
+                "taxonomy": {
+                    "theme_profile": {
+                        "theme_family": "硬科技",
+                        "primary_chain": "CPO/光模块",
+                        "theme_role": "AI硬件主链",
+                        "evidence_keywords": ["CPO", "光模块", "800G", "AI算力"],
+                        "preferred_sector_aliases": ["科技", "通信", "AI硬件"],
+                    }
+                },
+            },
+        }
+    )
+
+    assert "光模块" in terms
+    assert "CPO" in terms
+    assert "800G" in terms
 
 
 def test_build_event_digest_recognizes_margin_improvement_as_direct_financial_change() -> None:
@@ -216,6 +283,98 @@ def test_build_event_digest_recognizes_theme_heat_as_observation_only() -> None:
     assert "抬升 `资金偏好`" in digest["importance_reason"]
 
 
+def test_build_event_digest_keeps_directional_etf_peer_news_as_theme_event() -> None:
+    digest = build_event_digest(
+        {
+            "name": "国泰中证半导体材料设备主题ETF",
+            "symbol": "159516",
+            "generated_at": "2026-04-11 10:00:00",
+            "dimensions": {
+                "catalyst": {
+                    "evidence": [
+                        {
+                            "layer": "产品/跟踪方向催化",
+                            "title": "半导体设备ETF易方达（159558）盘中获1800万份净申购，半导体设备龙头业绩炸裂",
+                            "source": "财联社",
+                            "date": "2026-04-10",
+                        }
+                    ]
+                }
+            },
+        }
+    )
+
+    assert digest["lead_layer"] == "行业主题事件"
+    assert digest["status"] == "已消化"
+    assert digest["thesis_scope"] == "待确认"
+
+
+def test_build_event_digest_filters_etf_proxy_news_without_direct_coverage() -> None:
+    payload = {
+        "asset_type": "cn_etf",
+        "name": "国泰中证半导体材料设备主题ETF",
+        "symbol": "159516",
+        "generated_at": "2026-04-11 10:00:00",
+        "metadata": {
+            "tracked_index_name": "中证半导体材料设备主题指数",
+            "index_framework_label": "中证半导体材料设备主题指数",
+        },
+        "dimensions": {
+            "catalyst": {
+                "coverage": {
+                    "directional_catalyst_hit": False,
+                    "direct_news_count": 0,
+                },
+                "theme_news": [
+                    {
+                        "layer": "主题级关键新闻",
+                        "title": "北方华创股价连续上涨，嘉实基金旗下11只基金重仓持有",
+                        "source": "财联社",
+                        "date": "2026-04-10",
+                    }
+                ],
+            }
+        },
+        "news_report": {
+            "items": [
+                {
+                    "title": "半导体设备ETF易方达（159558）盘中获1800万份净申购，半导体设备龙头业绩炸裂",
+                    "source": "财联社",
+                    "published_at": "2026-04-10T11:20:00",
+                },
+                {
+                    "title": "【早报】消费领域多个利好来袭，多家A股公司被证监会立案",
+                    "source": "财联社",
+                    "published_at": "2026-04-10T08:00:00",
+                },
+            ]
+        },
+        "market_event_rows": [
+            [
+                "2026-04-11",
+                "跟踪指数/行业框架：中证半导体材料设备主题指数对应申万二级行业半导体（+1.96%）",
+                "行业/指数框架",
+                "中",
+                "景气 / 资金偏好",
+                "",
+                "行业框架确认",
+                "只作为跟踪指数背景，不升级成产品直连催化。",
+            ]
+        ],
+    }
+
+    digest = build_event_digest(payload)
+    homepage_lines = event_digest_homepage_lines(digest)
+    item_titles = [str(item.get("title") or "") for item in list(digest.get("items") or [])]
+    combined = "\n".join([digest.get("lead_title", ""), *homepage_lines, *item_titles])
+
+    assert digest["lead_title"].startswith("跟踪指数/行业框架")
+    assert "159558" not in combined
+    assert "北方华创股价连续上涨" not in combined
+    assert "消费领域多个利好" not in combined
+    assert "财报摘要" not in combined
+
+
 def test_build_event_digest_recognizes_overseas_mapping_as_pending_confirmation() -> None:
     digest = build_event_digest(
         {
@@ -302,6 +461,60 @@ def test_build_event_digest_consumes_briefing_market_event_rows_before_generic_n
 
     assert digest["lead_title"] == "A股热股前排：新易盛（+12.50%）"
     assert digest["lead_detail"] == "主题事件：海外科技映射；结论：偏利多，先看 `AI算力/光模块` 能否继续拿到价格与成交确认。"
+
+
+def test_build_event_digest_treats_ceasefire_risk_repair_as_non_negative() -> None:
+    digest = build_event_digest(
+        {
+            "name": "A股市场",
+            "symbol": "market",
+            "generated_at": "2026-04-11 02:00:00",
+            "headline_lines": [
+                "**美伊停火利好A股_新浪新闻 - 手机新浪网** (手机新浪网)\n"
+                "  → 消息面 -> 风险偏好 -> 相关资产表现。\n"
+                "  → 先把它当成新增情报线索，再结合盘面和后文验证点确认。"
+            ],
+        }
+    )
+
+    assert digest["lead_detail"] == "主题事件：地缘缓和/风险偏好修复"
+    assert digest["thesis_scope"] == "待确认"
+    assert digest["signal_conclusion"].startswith("中性偏多")
+
+
+def test_build_event_digest_does_not_mark_risk_appetite_repair_headline_as_bearish() -> None:
+    digest = build_event_digest(
+        {
+            "name": "A股市场",
+            "symbol": "market",
+            "generated_at": "2026-04-11 02:00:00",
+            "headline_lines": [
+                "**A股放量大涨，机构眼中的后市机会在哪？ - 新浪财经** (新浪财经)\n"
+                "  → 消息面 -> 风险偏好 -> 相关资产表现。\n"
+                "  → 先把它当成新增情报线索，再结合盘面和后文验证点确认。"
+            ],
+        }
+    )
+
+    assert digest["lead_detail"] == "主题事件：市场修复/风险偏好回暖"
+    assert "偏利空" not in digest["signal_conclusion"]
+
+
+def test_build_event_digest_does_not_treat_stalled_ceasefire_attack_as_risk_on() -> None:
+    digest = build_event_digest(
+        {
+            "name": "A股市场",
+            "symbol": "market",
+            "generated_at": "2026-04-11 02:00:00",
+            "headline_lines": [
+                "**美伊停火斡旋陷入僵局 中东最大铝生产商工厂遭袭受损严重** (财联社)\n"
+                "  → 消息面 -> 风险偏好 -> 相关资产表现。"
+            ],
+        }
+    )
+
+    assert digest["lead_detail"] == "主题事件：地缘扰动/风险偏好承压"
+    assert digest["signal_conclusion"].startswith("偏利空")
 
 
 def test_build_event_digest_skips_workflow_market_event_rows_and_headline_text() -> None:
@@ -929,6 +1142,34 @@ def test_sort_event_items_prioritizes_fresher_media_over_stale_first_party_with_
     assert ranked[1]["source"] == "CNINFO"
 
 
+def test_sort_event_items_prioritizes_interactive_ir_over_generic_framework_rows() -> None:
+    ranked = sort_event_items(
+        [
+            {
+                "layer": "行业主题事件",
+                "title": "标准行业框架：药明康德 属于 申万二级行业·化学制药（-1.20%）",
+                "source": "申万行业框架",
+                "date": "2026-04-03",
+                "freshness_bucket": "fresh",
+                "age_days": 0,
+            },
+            {
+                "layer": "行业主题事件",
+                "title": "互动易确认：公司回复海外订单进展",
+                "source": "互动易/投资者关系",
+                "date": "2026-04-03",
+                "freshness_bucket": "fresh",
+                "age_days": 0,
+            },
+        ],
+        as_of="2026-04-03 10:00:00",
+    )
+
+    assert ranked[0]["title"] == "互动易确认：公司回复海外订单进展"
+    assert ranked[0]["source_directness_rank"] == 2
+    assert ranked[0]["importance_score"] >= ranked[1]["importance_score"]
+
+
 def test_build_event_digest_prefers_fresh_first_party_lead_item_over_theme_media() -> None:
     digest = build_event_digest(
         {
@@ -995,6 +1236,66 @@ def test_sort_event_items_prioritizes_fresh_first_party_over_stale_search_fallba
     assert ranked[0]["freshness_rank"] == 2
     assert ranked[1]["title"].startswith("板块旧闻回放")
     assert ranked[1]["source_tier_rank"] == 0
+
+
+def test_build_event_digest_filters_stock_news_from_unrelated_market_theme() -> None:
+    digest = build_event_digest(
+        {
+            "asset_type": "cn_stock",
+            "name": "紫金矿业",
+            "symbol": "601899",
+            "generated_at": "2026-04-23 14:26:09",
+            "day_theme": {"label": "硬科技 / AI硬件链"},
+            "metadata": {
+                "sector": "有色",
+                "industry": "铜",
+                "chain_nodes": ["工业金属", "铜"],
+            },
+            "dimensions": {
+                "catalyst": {
+                    "evidence": [
+                        {
+                            "layer": "前瞻催化",
+                            "title": "紫金矿业 已于 2026-04-22 披露 2026年一季报",
+                            "source": "Tushare disclosure_date",
+                            "date": "2026-04-22",
+                        },
+                        {
+                            "title": "国务院重磅部署！事关AI、算力、6G、卫星互联网等 - 财联社",
+                            "source": "财联社",
+                            "published_at": "2026-04-21T09:09:05",
+                            "category": "ai",
+                            "link": "https://example.com/ai-policy",
+                        },
+                    ]
+                }
+            },
+            "news_report": {
+                "items": [
+                    {
+                        "title": "国内创新药“大单品”竞相涌现 商业化进程全面提速 - 证券时报",
+                        "source": "证券时报",
+                        "published_at": "2026-04-21T22:56:00",
+                        "category": "biotech",
+                        "link": "https://example.com/biotech",
+                    }
+                ]
+            },
+        },
+        theme_playbook={"label": "黄金 / 有色资源"},
+    )
+    joined = "\n".join(
+        [
+            digest.get("lead_title", ""),
+            *event_digest_homepage_lines(digest, []),
+            *render_event_digest_section(digest),
+            *[str(item.get("title", "")) for item in digest.get("items", [])],
+        ]
+    )
+
+    assert digest["lead_title"].startswith("紫金矿业 已于 2026-04-22")
+    assert "创新药" not in joined
+    assert "AI、算力" not in joined
 
 
 def test_build_event_digest_keeps_pending_review_high_priority() -> None:
@@ -1164,6 +1465,10 @@ def test_event_digest_homepage_lines_prioritize_index_weight_over_weekly_monthly
 
     homepage_lines = event_digest_homepage_lines(digest, [])
 
+    assert digest["thesis_scope"] == "结构基线"
+    assert "一次性噪音" not in digest["changed_what"]
+    assert "新增催化" in digest["importance_reason"]
+    assert "产品画像" in digest["importance_reason"]
     assert homepage_lines
     assert "成分权重结构" in homepage_lines[1]
     assert "月线结构" not in homepage_lines[1]

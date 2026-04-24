@@ -5,11 +5,14 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
+from datetime import datetime
+import json
 import re
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from src.commands.final_runner import finalize_client_markdown, internal_sidecar_path
+from src.commands.intel import collect_intel_news_report, collect_market_aware_intel_news_report
 from src.commands.pick_history import enrich_pick_payload_with_score_history, summarize_pick_coverage
 from src.commands.pick_visuals import attach_visuals_to_analyses
 from src.commands.report_guard import ensure_report_task_registered, exported_bundle_lines
@@ -23,15 +26,17 @@ from src.output.catalyst_web_review import (
 )
 from src.output.editor_payload import (
     build_stock_pick_editor_packet,
+    render_editor_homepage,
     render_financial_editor_prompt,
     summarize_theme_playbook_contract,
     summarize_what_changed_contract,
 )
 from src.output.event_digest import summarize_event_digest_contract
-from src.output.pick_ranking import average_dimension_score, portfolio_overlap_bonus, rank_market_items, score_band
+from src.output.client_report import _upsert_visual_section, render_event_digest_section, render_what_changed_section
+from src.output.pick_ranking import average_dimension_score, portfolio_overlap_bonus, rank_market_items, recommendation_bucket, score_band
 from src.processors.factor_meta import summarize_factor_contracts_from_analyses
 from src.processors.portfolio_actions import attach_portfolio_overlap_summaries
-from src.processors.opportunity_engine import analyze_opportunity, build_market_context, discover_stock_opportunities, summarize_proxy_contracts_from_analyses
+from src.processors.opportunity_engine import _client_safe_issue, analyze_opportunity, build_market_context, discover_stock_opportunities, summarize_proxy_contracts_from_analyses
 from src.utils.config import PROJECT_ROOT, load_config
 from src.utils.logger import setup_logger
 from src.utils.market import close_yfinance_runtime_caches
@@ -58,6 +63,215 @@ MODEL_CHANGELOG = [
     "英文股票名不再使用两字符前缀做模糊匹配，避免 `Meta -> Me` 这类误命中。",
     "美股短英文 ticker 改为按单词边界匹配，避免 `SNOW -> snowfall` 这类误命中。",
 ]
+FAST_STRUCTURED_STOCK_INTELLIGENCE_APIS = [
+    "forecast",
+    "express",
+    "dividend",
+    "stk_surv",
+    "irm_qa_sh",
+    "irm_qa_sz",
+]
+EXPECTED_CHART_THEMES = ("terminal", "abyss-gold", "institutional", "clinical", "erdtree", "neo-brutal")
+
+
+def _visuals_have_theme_variants(visuals: Mapping[str, Any] | None) -> bool:
+    if not isinstance(visuals, Mapping):
+        return False
+    for key in ("dashboard", "windows", "indicators"):
+        raw_path = str(visuals.get(key, "")).strip()
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = (PROJECT_ROOT / path).resolve()
+        suffix = path.suffix
+        base_stem = path.stem.split(".theme-", 1)[0]
+        for theme_name in EXPECTED_CHART_THEMES:
+            variant_path = path.with_name(f"{base_stem}.theme-{theme_name}{suffix}")
+            if not variant_path.exists():
+                return False
+    return True
+
+
+def _featured_visual_clusters(payload: Mapping[str, Any]) -> Dict[tuple[str, str, str], list[Dict[str, Any]]]:
+    top = list(dict(payload or {}).get("top") or [])
+    if not top:
+        return {}
+    clustered: Dict[tuple[str, str, str], list[Dict[str, Any]]] = {}
+    for field in ("top", "watch_positive", "coverage_analyses"):
+        for item in payload.get(field) or []:
+            if not isinstance(item, dict):
+                continue
+            key = _visual_key(item)
+            if not key[1]:
+                continue
+            clustered.setdefault(key, []).append(item)
+    watch_symbols = {
+        str(item.get("symbol", ""))
+        for item in (payload.get("watch_positive") or [])
+        if str(item.get("symbol", "")).strip()
+    }
+    grouped: Dict[str, list[Mapping[str, Any]]] = {"A股": [], "港股": [], "美股": []}
+    for item in top:
+        label = {"cn_stock": "A股", "hk": "港股", "us": "美股"}.get(str(item.get("asset_type", "")), "")
+        if label:
+            grouped.setdefault(label, []).append(item)
+
+    featured_keys: list[tuple[str, str, str]] = []
+    for market_name in ("A股", "港股", "美股"):
+        items = grouped.get(market_name) or []
+        if not items:
+            continue
+        ranked = rank_market_items(items, watch_symbols)
+        featured_keys.extend(_visual_key(item) for item in ranked[:3] if _visual_key(item)[1])
+    return {
+        key: cluster
+        for key in dict.fromkeys(featured_keys)
+        if (cluster := clustered.get(key) or [])
+    }
+
+
+def _rehydrate_featured_visual_theme_variants(
+    payload: Dict[str, Any],
+    config: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    if not config:
+        return payload
+    for cluster in _featured_visual_clusters(payload).values():
+        source = max(cluster, key=_visual_source_score)
+        if _visuals_have_theme_variants(source.get("visuals")):
+            continue
+        symbol = str(source.get("symbol", "")).strip()
+        asset_type = str(source.get("asset_type", "")).strip()
+        if not symbol or not asset_type:
+            continue
+        try:
+            refreshed = analyze_opportunity(
+                symbol,
+                asset_type,
+                config,
+                metadata_override=dict(source.get("metadata") or {}),
+            )
+        except Exception:
+            continue
+        stamp = str(source.get("generated_at", "")).strip()
+        if stamp:
+            refreshed["generated_at"] = stamp
+        attach_visuals_to_analyses([refreshed], render_theme_variants=True)
+        visuals = dict(refreshed.get("visuals") or {})
+        if not _visuals_have_theme_variants(visuals):
+            continue
+        for sibling in cluster:
+            sibling["visuals"] = dict(visuals)
+    return payload
+
+
+def _shared_intel_news_report(
+    config: Mapping[str, Any],
+    *,
+    query: str,
+    explicit_symbol: str = "",
+    baseline_report: Mapping[str, Any] | None = None,
+    limit: int = 8,
+    recent_days: int = 7,
+    note_prefix: str = "",
+    structured_only: Optional[bool] = None,
+) -> Dict[str, Any]:
+    try:
+        report = collect_market_aware_intel_news_report(
+            query,
+            config=config,
+            explicit_symbol=explicit_symbol,
+            baseline_report=baseline_report,
+            limit=limit,
+            recent_days=recent_days,
+            structured_only=(
+                bool(structured_only)
+                if structured_only is not None
+                else not bool(dict(config or {}).get("news_topic_search_enabled", True))
+            ),
+            note_prefix=note_prefix,
+            collect_fn=collect_intel_news_report,
+        )
+    except Exception:
+        return {}
+    if not list(dict(report).get("items") or []):
+        return {}
+    return dict(report)
+
+
+def _attach_shared_intel_news_report(
+    context: Mapping[str, Any],
+    config: Mapping[str, Any],
+    *,
+    query: str,
+    explicit_symbol: str = "",
+    note_prefix: str = "",
+    limit: int = 8,
+    recent_days: int = 7,
+    structured_only: Optional[bool] = None,
+) -> Dict[str, Any]:
+    merged = dict(context or {})
+    existing_report = dict(merged.get("news_report") or {})
+    shared_report = _shared_intel_news_report(
+        config,
+        query=query,
+        explicit_symbol=explicit_symbol,
+        baseline_report=existing_report,
+        limit=limit,
+        recent_days=recent_days,
+        note_prefix=note_prefix,
+        structured_only=structured_only,
+    )
+    if not shared_report:
+        return merged
+
+    existing_items = list(existing_report.get("items") or [])
+    shared_items = list(shared_report.get("items") or [])
+    if not existing_items or len(shared_items) >= len(existing_items):
+        merged["news_report"] = shared_report
+        merged["intel_news_report"] = shared_report
+    return merged
+
+
+def _market_intel_query(market: str, sector_filter: str) -> str:
+    market_label = {"cn": "A股", "hk": "港股", "us": "美股", "all": "全市场"}.get(str(market).strip(), str(market).strip() or "A股")
+    terms = [market_label]
+    if str(sector_filter or "").strip():
+        terms.append(str(sector_filter).strip())
+    terms.extend(["主线", "情报"])
+    return " ".join(dict.fromkeys(term for term in terms if term))
+
+
+def _finalist_intel_query(finalists: Sequence[Mapping[str, Any]]) -> str:
+    terms: list[str] = []
+    for item in list(finalists or [])[:3]:
+        for value in (
+            str(item.get("name", "")).strip(),
+            str(item.get("symbol", "")).strip(),
+            str(item.get("sector", "")).strip(),
+        ):
+            if value and value not in terms:
+                terms.append(value)
+    return " ".join(terms) if terms else "A股 股票 情报"
+
+
+def _run_timed_stock_analysis(
+    symbol: str,
+    asset_type: str,
+    config: Mapping[str, Any],
+    *,
+    context: Mapping[str, Any] | None = None,
+    metadata_override: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    loader = lambda: analyze_opportunity(  # noqa: E731
+        symbol,
+        asset_type,
+        config,
+        context=context,
+        metadata_override=metadata_override,
+    )
+    return loader()
 
 
 def _client_final_runtime_overrides(
@@ -66,7 +280,7 @@ def _client_final_runtime_overrides(
     client_final: bool,
     explicit_config_path: str = "",
 ) -> tuple[Dict[str, Any], list[str]]:
-    if not client_final or explicit_config_path.strip():
+    if not client_final:
         return deepcopy(dict(config or {})), []
 
     effective = deepcopy(dict(config or {}))
@@ -80,46 +294,54 @@ def _client_final_runtime_overrides(
     if not bool(market_context.get("skip_market_monitor")):
         market_context["skip_market_monitor"] = True
         proxy_changed = True
-    if not bool(market_context.get("skip_market_drivers")):
-        market_context["skip_market_drivers"] = True
-        proxy_changed = True
     if proxy_changed:
         effective["market_context"] = market_context
-        notes.append("为保证个股 `client-final` 可交付，本轮自动跳过跨市场代理、market monitor 与板块驱动慢链。")
+        notes.append("为保证个股 `client-final` 可交付，本轮自动跳过跨市场代理与 market monitor；板块驱动保留给个股主链做行业/主题判断。")
 
-    if bool(effective.get("news_topic_search_enabled", True)):
-        effective["news_topic_search_enabled"] = False
-        notes.append("本轮 `client-final` 已自动关闭个股全局主题新闻扩搜，优先使用公司级直连新闻、结构化事件和已有本地证据。")
+    if not bool(effective.get("news_topic_search_enabled", False)):
+        effective["news_topic_search_enabled"] = True
+        notes.append("本轮 `client-final` 保留受控个股/主题情报回填，避免强方向只剩技术面而缺催化确认。")
     current_news_feeds = str(effective.get("news_feeds_file", "") or "").strip()
-    if current_news_feeds != "config/news_feeds.empty.yaml":
-        effective["news_feeds_file"] = "config/news_feeds.empty.yaml"
-        notes.append("本轮 `client-final` 已自动切到轻量新闻源配置，避免个股正式稿被全局新闻拉取慢链拖住。")
+    if current_news_feeds != "config/news_feeds.briefing_light.yaml":
+        effective["news_feeds_file"] = "config/news_feeds.briefing_light.yaml"
+        notes.append("本轮 `client-final` 已自动切到轻量但非空的新闻源配置，保留少量可点击情报，不再把个股催化链整段关空。")
 
     opportunity = dict(effective.get("opportunity") or {})
-    if int(opportunity.get("analysis_workers", 4) or 4) > 2:
-        opportunity["analysis_workers"] = 2
+    if int(opportunity.get("analysis_workers", 4) or 4) > 3:
+        opportunity["analysis_workers"] = 3
         notes.append("本轮 `client-final` 已自动收窄个股分析并发，优先保证正式稿稳定落盘。")
-    if int(opportunity.get("stock_max_scan_candidates", 60) or 60) > 18:
-        opportunity["stock_max_scan_candidates"] = 18
-        notes.append("本轮 `client-final` 已自动收窄个股候选池，优先分析更接近正式交付的高流动性样本。")
+    current_candidates = int(opportunity.get("stock_max_scan_candidates", 60) or 60)
+    normalized_candidates = 24
+    if current_candidates != normalized_candidates:
+        opportunity["stock_max_scan_candidates"] = normalized_candidates
+        notes.append("本轮 `client-final` 已重设并收窄个股候选池到 `18` 只，避免 fast 配置把正式推荐池收窄得过头。")
     if opportunity:
         effective["opportunity"] = opportunity
 
-    if list(effective.get("structured_stock_intelligence_apis") or []) != ["forecast", "express", "dividend", "irm_qa_sh", "irm_qa_sz"]:
-        effective["structured_stock_intelligence_apis"] = ["forecast", "express", "dividend", "irm_qa_sh", "irm_qa_sz"]
-        notes.append("本轮 `client-final` 已自动聚焦个股最关键的结构化情报源（业绩预告/快报/分红/互动平台问答），避免结构化情报慢链拖住正式稿。")
-    if str(effective.get("stock_news_runtime_mode", "") or "").strip().lower() != "structured_only":
-        effective["stock_news_runtime_mode"] = "structured_only"
-        notes.append("本轮 `client-final` 已把逐票公司情报切到结构化快链，不再逐票补泛媒体/搜索回填。")
+    if list(effective.get("structured_stock_intelligence_apis") or []) != FAST_STRUCTURED_STOCK_INTELLIGENCE_APIS:
+        effective["structured_stock_intelligence_apis"] = list(FAST_STRUCTURED_STOCK_INTELLIGENCE_APIS)
+        notes.append("本轮 `client-final` 已自动聚焦个股最关键的结构化情报源（业绩预告/快报/分红/机构调研/互动平台问答），避免结构化情报慢链拖住正式稿。")
+    if str(effective.get("stock_news_runtime_mode", "") or "").strip().lower() != "finalist":
+        effective["stock_news_runtime_mode"] = "finalist"
+        notes.append("本轮 `client-final` 的正式候选补强已切到 finalist 模式：先吃结构化/官方直连，再做极少量主题回填，不再对每只票跑一轮低质全量扩搜。")
 
-    if int(effective.get("stock_news_limit", 10) or 10) > 6:
-        effective["stock_news_limit"] = 6
-        notes.append("本轮 `client-final` 已自动收紧单票情报条数上限，优先保留最新、最直接、最重要的证据。")
+    if int(effective.get("stock_news_limit", 10) or 10) > 8:
+        effective["stock_news_limit"] = 8
+        notes.append("本轮 `client-final` 已自动收紧单票情报条数上限，但会保留足够多的一手催化与确认线索。")
+    effective["stock_news_finalist_official_query_cap"] = 2
+    effective["stock_news_finalist_search_query_cap"] = 1
+    effective["stock_news_finalist_search_recent_days"] = 21
 
     effective["skip_analysis_proxy_signals_runtime"] = True
     effective["skip_signal_confidence_runtime"] = True
     effective["stock_pool_skip_industry_lookup_runtime"] = True
+    effective["stock_pool_prefer_cached_realtime_runtime"] = True
     notes.append("本轮 `client-final` 已自动跳过情绪代理、历史信号置信度和逐票行业补查慢链，优先保证正式稿稳定落盘。")
+    notes.append("本轮 `client-final` 的候选池会优先复用本地 A 股快照缓存，不再为 live 实时快照白等长超时。")
+    notes.append("本轮 `client-final` 不再给整段个股分析套线程超时；正式稿稳定性改由底层 fetcher timeout 和快照缓存兜住，避免把观察池误裁空。")
+
+    if explicit_config_path.strip():
+        notes.append("显式配置文件仍会继续叠加 `client-final` 的正式稿稳定性 guard，不会因为自定义配置而回退到慢链。")
 
     return effective, notes
 
@@ -143,42 +365,48 @@ def _preview_runtime_overrides(
     if not bool(market_context.get("skip_market_monitor")):
         market_context["skip_market_monitor"] = True
         changed = True
-    if not bool(market_context.get("skip_market_drivers")):
-        market_context["skip_market_drivers"] = True
-        changed = True
     if changed:
         effective["market_context"] = market_context
-        notes.append("默认预览已自动跳过跨市场代理、market monitor 与板块驱动慢链，优先提高 stock_pick 响应速度。")
+        notes.append("默认预览已自动跳过跨市场代理与 market monitor；板块驱动保留给个股主链做行业/主题行情判断。")
 
     opportunity = dict(effective.get("opportunity") or {})
-    if int(opportunity.get("analysis_workers", 4) or 4) > 2:
-        opportunity["analysis_workers"] = 2
+    if int(opportunity.get("analysis_workers", 4) or 4) > 3:
+        opportunity["analysis_workers"] = 3
         notes.append("默认预览已自动收窄分析并发，减少 stock_pick 首次运行时长。")
-    if int(opportunity.get("stock_max_scan_candidates", 60) or 60) > 15:
-        opportunity["stock_max_scan_candidates"] = 15
-        notes.append("默认预览已自动收窄候选池，优先保留更接近动作区的高流动性样本。")
+    if int(opportunity.get("stock_max_scan_candidates", 60) or 60) > 18:
+        opportunity["stock_max_scan_candidates"] = 18
+        notes.append("默认预览已自动收窄候选池，但会保留足够多的板块强势样本，避免热方向只剩 1-2 只票。")
     if opportunity:
         effective["opportunity"] = opportunity
 
-    if bool(effective.get("news_topic_search_enabled", True)):
-        effective["news_topic_search_enabled"] = False
-        notes.append("默认预览已自动关闭全局主题新闻扩搜，优先保留公司级直连情报和结构化披露。")
+    if not bool(effective.get("news_topic_search_enabled", False)):
+        effective["news_topic_search_enabled"] = True
+        notes.append("默认预览保留受控主题情报扩搜，避免热点方向只剩技术面而找不到催化确认。")
 
-    if list(effective.get("structured_stock_intelligence_apis") or []) != ["forecast", "express", "dividend", "irm_qa_sh", "irm_qa_sz"]:
-        effective["structured_stock_intelligence_apis"] = ["forecast", "express", "dividend", "irm_qa_sh", "irm_qa_sz"]
-        notes.append("默认预览已自动聚焦业绩预告/快报/分红/互动平台问答四类结构化情报，减少 stock_pick 慢链。")
-    if str(effective.get("stock_news_runtime_mode", "") or "").strip().lower() != "structured_only":
-        effective["stock_news_runtime_mode"] = "structured_only"
-        notes.append("默认预览已把逐票公司情报切到结构化快链，不再逐票补泛媒体/搜索回填。")
+    if list(effective.get("structured_stock_intelligence_apis") or []) != FAST_STRUCTURED_STOCK_INTELLIGENCE_APIS:
+        effective["structured_stock_intelligence_apis"] = list(FAST_STRUCTURED_STOCK_INTELLIGENCE_APIS)
+        notes.append("默认预览已自动聚焦业绩预告/快报/分红/机构调研/互动平台问答五类结构化情报，减少 stock_pick 慢链。")
+    if str(effective.get("stock_news_runtime_mode", "") or "").strip().lower() != "focused":
+        effective["stock_news_runtime_mode"] = "focused"
+        notes.append("默认预览已切到逐票公司情报 focused 模式：先看结构化/官方线索，只做少量搜索回填，避免每只票都跑一轮低质扩搜。")
 
-    if int(effective.get("stock_news_limit", 10) or 10) > 6:
-        effective["stock_news_limit"] = 6
-        notes.append("默认预览已自动收紧单票情报条数上限，优先保留最近、最直接的公司级情报。")
+    if int(effective.get("stock_news_limit", 10) or 10) > 8:
+        effective["stock_news_limit"] = 8
+        notes.append("默认预览已自动收紧单票情报条数上限，但会保留足够多的直连催化和主题确认线索。")
+
+    effective["skip_catalyst_dynamic_search_runtime"] = True
+    effective["stock_news_official_query_cap"] = 2
+    effective["stock_news_search_query_cap"] = 1
+    effective["stock_news_search_recent_days"] = 14
+    notes.append("默认预览会把主题动态扩搜留给入围样本，预筛阶段只保留高价值官方/结构化催化。")
 
     effective["skip_analysis_proxy_signals_runtime"] = True
     effective["skip_signal_confidence_runtime"] = True
     effective["stock_pool_skip_industry_lookup_runtime"] = True
+    effective["stock_pool_prefer_cached_realtime_runtime"] = True
     notes.append("默认预览已自动跳过情绪代理、历史信号置信度和逐票行业补查慢链，优先保证首屏筛选速度。")
+    notes.append("默认预览会优先复用本地 A 股快照缓存，避免 stock_pool 为 live 实时快照白等长超时。")
+    notes.append("默认预览不再给整段个股分析套线程超时；首屏稳定性改由底层 fetcher timeout 和快照缓存兜住。")
 
     return effective, notes
 
@@ -186,16 +414,21 @@ def _preview_runtime_overrides(
 def _client_final_discovery_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     effective = deepcopy(dict(config or {}))
     effective["skip_index_topic_bundle_runtime"] = True
-    effective["skip_cn_stock_direct_news_runtime"] = True
     effective["skip_catalyst_dynamic_search_runtime"] = True
-    effective["skip_cn_stock_chip_snapshot_runtime"] = True
-    effective["skip_cn_stock_capital_flow_runtime"] = True
-    effective["skip_cn_stock_margin_runtime"] = True
-    effective["skip_cn_stock_board_action_runtime"] = True
-    effective["skip_cn_stock_regulatory_risk_runtime"] = True
-    effective["skip_cn_stock_broker_recommend_runtime"] = True
-    effective["skip_cn_stock_unlock_pressure_runtime"] = True
-    effective["skip_cn_stock_pledge_risk_runtime"] = True
+    effective["stock_news_runtime_mode"] = "focused"
+    effective["stock_news_official_query_cap"] = 2
+    effective["stock_news_search_query_cap"] = 1
+    effective["stock_news_search_recent_days"] = 14
+    return effective
+
+
+def _stock_pick_finalist_reanalysis_config(config: Mapping[str, Any]) -> Dict[str, Any]:
+    effective = deepcopy(dict(config or {}))
+    effective["stock_news_runtime_mode"] = "finalist"
+    effective["stock_news_finalist_official_query_cap"] = 2
+    effective["stock_news_finalist_search_query_cap"] = 1
+    effective["stock_news_finalist_search_recent_days"] = 21
+    effective["skip_catalyst_dynamic_search_runtime"] = False
     return effective
 
 
@@ -250,7 +483,8 @@ def _stock_pick_finalist_candidates(payload: Mapping[str, Any], top_n: int) -> l
     coverage_rows = list(payload.get("coverage_analyses") or payload.get("top") or [])
     if not coverage_rows:
         return []
-    finalist_limit = min(len(coverage_rows), max(6, min(8, max(1, top_n))))
+    finalist_limit = min(len(coverage_rows), max(5, min(6, max(1, top_n))))
+    watch_symbols = {str(item).strip() for item in list(payload.get("watch_symbols") or []) if str(item).strip()}
     finalists: list[Mapping[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for bucket in (
@@ -264,9 +498,15 @@ def _stock_pick_finalist_candidates(payload: Mapping[str, Any], top_n: int) -> l
                 continue
             finalists.append(item)
             seen.add(key)
-            if len(finalists) >= finalist_limit:
-                return finalists
-    return finalists
+    finalists.sort(
+        key=lambda item: (
+            {"正式推荐": 0, "看好但暂不推荐": 1, "观察为主": 2}.get(recommendation_bucket(item, watch_symbols), 9),
+            -int(dict(item.get("rating") or {}).get("rank", 0) or 0),
+            -score_band(average_dimension_score(item)),
+            -average_dimension_score(item),
+        )
+    )
+    return finalists[:finalist_limit]
 
 
 def _analysis_metadata_override(item: Mapping[str, Any]) -> Dict[str, Any]:
@@ -296,6 +536,7 @@ def _reenrich_stock_pick_finalists(
     top_n: int,
     context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
+    finalist_config = _stock_pick_finalist_reanalysis_config(config)
     finalists = _stock_pick_finalist_candidates(payload, top_n)
     if not finalists:
         return payload
@@ -313,6 +554,14 @@ def _reenrich_stock_pick_finalists(
         base_context = build_market_context(config, relevant_asset_types=relevant_asset_types)
     else:
         base_context = dict(context)
+    base_context = _attach_shared_intel_news_report(
+        base_context,
+        config,
+        query=_finalist_intel_query(finalists),
+        explicit_symbol=str(finalists[0].get("symbol", "")).strip() if finalists else "",
+        note_prefix="stock_pick finalist intel: ",
+        structured_only=True,
+    )
 
     opportunity_cfg = dict(dict(config).get("opportunity") or {})
     workers = max(1, min(int(opportunity_cfg.get("analysis_workers", 2) or 2), len(finalists), 3))
@@ -326,10 +575,10 @@ def _reenrich_stock_pick_finalists(
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_map = {
                 executor.submit(
-                    analyze_opportunity,
+                    _run_timed_stock_analysis,
                     str(item.get("symbol", "")).strip(),
                     str(item.get("asset_type", "")).strip(),
-                    config,
+                    finalist_config,
                     context=_context_for_item(),
                     metadata_override=_analysis_metadata_override(item),
                 ): item
@@ -349,10 +598,10 @@ def _reenrich_stock_pick_finalists(
             if not symbol or not asset_type:
                 continue
             try:
-                refreshed[_analysis_key(item)] = analyze_opportunity(
+                refreshed[_analysis_key(item)] = _run_timed_stock_analysis(
                     symbol,
                     asset_type,
-                    config,
+                    finalist_config,
                     context=_context_for_item(),
                     metadata_override=_analysis_metadata_override(item),
                 )
@@ -406,6 +655,19 @@ def _watch_positive_candidates(analyses: list[Mapping[str, Any]]) -> list[Mappin
     )[:6]
 
 
+def _observe_fallback_top_candidates(
+    analyses: Sequence[Mapping[str, Any]],
+    *,
+    limit: int,
+) -> list[Mapping[str, Any]]:
+    rows = list(analyses or [])
+    if not rows:
+        return []
+    watch_rows = _watch_positive_candidates(rows)
+    ranked_rows = watch_rows or sorted(rows, key=_rank_key, reverse=True)
+    return list(ranked_rows[: max(int(limit or 0), 1)])
+
+
 def _factor_contract_summary(analyses: list[Mapping[str, Any]]) -> Dict[str, Any]:
     return summarize_factor_contracts_from_analyses(list(analyses or []), sample_limit=16)
 
@@ -427,44 +689,18 @@ def _visual_source_score(item: Mapping[str, Any]) -> int:
     )
 
 
-def _attach_featured_visuals(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _attach_featured_visuals(
+    payload: Dict[str, Any],
+    *,
+    render_theme_variants: bool = False,
+) -> Dict[str, Any]:
     top = list(payload.get("top") or [])
     if not top:
         return payload
-    clustered: Dict[tuple[str, str, str], list[Dict[str, Any]]] = {}
-    for field in ("top", "watch_positive", "coverage_analyses"):
-        for item in payload.get(field) or []:
-            if not isinstance(item, dict):
-                continue
-            key = _visual_key(item)
-            if not key[1]:
-                continue
-            clustered.setdefault(key, []).append(item)
-    watch_symbols = {
-        str(item.get("symbol", ""))
-        for item in (payload.get("watch_positive") or [])
-        if str(item.get("symbol", "")).strip()
-    }
-    grouped: Dict[str, list[Mapping[str, Any]]] = {"A股": [], "港股": [], "美股": []}
-    for item in top:
-        label = {"cn_stock": "A股", "hk": "港股", "us": "美股"}.get(str(item.get("asset_type", "")), "")
-        if label:
-            grouped.setdefault(label, []).append(item)
-
-    featured_keys: list[tuple[str, str, str]] = []
-    for market_name in ("A股", "港股", "美股"):
-        items = grouped.get(market_name) or []
-        if not items:
-            continue
-        ranked = rank_market_items(items, watch_symbols)
-        featured_keys.extend(_visual_key(item) for item in ranked[:3] if _visual_key(item)[1])
-    for key in dict.fromkeys(featured_keys):
-        cluster = clustered.get(key) or []
-        if not cluster:
-            continue
+    for cluster in _featured_visual_clusters(payload).values():
         source = max(cluster, key=_visual_source_score)
-        if not source.get("visuals"):
-            attach_visuals_to_analyses([source])
+        if render_theme_variants or not source.get("visuals") or not _visuals_have_theme_variants(source.get("visuals")):
+            attach_visuals_to_analyses([source], render_theme_variants=render_theme_variants)
         visuals = dict(source.get("visuals") or {})
         if not visuals:
             continue
@@ -489,6 +725,9 @@ def enrich_payload_with_score_history(
     )
     coverage_rows = list(payload.get("coverage_analyses", []) or payload.get("top", []) or [])
     payload["watch_positive"] = _watch_positive_candidates(coverage_rows)
+    target_count = int(payload.get("requested_top_n", 0) or len(payload.get("top") or []) or 5)
+    if not list(payload.get("top") or []) and coverage_rows:
+        payload["top"] = _observe_fallback_top_candidates(coverage_rows, limit=target_count)
     payload["stock_pick_coverage"] = _coverage_summary(coverage_rows)
     return payload
 
@@ -534,6 +773,39 @@ def _persist_internal_detail_report(stem: str, markdown: str) -> Path:
     path = INTERNAL_DIR / f"{stem}.md"
     path.write_text(markdown, encoding="utf-8")
     return path
+
+
+def _persist_stock_pick_payload(detail_path: Path, payload: Mapping[str, Any]) -> Path:
+    payload_path = internal_sidecar_path(detail_path, "payload.json")
+    payload_path.parent.mkdir(parents=True, exist_ok=True)
+    payload_path.write_text(
+        json.dumps(dict(payload or {}), ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    return payload_path
+
+
+def _persist_stock_pick_internal(detail_path: Path, markdown: str, payload: Mapping[str, Any]) -> tuple[Path, Path]:
+    detail_path.parent.mkdir(parents=True, exist_ok=True)
+    detail_path.write_text(str(markdown or ""), encoding="utf-8")
+    payload_path = _persist_stock_pick_payload(detail_path, payload)
+    return detail_path, payload_path
+
+
+def _stock_pick_release_checker(
+    editor_packet: Mapping[str, Any],
+    editor_prompt: str,
+) -> Callable[[str, str], Sequence[str]]:
+    from src.commands.release_check import check_stock_pick_client_report
+
+    return lambda markdown, source_text: check_stock_pick_client_report(
+        markdown,
+        source_text,
+        editor_theme_playbook=editor_packet.get("theme_playbook") or {},
+        editor_prompt_text=editor_prompt,
+        event_digest_contract=editor_packet.get("event_digest") or {},
+        what_changed_contract=editor_packet.get("what_changed") or {},
+    )
 
 
 def _merge_payloads(payloads: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
@@ -587,6 +859,20 @@ def _run_market(
     enrich_finalists: bool = False,
 ) -> Dict[str, Any]:
     discovery_config = _client_final_discovery_config(config) if enrich_finalists else dict(config)
+    if context is None:
+        relevant_asset_types = {
+            "cn": ["cn_stock", "cn_etf"],
+            "hk": ["hk"],
+            "us": ["us"],
+            "all": ["cn_stock", "cn_etf", "hk", "us", "futures"],
+        }.get(str(market).strip(), ["cn_stock", "cn_etf", "hk", "us", "futures"])
+        context = build_market_context(config, relevant_asset_types=relevant_asset_types)
+        context = _attach_shared_intel_news_report(
+            context,
+            config,
+            query=_market_intel_query(market, sector_filter),
+            note_prefix="stock_pick market intel: ",
+        )
     payload = discover_stock_opportunities(discovery_config, top_n=top_n, market=market, sector_filter=sector_filter, context=context)
     if enrich_finalists:
         payload = _reenrich_stock_pick_finalists(payload, config, top_n=top_n, context=context)
@@ -629,6 +915,7 @@ def main() -> None:
         if not args.client_final:
             payload = discover_stock_opportunities(config, top_n=args.top, market=args.market, sector_filter=sector_filter)
             payload = enrich_payload_with_score_history(payload, market=args.market, sector_filter=sector_filter)
+            payload = _attach_featured_visuals(payload)
             print(OpportunityReportRenderer().render_stock_picks(payload))
             return
 
@@ -636,6 +923,12 @@ def main() -> None:
             shared_context = build_market_context(
                 config,
                 relevant_asset_types=["cn_stock", "cn_etf", "hk", "us", "futures"],
+            )
+            shared_context = _attach_shared_intel_news_report(
+                shared_context,
+                config,
+                query=_market_intel_query(args.market, sector_filter),
+                note_prefix="stock_pick market intel: ",
             )
             market_payloads = {
                 market: _run_market(
@@ -651,11 +944,13 @@ def main() -> None:
             }
             for market, payload in market_payloads.items():
                 detailed = OpportunityReportRenderer().render_stock_picks(payload)
-                _persist_internal_detail_report(
-                    _internal_detail_stem(market, str(payload.get("generated_at", "")), sector_filter),
+                detail_path = INTERNAL_DIR / f"{_internal_detail_stem(market, str(payload.get('generated_at', '')), sector_filter)}.md"
+                _persist_stock_pick_internal(
+                    detail_path,
                     detailed,
+                    payload,
                 )
-            client_payload = _merge_payloads(market_payloads)
+            client_payload = _attach_featured_visuals(_merge_payloads(market_payloads), render_theme_variants=True)
             factor_contract = _factor_contract_summary(
                 [
                     analysis
@@ -663,9 +958,10 @@ def main() -> None:
                     for analysis in list(market_payload.get("coverage_analyses") or market_payload.get("top") or [])
                 ]
             )
-            source_path = _persist_internal_detail_report(
-                _internal_merged_stem(str(client_payload.get("generated_at", "")), sector_filter),
+            source_path, _payload_path = _persist_stock_pick_internal(
+                INTERNAL_DIR / f"{_internal_merged_stem(str(client_payload.get('generated_at', '')), sector_filter)}.md",
                 OpportunityReportRenderer().render_stock_picks(client_payload),
+                client_payload,
             )
             catalyst_review_path = internal_sidecar_path(source_path, "catalyst_web_review.md")
             review_lookup = load_catalyst_web_review(catalyst_review_path)
@@ -741,14 +1037,7 @@ def main() -> None:
                         "event_digest_contract": summarize_event_digest_contract(editor_packet.get("event_digest") or {}),
                         "what_changed_contract": summarize_what_changed_contract(editor_packet.get("what_changed") or {}),
                     },
-                    release_checker=lambda markdown, source_text: check_stock_pick_client_report(
-                        markdown,
-                        source_text,
-                        editor_theme_playbook=editor_packet.get("theme_playbook") or {},
-                        editor_prompt_text=editor_prompt,
-                        event_digest_contract=editor_packet.get("event_digest") or {},
-                        what_changed_contract=editor_packet.get("what_changed") or {},
-                    ),
+                    release_checker=_stock_pick_release_checker(editor_packet, editor_prompt),
                     text_sidecars=text_sidecars,
                     json_sidecars=json_sidecars,
                 )
@@ -761,10 +1050,12 @@ def main() -> None:
             return
 
         payload = _run_market(config, args.market, args.top, sector_filter, blind_spot_notes=runtime_notes, enrich_finalists=True)
+        payload = _attach_featured_visuals(payload, render_theme_variants=True)
         detailed = OpportunityReportRenderer().render_stock_picks(payload)
-        detail_path = _persist_internal_detail_report(
-            _internal_detail_stem(args.market, str(payload.get("generated_at", "")), sector_filter),
+        detail_path, _payload_path = _persist_stock_pick_internal(
+            INTERNAL_DIR / f"{_internal_detail_stem(args.market, str(payload.get('generated_at', '')), sector_filter)}.md",
             detailed,
+            payload,
         )
         catalyst_review_path = internal_sidecar_path(detail_path, "catalyst_web_review.md")
         review_lookup = load_catalyst_web_review(catalyst_review_path)
@@ -780,21 +1071,6 @@ def main() -> None:
         editor_packet = build_stock_pick_editor_packet(payload)
         editor_prompt = render_financial_editor_prompt(editor_packet)
 
-        findings = []
-        if args.market == "cn":
-            try:
-                from src.commands.release_check import check_stock_pick_client_report
-
-                findings = check_stock_pick_client_report(
-                    client_markdown,
-                    detail_path.read_text(encoding="utf-8"),
-                    editor_theme_playbook=editor_packet.get("theme_playbook") or {},
-                    editor_prompt_text=editor_prompt,
-                    event_digest_contract=editor_packet.get("event_digest") or {},
-                    what_changed_contract=editor_packet.get("what_changed") or {},
-                )
-            except Exception as exc:
-                raise SystemExit(f"发布前一致性校验失败: {exc}")
         catalyst_packet = build_catalyst_web_review_packet(
             report_type="stock_pick",
             subject=f"stock_pick {payload.get('generated_at', '')[:10]}",
@@ -853,7 +1129,7 @@ def main() -> None:
                 "event_digest_contract": summarize_event_digest_contract(editor_packet.get("event_digest") or {}),
                 "what_changed_contract": summarize_what_changed_contract(editor_packet.get("what_changed") or {}),
             },
-            release_checker=(lambda markdown, source_text: findings) if findings else None,
+            release_checker=_stock_pick_release_checker(editor_packet, editor_prompt) if args.market == "cn" else None,
             text_sidecars=text_sidecars,
             json_sidecars=json_sidecars,
         )

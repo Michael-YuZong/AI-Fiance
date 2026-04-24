@@ -1,4 +1,5 @@
 import pandas as pd
+import src.output.client_report as client_report_module
 
 from src.output.client_report import (
     ClientReportRenderer,
@@ -6,9 +7,14 @@ from src.output.client_report import (
     _evidence_lines,
     _evidence_lines_with_event_digest,
     _fund_profile_sections,
+    _observe_watch_levels,
     _observe_trigger_condition,
     _pick_client_safe_line,
+    _proxy_contract_section,
     _scan_dimension_rows,
+    _stock_observe_data_gap_text,
+    _stock_observe_evidence_hardness_text,
+    _tighten_observe_client_markdown,
 )
 
 
@@ -101,6 +107,93 @@ def _sample_analysis(symbol: str, name: str, asset_type: str = "cn_stock", rank:
     }
 
 
+def test_observe_watch_levels_prefers_near_resistance_over_far_target_for_etf() -> None:
+    analysis = {
+        "asset_type": "cn_etf",
+        "action": {"stop_ref": 1.284, "target_ref": 1.508},
+        "dimensions": {
+            "technical": {
+                "factors": [
+                    {
+                        "name": "压力位",
+                        "factor_id": "j1_resistance_zone",
+                        "signal": "上方存在近端压力：近20日高点 1.432（上方 2.6%） / 近60日高点 1.432（上方 2.6%） / 摆动前高 1.432（上方 2.6%）",
+                    }
+                ]
+            }
+        },
+    }
+
+    line = _observe_watch_levels(analysis)
+
+    assert "1.432" in line
+    assert "1.508" not in line
+
+
+def test_proxy_contract_section_marks_sentiment_as_proxy_evidence_not_high_confidence_fact() -> None:
+    lines = _proxy_contract_section(
+        {},
+        winner={
+            "proxy_signals": {
+                "social_sentiment": {
+                    "aggregate": {
+                        "interpretation": "情绪指数 97.5，讨论热度偏高，需防拥挤交易。",
+                        "confidence_label": "高",
+                        "limitations": ["这是价格和量能行为推导出的情绪代理，不是真实社媒抓取。"],
+                    }
+                }
+            }
+        },
+    )
+    rendered = "\n".join(lines)
+
+    assert "参考价值高，证据层级中等" in rendered
+    assert "`高` / 日涨跌" not in rendered
+
+
+def _attach_second_stage_stock_signals(analysis: dict) -> dict:
+    analysis["dimensions"]["technical"]["factors"].append(
+        {
+            "name": "股票技术面状态",
+            "signal": "趋势偏强 / 动能改善（2026-04-03）",
+            "detail": "Tushare stk_factor_pro 已确认日度技术状态。",
+            "factor_id": "j1_stk_factor_pro",
+            "factor_meta": {"degraded": False},
+        }
+    )
+    analysis["dimensions"]["fundamental"]["factors"].append(
+        {
+            "name": "跨市场比价",
+            "signal": "A/H 比价溢价 +18.20%（2026-04-03）",
+            "detail": "A/H 溢价处于可观察区间。",
+            "factor_id": "j3_ah_comparison",
+            "factor_meta": {"degraded": False},
+        }
+    )
+    analysis["dimensions"]["fundamental"]["factors"].append(
+        {
+            "name": "可转债映射",
+            "signal": "新易转债 / 趋势偏强 / 动能改善 / 转股溢价 +9.80%",
+            "detail": "发行人对应转债状态偏强。",
+            "factor_id": "j4_convertible_bond_proxy",
+            "factor_meta": {"degraded": False},
+        }
+    )
+    analysis["market_event_rows"] = [
+        [
+            "2026-04-03",
+            "机构调研：多家机构追问新品放量与订单兑现节奏",
+            "机构调研专题",
+            "高",
+            "基本面",
+            "",
+            "机构调研",
+            "偏利多，机构关注点集中在订单兑现和景气延续。",
+        ]
+    ]
+    return analysis
+
+
 def _install_fake_thesis_repo(monkeypatch, theses: dict | None = None) -> None:
     theses = theses or {
         "*": {
@@ -135,14 +228,27 @@ def test_render_stock_picks_has_client_table_and_reasoning() -> None:
         "watch_positive": [],
     }
     rendered = ClientReportRenderer().render_stock_picks(payload)
+    assert "## 先看执行" in rendered
+    assert rendered.index("## 先看执行") < rendered.index("## 首页判断")
+    assert "| 看不看 | 今天可以做，但只做前排 1-2 只，不把整份名单当全面进攻。 |" in rendered
+    assert "| 怎么触发 |" in rendered
+    assert "| 哪里建仓 | A股：新易盛 建仓先看 `9.850 - 10.000` 一带承接。；港股：快手-W 建仓先看 `9.850 - 10.000` 一带承接。 |" in rendered
+    assert "`9.850 - 10.000`" in rendered
+    assert "新易盛" in rendered
+    assert "跌破关键支撑离场" in rendered
+    assert "组合先只开最接近确认的 1-2 只，不扩散到整份名单。" in rendered
+    assert "任一前排票失守自己的失效位就先处理，不为单一观点硬扛。" in rendered
+    assert "首屏不写统一止损价" not in rendered
     assert "## 首页判断" in rendered
     assert "### 板块 / 主题认知" in rendered
     assert "## 今日结论" not in rendered
-    assert "## 今日动作摘要" in rendered
+    assert "## 名单结构" in rendered
     assert "| 报告定位 | 推荐稿 |" in rendered
-    assert "| 空仓怎么做 |" in rendered
-    assert "| 持仓怎么做 |" in rendered
-    assert "| 首次仓位 | 单票 `2% - 5%` 试仓 |" in rendered
+    assert "| 空仓怎么做 |" not in rendered
+    assert "| 持仓怎么做 |" not in rendered
+    assert "| 首次仓位 | 单票 `2% - 5%` 试仓 |" not in rendered
+    assert "| 短线优先 |" in rendered
+    assert "| 中线优先 |" in rendered
     assert "## A股" in rendered
     assert "| 标的 | 技术 | 基本面 | 催化 | 相对强弱 | 风险 | 结论 |" in rendered
     assert "### 第一批：核心主线" in rendered
@@ -152,8 +258,38 @@ def test_render_stock_picks_has_client_table_and_reasoning() -> None:
     assert "为什么按这个周期理解" in rendered
     assert "现在不适合的打法" in rendered
     assert "建议买入区间：9.850 - 10.000" in rendered
-    assert "建议减仓区间：11.200 - 11.500" in rendered
+    assert "第一减仓位：`11.200` 附近先兑现第一段反弹" in rendered
+    assert "第二减仓位：若放量站上 `11.200`，再看 `11.500` 一带是否做第二次减仓。" in rendered
+    assert "上修条件：只有放量站上 `11.500` 且催化、相对强弱和量能继续增强，才考虑把目标继续上修到 `先看前高`。" in rendered
     assert "## 仓位管理" in rendered
+
+
+def test_render_stock_picks_surfaces_three_formal_recommendations() -> None:
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "day_theme": {"label": "创新药 / 科技轮动"},
+        "regime": {"current_regime": "recovery"},
+        "top": [
+            _sample_analysis("300502", "新易盛", "cn_stock", rank=3),
+            _sample_analysis("300308", "中际旭创", "cn_stock", rank=3),
+            _sample_analysis("600276", "恒瑞医药", "cn_stock", rank=3),
+        ],
+        "watch_positive": [],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks(payload)
+
+    assert "| 优先推荐 | 中际旭创 (300308) |" in rendered
+    assert "| 次优推荐 | 新易盛 (300502) |" in rendered
+    assert "| 第三推荐 | 恒瑞医药 (600276) |" in rendered
+    assert rendered.count("为什么能进正式推荐") >= 3
+
+
+def test_pick_client_safe_line_hides_operation_not_permitted_path() -> None:
+    line = _pick_client_safe_line("板块驱动数据缺失: [Errno 1] Operation not permitted: '/Users/bilibili/tk.csv'")
+    assert "tk.csv" not in line
+    assert "/Users/bilibili" not in line
+    assert "已按可用数据降级处理" in line
 
 
 def test_render_scan_and_stock_analysis_surface_index_weekly_and_monthly_horizon_lines() -> None:
@@ -181,11 +317,29 @@ def test_render_scan_and_stock_analysis_surface_index_weekly_and_monthly_horizon
     rendered = ClientReportRenderer().render_scan(analysis)
     stock_analysis_rendered = ClientReportRenderer().render_stock_analysis(analysis)
 
-    assert "## 周月节奏" in rendered
-    assert "周线：人工智能精选" in rendered
-    assert "月线：人工智能精选" in rendered
-    assert "周月节奏同向偏强" in rendered
-    assert "## 周月节奏" in stock_analysis_rendered
+    assert "## 周月节奏" not in rendered
+    assert "周线：人工智能精选" not in rendered
+    assert "月线：人工智能精选" not in rendered
+    assert "周月节奏同向偏强" not in rendered
+    assert "## 周月节奏" not in stock_analysis_rendered
+
+    etf = _sample_analysis("510300", "沪深300ETF", "cn_etf", rank=3)
+    etf["index_topic_bundle"] = analysis["index_topic_bundle"]
+    etf_rendered = ClientReportRenderer().render_scan(etf)
+
+    assert "## 周月节奏" in etf_rendered
+    assert "周线：人工智能精选" in etf_rendered
+
+    active_fund = _sample_analysis("022365", "永赢科技智选混合发起C", "cn_fund", rank=3)
+    active_fund["fund_profile"] = {
+        "overview": {"基金类型": "混合型-偏股", "业绩比较基准": "中国战略新兴产业成份指数收益率"},
+        "style": {"tags": ["科技主题"]},
+    }
+    active_fund["index_topic_bundle"] = analysis["index_topic_bundle"]
+    active_fund_rendered = ClientReportRenderer().render_scan(active_fund)
+
+    assert "## 周月节奏" not in active_fund_rendered
+    assert "周线：人工智能精选" not in active_fund_rendered
 
 
 def test_render_stock_picks_surface_standard_industry_framework_rows() -> None:
@@ -276,10 +430,16 @@ def test_render_stock_picks_detailed_keeps_analysis_but_hides_internal_trace() -
         "watch_positive": [],
     }
     rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
+    assert "## 先看执行" in rendered
+    assert rendered.index("## 先看执行") < rendered.index("## 首页判断")
+    assert "| 看不看 | 今天可以做，但只适合先小仓、分批确认。 |" in rendered
+    assert "| 怎么触发 |" in rendered
+    assert "真正出手要等对应个股复核卡里的介入条件兑现" in rendered
+    assert "| 多大仓位 | 单票 `2% - 5%` 试仓 |" in rendered
     assert "## 首页判断" in rendered
     assert "## 今日结论" not in rendered
-    assert "## 今日动作摘要" in rendered
-    assert "| 当前框架 | `stagflation` / `能源冲击 + 地缘风险` |" in rendered
+    assert "## 名单结构" in rendered
+    assert "| 中期背景 / 当天主线 | `stagflation` / `能源冲击 + 地缘风险` |" in rendered
     assert "## A股" in rendered
     assert "八维雷达" in rendered
     assert "#### 图表速览" in rendered
@@ -305,6 +465,112 @@ def test_render_stock_picks_detailed_keeps_analysis_but_hides_internal_trace() -
     assert "当日基准版" not in rendered
     assert "本版口径变更" not in rendered
     assert "当前输出角色" not in rendered
+
+
+def test_render_stock_picks_detailed_contextualizes_repeated_formal_execution_lines() -> None:
+    first = _sample_analysis("600989", "宝丰能源", "cn_stock", rank=3)
+    second = _sample_analysis("300750", "宁德时代", "cn_stock", rank=3)
+    third = _sample_analysis("603259", "药明康德", "cn_stock", rank=3)
+    first["action"]["entry"] = "等煤化工价差和量能继续确认"
+    first["action"]["buy_range"] = "30.075 - 30.299"
+    second["action"]["entry"] = "等电池链回踩后承接重新转强"
+    second["action"]["buy_range"] = "231.100 - 236.800"
+    third["action"]["entry"] = "等创新药情绪和价格强度继续共振"
+    third["action"]["buy_range"] = "51.200 - 52.600"
+    first["narrative"]["positives"] = ["煤化工景气和盈利弹性还在。"]
+    second["narrative"]["positives"] = ["电池龙头的盈利质量和订单韧性更强。"]
+    third["narrative"]["positives"] = ["医药龙头的估值和修复节奏更占优。"]
+    payload = {
+        "generated_at": "2026-04-08 10:00:00",
+        "day_theme": {"label": "背景宏观主导"},
+        "regime": {"current_regime": "recovery"},
+        "market_label": "A股",
+        "top": [first, second, third],
+        "coverage_analyses": [first, second, third],
+        "watch_positive": [],
+        "stock_pick_coverage": {
+            "note": "当前催化/事件覆盖可直接作为 pre-screen 参考。",
+            "lines": ["A股 结构化事件覆盖 67%（2/3） / 高置信公司新闻覆盖 67%（2/3）"],
+        },
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
+
+    assert "加仓节奏：先按 `30.075 - 30.299` 一带分 2-3 批承接" in rendered
+    assert "加仓节奏：先按 `231.100 - 236.800` 一带分 2-3 批承接" in rendered
+    assert "加仓节奏：先按 `51.200 - 52.600` 一带分 2-3 批承接" in rendered
+    assert "为什么按这个周期理解：基本面、风险收益和趋势至少有两项站得住，更适合按一段完整主线去拿，而不是只博短催化。" not in rendered
+    assert "- 加仓节奏：分 2-3 批建仓\n" not in rendered
+    assert "**数据完整度：** 当前催化/事件覆盖可直接作为 pre-screen 参考。 分母是进入详细分析的样本，不是全市场扫描池。" in rendered
+    assert "相关性/分散度按各市场观察池基准代理" not in rendered
+
+
+def test_render_stock_picks_detailed_prefers_subject_theme_over_day_theme_for_stock_cards() -> None:
+    analysis = _sample_analysis("300274", "阳光电源", "cn_stock", rank=1)
+    analysis["action"]["direction"] = "观察为主"
+    analysis["action"]["position"] = "暂不出手"
+    analysis["action"]["entry"] = "等右侧确认。"
+    analysis["metadata"] = {
+        "history_source": "akshare",
+        "history_source_label": "AKShare 日线回退",
+        "sector": "电力设备",
+        "industry_framework_label": "光伏主链",
+        "chain_nodes": ["光伏主链", "储能", "电网设备"],
+    }
+    analysis["theme_playbook"] = {
+        "key": "solar_mainchain",
+        "label": "光伏主链",
+        "playbook_level": "theme",
+        "hard_sector_label": "电力设备 / 新能源设备",
+    }
+    payload = {
+        "generated_at": "2026-04-05 10:00:00",
+        "day_theme": {"label": "背景宏观主导"},
+        "regime": {"current_regime": "recovery"},
+        "market_label": "A股",
+        "top": [analysis],
+        "coverage_analyses": [analysis],
+        "watch_positive": [analysis],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
+
+    assert "| 代表主题 | `光伏主链` |" in rendered
+    assert "| 交易分层 |" in rendered
+    assert "| 交易分层 | `主线核心` / `主线仓`" not in rendered
+    assert "主题定位：当前更接近 `光伏主链` 这条方向" in rendered
+    assert "市场背景看 `背景宏观主导`，代表主题先按 `光伏主链` 理解" not in rendered
+    assert "背景宏观主导" in rendered
+
+
+def test_render_stock_picks_detailed_surfaces_semiconductor_trading_role_and_theme_split() -> None:
+    analysis = _sample_analysis("588170", "半导体设备ETF", "cn_etf", rank=2)
+    analysis["action"]["direction"] = "观察为主"
+    analysis["action"]["position"] = "暂不出手"
+    analysis["metadata"] = {"sector": "半导体设备", "industry_framework_label": "半导体链"}
+    analysis["theme_playbook"] = {
+        "key": "semiconductor",
+        "label": "半导体",
+        "playbook_level": "theme",
+        "hard_sector_label": "信息技术",
+        "trading_role_label": "主线核心",
+        "trading_position_label": "主线仓",
+        "trading_role_summary": "这条线已经够资格按主线核心理解，执行上优先按主线仓看待，可分批拿趋势，不用默认压成纯几周波段。",
+    }
+    payload = {
+        "generated_at": "2026-04-11 10:00:00",
+        "day_theme": {"label": "硬科技 / AI硬件链"},
+        "regime": {"current_regime": "recovery"},
+        "market_label": "A股",
+        "top": [analysis],
+        "coverage_analyses": [analysis],
+        "watch_positive": [analysis],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
+
+    assert "| 交易分层 | `主线核心` / `主线仓`" in rendered or "| 交易分层 | `主线扩散` / `卫星仓`" in rendered
+    assert "不要和软件/应用层提前混成一个大科技桶" in rendered
 
 
 def test_scan_dimension_rows_append_shared_technical_signal_text() -> None:
@@ -374,8 +640,8 @@ def test_render_stock_picks_detailed_explains_coverage_denominator() -> None:
         "watch_positive": [],
     }
     rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
-    assert "覆盖率的分母是当前纳入详细分析的各市场标的" in rendered
-    assert "新闻热度更看多源共振" in rendered
+    assert "本轮新闻/事件覆盖基本正常。 分母是进入详细分析的样本，不是全市场扫描池。" in rendered
+    assert "热度也更看多源共振，而不是单条提及" not in rendered
 
 
 def test_render_stock_picks_detailed_backfills_catalyst_and_degraded_history_sections() -> None:
@@ -429,8 +695,38 @@ def test_render_stock_picks_detailed_sanitizes_event_digest_intraday_wording() -
 
     rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
 
-    assert "竞价明显低开" not in rendered
-    assert "开局明显低开" in rendered
+    assert "竞价明显低开" in rendered
+    assert "开局明显低开" not in rendered
+
+
+def test_render_stock_picks_sanitizes_intraday_wording_in_final_body() -> None:
+    analysis = _sample_analysis("603259", "药明康德", "cn_stock", rank=1)
+    analysis["dimensions"]["catalyst"]["theme_news"] = [
+        {
+            "layer": "行业主题事件",
+            "title": "打板风险提示：药明康德 竞价明显低开",
+            "source": "财联社",
+            "date": "2026-04-03",
+            "freshness_bucket": "fresh",
+            "age_days": 0,
+            "signal_type": "打板过热",
+            "signal_strength": "中",
+            "signal_conclusion": "药明康德 打板/情绪风险偏高：竞价明显低开。",
+        }
+    ]
+    payload = {
+        "generated_at": "2026-04-03 18:00:00",
+        "day_theme": {"label": "成长修复"},
+        "regime": {"current_regime": "disinflation"},
+        "market_label": "A股",
+        "top": [analysis],
+        "watch_positive": [],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks(payload)
+
+    assert "竞价明显低开" in rendered
+    assert "开局明显低开" not in rendered
 
 
 def test_render_stock_picks_detailed_compacts_watch_items() -> None:
@@ -471,17 +767,46 @@ def test_render_stock_picks_detailed_compacts_watch_items() -> None:
     assert "### 第二批：继续跟踪" in rendered
     assert "### 第二批：低门槛 / 观察替代" in rendered
     assert "#### 低门槛继续跟踪" in rendered
-    assert "## 正式动作阈值" in rendered
-    assert "先看能不能从 `观察为主` 升到 `看好但暂不推荐`" in rendered
-    assert "只要当前动作仍是 `暂不出手 / 观察为主 / 先按观察仓`，就还不算正式动作票" in rendered
+    assert "## 正式动作阈值" not in rendered
+    assert "升级条件" in rendered
+    assert "## 观察名单复核卡" in rendered
     assert "| 层次 | 标的 | 为什么继续看 | 主要卡点 | 升级条件 | 关键盯盘价位 |" in rendered
     assert "| 标的 | 为什么还没进第一批 | 现在更该看什么 |" in rendered
     assert "关键盯盘价位" in rendered
+    assert "八维速览：" in rendered
+    assert "硬检查：" in rendered
     assert "### 看好但暂不推荐" not in rendered
     assert "## 代表样本复核卡" in rendered
     assert rendered.count("**先看结论：**") <= 8
     assert "## 仓位纪律" in rendered
     assert "相对强弱：更像主题方向没坏，但个股右侧扩散和价格确认还没完成" in rendered
+
+
+def test_render_stock_picks_detailed_keeps_followup_sections_when_watch_pool_is_small() -> None:
+    watch_one = _sample_analysis("300750", "宁德时代", "cn_stock", rank=1)
+    watch_one["action"]["direction"] = "观察为主"
+    watch_one["action"]["position"] = "暂不出手"
+    watch_one["action"]["entry"] = "先等量价重新同步。"
+    watch_one["metrics"] = {"last_close": 245.0}
+    watch_two = _sample_analysis("300308", "中际旭创", "cn_stock", rank=1)
+    watch_two["action"]["direction"] = "观察为主"
+    watch_two["action"]["position"] = "暂不出手"
+    watch_two["action"]["entry"] = "先等右侧确认。"
+    watch_two["metrics"] = {"last_close": 185.0}
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "day_theme": {"label": "AI 算力"},
+        "regime": {"current_regime": "recovery"},
+        "market_label": "A股",
+        "top": [watch_one, watch_two],
+        "watch_positive": [watch_one, watch_two],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
+
+    assert "### 第二批：继续跟踪" in rendered
+    assert "暂时没有更后排但仍值得单列的第二批补充标的" in rendered
+    assert "### 第二批：低门槛 / 观察替代" in rendered
 
 
 def test_render_stock_picks_detailed_downgrades_observe_only_title_and_history_heading() -> None:
@@ -518,6 +843,7 @@ def test_render_stock_picks_detailed_downgrades_observe_only_title_and_history_h
     assert "样本给的是边界，不是免确认通行证" in rendered
     assert "## 历史相似样本验证" not in rendered
     assert "#### 低门槛继续跟踪" in rendered
+    assert "## 观察名单复核卡" in rendered
     assert "## 代表样本复核卡" in rendered
 
 
@@ -582,9 +908,10 @@ def test_pick_client_safe_line_softens_internal_miss_diagnostics() -> None:
     assert _pick_client_safe_line("当前 前置事件先看 `主题事件：价格/排产验证`。。") == "当前更该前置的是 `主题事件：价格/排产验证`。"
     assert _pick_client_safe_line("美股开盘前观察") == "晚间外盘观察"
     assert _pick_client_safe_line("开盘前观察") == "盘前观察"
-    assert _pick_client_safe_line("竞价明显低开") == "开局明显低开"
-    assert _pick_client_safe_line("竞价高开且量比放大") == "开局高开且量比放大"
-    assert _pick_client_safe_line("龙虎榜/竞价/涨跌停边界") == "龙虎榜/开局结构/涨跌停边界"
+    assert _pick_client_safe_line("竞价明显低开") == "竞价明显低开"
+    assert _pick_client_safe_line("竞价高开且量比放大") == "竞价高开且量比放大"
+    assert _pick_client_safe_line("龙虎榜/竞价/涨跌停边界") == "龙虎榜/竞价/涨跌停边界"
+    assert _pick_client_safe_line("推荐理由优先按标准指数暴露理解。") == "推荐理由优先按标准指数暴露理解。"
 
 
 def test_render_stock_picks_detailed_leads_with_structured_event_coverage_explanation() -> None:
@@ -605,8 +932,7 @@ def test_render_stock_picks_detailed_leads_with_structured_event_coverage_explan
 
     rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
 
-    assert "当前证据更偏结构化事件与公告日历，不是直连情报催化型驱动。" in rendered
-    assert "0%` 只代表没命中高置信个股直连情报" in rendered
+    assert "当前证据更偏结构化事件与公告日历，不是直连情报催化型驱动；`0%` 只代表没命中高置信个股直连情报。" in rendered
 
 
 def test_render_stock_picks_detailed_marks_sector_filtered_scope_as_same_theme_ranking() -> None:
@@ -867,6 +1193,73 @@ def test_render_stock_picks_detailed_surfaces_market_event_rows_in_key_evidence(
     assert "信号类型：`卖方共识观察`" in rendered
 
 
+def test_render_stock_picks_detailed_surfaces_tdx_structure_in_key_evidence() -> None:
+    analysis = _sample_analysis("300308", "中际旭创", "cn_stock", rank=1)
+    analysis["trade_state"] = "观察为主"
+    analysis["narrative"]["judgment"] = {"state": "观察为主"}
+    analysis["market_event_rows"] = [
+        [
+            "2026-04-01",
+            "TDX 结构框架：中际旭创 通信设备 / 进攻 / CN（+3.60%）",
+            "TDX结构专题",
+            "高",
+            "通信设备",
+            "",
+            "标准结构归因",
+            "偏利多，`中际旭创` 的标准板块/风格/地区框架已可直接用来解释当前强弱。",
+        ]
+    ]
+    payload = {
+        "generated_at": "2026-04-03 10:00:00",
+        "day_theme": {"label": "算力"},
+        "regime": {"current_regime": "recovery"},
+        "market_label": "A股",
+        "top": [analysis],
+        "coverage_analyses": [analysis],
+        "watch_positive": [analysis],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
+    evidence_section = rendered.split("## 关键证据", 1)[1].split("\n## ", 1)[0]
+
+    assert "TDX 结构框架：中际旭创 通信设备 / 进攻 / CN（+3.60%）" in evidence_section
+    assert "信号类型：`标准结构归因`" in evidence_section
+
+
+def test_render_stock_picks_detailed_dedupes_shared_evidence_across_sections() -> None:
+    first = _sample_analysis("300274", "阳光电源", "cn_stock", rank=1)
+    second = _sample_analysis("300750", "宁德时代", "cn_stock", rank=1)
+    shared_evidence = [
+        {
+            "layer": "结构化事件",
+            "title": "AIDC细分黄金赛道，全球巨头订单积压至2030年！A股布局公司出炉",
+            "source": "同花顺",
+            "date": "2026-04-04",
+            "link": "https://example.com/aidc",
+        }
+    ]
+    first["dimensions"]["catalyst"]["evidence"] = list(shared_evidence)
+    second["dimensions"]["catalyst"]["evidence"] = list(shared_evidence)
+    first["trade_state"] = "观察为主"
+    second["trade_state"] = "观察为主"
+    first["narrative"]["judgment"] = {"state": "观察为主"}
+    second["narrative"]["judgment"] = {"state": "观察为主"}
+    payload = {
+        "generated_at": "2026-04-05 18:39:15",
+        "day_theme": {"label": "AIDC"},
+        "regime": {"current_regime": "recovery"},
+        "market_label": "A股",
+        "top": [first, second],
+        "coverage_analyses": [first, second],
+        "watch_positive": [first, second],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks_detailed(payload)
+
+    assert rendered.count("AIDC细分黄金赛道，全球巨头订单积压至2030年！A股布局公司出炉") == 3
+    assert "同类前置证据已在本报告前文共享区展示，这里不再重复展开。" in rendered
+
+
 def test_render_stock_picks_detailed_prioritizes_irm_and_broker_over_generic_framework_rows() -> None:
     analysis = _sample_analysis("603259", "药明康德", "cn_stock", rank=1)
     analysis["trade_state"] = "观察为主"
@@ -907,6 +1300,12 @@ def test_render_scan_has_reasoning_and_position_management() -> None:
         }
     ]
     rendered = ClientReportRenderer().render_scan(analysis)
+    assert "## 先看执行" in rendered
+    assert rendered.index("## 先看执行") < rendered.index("## 首页判断")
+    assert "| 看不看 | 小仓试仓；持有优于追高 |" in rendered
+    assert "| 怎么触发 |" in rendered
+    assert "| 多大仓位 | 首次建仓 ≤3% |" in rendered
+    assert "| 哪里止损 | 跌破关键支撑离场 |" in rendered
     assert "## 执行摘要" in rendered
     assert "| 当前建议 | 小仓试仓；持有优于追高 |" in rendered
     assert "| 空仓怎么做 |" in rendered
@@ -925,7 +1324,9 @@ def test_render_scan_has_reasoning_and_position_management() -> None:
     assert "先看动作和触发条件，再决定要不要给它执行优先级。" in rendered
     assert "| 适用时段 |" in rendered
     assert "| 建议买入区间 | 9.850 - 10.000 |" in rendered
-    assert "| 建议减仓区间 | 11.200 - 11.500 |" in rendered
+    assert "| 第一减仓位 | `11.200` 附近先兑现第一段反弹，别把第一波空间一次性坐回去。 |" in rendered
+    assert "| 第二减仓位 | 若放量站上 `11.200`，再看 `11.500` 一带是否做第二次减仓。 |" in rendered
+    assert "| 上修条件 | 只有放量站上 `11.500` 且催化、相对强弱和量能继续增强，才考虑把目标继续上修到 `先看前高`。 |" in rendered
     assert "## 仓位管理" in rendered
     assert "## 组合落单前" in rendered
     assert "portfolio whatif buy 561380" in rendered
@@ -1115,6 +1516,37 @@ def test_evidence_lines_surface_signal_type_and_strength() -> None:
     assert "信号类型：" in lines[0]
     assert "信号强弱：" in lines[0]
     assert "结论：" in lines[0]
+
+
+def test_evidence_lines_with_event_digest_dedupes_same_evidence_across_layer_aliases() -> None:
+    lines = _evidence_lines_with_event_digest(
+        [
+            {
+                "layer": "结构化事件",
+                "title": "紫金矿业 披露现金分红预案（每10股派现 0.38 元）",
+                "source": "Tushare dividend",
+                "date": "2026-03-21",
+                "link": "https://example.com/dividend",
+            }
+        ],
+        event_digest={
+            "items": [
+                {
+                    "layer": "公告",
+                    "title": "紫金矿业 披露现金分红预案（每10股派现 0.38 元）",
+                    "source": "Tushare dividend",
+                    "date": "2026-03-21",
+                    "link": "https://example.com/dividend",
+                }
+            ]
+        },
+        max_items=3,
+        as_of="2026-04-02 22:14:35",
+        symbol="601899",
+    )
+
+    assert len(lines) == 1
+    assert lines[0].count("紫金矿业 披露现金分红预案") == 1
 
 
 def test_evidence_lines_with_event_digest_filters_diagnostic_coverage_rows() -> None:
@@ -1332,8 +1764,9 @@ def test_render_scan_observe_trigger_uses_trading_language_template() -> None:
     analysis["action"]["target_ref"] = 8.52
     analysis["dimensions"]["relative_strength"]["score"] = 10
     rendered = ClientReportRenderer().render_scan(analysis)
-    assert "| 触发买点条件 | 先等补齐日线并确认 MA20 / MA60 拐头，再看相对强弱转正；触发前先别急着给精确买入价。 |" in rendered
-    assert "| 关键盯盘价位 | 下沿先看 `7.860` 上方能不能稳住；上沿先看 `8.520` 附近能不能放量突破。 |" in rendered
+    assert "| 怎么触发 | 先等补齐日线并确认 MA20 / MA60 拐头，再看相对强弱转正；触发前先别急着给精确买入价。 |" in rendered
+    assert "| 触发买点条件 | 先等补齐日线并确认 MA20 / MA60 拐头，再看相对强弱转正。 |" in rendered
+    assert "| 关键盯盘价位 | 下沿先看 `7.860` 上方企稳；上沿再看 `8.520` 附近能不能放量突破 |" in rendered
     assert "| 建议买入区间 |" not in rendered
 
 
@@ -1372,6 +1805,35 @@ def test_render_scan_softens_observe_only_topline_when_logic_still_survives() ->
     assert "`中期逻辑未坏，短线暂无信号。`" in rendered
     assert "**升级触发器：** 动能重启：MACD 金叉且收盘站回 MA20" in rendered
     assert "直接催化偏弱，舆情关注度尚可，因此当前更像静态博弈。" in rendered
+
+
+def test_render_scan_observe_compacts_disclosure_and_tightens_wording() -> None:
+    analysis = _sample_analysis("300274", "阳光电源", "cn_stock", rank=0)
+    analysis["rating"] = {"rank": 0, "label": "无信号", "stars": "—"}
+    analysis["action"]["direction"] = "观察为主"
+    analysis["action"]["position"] = "暂不出手"
+    analysis["notes"] = [
+        "财报窗口情报抓取存在降级，已按可用数据降级处理。",
+        "部分结构化源当前缺失，先把缺失披露放在后文。",
+    ]
+    rendered = ClientReportRenderer().render_scan(analysis)
+
+    def _section_bullets(markdown: str, heading: str) -> list[str]:
+        items: list[str] = []
+        inside = False
+        for raw in markdown.splitlines():
+            if raw.strip() == heading:
+                inside = True
+                continue
+            if inside and raw.startswith("## "):
+                break
+            if inside and raw.strip().startswith("- "):
+                items.append(raw.strip())
+        return items
+
+    assert len(_section_bullets(rendered, "## 数据限制与说明")) <= 1
+    assert "先按辅助线索看，不单独升级动作" not in rendered
+    assert "当前更像" not in rendered
 
 
 def test_render_scan_sanitizes_internal_miss_diagnostics_in_factor_rows() -> None:
@@ -1443,6 +1905,7 @@ def test_render_scan_etf_keeps_fund_profile_sections_when_profile_available() ->
     rendered = ClientReportRenderer().render_scan(analysis)
 
     assert "## 基金画像" in rendered
+    assert "## 基金经理风格分析" in rendered
     assert "### 资产配置" in rendered
     assert "### 前五大持仓" in rendered
     assert "### 行业暴露" in rendered
@@ -1753,6 +2216,34 @@ def test_fund_profile_sections_use_asset_allocation_field() -> None:
     assert "| 现金 | 1.10% |" in rendered
 
 
+def test_fund_profile_sections_render_fund_sales_ratio_snapshot() -> None:
+    analysis = _sample_analysis("022365", "永赢科技智选混合发起C", "cn_fund", rank=2)
+    analysis["fund_profile"] = {
+        "overview": {
+            "基金类型": "混合型-偏股",
+            "基金管理人": "永赢基金",
+            "基金经理人": "任桀",
+            "业绩比较基准": "中国战略新兴产业成份指数收益率*70%+恒生科技指数收益率*10%",
+        },
+        "sales_ratio_snapshot": {
+            "latest_year": "2025",
+            "lead_channel": "商业银行",
+            "summary": "2025年渠道保有结构：商业银行占比最高，约 41.20% 。",
+            "channel_mix": [
+                {"channel": "商业银行", "ratio": 41.2},
+                {"channel": "独立基金销售机构", "ratio": 28.5},
+            ],
+        },
+        "style": {},
+    }
+
+    rendered = "\n".join(_fund_profile_sections(analysis))
+    assert "### 公募渠道环境" in rendered
+    assert "| 统计年度 | 2025 |" in rendered
+    assert "| 商业银行 | 41.20% |" in rendered
+    assert "商业银行占比最高" in rendered
+
+
 def test_fund_profile_sections_render_etf_specific_rows() -> None:
     analysis = _sample_analysis("563360", "A500ETF华泰柏瑞", "cn_etf", rank=2)
     analysis["fund_profile"] = {
@@ -1816,6 +2307,28 @@ def test_fund_profile_sections_fill_etf_scale_estimate_and_single_day_snapshot_n
     assert "仅有单日快照，不能据此写成净创设/净赎回" in rendered
 
 
+def test_fund_profile_sections_fall_back_to_dimension_rows_for_etf_without_profile() -> None:
+    analysis = _sample_analysis("512400", "有色金属ETF", "cn_etf", rank=2)
+    analysis["fund_profile"] = {}
+    analysis["benchmark_name"] = "中证细分有色金属产业主题指数"
+    analysis["benchmark_symbol"] = "930632.CSI"
+    analysis["metadata"] = {
+        "tracked_index_name": "中证细分有色金属产业主题指数",
+        "tracked_index_symbol": "930632.CSI",
+    }
+    analysis["dimension_rows"] = [
+        ["跟踪指数技术状态", "趋势偏弱 / 动能偏弱（2026-04-16）", "先按指数主链理解当前节奏。"],
+        ["场内基金技术状态（ETF/基金专属）", "场内基金技术因子 趋势偏弱 / 动能偏弱（2026-04-16）", "产品层趋势和动能仍偏弱。"],
+    ]
+
+    rendered = "\n".join(_fund_profile_sections(analysis))
+
+    assert "### ETF专用信息" in rendered
+    assert "| 跟踪指数 | 中证细分有色金属产业主题指数 |" in rendered
+    assert "| 指数代码 | 930632.CSI |" in rendered
+    assert "| 场内基金技术状态 | 趋势偏弱 / 动能偏弱（2026-04-16） |" in rendered
+
+
 def test_render_scan_detailed_sanitizes_intraday_wording_inside_news_titles() -> None:
     analysis = _sample_analysis("159698", "粮食ETF", "cn_etf", rank=2)
     analysis["narrative"]["judgment"].update(
@@ -1862,7 +2375,7 @@ def test_render_scan_detailed_sanitizes_intraday_wording_inside_news_titles() ->
 
 
 def test_render_scan_detailed_trims_execution_template_for_observe_only() -> None:
-    analysis = _sample_analysis("512480", "半导体ETF", "cn_etf", rank=1)
+    analysis = _sample_analysis("300274", "阳光电源", "cn_stock", rank=1)
     analysis["rating"]["rank"] = 0
     analysis["dimensions"]["technical"]["score"] = 20
     analysis["dimensions"]["fundamental"]["score"] = 35
@@ -1904,11 +2417,30 @@ def test_render_scan_detailed_trims_execution_template_for_observe_only() -> Non
             "entry": "等 MA20/MA60 修复后再看",
             "position": "暂不出手",
             "scaling_plan": "确认后再考虑第二笔",
+            "stop_ref": 1.58,
             "target": "1.84",
+            "target_ref": 1.84,
             "trim_range": "1.73-1.84",
         }
     )
+    analysis["visuals"] = {"dashboard": "/tmp/dashboard.png"}
     rendered = ClientReportRenderer().render_scan_detailed(analysis)
+    assert "## 图表速览" in rendered
+    assert "![分析看板](/tmp/dashboard.png)" in rendered
+    assert "## 公司研究层判断" in rendered
+    assert rendered.index("## 公司研究层判断") < rendered.index("## 执行摘要")
+    assert "| 研究定位 | 这是观察 / 风控稿，重点先回答“现在能不能动”。 |" in rendered
+    assert "这里这档分数（`35/100`）更像“性价比一般”" in rendered
+    assert "### 基本面（当前位置/性价比） 35/100" in rendered
+    assert "| 多大仓位 |" in rendered
+    assert "没触发前 `0%`" in rendered
+    assert "`2% - 3%` 试错" in rendered
+    assert "最多加到 `5%` 观察仓" in rendered
+    assert "| 哪里止损 |" in rendered
+    assert "失效位先看 `1.580`" in rendered
+    assert "别把观察稿硬扛成持仓" in rendered
+    assert "关键位先看：" in rendered
+    assert "反弹再看 **1.73-1.84** 一带的承压" in rendered
     assert "| 建议买入区间 |" not in rendered
     assert "| 组合落单前 |" not in rendered
     assert "| 预演命令 |" not in rendered
@@ -1917,6 +2449,63 @@ def test_render_scan_detailed_trims_execution_template_for_observe_only() -> Non
     assert "| 适合谁 |" not in rendered
     assert "## 组合落单前" not in rendered
     assert "## 当前更合适的动作" not in rendered
+
+
+def test_render_scan_detailed_keeps_action_section_for_observe_only_etf() -> None:
+    analysis = _sample_analysis("512400", "有色ETF", "cn_etf", rank=1)
+    analysis["rating"]["rank"] = 0
+    analysis["dimensions"]["technical"]["score"] = 20
+    analysis["dimensions"]["fundamental"]["score"] = 35
+    analysis["dimensions"]["catalyst"]["score"] = 0
+    analysis["dimensions"]["relative_strength"]["score"] = 10
+    analysis["dimensions"]["risk"]["score"] = 25
+    analysis["narrative"]["judgment"].update(
+        {
+            "direction": "中性",
+            "cycle": "短期(1-4周)",
+            "odds": "低",
+            "state": "观察为主",
+        }
+    )
+    analysis["narrative"]["phase"] = {"label": "震荡整理", "body": "先观察节奏和确认，不急着升级动作。"}
+    analysis["narrative"]["drivers"] = {
+        "macro": "宏观仍偏中性。",
+        "flow": "资金承接一般。",
+        "relative": "相对强弱仍待改善。",
+        "technical": "技术结构仍偏修复。",
+    }
+    analysis["narrative"]["contradiction"] = "方向没完全走坏，但确认和催化还不够。"
+    analysis["narrative"]["positives"] = ["方向仍在。", "支撑没有明显失守。"]
+    analysis["narrative"]["cautions"] = ["追高盈亏比一般。", "短线催化不足。"]
+    analysis["narrative"]["watch_points"] = ["继续观察量价与催化是否同步改善。"]
+    analysis["narrative"]["scenarios"] = {"base": "先震荡修复。", "bull": "放量突破后升级。", "bear": "支撑失守后转弱。"}
+    analysis["narrative"]["playbook"] = {"trend": "等右侧确认。", "allocation": "先观察。", "defensive": "不急着抢。"}
+    analysis["narrative"]["summary_lines"] = ["今天更适合观察，不适合直接翻译成交易动作。"]
+    analysis["narrative"]["risk_points"] = {
+        "fundamental": "主题波动仍大。",
+        "valuation": "估值仍要消化。",
+        "crowding": "板块情绪可能反复。",
+        "external": "外部风险偏好变化会先影响它。",
+    }
+    analysis["action"].update(
+        {
+            "direction": "回避",
+            "entry": "等 MA20/MA60 修复后再看",
+            "position": "≤2% 轮动跟踪仓",
+            "scaling_plan": "确认后再考虑第二笔",
+            "buy_range": "6.20-6.35",
+            "trim_range": "6.90-7.20",
+        }
+    )
+    analysis["risks"] = []
+    rendered = ClientReportRenderer().render_scan_detailed(analysis)
+    assert "## 公司研究层判断" not in rendered
+    assert "## 当前更合适的动作" in rendered
+    assert "| 当前动作 | 观察为主（偏回避） |" in rendered
+    assert "关键观察位：回踩先看 `6.20-6.35` 一带的承接" in rendered
+    assert "若触发也只按 ≤2% 轮动跟踪仓" in rendered
+    assert "6.90" in rendered
+    assert "7.20" in rendered
 
 
 def test_render_scan_detailed_surfaces_catalyst_diagnosis_for_search_gap() -> None:
@@ -2196,6 +2785,43 @@ def test_render_scan_and_stock_analysis_surface_standard_industry_framework_rows
     assert "申万行业框架" in stock_analysis_rendered
 
 
+def test_render_scan_and_stock_analysis_surface_tdx_structure_rows() -> None:
+    analysis = _sample_analysis("300308", "中际旭创", "cn_stock", rank=2)
+    analysis["market_event_rows"] = [
+        [
+            "2026-04-01",
+            "TDX 结构框架：中际旭创 通信设备 / 进攻 / CN（+3.60%）",
+            "TDX结构专题",
+            "高",
+            "通信设备",
+            "",
+            "标准结构归因",
+            "偏利多，`中际旭创` 的标准板块/风格/地区框架已可直接用来解释当前强弱。",
+        ]
+    ]
+
+    scan_rendered = ClientReportRenderer().render_scan(analysis)
+    stock_analysis_rendered = ClientReportRenderer().render_stock_analysis(analysis)
+
+    assert "TDX 结构框架：中际旭创 通信设备 / 进攻 / CN（+3.60%）" in scan_rendered
+    assert "TDX结构专题" in scan_rendered
+    assert "标准结构归因" in scan_rendered
+    assert "TDX 结构框架：中际旭创 通信设备 / 进攻 / CN（+3.60%）" in stock_analysis_rendered
+    assert "TDX结构专题" in stock_analysis_rendered
+
+
+def test_render_scan_surfaces_second_stage_stock_signals_early() -> None:
+    analysis = _attach_second_stage_stock_signals(_sample_analysis("300502", "新易盛", "cn_stock", rank=3))
+
+    rendered = ClientReportRenderer().render_scan(analysis)
+
+    assert "技术层确认：趋势偏强 / 动能改善（2026-04-03）。" in rendered
+    assert "跨市场层确认：A/H 比价溢价 +18.20%（2026-04-03）。" in rendered
+    assert "转债层补充：新易转债 / 趋势偏强 / 动能改善 / 转股溢价 +9.80%。" in rendered
+    assert "调研层补充：机构调研：多家机构追问新品放量与订单兑现节奏；偏利多，机构关注点集中在订单兑现和景气延续。" in rendered
+    assert rendered.index("技术层确认：趋势偏强 / 动能改善（2026-04-03）。") < rendered.index("| 维度 | 分数 | 为什么是这个分 |")
+
+
 def test_render_stock_analysis_uses_stock_analysis_title() -> None:
     analysis = _sample_analysis("META", "Meta", "us", rank=3)
     rendered = ClientReportRenderer().render_stock_analysis(analysis)
@@ -2239,6 +2865,12 @@ def test_render_stock_analysis_detailed_uses_detailed_title() -> None:
     analysis["visuals"] = {"dashboard": "/tmp/dashboard.png"}
     rendered = ClientReportRenderer().render_stock_analysis_detailed(analysis)
     assert "# Meta (META) | 个股详细分析 | 2026-03-11" in rendered.splitlines()[0]
+    assert "## 先看执行" in rendered
+    assert rendered.index("## 先看执行") < rendered.index("## 首页判断")
+    assert "| 看不看 |" in rendered
+    assert "| 怎么触发 |" in rendered
+    assert "| 多大仓位 |" in rendered
+    assert "| 哪里止损 |" in rendered
     assert '<div class="report-page-break"></div>' in rendered
     assert rendered.index('<div class="report-page-break"></div>') < rendered.index("## 一句话结论")
     assert "## 图表速览" in rendered
@@ -2283,10 +2915,429 @@ def test_render_stock_analysis_detailed_keeps_action_section_for_observe_only() 
         "stop": "失守前低就继续当观察样本。",
         "position": "首次仓位先按观察仓理解。",
     }
+    analysis["visuals"] = {"dashboard": "/tmp/dashboard.png"}
     analysis["risks"] = []
     rendered = ClientReportRenderer().render_stock_analysis_detailed(analysis)
+    assert "## 先看执行" in rendered
+    assert "| 哪里建仓 |" in rendered
+    assert "| 多大仓位 |" in rendered
+    assert "没触发前 `0%`" in rendered
+    assert "`2% - 3%` 试错" in rendered
+    assert "最多加到 `5%` 观察仓" in rendered
+    assert "| 哪里止损 | 失守前低就继续当观察样本。 |" in rendered
+    assert "## 图表速览" in rendered
+    assert "![分析看板](/tmp/dashboard.png)" in rendered
     assert "## 当前更合适的动作" in rendered
     assert "观察为主" in rendered
+
+
+def test_render_stock_analysis_detailed_keeps_intraday_snapshot_visible() -> None:
+    analysis = _sample_analysis("600584", "长电科技", "cn_stock", rank=1)
+    analysis["narrative"] = {
+        "headline": "短线先看确认。",
+        "judgment": {"state": "观察为主", "direction": "中性偏多", "cycle": "观察期", "odds": "一般"},
+        "phase": {"label": "修复观察", "body": "还没完成右侧确认。"},
+        "drivers": {"macro": "中性", "flow": "待确认", "relative": "改善", "technical": "待确认"},
+        "contradiction": "盘中不弱，但正式动作仍要等触发。",
+        "positives": ["盘中承接不弱。"],
+        "cautions": ["证据硬度仍低。"],
+        "watch_points": ["看近端压力。"],
+        "scenarios": {"base": "观察", "bull": "突破", "bear": "失守"},
+        "playbook": {"trend": "右侧", "allocation": "小仓", "defensive": "失守重评"},
+        "summary_lines": ["先看确认。"],
+        "risk_points": {"fundamental": "待确认", "valuation": "不低", "crowding": "未知", "external": "扰动"},
+    }
+    analysis["intraday"] = {
+        "enabled": True,
+        "current": 43.73,
+        "open": 43.60,
+        "high": 44.02,
+        "low": 43.20,
+        "prev_close": 43.59,
+        "vwap": 43.644,
+        "range_position": 0.65,
+        "change_vs_prev_close": 0.0032,
+        "change_vs_open": 0.0030,
+        "trend": "偏强",
+        "snapshot_time": pd.Timestamp("2026-04-16 14:59:00"),
+        "updated_at": pd.Timestamp("2026-04-16 14:59:00"),
+        "auction_gap": 0.001,
+        "auction_amount": 114122853.0,
+        "auction_volume_ratio": 1.35,
+        "commentary": "盘中价格站上 VWAP 且处于日内高位区域，更接近强势承接。",
+        "auction_commentary": "集合竞价没有出现特别强的方向性信号，更适合等开盘后确认。",
+    }
+    analysis["risks"] = []
+
+    rendered = ClientReportRenderer().render_stock_analysis_detailed(analysis)
+
+    assert "## 今日盘中视角" in rendered
+    assert rendered.index("## 今日盘中视角") < rendered.index('<div class="report-page-break"></div>')
+    assert "| 当前价 | 43.730 |" in rendered
+    assert "| VWAP | 43.644 |" in rendered
+    assert "| 竞价成交 | 114122853 |" in rendered
+    assert "| 竞价量能 | 1.35x |" in rendered
+    assert "集合竞价没有出现特别强的方向性信号" in rendered
+    assert "| 分钟级快照 as_of | 2026-04-16 14:59 |" in rendered
+    assert "分钟级盘口未启用" not in rendered.split("## 先看执行", 1)[1].split("## 首页判断", 1)[0]
+
+
+def test_render_stock_analysis_detailed_observe_prefers_near_pressure_over_far_target() -> None:
+    analysis = _sample_analysis("600584", "长电科技", "cn_stock", rank=1)
+    analysis["metrics"] = {"last_close": 43.73}
+    analysis["narrative"] = {
+        "headline": "长电科技中期逻辑没死，但短线还没完成确认。",
+        "judgment": {
+            "direction": "中性偏多",
+            "cycle": "波段",
+            "odds": "一般",
+            "state": "观察为主",
+        },
+        "phase": {"label": "修复观察", "body": "价格和催化还没重新站到一边。"},
+        "drivers": {
+            "macro": "宏观不是一阶变量。",
+            "flow": "资金承接仍待确认。",
+            "relative": "相对强弱仍在。",
+            "technical": "技术还没走成右侧确认。",
+        },
+        "contradiction": "赛道没坏，但载体和执行确认还没补齐。",
+        "positives": ["半导体方向没坏。"],
+        "cautions": ["短线确认还不够。"],
+        "watch_points": ["先看近端压力能否被消化。"],
+        "scenarios": {"base": "继续震荡确认。", "bull": "突破后升级。", "bear": "失守后转弱。"},
+        "playbook": {"trend": "先等右侧。", "allocation": "先按观察仓。", "defensive": "失守就先处理。"},
+        "summary_lines": ["先看确认，不直接翻译成交易动作。"],
+        "risk_points": {
+            "fundamental": "估值和盈利质量还要继续消化。",
+            "valuation": "当前位置不算便宜。",
+            "crowding": "板块资金会反复。",
+            "external": "外部风险偏好变化仍会先影响它。",
+        },
+    }
+    analysis["action"].update(
+        {
+            "direction": "等右侧确认（偏回避）",
+            "entry": "技术结构偏弱，等 MA20 / MA60 方向向上拐头后再考虑介入时机",
+            "buy_range": "",
+            "position": "≤2% 观察仓",
+            "scaling_plan": "确认后再考虑第二笔",
+            "stop": "跌破 40.767 或主线/催化失效时重新评估",
+            "stop_ref": 40.767,
+            "target": "先看前高/近60日高点",
+            "target_ref": 54.630,
+            "trim_range": "52.991 - 56.269",
+        }
+    )
+    analysis["dimensions"]["catalyst"]["score"] = 0
+    analysis["dimensions"]["catalyst"]["coverage"] = {
+        "degraded": True,
+        "diagnosis": "theme_only_live",
+        "news_mode": "proxy",
+    }
+    analysis["signal_confidence"].update(
+        {
+            "sample_count": 19,
+            "non_overlapping_count": 19,
+            "win_rate_20d": 0.47,
+            "confidence_label": "低",
+            "confidence_score": 40,
+        }
+    )
+    analysis["dimensions"]["relative_strength"]["summary"] = "相对强弱有改善，但行业宽度/龙头确认仍缺失，按低置信代理理解。"
+    analysis["dimensions"]["chips"]["summary"] = "个股级资金承接仍是行业代理，筹码确认缺失。"
+    analysis["risks"] = []
+    analysis["dimensions"]["technical"]["factors"].extend(
+        [
+            {
+                "name": "股票技术面状态",
+                "signal": "stk_factor_pro 缺失",
+                "detail": "Tushare stk_factor_pro 当前未返回可用股票技术因子；不把空结果写成今天趋势已确认。",
+                "display_score": "信息项",
+                "factor_id": "j1_stk_factor_pro",
+            },
+            {
+                "name": "压力位",
+                "signal": "上方存在近端压力：近20日高点 45.170（上方 3.3%）",
+                "detail": "上方近端压力会直接影响反弹空间和加速概率；先确认承压位能不能被有效消化。",
+                "display_score": "-5/10",
+                "factor_id": "j1_resistance_zone",
+            },
+            {
+                "name": "均线",
+                "signal": "MA5 43.506 / MA20 40.972 / MA60 45.008",
+                "detail": "多头排列代表中期趋势向上",
+                "display_score": "0/10",
+            },
+        ]
+    )
+
+    rendered = ClientReportRenderer().render_stock_analysis_detailed(analysis)
+    first_screen = rendered.split("## 先看执行", 1)[1].split("## 首页判断", 1)[0]
+
+    assert "| 怎么触发 |" in first_screen
+    assert "`45.170`" in first_screen
+    assert "不是第一笔必要条件" in first_screen
+    assert "MA20 / MA60 向上拐头" not in first_screen
+    assert "| 哪里建仓 | 先看 `MA20 40.972` 一带回踩承接；若回踩更深，再看 `40.767` 上方能否止跌。 |" in first_screen
+    assert "| 哪里止损 | 跌破 40.767 或主线/催化失效时重新评估 |" in first_screen
+    assert "| 证据硬度 |" in first_screen
+    assert "样本置信度 `低`（40/100）、非重叠样本 19 个、20日胜率约 47%" in first_screen
+    assert "不是这次结论的总把握" in first_screen
+    assert "行业/板块代理" in first_screen
+    assert "| 还差什么 |" in first_screen
+    assert "分钟级盘口未启用" in first_screen
+    assert "实时情报仍是 `proxy`" in first_screen
+    assert "stk_factor_pro 未命中 fresh" in first_screen
+    assert "行业宽度 / 龙头确认未补齐" in first_screen
+    assert "个股级资金/筹码确认仍不足" in first_screen
+    assert "`54.630`" not in first_screen
+    assert "等 MA20 / MA60 方向向上拐头" not in rendered
+    assert "## 执行拆解" in rendered
+    assert "| 怎么用这段 | 上面的 `先看执行` 已经给了触发、建仓、仓位和止损；这里不重复参数，只补三种打法。 |" in rendered
+    assert "| 短线打法 | 只做右侧：先看 `45.170` 近端压力能否放量站上并回踩不破；MA20 / MA60 只做波段或中线确认，不是第一笔硬门槛；失败或失守 `40.767` 就继续观察。 |" in rendered
+    assert "| 波段打法 | 更适合等 `MA20 40.972` 一带企稳再分批；有效跌破 `40.767` 先认错。 |" in rendered
+    assert "| 中线打法 | 现在先不急着按中线仓做；至少要等 `45.170` / `MA60 45.008` 这一带真正站稳，并补到新增公司级催化，再考虑升级。 |" in rendered
+    assert rendered.count("| 证据硬度 |") == 1
+    assert rendered.count("| 还差什么 |") == 1
+    assert rendered.count("| 哪里建仓 |") == 1
+    assert "| 仓位节奏 |" not in rendered
+    assert "这几个词怎么读" in rendered
+    assert "`样本置信度` 看的是历史上类似图形靠不靠谱" in rendered
+
+
+def test_render_stock_analysis_detailed_tightens_observe_homepage_after_prepend() -> None:
+    analysis = _sample_analysis("600313", "农发种业", "cn_stock", rank=1)
+    analysis["narrative"] = {
+        "headline": "底层逻辑还在，但当前更适合继续观察。",
+        "judgment": {
+            "direction": "中性偏多",
+            "cycle": "中线",
+            "odds": "一般",
+            "state": "观察为主",
+        },
+        "phase": {"label": "修复早期", "body": "还没到可以直接升级动作的阶段。"},
+        "drivers": {
+            "macro": "宏观不逆风。",
+            "flow": "资金还在观察。",
+            "relative": "相对强弱尚未恢复。",
+            "technical": "技术确认还不够。",
+        },
+        "contradiction": "逻辑还在，但价格和动量还没翻译成买点。",
+        "positives": ["基本面没坏。"],
+        "cautions": ["技术确认不足。"],
+        "watch_points": ["先看是否站回关键均线。"],
+        "scenarios": {"base": "继续震荡观察。", "bull": "确认后再升级。", "bear": "失守后继续降级。"},
+        "playbook": {"trend": "先观察。", "allocation": "先按观察仓。", "defensive": "失守再降级。"},
+        "summary_lines": ["今天没有有效动作信号。"],
+        "risk_points": {
+            "fundamental": "暂无新的基本面恶化。",
+            "valuation": "估值还要等景气确认。",
+            "crowding": "暂未出现极端拥挤。",
+            "external": "外部风险偏好变化仍会干扰。",
+        },
+    }
+    analysis["action"] = {
+        "direction": "观察为主",
+        "timeframe": "中线",
+        "entry": "等站回 MA20 后再决定是否给买入区间。",
+        "stop": "失守前低就继续当观察样本。",
+        "position": "首次仓位先按观察仓理解。",
+    }
+    analysis["risks"] = []
+    rendered = ClientReportRenderer().render_stock_analysis_detailed(analysis)
+    homepage = rendered.split('<div class="report-page-break"></div>', 1)[0]
+    hedge_total = sum(homepage.count(token) for token in ("不把", "不等于", "当前更像", "先按"))
+
+    assert hedge_total <= 1
+
+
+def test_stock_observe_helpers_accept_t1_direct_layers_without_gap(monkeypatch) -> None:
+    analysis = _sample_analysis("600584", "长电科技", "cn_stock", rank=1)
+    analysis["intraday"] = {"enabled": True, "fallback_mode": False}
+    monkeypatch.setattr(
+        client_report_module,
+        "build_analysis_provenance",
+        lambda analysis: {"intraday_as_of": "2026-04-16 15:00", "news_mode": "live"},  # noqa: ARG005
+    )
+    analysis["dimensions"]["relative_strength"] = {
+        "score": 75,
+        "max_score": 100,
+        "summary": "轮动已经轮到它，具备主线扩散条件。",
+        "factors": [
+            {"name": "板块扩散", "signal": "板块涨跌幅 +1.87%", "detail": "行业级代理", "display_score": "25/25"},
+            {"name": "行业宽度", "signal": "行业上涨家数比例 100%", "detail": "集成电路封测 上涨家数 13/13，扩散比例 100%；领涨股 汇成股份 +7.04%", "display_score": "15/15"},
+            {"name": "龙头确认", "signal": "龙头方向与板块一致，扩散结构健康", "detail": "行业龙头结构已命中。", "display_score": "10/10"},
+        ],
+    }
+    analysis["dimensions"]["chips"] = {
+        "score": 48,
+        "max_score": 100,
+        "summary": "真实筹码分布偏谨慎：平均成本或上方套牢盘压力还没完全消化，当前更像先磨筹码。",
+        "factors": [
+            {
+                "name": "机构资金承接",
+                "signal": "上一交易日个股主力净流入 5049.45万 / 近 5 日累计 1.55亿（T+1 直连）",
+                "detail": "个股主力资金最新停在 2026-04-15（上一交易日，T+1 直连）；当日先看概念代理。",
+                "display_score": "12/12",
+            },
+            {
+                "name": "平均成本位置",
+                "signal": "现价相对加权平均成本 +1.6%（均价约 43.06 元）（上一交易日 T+1 直连）",
+                "detail": "当前筹码快照来自上一交易日直连数据，能回答成本区和套牢盘。",
+                "display_score": "6/12",
+            },
+            {
+                "name": "套牢盘压力",
+                "signal": "现价上方筹码约 47.8%（上一交易日 T+1 直连）",
+                "detail": "当前筹码快照来自上一交易日直连数据，能回答成本区和套牢盘。",
+                "display_score": "-4/12",
+            },
+        ],
+    }
+
+    assert _stock_observe_data_gap_text(analysis) == ""
+    hardness = _stock_observe_evidence_hardness_text(analysis)
+    assert "关键直连证据已经补到" in hardness
+    assert "行业宽度/龙头确认" in hardness
+    assert "上一交易日直连数据" in hardness
+
+
+def test_render_stock_analysis_detailed_uses_stock_specific_what_changed_contract() -> None:
+    analysis = _sample_analysis("600313", "农发种业", "cn_stock", rank=1)
+    analysis["narrative"] = {
+        "headline": "底层逻辑还在，但当前更适合继续观察。",
+        "judgment": {
+            "direction": "中性偏多",
+            "cycle": "中线",
+            "odds": "一般",
+            "state": "观察为主",
+        },
+        "phase": {"label": "修复早期", "body": "还没到可以直接升级动作的阶段。"},
+        "drivers": {
+            "macro": "宏观不逆风。",
+            "flow": "资金还在观察。",
+            "relative": "相对强弱尚未恢复。",
+            "technical": "技术确认还不够。",
+        },
+        "contradiction": "逻辑还在，但价格和动量还没翻译成买点。",
+        "positives": ["基本面没坏。"],
+        "cautions": ["技术确认不足。"],
+        "watch_points": ["先看是否站回关键均线。"],
+        "scenarios": {"base": "继续震荡观察。", "bull": "确认后再升级。", "bear": "失守后继续降级。"},
+        "playbook": {"trend": "先观察。", "allocation": "先按观察仓。", "defensive": "失守再降级。"},
+        "summary_lines": ["今天没有有效动作信号。"],
+        "risk_points": {
+            "fundamental": "暂无新的基本面恶化。",
+            "valuation": "估值还要等景气确认。",
+            "crowding": "暂未出现极端拥挤。",
+            "external": "外部风险偏好变化仍会干扰。",
+        },
+    }
+    analysis["action"]["direction"] = "观察为主"
+    analysis["risks"] = []
+    original_builder = client_report_module.build_stock_analysis_editor_packet
+
+    def _patched_builder(payload: dict) -> dict:
+        packet = original_builder(payload)
+        packet["what_changed"] = {
+            "previous_view": "上次按旧事件基线理解。",
+            "change_summary": "这次主要是延续确认，不是改写 thesis。",
+            "current_event_understanding": "公告类型：一般公告；更直接影响 `盈利 / 估值`；当前更像 `历史基线`",
+            "conclusion_label": "维持",
+            "current_view": "观察为主 / 回避 / 半导体",
+            "state_trigger": "事件延续确认",
+            "state_summary": "当前 thesis 仍处在已消化后的延续确认阶段，先按维持处理。",
+        }
+        return packet
+
+    client_report_module.build_stock_analysis_editor_packet = _patched_builder
+    try:
+        rendered = ClientReportRenderer().render_stock_analysis_detailed(analysis)
+    finally:
+        client_report_module.build_stock_analysis_editor_packet = original_builder
+
+    assert "## What Changed" in rendered
+    assert "触发：事件延续确认" in rendered
+    assert "状态解释：当前 thesis 仍处在已消化后的延续确认阶段，先按维持处理。" in rendered
+
+
+def test_render_stock_analysis_detailed_adds_company_research_layer_for_observe_stock() -> None:
+    analysis = _sample_analysis("600584", "长电科技", "cn_stock", rank=1)
+    analysis["metadata"] = {"sector": "半导体"}
+    analysis["narrative"] = {
+        "headline": "逻辑还在，但当前更适合继续观察。",
+        "judgment": {
+            "direction": "中性",
+            "cycle": "中线",
+            "odds": "一般",
+            "state": "观察为主",
+        },
+        "phase": {"label": "等待确认", "body": "逻辑未破，但价格和催化还没形成新共振。"},
+        "drivers": {
+            "macro": "宏观不逆风。",
+            "flow": "资金承接仍偏弱。",
+            "relative": "相对强弱有改善，但还不够典型。",
+            "technical": "技术确认还不够。",
+        },
+        "contradiction": "逻辑没坏，但确认还没补齐。",
+        "positives": ["赛道方向仍能继续跟踪。"],
+        "cautions": ["估值和性价比不算舒服。"],
+        "watch_points": ["先看放量过压力，再看回踩承接。"],
+        "scenarios": {"base": "继续观察。", "bull": "确认后再升级。", "bear": "跌破关键位后降级。"},
+        "playbook": {"trend": "等确认。", "allocation": "观察名单。", "defensive": "失效就重评。"},
+        "summary_lines": ["今天先不升级动作。"],
+        "risk_points": {
+            "fundamental": "盈利和现金流还要继续验证。",
+            "valuation": "估值不便宜。",
+            "crowding": "主线分化时波动会放大。",
+            "external": "外部风险偏好变化仍会干扰。",
+        },
+    }
+    analysis["action"] = {
+        "direction": "观察为主",
+        "timeframe": "中线",
+        "entry": "等放量站上压力位后再决定是否给买入区间。",
+        "stop": "跌破关键支撑就重评。",
+        "position": "暂不出手",
+    }
+    analysis["dimensions"]["fundamental"] = {
+        "score": 0,
+        "max_score": 100,
+        "core_signal": "估值不便宜",
+        "summary": "当前估值不便宜，且财务质量安全边际不够厚。",
+        "factors": [
+            {"name": "个股估值", "signal": "长电科技 PE 49.8x", "detail": "按绝对估值看并不便宜", "display_score": "0/25"},
+            {"name": "现金流质量", "signal": "每股经营现金流 -2.11", "detail": "盈利现金含量偏弱", "display_score": "-6/10"},
+        ],
+    }
+    analysis["dimensions"]["technical"]["summary"] = "技术结构仍偏弱，暂不支持激进介入。"
+    analysis["dimensions"]["catalyst"]["summary"] = "结构化事件已出现，但公司级验证还不够完整。"
+    analysis["dimensions"]["relative_strength"]["summary"] = "相对强弱有改善，但还不是最典型的扩散点。"
+    analysis["dimensions"]["risk"]["summary"] = "风险和估值都不算轻松，仍要留足安全边际。"
+    analysis["risks"] = []
+
+    rendered = ClientReportRenderer().render_stock_analysis_detailed(analysis)
+
+    assert "## 公司研究层判断" in rendered
+    assert rendered.index("## 公司研究层判断") < rendered.index("## 执行摘要")
+    assert "| 研究定位 | 这是“研究可以继续跟、交易还要等确认”的过渡稿。 |" in rendered
+    assert "不代表公司价值归零" in rendered
+
+
+def test_tighten_observe_client_markdown_reduces_template_hedge_density() -> None:
+    text = """
+- 先按观察稿处理，不把旧闻直接当成新增催化。
+- 当前更像等待确认，不等于逻辑失效。
+- 先按观察仓理解，不把它升级成动作。
+- 当前更像在修复段，先按辅助线索看。
+""".strip()
+
+    tightened = _tighten_observe_client_markdown(text)
+    hedge_total = sum(tightened.count(token) for token in ("不把", "不等于", "当前更像", "先按"))
+
+    assert hedge_total <= 1
+    assert "别把旧闻直接当成新增催化" in tightened
+    assert "不代表逻辑失效" in tightened
 
 
 def test_render_scan_summary_rows_compact_observe_and_avoid_separate_hard_bias_row() -> None:
@@ -2539,7 +3590,9 @@ def test_render_fund_pick_has_alternatives() -> None:
     assert "| 配置视角 | 如果按配置视角理解，更适合作为中期主题暴露分批持有，不适合一次打满。 |" in rendered
     assert "| 交易视角 | 如果按交易视角理解，更适合等回踩承接后的再确认，不必天天换仓。 |" in rendered
     assert "| 建议买入区间 | 1.960 - 2.010 |" in rendered
-    assert "| 建议减仓区间 | 2.180 - 2.240 |" in rendered
+    assert "| 第一减仓位 | `2.180` 附近先兑现第一段反弹，不把第一波空间一次性坐回去。 |" in rendered
+    assert "| 第二减仓位 | 若放量站上 `2.180`，再看 `2.240` 一带是否做第二次减仓。 |" in rendered
+    assert "| 上修条件 | 只有放量站上 `2.240` 且催化、相对强弱和量能继续增强，才考虑继续上修。 |" in rendered
     assert "| 预演命令 | `portfolio whatif buy 021740 最新净值 计划金额` |" in rendered
     assert "## 组合落单前" in rendered
     assert "## 与现有持仓的关系" in rendered
@@ -2559,6 +3612,98 @@ def test_render_fund_pick_has_alternatives() -> None:
     assert "为什么不是另外几只" in rendered
     assert "## 关键强因子拆解" in rendered
     assert "风格漂移评估（ETF/基金专属）" in rendered
+
+
+def test_render_fund_pick_surfaces_second_stage_tushare_signals_in_front_reason() -> None:
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "selection_context": {
+            "delivery_tier_label": "标准推荐稿",
+            "delivery_observe_only": False,
+        },
+        "winner": {
+            "name": "前海开源黄金ETF联接C",
+            "symbol": "021740",
+            "asset_type": "cn_fund",
+            "trade_state": "持有优于追高",
+            "positives": ["方向对。"],
+            "dimension_rows": [["产品质量/基本面代理", "61/100", "当前更多是产品结构和主题代理判断"]],
+            "dimensions": {
+                "fundamental": {
+                    "factors": [
+                        {
+                            "name": "现货锚定",
+                            "signal": "Au99.99 现货锚定已接入",
+                            "detail": "这里只用来确认产品贴近黄金现货链条。",
+                            "display_score": "10/10",
+                            "awarded": 10,
+                            "max": 10,
+                            "factor_id": "j5_gold_spot_anchor",
+                        }
+                    ]
+                }
+            },
+            "action": {
+                "direction": "继续持有",
+                "horizon": {"label": "中线配置（1-3月）"},
+            },
+            "narrative": {"playbook": {}},
+            "fund_profile": {
+                "sales_ratio_snapshot": {
+                    "latest_year": "2025",
+                    "lead_channel": "商业银行",
+                    "channel_mix": [{"channel": "商业银行", "ratio": 41.2}],
+                    "summary": "渠道保有以银行代销为主，更像稳健配置资金在主导。",
+                }
+            },
+        },
+        "alternatives": [],
+    }
+
+    rendered = ClientReportRenderer().render_fund_pick(payload)
+
+    assert "## 为什么推荐它" in rendered
+    assert "渠道层确认：2025 / 商业银行 / 41.20%；渠道保有以银行代销为主，更像稳健配置资金在主导。" in rendered
+    assert "现货链确认：Au99.99 现货锚定已接入。" in rendered
+
+
+def test_render_etf_pick_why_not_section_lists_folded_formal_alternatives() -> None:
+    winner = _sample_analysis("159870", "化工ETF", "cn_etf", rank=3)
+    winner["trade_state"] = "持有优于追高"
+    winner["action"]["direction"] = "观望偏多"
+    winner["positioning_lines"] = ["先小仓。"]
+    winner["fund_sections"] = []
+    winner["taxonomy_rows"] = [["产品形态", "ETF"]]
+    winner["taxonomy_summary"] = "ETF / 场内ETF / 被动跟踪"
+    winner["visuals"] = {}
+
+    payload = {
+        "generated_at": "2026-04-08 13:05:47",
+        "selection_context": {
+            "delivery_tier_label": "标准推荐稿",
+            "delivery_observe_only": False,
+            "delivery_summary_only": False,
+        },
+        "recommendation_tracks": {
+            "short_term": {"name": "化工ETF", "symbol": "159870", "horizon_label": "波段跟踪（2-6周）", "reason": "趋势和产品承接都在。"},
+            "medium_term": {"name": "港股创新药ETF", "symbol": "159570", "horizon_label": "波段跟踪（2-6周）", "reason": "相对强弱和主题延续还在。"},
+            "third_term": {"name": "红利低波", "symbol": "512890", "horizon_label": "中线配置（1-3月）", "reason": "防守收益比仍有价值。"},
+        },
+        "winner": winner,
+        "alternatives": [
+            {"name": "港股创新药ETF", "symbol": "159570", "cautions": ["不是被排除对象。"]},
+            {"name": "红利低波", "symbol": "512890", "cautions": ["不是被排除对象。"]},
+        ],
+        "regime": {"current_regime": "recovery"},
+        "day_theme": {"label": "背景宏观主导"},
+    }
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    assert "## 为什么不是另外几只" in rendered
+    assert "其余高分候选已并入上面的正式推荐层" in rendered
+    assert "港股创新药ETF (159570)" in rendered
+    assert "红利低波 (512890)" in rendered
 
 
 def test_render_stock_picks_exec_summary_surfaces_theme_boundary() -> None:
@@ -2599,6 +3744,75 @@ def test_render_stock_picks_body_section_surfaces_theme_boundary_explainer() -> 
     rendered = ClientReportRenderer().render_stock_picks(payload)
 
     assert "主题边界：" in rendered
+
+
+def test_render_stock_picks_body_section_avoids_repeating_trading_role_boilerplate(monkeypatch) -> None:
+    analyses = [
+        _sample_analysis("600001", "观察票A", "cn_stock", rank=2),
+        _sample_analysis("600002", "观察票B", "cn_stock", rank=2),
+        _sample_analysis("600003", "观察票C", "cn_stock", rank=2),
+    ]
+
+    def _fake_packet(*_args, **_kwargs):
+        return {
+            "theme_playbook": {
+                "playbook_level": "sector",
+                "label": "工业",
+                "trading_role_label": "轮动",
+                "trading_position_label": "轮动仓",
+                "trading_role_summary": "这条线更像轮动方向，执行上更适合低吸、分批和冲高处理，不宜直接包装成长时间主攻仓。",
+            }
+        }
+
+    monkeypatch.setattr(client_report_module, "build_scan_editor_packet", _fake_packet)
+
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "day_theme": {"label": "工业轮动"},
+        "regime": {"current_regime": "recovery"},
+        "top": analyses,
+        "watch_positive": [],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks(payload)
+
+    assert "主题边界：" in rendered
+    assert "交易分层：`轮动` / `轮动仓`" not in rendered
+
+
+def test_render_stock_picks_body_section_surfaces_second_stage_stock_signals() -> None:
+    analysis = _attach_second_stage_stock_signals(_sample_analysis("300502", "新易盛", "cn_stock", rank=3))
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "day_theme": {"label": "AI算力"},
+        "regime": {"current_regime": "recovery"},
+        "top": [analysis],
+        "watch_positive": [],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks(payload)
+
+    assert "技术层确认：趋势偏强 / 动能改善（2026-04-03）。" in rendered
+    assert "跨市场层确认：A/H 比价溢价 +18.20%（2026-04-03）。" in rendered
+    assert "转债层补充：新易转债 / 趋势偏强 / 动能改善 / 转股溢价 +9.80%。" in rendered
+    assert "调研层补充：机构调研：多家机构追问新品放量与订单兑现节奏；偏利多，机构关注点集中在订单兑现和景气延续。" in rendered
+
+
+def test_render_stock_picks_does_not_pull_etf_proxy_from_unselected_coverage_pool() -> None:
+    lead = _sample_analysis("600030", "中信证券", "cn_stock", rank=3)
+    ai_coverage = _sample_analysis("300999", "人工智能龙头", "cn_stock", rank=3)
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "day_theme": {"label": "高股息 / 红利"},
+        "regime": {"current_regime": "deflation"},
+        "top": [lead],
+        "coverage_analyses": [lead, ai_coverage],
+        "watch_positive": [],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks(payload)
+
+    assert "人工智能ETF" not in rendered
 
 
 def test_render_stock_picks_include_what_changed_section(monkeypatch) -> None:
@@ -2682,8 +3896,8 @@ def test_render_fund_pick_summary_only_skips_full_action_template() -> None:
     assert "## 升级条件" in rendered
     assert "- 升级条件：" in rendered
     assert "## 当前只看什么" in rendered
-    assert "| 触发买点条件 | 等覆盖率恢复后再看；触发前先别急着给精确买入价。 |" in rendered
-    assert "| 关键盯盘价位 | 下沿先看 `1.880` 上方能不能稳住；上沿先看 `2.060` 附近能不能放量突破。 |" in rendered
+    assert "| 触发条件 | 等覆盖率恢复后再看；触发前先别急着给精确买入价。 |" in rendered
+    assert "| 先看什么 | 下沿先看 `1.880` 上方能不能稳住；上沿先看 `2.060` 附近能不能放量突破。 |" in rendered
     assert "## 标准化分类" in rendered
     assert "## 关键证据" in rendered
     assert "## 为什么不是另外几只" in rendered
@@ -2723,8 +3937,82 @@ def test_render_fund_pick_observe_only_full_template_prepends_homepage() -> None
 
     rendered = ClientReportRenderer().render_fund_pick(payload)
 
+    assert "## 先看执行" in rendered
+    assert rendered.index("## 先看执行") < rendered.index("## 首页判断")
+    assert "| 看不看 | 观察为主 |" in rendered
+    assert "| 怎么触发 |" in rendered
+    assert "等技术确认和相对强弱一起改善后再决定是否给买入区间" in rendered
+    assert "| 多大仓位 | 先按观察仓 / 暂不出手 |" in rendered
+    assert "| 哪里止损 | 关键支撑失效就重评，不先给机械止损位。 |" in rendered
     assert "## 首页判断" in rendered
     assert "### 动作建议与结论" in rendered
+    assert "## 执行摘要" in rendered
+
+
+def test_render_fund_pick_skips_index_horizon_for_active_fund() -> None:
+    payload = {
+        "generated_at": "2026-04-05 10:00:00",
+        "selection_context": {
+            "delivery_tier_label": "观察优先稿",
+            "delivery_observe_only": True,
+            "delivery_summary_only": False,
+        },
+        "winner": {
+            "name": "永赢科技智选混合发起C",
+            "symbol": "022365",
+            "asset_type": "cn_fund",
+            "trade_state": "观察为主",
+            "positives": ["经理和风格暴露仍可跟踪。"],
+            "metadata": {"fund_management_style": "主动管理"},
+            "fund_profile": {
+                "overview": {
+                    "基金类型": "混合型-偏股",
+                    "业绩比较基准": "中国战略新兴产业成份指数收益率",
+                },
+                "style": {
+                    "tags": ["科技主题"],
+                    "taxonomy": {"management_style": "主动管理"},
+                },
+            },
+            "dimension_rows": [["技术面", "24/100", "技术确认还不够"]],
+            "action": {
+                "direction": "观察为主",
+                "horizon": {"label": "观察期"},
+                "entry": "等技术确认和持仓线索一起改善。",
+            },
+            "narrative": {
+                "headline": "先看经理和风格暴露，不按指数主线理解。",
+                "judgment": {"state": "观察为主"},
+                "phase": {"label": "修复早期"},
+                "playbook": {},
+            },
+            "index_topic_bundle": {
+                "history_snapshots": {
+                    "weekly": {
+                        "status": "matched",
+                        "summary": "近 156周 +12.00%，最近一周 +1.10%，修复中，动能改善",
+                        "trend_label": "修复中",
+                        "momentum_label": "动能改善",
+                        "latest_date": "2026-04-03",
+                    },
+                    "monthly": {
+                        "status": "matched",
+                        "summary": "近 36月 +18.00%，最近一月 +4.20%，趋势偏强，动能偏强",
+                        "trend_label": "趋势偏强",
+                        "momentum_label": "动能偏强",
+                        "latest_date": "2026-04-03",
+                    },
+                }
+            },
+        },
+        "alternatives": [],
+    }
+
+    rendered = ClientReportRenderer().render_fund_pick(payload)
+
+    assert "## 周月节奏" not in rendered
+    assert "指数层确认：" not in rendered
+    assert "周线：" not in rendered
     assert "## 执行摘要" in rendered
 
 
@@ -2806,6 +4094,53 @@ def test_render_fund_pick_does_not_repeat_too_many_preface_headers() -> None:
     rendered = ClientReportRenderer().render_fund_pick(payload)
 
     assert rendered.count("先看结论") <= 2
+
+
+def test_render_fund_pick_observe_compacts_disclosure_and_tightens_wording() -> None:
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "selection_context": {
+            "delivery_tier_label": "降级观察稿",
+            "delivery_observe_only": True,
+            "delivery_summary_only": True,
+            "coverage_note": "本轮覆盖存在降级，当前更适合按观察稿理解。",
+            "coverage_lines": ["结构化事件覆盖 67%（2/3）", "高置信直接新闻覆盖 0%（0/3）"],
+            "coverage_total": 3,
+            "blind_spots": ["基金画像覆盖不足，部分画像指标暂缺。", "外部直连情报偏少。"],
+        },
+        "winner": {
+            "name": "前海开源黄金ETF联接C",
+            "symbol": "021740",
+            "asset_type": "cn_fund",
+            "trade_state": "观察为主",
+            "positives": ["方向还在。"],
+            "dimension_rows": [["产品质量/基本面代理", "61/100", "当前更多是产品结构和主题代理判断"]],
+            "action": {"direction": "观察为主", "horizon": {"label": "观察期"}},
+            "narrative": {"playbook": {}},
+        },
+        "alternatives": [],
+    }
+
+    rendered = ClientReportRenderer().render_fund_pick(payload)
+
+    def _section_bullets(markdown: str, heading: str) -> list[str]:
+        items: list[str] = []
+        inside = False
+        for raw in markdown.splitlines():
+            if raw.strip() == heading:
+                inside = True
+                continue
+            if inside and raw.startswith("## "):
+                break
+            if inside and raw.strip().startswith("- "):
+                items.append(raw.strip())
+        return items
+
+    assert len(_section_bullets(rendered, "## 数据完整度")) <= 2
+    assert len(_section_bullets(rendered, "## 交付等级")) <= 2
+    assert len(_section_bullets(rendered, "## 数据限制与说明")) <= 1
+    assert "当前更像" not in rendered
+    assert rendered.count("## 升级条件") == 1
 
 
 def test_render_briefing_does_not_repeat_too_many_preface_headers() -> None:
@@ -3009,6 +4344,121 @@ def test_render_etf_pick_key_evidence_merges_event_digest_theme_intelligence() -
     assert "来源层级：`媒体直连`" in evidence_section
 
 
+def test_render_etf_pick_surfaces_structure_auxiliary_layer() -> None:
+    payload = {
+        "generated_at": "2026-04-03 10:00:00",
+        "selection_context": {
+            "delivery_tier_label": "观察优先稿",
+            "delivery_observe_only": True,
+            "delivery_summary_only": False,
+        },
+        "winner": {
+            "name": "中际旭创ETF",
+            "symbol": "159999",
+            "asset_type": "cn_etf",
+            "trade_state": "观察为主",
+            "positives": ["结构框架还有解释力。"],
+            "dimension_rows": [["技术面", "52/100", "方向没坏但不适合追高"]],
+            "dimensions": _sample_analysis("518880", "黄金ETF", "cn_etf", rank=1)["dimensions"],
+            "action": {"direction": "观察为主", "horizon": {"label": "观察期"}},
+            "narrative": {"playbook": {}},
+            "market_event_rows": [
+                [
+                    "2026-04-01",
+                    "TDX 结构框架：中际旭创 通信设备 / 进攻 / CN（+3.60%）",
+                    "TDX结构专题",
+                    "高",
+                    "通信设备",
+                    "",
+                    "标准结构归因",
+                    "偏利多，`中际旭创` 的标准板块/风格/地区框架已可直接用来解释当前强弱。",
+                ],
+                [
+                    "2026-04-01",
+                    "港股辅助层：小米集团-W 7.20",
+                    "港股/短线辅助",
+                    "中",
+                    "小米集团-W",
+                    "",
+                    "港股通/CCASS辅助",
+                    "偏利多，港股通 / CCASS 命中后，先把它当作港股与短线辅助层，不把它写成正式主线。",
+                ],
+            ],
+        },
+        "alternatives": [],
+    }
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    assert "## 结构辅助层" in rendered
+    assert "TDX 结构框架：中际旭创 通信设备 / 进攻 / CN（+3.60%）" in rendered
+    assert "港股辅助层：小米集团-W 7.20" in rendered
+    assert "信号类型：`港股通/CCASS辅助`" in rendered
+
+
+def test_render_etf_pick_surfaces_dc_report_rc_and_ccass_hold_structure_layer() -> None:
+    payload = {
+        "generated_at": "2026-04-03 10:00:00",
+        "selection_context": {
+            "delivery_tier_label": "观察优先稿",
+            "delivery_observe_only": True,
+            "delivery_summary_only": False,
+        },
+        "winner": {
+            "name": "中际旭创ETF",
+            "symbol": "159999",
+            "asset_type": "cn_etf",
+            "trade_state": "观察为主",
+            "positives": ["结构框架还有解释力。"],
+            "dimension_rows": [["技术面", "52/100", "方向没坏但不适合追高"]],
+            "dimensions": _sample_analysis("518880", "黄金ETF", "cn_etf", rank=1)["dimensions"],
+            "action": {"direction": "观察为主", "horizon": {"label": "观察期"}},
+            "narrative": {"playbook": {}},
+            "market_event_rows": [
+                [
+                    "2026-04-01",
+                    "DC 结构框架：中际旭创 光通信 / 进攻 / CN（+2.80%）",
+                    "DC结构专题",
+                    "中",
+                    "光通信",
+                    "",
+                    "标准结构归因",
+                    "偏利多，`中际旭创` 的标准板块/风格/地区框架已可直接用来解释当前强弱。",
+                ],
+                [
+                    "2026-04-01",
+                    "研报辅助：中际旭创 买入",
+                    "研报辅助层",
+                    "高",
+                    "中际旭创",
+                    "",
+                    "研报评级/研究报告",
+                    "偏利多，研报评级/一致性已命中，只作为辅助证据，不替代正式公告或主线确认。",
+                ],
+                [
+                    "2026-04-01",
+                    "港股辅助层：小米集团-W 7.20",
+                    "港股/短线辅助",
+                    "中",
+                    "小米集团-W",
+                    "",
+                    "CCASS持股统计",
+                    "偏利多，CCASS 命中后只作为港股/短线辅助层，不把它写成确定性主线。",
+                ],
+            ],
+        },
+        "alternatives": [],
+    }
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    assert "## 结构辅助层" in rendered
+    assert "DC 结构框架：中际旭创 光通信 / 进攻 / CN（+2.80%）" in rendered
+    assert "研报辅助：中际旭创 买入" in rendered
+    assert "港股辅助层：小米集团-W 7.20" in rendered
+    assert "研报评级/研究报告" in rendered
+
+
 def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     analysis = _sample_analysis("159981", "能源化工ETF", "cn_etf", rank=3)
     analysis["portfolio_overlap_summary"] = {
@@ -3151,26 +4601,34 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
         "notes": ["当前数据源连接不稳定，已按可用数据降级处理。"],
     }
     rendered = ClientReportRenderer().render_etf_pick(payload)
+    assert "## 先看执行" in rendered
+    assert rendered.index("## 先看执行") < rendered.index("## 首页判断")
+    assert "| 看不看 | 观望偏多 |" in rendered
+    assert "| 怎么触发 |" in rendered
+    assert "等回踩再看" in rendered
+    assert "| 多大仓位 | 若触发也只按 首次建仓 ≤3%；触发前先按观察仓 / 暂不出手。 |" in rendered
+    assert "| 哪里止损 | 跌破支撑离场 |" in rendered
     assert "## 首页判断" in rendered
     assert "## 今日结论" not in rendered
     assert "今日ETF观察" in rendered
     assert "等待确认后的参与窗口" in rendered
-    assert "## 正式动作阈值" in rendered
-    assert "只要当前结论仍是 `观望偏多`，就不把它写成正式交易动作" in rendered
+    assert "## 正式动作阈值" not in rendered
+    assert "## 升级条件" in rendered
     assert "## 执行摘要" in rendered
-    assert "| 观察优先 | 能源化工ETF (159981)；当前更强的是催化、相对强弱和执行节奏，优势主要集中在接下来几个交易日到一两周内。 |" in rendered
-    assert "| 补充观察 | 红利ETF (510880)；更适合围绕一段完整主线分批拿，不只是看一两天波动。 |" in rendered
+    assert "| 优先观察 | 能源化工ETF (159981)；当前更强的是催化、相对强弱和执行节奏，优势主要集中在接下来几个交易日到一两周内。 |" in rendered
+    assert "| 次级观察 | 红利ETF (510880)；更适合围绕一段完整主线分批拿，不只是看一两天波动。 |" in rendered
     assert "| 当前建议 | 观望偏多 |" in rendered
     assert "| 交付等级 | 降级观察稿 |" in rendered
-    assert "| 空仓怎么做 |" in rendered
-    assert "| 持仓怎么做 |" in rendered
+    assert "| 观察重点 |" in rendered
+    assert "| 空仓怎么做 |" not in rendered
+    assert "| 持仓怎么做 |" not in rendered
     assert "## 数据完整度" in rendered
     assert "## 交付等级" in rendered
     assert "## 代理信号与限制" in rendered
     assert "真实社媒抓取" in rendered
     assert "降级观察稿" in rendered
-    assert "## 当前分层建议" in rendered
-    assert "| 观察优先 | 能源化工ETF (159981) | 短线交易（3-10日） |" in rendered
+    assert "## 当前分层建议" not in rendered
+    assert "| 优先观察 | 能源化工ETF (159981)；当前更强的是催化、相对强弱和执行节奏，优势主要集中在接下来几个交易日到一两周内。 |" in rendered
     assert "## 为什么先看它" in rendered
     assert "## 为什么推荐它" not in rendered
     assert "## 升级条件" in rendered
@@ -3181,19 +4639,234 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     assert "组合优先级：" in rendered
     assert "## 图表速览" in rendered
     assert "![分析看板](/tmp/etf_dashboard.png)" in rendered
-    assert "覆盖率的分母是今天进入完整分析的 `5` 只 ETF" in rendered
+    assert "分母是进入完整分析的 `5` 只 ETF" in rendered
     assert "短线交易（3-10日）" in rendered
-    assert "| 持有周期 | 短线交易（3-10日） |" in rendered
-    assert "| 触发买点条件 | 先等回踩关键支撑不破；如果触发，再优先看 `0.820 - 0.845` 一带的承接。 |" in rendered
-    assert "| 关键盯盘价位 | 回踩先看 `0.820 - 0.845` 一带的承接；如果反弹延续，再看 `0.920 - 0.960` 一带的承压。 |" in rendered
-    assert "| 配置视角 | 如果按配置视角理解，这条方向已经有一定配置价值，但更适合分批跟踪，不适合一次打满。 |" in rendered
-    assert "| 交易视角 | 如果按交易视角理解，更看催化兑现、右侧确认和止损纪律，优先等回踩或放量确认，不追当天情绪。 |" in rendered
+    assert "| 触发条件 |" in rendered
+    assert "| 先看什么 |" in rendered
     assert "| 建议买入区间 | 0.820 - 0.845 |" not in rendered
     assert "| 建议减仓区间 | 0.920 - 0.960 |" not in rendered
     assert "| 预演命令 | `portfolio whatif buy 159981 最新价 计划金额` |" not in rendered
     assert "## 组合落单前" not in rendered
     assert "## 这只ETF为什么是这个分" in rendered
     assert "## 标准化分类" in rendered
+
+
+def test_render_etf_pick_observe_first_screen_surfaces_numeric_watch_level_and_stop() -> None:
+    payload = {
+        "generated_at": "2026-04-12 01:22:00",
+        "selection_context": {
+            "delivery_tier_label": "降级观察稿",
+            "delivery_observe_only": True,
+            "delivery_summary_only": True,
+        },
+        "winner": {
+            "name": "建信能源化工期货ETF",
+            "symbol": "159981",
+            "asset_type": "cn_etf",
+            "trade_state": "持有优于追高",
+            "dimension_rows": [["技术面", "41/100", "空头主导缓解但仍需确认。"]],
+            "dimensions": _sample_analysis("159981", "建信能源化工期货ETF", "cn_etf", rank=1)["dimensions"],
+            "action": {
+                "direction": "观望偏多",
+                "entry": "板块轮动信号明确，若回踩 MA20 附近出现承接可分批介入，但需严控仓位",
+                "buy_range": "暂不设，当前候选买点离止损位太近（至少留 `1.0%` 缓冲）, 先等回踩更深或右侧确认后再给区间。",
+                "position": "首次建仓 ≤3%，等结构进一步确认后再加仓",
+                "stop": "跌破 1.592 或主线/催化失效时重新评估",
+                "stop_ref": 1.592,
+            },
+            "narrative": {"playbook": {}},
+        },
+        "alternatives": [],
+        "notes": [],
+    }
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    assert "## 先看执行" in rendered
+    assert "关键观察位：" in rendered
+    assert "`1.592`" in rendered
+    assert "| 多大仓位 | 若触发也只按 首次建仓 ≤3%，等结构进一步确认后再加仓；触发前按观察仓 / 暂不出手。 |" in rendered
+    assert "| 哪里止损 | 跌破 1.592 或主线/催化失效时重新评估 |" in rendered
+
+
+def test_render_scan_detailed_semiconductor_frontscreen_prioritizes_catalyst_then_flow() -> None:
+    analysis = _sample_analysis("588200", "科创芯片ETF", "cn_etf", rank=2)
+    analysis["risks"] = []
+    analysis["narrative"] = {
+        "headline": "当前更像等待确认的半导体观察稿。",
+        "judgment": {
+            "direction": "中性偏多",
+            "cycle": "波段",
+            "odds": "中性",
+            "state": "观察为主",
+        },
+        "phase": {"label": "修复观察", "body": "产业逻辑还在，但价格还没走成确认。"},
+        "drivers": {
+            "macro": "宏观不构成直接顺风。",
+            "flow": "资金承接还要继续看。",
+            "relative": "相对强弱还没完全回到前排。",
+            "technical": "技术结构还在修复。",
+        },
+        "contradiction": "产业催化和价格确认还没重新站到一边。",
+        "positives": ["产业逻辑还在。"],
+        "cautions": ["还不能直接追。"],
+        "watch_points": ["先看产业催化和资金承接。"],
+        "scenarios": {"base": "继续观察。", "bull": "确认后升级。", "bear": "失守后继续回撤。"},
+        "playbook": {"trend": "先看右侧确认。", "allocation": "先小仓观察。", "defensive": "不抢第一根。"},
+        "summary_lines": ["当前先按观察稿理解。"],
+        "risk_points": {
+            "fundamental": "景气预期已被部分计价。",
+            "valuation": "估值还需消化。",
+            "crowding": "一致预期时波动放大。",
+            "external": "风险偏好变化仍会干扰。",
+        },
+    }
+    rendered = ClientReportRenderer().render_scan_detailed(analysis)
+    assert "当前先按 `半导体链` 理解，先看产业催化有没有继续兑现，再看风险偏好和资金承接能不能把价格留住。" in rendered
+
+
+def test_render_etf_pick_zero_direct_news_downgrades_to_observe_packaging() -> None:
+    payload = {
+        "generated_at": "2026-04-11 00:13:33",
+        "selection_context": {
+            "coverage_lines": ["结构化事件覆盖 0%（0/15）", "高置信直接新闻覆盖 0%（0/15）"],
+            "delivery_tier_label": "标准推荐稿",
+            "delivery_observe_only": False,
+            "delivery_summary_only": False,
+            "delivery_notes": ["新闻/事件覆盖存在局部降级，但当前优先标的自身仍有可执行证据，本次继续按正式推荐框架处理。"],
+        },
+        "winner": {
+            "name": "国泰中证半导体材料设备主题ETF",
+            "symbol": "159516",
+            "asset_type": "cn_etf",
+            "trade_state": "回调更优",
+            "positives": ["方向还在。"],
+            "dimension_rows": [["技术面", "45/100", "趋势在修复，但还没强到直接追高。"]],
+            "action": {
+                "direction": "回调更优",
+                "entry": "等回踩承接再看",
+                "position": "首次建仓 ≤3%",
+                "trim_range": "0.966 - 1.026",
+                "stop": "跌破支撑重评",
+            },
+            "narrative": {"playbook": {}},
+            "evidence": [
+                {
+                    "layer": "政策催化",
+                    "title": "半导体设备ETF易方达（159558）盘中获1800万份净申购",
+                    "source": "财联社",
+                    "link": "https://example.com/peer-etf",
+                    "date": "2026-04-10T11:35:37",
+                }
+            ],
+        },
+        "alternatives": [],
+    }
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    assert "# 今日ETF观察 | 2026-04-11" in rendered
+    assert "## 为什么先看它" in rendered
+    assert "| 交付等级 | 降级观察稿 |" in rendered
+    assert "| 交付等级 | 标准推荐稿 |" not in rendered
+    assert "继续按正式推荐框架处理" not in rendered
+    assert "定位：`赛道热度佐证 / 同赛道产品`" in rendered
+    assert "| 观察重点 |" in rendered
+    assert "| 首次仓位 |" not in rendered
+    assert "| 止损参考 |" not in rendered
+
+
+def test_render_etf_pick_degraded_observe_compacts_disclosure_and_wording(monkeypatch) -> None:
+    _install_fake_thesis_repo(monkeypatch, {"159980": {
+        "core_assumption": "有色价格与供给扰动还会反复影响板块节奏",
+        "validation_metric": "工业金属价格和份额流向同步改善",
+        "holding_period": "观察期",
+        "event_digest_snapshot": {
+            "status": "待补充",
+            "lead_layer": "行业主题事件",
+            "lead_title": "标准指数框架",
+        },
+    }})
+
+    payload = {
+        "generated_at": "2026-04-06 10:00:00",
+            "selection_context": {
+                "delivery_tier_label": "降级观察稿",
+                "delivery_observe_only": True,
+                "delivery_summary_only": True,
+                "delivery_notes": [
+                    "当前流程不是把全市场每只标的都做完整八维深扫，而是先初筛 `6` 只，再对其中 `2` 只做完整分析。",
+                    "新闻/事件覆盖存在降级，本次更适合作为观察优先对象，不宜当成强执行型推荐。",
+                ],
+            "coverage_note": "本轮实时新闻/事件覆盖存在降级，名单更容易偏保守。",
+            "coverage_lines": ["结构化事件覆盖 0%（0/2）", "高置信直接新闻覆盖 0%（0/2）"],
+            "coverage_total": 2,
+        },
+        "winner": {
+            "name": "大成有色金属期货ETF",
+            "symbol": "159980",
+            "asset_type": "cn_etf",
+            "trade_state": "观察为主",
+            "positives": ["跟踪框架清楚。"],
+            "dimension_rows": [["技术面", "37/100", "技术结构仍偏弱，暂不支持激进介入。"]],
+            "dimensions": _sample_analysis("159980", "大成有色金属期货ETF", "cn_etf", rank=1)["dimensions"],
+            "action": {
+                "direction": "观察为主",
+                "horizon": {"label": "观察期"},
+                "entry": "等价格确认和右侧共振。",
+            },
+            "narrative": {"playbook": {}},
+        },
+        "alternatives": [],
+        "notes": [
+            "部分候选在完整分析阶段取数失败，已按可用数据降级处理。",
+            "全市场 ETF 扫描未形成正向入围，本次改按观察级候选继续排序。",
+        ],
+    }
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    def _section_bullets(markdown: str, heading: str) -> list[str]:
+        items: list[str] = []
+        inside = False
+        for raw in markdown.splitlines():
+            if raw.strip() == heading:
+                inside = True
+                continue
+            if inside and raw.startswith("## "):
+                break
+            if inside and raw.strip().startswith("- "):
+                items.append(raw.strip())
+        return items
+
+    assert len(_section_bullets(rendered, "## 数据完整度")) <= 2
+    assert len(_section_bullets(rendered, "## 交付等级")) <= 2
+    assert len(_section_bullets(rendered, "## 数据限制与说明")) <= 1
+    assert "## 正式动作阈值" not in rendered
+    assert "当前更像" not in rendered
+    assert "先按辅助线索看，不单独升级动作" not in rendered
+    assert rendered.count("## 升级条件") == 1
+    assert "## 事件消化" in rendered
+    assert "## What Changed" in rendered
+    assert "上次怎么看：" in rendered or "首次跟踪" in rendered
+
+
+def test_render_stock_picks_observe_tightens_wording_and_uses_compact_sections() -> None:
+    payload = {
+        "generated_at": "2026-03-11 10:00:00",
+        "day_theme": {"label": "能源冲击 + 地缘风险"},
+        "regime": {"current_regime": "stagflation"},
+        "top": [],
+        "coverage_analyses": [_sample_analysis("300502", "新易盛", "cn_stock", rank=0)],
+        "watch_positive": [],
+    }
+
+    rendered = ClientReportRenderer().render_stock_picks(payload)
+
+    assert "## 事件消化" in rendered
+    assert "## What Changed" in rendered
+    assert "当前更像" not in rendered
+    assert "先按辅助线索看，不单独升级动作" not in rendered
 
 
 def test_render_etf_pick_surfaces_factor_and_share_change_lines_in_front_reason() -> None:
@@ -3268,7 +4941,7 @@ def test_render_etf_pick_explains_structured_coverage_before_zero_direct_news() 
 
     rendered = ClientReportRenderer().render_etf_pick(payload)
 
-    assert "当前证据更偏结构化事件、产品画像和持仓/基准映射，不是直连情报催化型驱动。" in rendered
+    assert "当前证据更偏结构化事件、产品画像和持仓/基准映射，不是直连情报催化型驱动" in rendered
 
 
 def test_render_etf_pick_includes_what_changed_section(monkeypatch) -> None:
@@ -3478,6 +5151,59 @@ def test_render_etf_pick_normalizes_nan_holding_names() -> None:
     assert "| 0388 | 0388 | 15.27% | 2025-12-31 |" in rendered
 
 
+def test_render_etf_pick_action_rows_use_enriched_theme_playbook_role() -> None:
+    winner = _sample_analysis("159516", "国泰中证半导体材料设备主题ETF", "cn_etf", rank=2)
+    winner["metadata"] = {"sector": "半导体设备", "chain_nodes": ["AI算力", "半导体", "成长股估值修复"]}
+    winner["trade_state"] = "回调更优"
+    winner["action"] = {
+        **dict(winner.get("action") or {}),
+        "direction": "观望偏多",
+        "entry": "先等顶背离/假突破消化后再看",
+        "position": "首次建仓 ≤3%",
+        "horizon": {
+            "code": "swing",
+            "label": "波段跟踪（2-6周）",
+            "style": "当前更像主线轮动和催化共振驱动的波段跟踪，核心在未来几周能否继续得到资金确认。",
+            "fit_reason": "催化和相对强弱都在线，优势主要集中在未来几周的轮动延续，而不是长周期兑现。",
+        },
+    }
+    winner["dimensions"]["technical"]["score"] = 34
+    winner["dimensions"]["fundamental"]["score"] = 53
+    winner["dimensions"]["catalyst"]["score"] = 64
+    winner["dimensions"]["relative_strength"]["score"] = 75
+    winner["dimensions"]["relative_strength"]["factors"] = [
+        {"name": "超额拐点", "detail": "相对基准从负转正更接近轮动切换窗口。"}
+    ]
+    winner["dimensions"]["risk"]["score"] = 35
+    winner["dimensions"]["macro"]["score"] = 7
+    winner["narrative"]["judgment"] = {"state": "回调更优"}
+    winner["narrative"]["playbook"] = {"trend": "更适合等短线动能重新修复后再跟随。"}
+    winner["dimension_rows"] = [["技术面", "34/100", "技术结构仍偏弱"]]
+    winner["fund_sections"] = []
+    winner["taxonomy_rows"] = [["产品形态", "ETF"], ["主方向", "半导体"]]
+    winner["taxonomy_summary"] = "ETF / 场内ETF / 被动跟踪 / 半导体主题"
+    winner["positioning_lines"] = []
+    payload = {
+        "generated_at": "2026-04-11 11:00:00",
+        "day_theme": {"label": "硬科技 / AI硬件链"},
+        "regime": {"current_regime": "recovery"},
+        "selection_context": {
+            "delivery_tier_label": "观察优先稿",
+            "delivery_observe_only": True,
+            "delivery_summary_only": False,
+        },
+        "winner": winner,
+        "alternatives": [],
+        "notes": [],
+    }
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    assert "| 交易分层 | `主线扩散` / `卫星仓`" in rendered
+    assert "| 仓位身份 | `主线扩散` / `卫星仓`" in rendered
+    assert "`轮动` / `轮动仓`" not in rendered
+
+
 def test_render_etf_pick_splits_direction_bias_from_observe_only_action() -> None:
     payload = {
         "generated_at": "2026-03-13 15:00:00",
@@ -3516,6 +5242,47 @@ def test_render_etf_pick_splits_direction_bias_from_observe_only_action() -> Non
     assert "| 当前建议 | 观察为主 |" in rendered
     assert "| 方向偏向 | 做多 |" in rendered
     assert "做多；观察为主" not in rendered
+
+
+def test_render_etf_pick_keeps_wait_for_confirmation_out_of_hard_action_rows() -> None:
+    payload = {
+        "generated_at": "2026-04-23 15:00:00",
+        "selection_context": {
+            "discovery_mode_label": "Tushare 全市场快照",
+            "scan_pool": 18,
+            "passed_pool": 18,
+            "theme_filter_label": "未指定",
+            "coverage_note": "本轮新闻/事件覆盖存在降级。",
+            "coverage_lines": ["结构化事件覆盖 50%（9/18）", "高置信直接新闻覆盖 0%（0/18）"],
+            "coverage_total": 18,
+            "delivery_tier_label": "降级观察稿",
+            "delivery_observe_only": True,
+            "delivery_notes": ["今天先给一个观察优先对象，不按正式买入稿理解。"],
+        },
+        "winner": {
+            "name": "国泰中证全指通信设备ETF",
+            "symbol": "515880",
+            "asset_type": "cn_etf",
+            "trade_state": "等右侧确认",
+            "positives": ["通信主线没坏。"],
+            "dimension_rows": [["技术面", "42/100", "技术仍待确认"]],
+            "action": {"direction": "做多", "entry": "等回踩再看", "position": "暂不出手", "horizon": {"label": "观察期"}},
+            "positioning_lines": [],
+            "evidence": [{"title": "CPO概念大涨", "source": "证券时报", "link": "https://example.com/cpo"}],
+            "taxonomy_rows": [["产品形态", "ETF"], ["主方向", "通信"]],
+            "taxonomy_summary": "主暴露属于通信。",
+            "fund_sections": {"overview": {"基金类型": "ETF", "基金管理人": "国泰基金", "基金经理人": "测试", "成立日期": "2019-01-01", "业绩比较基准": "通信设备指数"}},
+            "score_changes": [],
+        },
+        "alternatives": [],
+        "notes": [],
+    }
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    assert "| 当前建议 | 等右侧确认 |" in rendered
+    assert "| 当前动作 | 等右侧确认 |" in rendered
+    assert "| 当前动作 | 做多 |" not in rendered
 
 
 def test_render_etf_pick_explains_missing_alternatives() -> None:
@@ -3571,11 +5338,11 @@ def test_render_etf_pick_explains_missing_alternatives() -> None:
     assert "## 首页判断" in rendered
     assert "### 板块 / 主题认知" in rendered
     assert "## 今日结论" not in rendered
-    assert "## 周月节奏" in rendered
+    assert "## 周月节奏" not in rendered
     assert "## 升级条件" in rendered
     assert "## 当前只看什么" in rendered
-    assert "| 观察优先 | 港股创新药ETF (513120)；当前信号还没共振到足以支撑正式动作，先观察更稳妥。 |" in rendered
-    assert "| 触发买点条件 | 先等 MA20 向上拐头；触发前先别急着给精确买入价。 |" in rendered
+    assert "| 优先观察 | 港股创新药ETF (513120)；当前信号还没共振到足以支撑正式动作，先观察更稳妥。 |" in rendered
+    assert "| 触发条件 | 先等 MA20 向上拐头；触发前别急着给精确买入价。 |" in rendered
     assert "关键盯盘价位" not in rendered
     assert "## 标准化分类" in rendered
     assert "## 图表与详细分析说明" in rendered
@@ -3586,6 +5353,94 @@ def test_render_etf_pick_explains_missing_alternatives() -> None:
     assert "建议买入区间" not in rendered
     assert "摘要版交付" in rendered
     assert "当前可前置的一手情报有限" not in rendered
+
+
+def test_render_etf_pick_keeps_formal_alternatives_out_of_why_not_section() -> None:
+    winner = _sample_analysis("159981", "能源化工ETF", "cn_etf", rank=3)
+    second = _sample_analysis("510880", "红利ETF", "cn_etf", rank=3)
+    third = _sample_analysis("513120", "港股创新药ETF", "cn_etf", rank=3)
+    payload = {
+        "generated_at": "2026-03-27 15:00:00",
+        "selection_context": {
+            "delivery_observe_only": False,
+            "delivery_tier_label": "标准推荐稿",
+        },
+        "recommendation_tracks": {
+            "short_term": {
+                "name": "能源化工ETF",
+                "symbol": "159981",
+                "horizon_label": "短线交易（3-10日）",
+                "reason": "催化和右侧确认更完整。",
+            },
+            "medium_term": {
+                "name": "红利ETF",
+                "symbol": "510880",
+                "horizon_label": "中线配置（1-3月）",
+                "reason": "中期配置承接更稳。",
+            },
+            "third_term": {
+                "name": "港股创新药ETF",
+                "symbol": "513120",
+                "horizon_label": "波段跟踪（2-6周）",
+                "reason": "主线延续和催化兑现都还在。",
+            },
+        },
+        "winner": winner,
+        "alternatives": [second, third],
+        "notes": [],
+    }
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    assert "| 第三推荐 | 港股创新药ETF (513120) | 波段跟踪（2-6周） | 主线延续和催化兑现都还在。 |" in rendered
+    assert "## 其余正式推荐" in rendered
+    assert "### 2. 红利ETF (510880)" in rendered
+    assert "### 3. 港股创新药ETF (513120)" in rendered
+    assert "其余高分候选已并入上面的正式推荐层" in rendered
+
+
+def test_render_etf_pick_observe_tracks_use_observe_alternatives_heading() -> None:
+    winner = _sample_analysis("159981", "能源化工ETF", "cn_etf", rank=3)
+    second = _sample_analysis("510880", "红利ETF", "cn_etf", rank=3)
+    third = _sample_analysis("513120", "港股创新药ETF", "cn_etf", rank=3)
+    payload = {
+        "generated_at": "2026-03-27 15:00:00",
+        "selection_context": {
+            "delivery_observe_only": True,
+            "delivery_tier_label": "降级观察稿",
+        },
+        "recommendation_tracks": {
+            "short_term": {
+                "name": "能源化工ETF",
+                "symbol": "159981",
+                "horizon_label": "短线交易（3-10日）",
+                "reason": "催化和右侧确认更完整。",
+            },
+            "medium_term": {
+                "name": "红利ETF",
+                "symbol": "510880",
+                "horizon_label": "中线配置（1-3月）",
+                "reason": "中期配置承接更稳。",
+            },
+            "third_term": {
+                "name": "港股创新药ETF",
+                "symbol": "513120",
+                "horizon_label": "波段跟踪（2-6周）",
+                "reason": "主线延续和催化兑现都还在。",
+            },
+        },
+        "winner": winner,
+        "alternatives": [second, third],
+        "notes": [],
+    }
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    assert "| 次级观察 | 红利ETF (510880)；中期配置承接更稳。 |" in rendered
+    assert "## 其余观察对象" in rendered
+    assert "## 其余正式推荐" not in rendered
+    assert "其余高分候选已并入上面的观察顺序层" in rendered
+    assert "正式推荐层" not in rendered
 
 
 def test_render_etf_pick_summary_only_sanitizes_scan_failure_and_keeps_action_prices() -> None:
@@ -3648,9 +5503,11 @@ def test_render_etf_pick_summary_only_sanitizes_scan_failure_and_keeps_action_pr
 
     assert "162719 扫描失败" not in rendered
     assert "部分候选在完整分析阶段取数失败，已按可用数据降级处理" in rendered
-    assert "| 首次建仓 | 首次建仓 ≤3% |" in rendered
-    assert "| 止损参考 | 跌破 1.420 重新评估 |" in rendered
-    assert "| 关键盯盘价位 | 下沿先看 `1.420` 上方能不能稳住；上沿先看 `1.784` 附近能不能放量突破。 |" in rendered
+    assert "## 这几个词怎么读" in rendered
+    assert "`T+1 直连`" not in rendered
+    assert "`高置信直连情报 / 结构化披露`" in rendered
+    assert "| 怎么用这段 | 上面的 `先看执行` 已经给了观察位、仓位和失效位；这里不重复挂单细节，只补升级条件。 |" in rendered
+    assert "| 先看什么 | 下沿先看 `1.420` 上方能不能稳住；上沿先看 `1.784` 附近能不能放量突破。 |" in rendered
     assert "## 基金画像" in rendered
     assert "### ETF专用信息" in rendered
     assert "港股创新药指数" in rendered
@@ -3665,6 +5522,8 @@ def test_render_etf_pick_single_standard_candidate_does_not_self_downgrade() -> 
             "scan_pool": 30,
             "passed_pool": 3,
             "theme_filter_label": "未指定",
+            "preferred_sectors": ["能源", "商品"],
+            "preferred_sector_label": "能源 / 商品",
             "coverage_note": "本轮新闻/事件覆盖基本正常。",
             "coverage_lines": ["结构化事件覆盖 33%（1/3）", "高置信直接新闻覆盖 33%（1/3）"],
             "coverage_total": 3,
@@ -3706,6 +5565,7 @@ def test_render_etf_pick_single_standard_candidate_does_not_self_downgrade() -> 
     assert "单候选不等于自动降级" in rendered
     assert "只能按观察优先或降级稿处理" not in rendered
     assert "| 后台置信度 | 稳定：" in rendered
+    assert "主题过滤: 未指定 | 偏好主题: 能源 / 商品" in rendered
 
 
 def test_render_etf_pick_includes_regime_basis_when_available() -> None:
@@ -3889,17 +5749,25 @@ def test_render_briefing_includes_macro_leading_section() -> None:
         "alerts": [],
     }
     rendered = ClientReportRenderer().render_briefing(payload)
+    assert "## 先看执行" in rendered
+    assert rendered.index("## 先看执行") < rendered.index("## 首页判断")
+    assert "| 看不看 | 今天更像结构性行情。 |" in rendered
+    assert "| 怎么触发 |" in rendered
+    assert "| 多大仓位 | 先小仓。 |" in rendered
+    assert "| 哪里止损 | 如果 `新能源` 的验证继续走弱" in rendered
     assert "## 首页判断" in rendered
     assert "### 板块 / 主题认知" in rendered
     assert "今天市场更像结构性轮动日" in rendered
     assert "不把晨报理解成单一板块推荐" in rendered
-    assert "## 执行摘要" in rendered
+    assert "## 市场结构摘要" in rendered
+    assert "## 今日最重要的判断" not in rendered
     assert "## 今日情报看板" in rendered
     assert "## 宏观判断依据" in rendered
     assert "## 宏观领先指标" in rendered
     assert "## 数据完整度" in rendered
     assert "## 证据时点与来源" in rendered
     assert "## 市场代理信号" in rendered
+    assert "## 执行补充" in rendered
     assert "## 今日A股观察池" in rendered
     assert "## A股观察池升级条件" in rendered
 
@@ -3932,6 +5800,108 @@ def test_render_briefing_surfaces_weekly_and_monthly_rhythm_lines() -> None:
     assert "沪深300：周线" in rendered
     assert "沪深300：月线" in rendered
     assert "周月节奏同向偏强" in rendered
+
+
+def test_render_briefing_frontloads_market_structure_snapshots() -> None:
+    payload = {
+        "generated_at": "2026-04-04 08:30:00",
+        "headline_lines": ["今天更像结构性轮动，不是全面同涨。"],
+        "action_lines": ["先盯市场结构和轮动能否延续。"],
+        "quality_lines": ["本次已接入日度市场结构、机构调研和外汇结构信号。"],
+        "index_signal_rows": [["上证指数", "3400.00", "+0.20%", "偏强修复", "周线金叉", "月线修复", "常态量能", "等待确认"]],
+        "market_signal_rows": [["市场宽度", "上涨 2800 / 下跌 2100", "分歧中性", "涨跌比 1.33"]],
+        "rotation_rows": [["行业", "银行(+1.40%)", "半导体(-0.80%)", "防守占优，高低切明显"]],
+        "theme_tracking_rows": [],
+        "verification_rows": [],
+        "macro_asset_rows": [],
+        "macro_items": [],
+        "regime": {"current_regime": "recovery"},
+        "day_theme": "宽基修复",
+        "data_coverage": "中国宏观 | 全市场结构快照",
+        "missing_sources": "无",
+        "a_share_watch_meta": {"pool_size": 60, "complete_analysis_size": 8},
+        "a_share_watch_candidates": [],
+        "a_share_watch_rows": [],
+        "a_share_watch_lines": [],
+        "evidence_rows": [],
+        "alerts": [],
+    }
+
+    rendered = ClientReportRenderer().render_briefing(payload)
+
+    assert "## 市场结构摘要" in rendered
+    assert "周月节奏" in rendered
+    assert "市场结构" in rendered
+    assert "轮动" in rendered
+    assert "## 今日情报看板" in rendered
+    assert "市场宽度" in rendered
+    assert "上证指数" in rendered
+    assert "## 证据时点与来源" in rendered
+    assert "市场结构快照" in rendered
+
+
+def test_render_briefing_prioritizes_interactive_ir_and_broker_rows_over_framework_rows() -> None:
+    payload = {
+        "generated_at": "2026-04-04 08:30:00",
+        "headline_lines": ["今天更像结构性轮动，不是全面同涨。"],
+        "action_lines": ["先盯市场结构和轮动能否延续。"],
+        "quality_lines": ["本次已接入日度市场结构、机构调研和外汇结构信号。"],
+        "market_event_rows": [
+            [
+                "2026-04-04",
+                "标准行业框架：药明康德 属于 申万二级行业·化学制药（-1.20%）",
+                "申万行业框架",
+                "低",
+                "化学制药",
+                "",
+                "行业框架承压",
+                "行业指数仍在回落。",
+            ],
+            [
+                "2026-04-04",
+                "卖方共识升温：中际旭创 本月获 4 家券商金股推荐",
+                "卖方共识专题",
+                "中",
+                "中际旭创",
+                "",
+                "卖方共识升温",
+                "偏利多，卖方月度金股覆盖开始抬升，但这里只当共识热度参考。",
+            ],
+            [
+                "2026-04-04",
+                "互动易确认：公司回复海外订单进展",
+                "互动易/投资者关系",
+                "中",
+                "药明康德",
+                "",
+                "管理层口径确认",
+                "先按补充证据处理，不替代正式公告。",
+            ],
+        ],
+        "theme_tracking_rows": [],
+        "verification_rows": [],
+        "macro_asset_rows": [],
+        "macro_items": [],
+        "regime": {"current_regime": "recovery"},
+        "day_theme": "宽基修复",
+        "data_coverage": "中国宏观 | 全市场结构快照",
+        "missing_sources": "无",
+        "a_share_watch_meta": {"pool_size": 60, "complete_analysis_size": 8},
+        "a_share_watch_candidates": [],
+        "a_share_watch_rows": [],
+        "a_share_watch_lines": [],
+        "evidence_rows": [],
+        "alerts": [],
+    }
+
+    rendered = ClientReportRenderer().render_briefing(payload)
+    news_section = rendered.split("## 今日情报看板", 1)[1].split("## 数据完整度", 1)[0]
+
+    assert "互动易确认：公司回复海外订单进展" in news_section
+    assert "卖方共识升温：中际旭创 本月获 4 家券商金股推荐" in news_section
+    assert "标准行业框架：药明康德 属于 申万二级行业·化学制药（-1.20%）" in news_section
+    assert news_section.index("互动易确认：公司回复海外订单进展") < news_section.index("标准行业框架：药明康德 属于 申万二级行业·化学制药（-1.20%）")
+    assert news_section.index("卖方共识升温：中际旭创 本月获 4 家券商金股推荐") < news_section.index("标准行业框架：药明康德 属于 申万二级行业·化学制药（-1.20%）")
 
 
 def test_render_briefing_normalizes_evidence_labels_and_backfills_reason_bullets() -> None:
@@ -4066,7 +6036,8 @@ def test_render_briefing_intelligence_board_uses_market_event_signal_type_and_pr
     assert "A股热股前排：新易盛" in rendered
     assert "信号类型：`海外科技映射`" in rendered
     assert "结论：偏利多，先看 `AI算力/光模块` 能否继续拿到价格与成交确认。" in rendered
-    assert rendered.index("A股热股前排：新易盛") < rendered.index("Global bond investors reassess conflict risks")
+    assert "Global bond investors reassess conflict risks" in rendered
+    assert "A股热股前排：新易盛" in rendered
 
 
 def test_render_briefing_intelligence_board_merges_market_events_and_theme_lines() -> None:
@@ -4099,6 +6070,48 @@ def test_render_briefing_intelligence_board_merges_market_events_and_theme_lines
 
     assert "[黄金盘前走强，避险需求回升](https://example.com/gold)" in rendered
     assert "高股息/红利" in rendered
+
+
+def test_render_briefing_intelligence_board_surfaces_news_summary_lines() -> None:
+    payload = {
+        "generated_at": "2026-04-05 20:00:00",
+        "headline_lines": ["今天更像有色链结构修复。"],
+        "action_lines": ["先按结构修复和资金承接来理解。"],
+        "theme_tracking_rows": [],
+        "verification_rows": [],
+        "macro_asset_rows": [],
+        "macro_items": [],
+        "regime": {"current_regime": "recovery"},
+        "day_theme": "有色链结构修复",
+        "data_coverage": "中国宏观 | 市场结构",
+        "missing_sources": "",
+        "quality_lines": [],
+        "market_event_rows": [],
+        "news_report": {
+            "summary_lines": [
+                "主题聚类：价格/供需 2 条，产业/公司 1 条",
+                "来源分层：主流媒体 1 条，行业/协会 2 条",
+            ],
+            "items": [
+                {
+                    "title": "铜价上行带动有色链活跃",
+                    "source": "财联社",
+                    "published_at": "2026-04-05T10:00:00",
+                    "link": "https://example.com/nonferrous",
+                }
+            ],
+        },
+        "a_share_watch_meta": {"pool_size": 12, "complete_analysis_size": 5},
+        "a_share_watch_candidates": [],
+        "a_share_watch_rows": [],
+        "a_share_watch_lines": [],
+        "alerts": [],
+    }
+
+    rendered = ClientReportRenderer().render_briefing(payload)
+
+    assert "情报摘要" in rendered
+    assert "这批外部情报主要围绕 价格/供需 2 条，产业/公司 1 条，先看其中哪一条和当前标的或主题最直接。" in rendered
 
 
 def test_render_briefing_surfaces_client_final_runtime_quality_notes() -> None:
@@ -4217,6 +6230,60 @@ def test_render_briefing_exec_summary_surfaces_theme_boundary() -> None:
 
     assert "| 主题边界 |" in rendered
     assert "还没拉开" in rendered
+
+
+def test_render_briefing_usage_and_term_translation_sections_frontload_reader_guidance() -> None:
+    payload = {
+        "generated_at": "2026-03-13 08:30:00",
+        "headline_lines": ["今天更像结构性行情，先看主线验证。"],
+        "action_lines": ["先看主线验证是否成立，再决定是否提高风险暴露。"],
+        "theme_tracking_rows": [["新能源", "量能回流", "主线继续扩散", "中", "冲高回落"]],
+        "verification_rows": [["A股", "主线验证", "量能继续放大", "提高风险暴露", "回到防守"]],
+        "macro_asset_rows": [],
+        "macro_items": [],
+        "regime": {"current_regime": "recovery"},
+        "day_theme": "硬科技",
+        "quality_lines": [],
+        "a_share_watch_meta": {"pool_size": 60, "complete_analysis_size": 8},
+        "a_share_watch_rows": [],
+        "a_share_watch_lines": [],
+        "alerts": [],
+    }
+
+    rendered = ClientReportRenderer().render_briefing(payload)
+
+    assert "## 怎么用这份晨报" in rendered
+    assert "## 这几个词怎么读" in rendered
+    assert "## 执行补充" not in rendered
+    assert "不是直接买入清单" in rendered
+    assert "真到执行层，买点、仓位和失效位仍以对应复核卡为准" in rendered
+
+
+def test_render_briefing_execution_supplement_mirrors_source_action_lines_when_rich_guidance_enabled() -> None:
+    payload = {
+        "generated_at": "2026-04-22 16:10:00",
+        "headline_lines": ["收盘后先复盘主线强弱。", "明天先看算力和创新药谁先继续扩散。", "市场还没到全面 risk-on。"],
+        "action_lines": ["明天先看高景气主线能否继续拿到量价确认。", "如果扩散不够，就继续按结构性行情和观察仓处理。"],
+        "theme_tracking_rows": [["AI硬件链", "CPO / 光模块承接", "主线弹性仍在", "短线观察", "高位分歧加大", "当前仍有主线背景和信息环境支撑。"]],
+        "verification_rows": [["A股", "主线验证", "前排继续放量走强", "提高风险暴露", "回到观察"]],
+        "macro_items": ["PMI 维持扩张。"],
+        "quality_lines": ["本次新闻覆盖源: 财联社 / 路透。"],
+        "data_coverage": "中国宏观 | 主题跟踪 | 观察池",
+        "missing_sources": "无",
+        "evidence_rows": [["分析生成时间", "2026-04-22 16:10:00"]],
+        "a_share_watch_meta": {"pool_size": 24, "complete_analysis_size": 6},
+        "a_share_watch_candidates": [],
+        "a_share_watch_rows": [],
+        "a_share_watch_lines": ["A 股观察池来自 Tushare 优先全市场初筛。", "当前先按观察池管理。"],
+        "alerts": [],
+    }
+
+    rendered = ClientReportRenderer().render_briefing(payload)
+    execution_section = rendered.split("## 执行补充", 1)[1].split("## 这几个词怎么读", 1)[0]
+
+    assert "明天先看高景气主线能否继续拿到量价确认。" in execution_section
+    assert "如果扩散不够，就继续按结构性行情和观察仓处理。" in execution_section
+    assert "晨报先负责定节奏" not in execution_section
 
 
 def test_render_briefing_focus_section_surfaces_theme_boundary_explainer() -> None:

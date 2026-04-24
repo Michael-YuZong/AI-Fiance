@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery
+from src.commands.pick_history import enrich_pick_payload_with_score_history, grade_pick_delivery, summarize_pick_coverage
 
 
 def _sample_payload(score: int, signal: str, generated_at: str, *, degraded: bool = False) -> dict:
@@ -160,6 +160,27 @@ def test_enrich_pick_payload_with_score_history_prefers_full_coverage_population
     assert enriched["pick_coverage"]["structured_rate"] == 0.5
 
 
+def test_enrich_pick_payload_with_score_history_quarantines_corrupt_snapshot(tmp_path: Path) -> None:
+    snapshot_path = tmp_path / "pick_history.json"
+    snapshot_path.write_text('{"theme:*": {"latest": ', encoding="utf-8")
+
+    enriched = enrich_pick_payload_with_score_history(
+        _sample_payload(35, "催化偏弱", "2026-03-13 09:00:00"),
+        scope="theme:*",
+        snapshot_path=snapshot_path,
+        model_version="test-pick-model-v1",
+        model_changelog=["第一次口径"],
+        rank_key=_rank_key,
+    )
+
+    assert enriched["top"][0]["score_changes"] == []
+    quarantined = list(tmp_path.glob("pick_history.corrupt.*.json"))
+    assert quarantined
+    assert snapshot_path.exists()
+    history_store = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert "theme:*" in history_store
+
+
 def test_grade_pick_delivery_labels_realtime_universe_as_intraday_final() -> None:
     delivery = grade_pick_delivery(
         report_type="etf_pick",
@@ -218,3 +239,142 @@ def test_grade_pick_delivery_downgrades_observe_only_etf_winner() -> None:
     assert delivery["label"] == "观察优先稿"
     assert delivery["observe_only"] is True
     assert any("观察/持有优先口径" in note for note in delivery["notes"])
+
+
+def test_grade_pick_delivery_keeps_actionable_etf_winner_recommendation_when_coverage_is_partially_degraded() -> None:
+    delivery = grade_pick_delivery(
+        report_type="etf_pick",
+        discovery_mode="tushare_universe",
+        coverage={"degraded": True, "total": 2, "structured_rate": 0.5, "direct_news_rate": 0.0},
+        scan_pool=30,
+        passed_pool=5,
+        winner={
+            "rating": {"rank": 2},
+            "action": {"direction": "观望", "position": "≤5% 试错"},
+            "dimensions": {
+                "catalyst": {
+                    "score": 35,
+                    "coverage": {
+                        "structured_event": True,
+                        "direct_news_count": 0,
+                        "news_pool_count": 1,
+                    },
+                }
+            },
+        },
+    )
+
+    assert delivery["observe_only"] is False
+    assert delivery["summary_only"] is False
+    assert any("仍有可执行证据" in note for note in delivery["notes"])
+
+
+def test_grade_pick_delivery_downgrades_cross_border_theme_etf_when_coverage_is_degraded_and_only_theme_signal_remains() -> None:
+    delivery = grade_pick_delivery(
+        report_type="etf_pick",
+        discovery_mode="tushare_universe",
+        coverage={"degraded": True, "total": 3, "structured_rate": 0.0, "direct_news_rate": 0.0},
+        scan_pool=18,
+        passed_pool=8,
+        winner={
+            "asset_type": "cn_etf",
+            "rating": {"rank": 3},
+            "action": {"direction": "做多", "position": "首次建仓 ≤3%"},
+            "dimensions": {
+                "technical": {"score": 36},
+                "fundamental": {"score": 44},
+                "catalyst": {"score": 20, "coverage": {"structured_event": False, "direct_news_count": 0, "news_pool_count": 0}},
+                "relative_strength": {"score": 51},
+                "risk": {"score": 15},
+            },
+        },
+    )
+
+    assert delivery["observe_only"] is True
+    assert any("观察优先对象" in note or "观察优先" in note or "观察" in note for note in delivery["notes"])
+
+
+def test_summarize_pick_coverage_treats_etf_theme_catalyst_as_usable_coverage() -> None:
+    coverage = summarize_pick_coverage(
+        [
+            {
+                "asset_type": "cn_etf",
+                "dimensions": {
+                    "catalyst": {
+                        "coverage": {
+                            "news_mode": "proxy",
+                            "degraded": True,
+                            "directional_catalyst_hit": True,
+                            "theme_news_count": 1,
+                            "recent_theme_news_pool_count": 2,
+                            "diagnosis": "theme_only_live",
+                        }
+                    }
+                },
+            }
+        ]
+    )
+
+    assert coverage["degraded"] is False
+    assert coverage["structured_rate"] == 1.0
+    assert "主题级延续催化" in coverage["note"]
+
+
+def test_grade_pick_delivery_keeps_theme_driven_etf_recommendation_even_without_direct_news() -> None:
+    delivery = grade_pick_delivery(
+        report_type="etf_pick",
+        discovery_mode="tushare_universe",
+        coverage={"degraded": False, "total": 3, "structured_rate": 0.34, "direct_news_rate": 0.0},
+        scan_pool=18,
+        passed_pool=8,
+        winner={
+            "asset_type": "cn_etf",
+            "rating": {"rank": 3},
+            "action": {"direction": "做多", "position": "首次建仓 ≤3%"},
+            "dimensions": {
+                "technical": {"score": 39},
+                "fundamental": {"score": 28},
+                "catalyst": {
+                    "score": 20,
+                    "coverage": {
+                        "structured_event": False,
+                        "direct_news_count": 0,
+                        "news_pool_count": 2,
+                        "directional_catalyst_hit": True,
+                        "theme_news_count": 1,
+                        "recent_theme_news_pool_count": 2,
+                    },
+                },
+                "relative_strength": {"score": 51},
+                "risk": {"score": 15},
+            },
+        },
+    )
+
+    assert delivery["observe_only"] is False
+    assert delivery["summary_only"] is False
+
+
+def test_grade_pick_delivery_downgrades_rank_three_etf_winner_when_degraded_and_direct_catalyst_is_empty() -> None:
+    delivery = grade_pick_delivery(
+        report_type="etf_pick",
+        discovery_mode="tushare_universe",
+        coverage={"degraded": True, "total": 15, "structured_rate": 0.13, "direct_news_rate": 0.27},
+        scan_pool=18,
+        passed_pool=15,
+        winner={
+            "asset_type": "cn_etf",
+            "trade_state": "观察为主",
+            "rating": {"rank": 3},
+            "action": {"direction": "做多", "position": "首次建仓 ≤3%"},
+            "dimensions": {
+                "technical": {"score": 28},
+                "fundamental": {"score": 77},
+                "catalyst": {"score": 4, "coverage": {"structured_event": False, "direct_news_count": 0, "news_pool_count": 0}},
+                "relative_strength": {"score": 36},
+                "risk": {"score": 55},
+            },
+        },
+    )
+
+    assert delivery["observe_only"] is True

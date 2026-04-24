@@ -4,7 +4,7 @@ from src.processors.trade_handoff import portfolio_whatif_handoff, recommendatio
 def test_cn_equity_short_term_after_close_rolls_to_next_trade_day() -> None:
     payload = portfolio_whatif_handoff(
         symbol="300502",
-        horizon={"code": "short_term", "label": "短线交易（3-10日）"},
+        horizon={"code": "short_term_overbought_followthrough", "family_code": "short_term", "label": "短线交易（3-10日）"},
         direction="小仓试仓",
         asset_type="cn_stock",
         reference_price=128.88,
@@ -19,7 +19,7 @@ def test_cn_equity_short_term_after_close_rolls_to_next_trade_day() -> None:
 def test_cn_fund_before_cutoff_uses_same_day_subscription_scope() -> None:
     payload = portfolio_whatif_handoff(
         symbol="021740",
-        horizon={"code": "position_trade", "label": "中线配置（1-3月）"},
+        horizon={"code": "position_trade_core_accumulation", "family_code": "position_trade", "label": "中线配置（1-3月）"},
         direction="继续持有",
         asset_type="cn_fund",
         reference_price=1.238,
@@ -34,7 +34,7 @@ def test_cn_fund_before_cutoff_uses_same_day_subscription_scope() -> None:
 def test_cn_etf_morning_scope_is_today_remaining_session() -> None:
     timing = recommendation_timing_context(
         asset_type="cn_etf",
-        horizon={"code": "short_term", "label": "短线交易（3-10日）"},
+        horizon={"code": "short_term_catalyst_breakout", "family_code": "short_term", "label": "短线交易（3-10日）"},
         generated_at="2026-03-16 10:05:00",
     )
 

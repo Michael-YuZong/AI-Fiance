@@ -58,10 +58,36 @@ def score_band(score: float, *, width: float = 5.0) -> int:
     return int(value // width)
 
 
+def _etf_requires_observe_bucket(analysis: Mapping[str, Any]) -> bool:
+    asset_type = str(analysis.get("asset_type", "") or "").strip()
+    if asset_type not in {"cn_etf", "cn_fund", "cn_index"}:
+        return False
+    catalyst_dimension = dict(dict(analysis.get("dimensions") or {}).get("catalyst") or {})
+    coverage = dict(catalyst_dimension.get("coverage") or {})
+    has_direct_confirmation = bool(
+        coverage.get("structured_event")
+        or coverage.get("effective_structured_event")
+        or coverage.get("forward_event")
+        or coverage.get("high_confidence_company_news")
+        or int(coverage.get("direct_news_count") or 0) > 0
+        or int(coverage.get("fresh_direct_news_count") or 0) > 0
+    )
+    has_theme_confirmation = bool(coverage.get("directional_catalyst_hit")) or int(coverage.get("theme_news_count") or 0) > 0
+    if has_direct_confirmation or has_theme_confirmation:
+        return False
+    technical = score_dimension(analysis, "technical")
+    catalyst = score_dimension(analysis, "catalyst")
+    risk = score_dimension(analysis, "risk")
+    diagnosis = str(coverage.get("diagnosis", "") or "").strip()
+    return diagnosis in {"proxy_degraded", "theme_only_live", "stale_live_only"} and catalyst < 20 and technical < 50 and risk < 45
+
+
 def recommendation_bucket(
     analysis: Mapping[str, Any],
     watch_symbols: Optional[set[str]] = None,
 ) -> str:
+    if _etf_requires_observe_bucket(analysis):
+        return "观察为主"
     rating_rank = int(analysis.get("rating", {}).get("rank", 0) or 0)
     technical = score_dimension(analysis, "technical")
     fundamental = score_dimension(analysis, "fundamental")

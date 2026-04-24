@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import time
+
 import pandas as pd
 import pytest
 
@@ -17,6 +20,85 @@ def test_market_cn_stock_daily_returns_empty_when_tushare_is_missing(monkeypatch
     assert frame.empty is True
 
 
+def test_market_cn_stock_daily_uses_stale_cache_when_live_fetch_fails(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    start = collector._date_str(-365 * 3)
+    end = collector._date_str()
+    cache_key = f"cn_market:ts_stock_daily:v2:{collector._to_ts_code('300750')}:{start}:{end}:qfq"
+    cached = pd.DataFrame(
+        [
+            {"日期": pd.Timestamp("2026-04-02"), "开盘": 250.0, "最高": 255.0, "最低": 248.0, "收盘": 252.0, "成交量": 1000.0, "成交额": 1_000_000.0},
+            {"日期": pd.Timestamp("2026-04-03"), "开盘": 252.0, "最高": 257.0, "最低": 251.0, "收盘": 256.0, "成交量": 1200.0, "成交额": 1_200_000.0},
+        ]
+    )
+    collector._save_cache(cache_key, cached)
+    cache_path = collector._cache_path(cache_key)
+    old_time = time.time() - 3600
+    os.utime(cache_path, (old_time, old_time))
+    monkeypatch.setattr(collector, "_ts_call", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("network down")))
+
+    frame = collector.get_stock_daily("300750")
+
+    assert not frame.empty
+    assert float(frame["收盘"].iloc[-1]) == 256.0
+    assert frame.attrs["history_source"] == "tushare_stale_cache"
+    assert frame.attrs["history_source_label"] == "Tushare 日线（历史缓存回退）"
+
+
+def test_market_cn_stock_daily_defaults_to_latest_open_trade_date_for_cache_reuse(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_latest_open_trade_date", lambda *args, **kwargs: "20260403")
+    monkeypatch.setattr(collector, "_date_str", lambda offset_days=0: "20260405" if offset_days == 0 else "20230406")
+    cache_key = "cn_market:ts_stock_daily:v2:300750.SZ:20230404:20260403:qfq"
+    cached = pd.DataFrame(
+        [
+            {"日期": pd.Timestamp("2026-04-02"), "开盘": 250.0, "最高": 255.0, "最低": 248.0, "收盘": 252.0, "成交量": 1000.0, "成交额": 1_000_000.0},
+            {"日期": pd.Timestamp("2026-04-03"), "开盘": 252.0, "最高": 257.0, "最低": 251.0, "收盘": 256.0, "成交量": 1200.0, "成交额": 1_200_000.0},
+        ]
+    )
+    collector._save_cache(cache_key, cached)
+    cache_path = collector._cache_path(cache_key)
+    old_time = time.time() - 3600
+    os.utime(cache_path, (old_time, old_time))
+    monkeypatch.setattr(collector, "_ts_call", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("network down")))
+
+    frame = collector.get_stock_daily("300750")
+
+    assert not frame.empty
+    assert float(frame["收盘"].iloc[-1]) == 256.0
+    assert frame.attrs["history_source"] == "tushare_stale_cache"
+    assert frame.attrs["history_source_label"] == "Tushare 日线（历史缓存回退）"
+
+
+def test_market_cn_default_history_start_date_tracks_latest_open_day(tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+
+    assert collector._default_history_start_date("20260403") == "20230404"
+
+
+def test_market_cn_stock_daily_reuses_nearby_stale_cache_on_non_trading_day(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_latest_open_trade_date", lambda *args, **kwargs: "")
+    monkeypatch.setattr(collector, "_date_str", lambda offset_days=0: "20260405" if offset_days == 0 else "20230406")
+    cache_key = "cn_market:ts_stock_daily:v2:300750.SZ:20230405:20260404:qfq"
+    cached = pd.DataFrame(
+        [
+            {"日期": pd.Timestamp("2026-04-03"), "开盘": 252.0, "最高": 257.0, "最低": 251.0, "收盘": 256.0, "成交量": 1200.0, "成交额": 1_200_000.0},
+        ]
+    )
+    collector._save_cache(cache_key, cached)
+    cache_path = collector._cache_path(cache_key)
+    old_time = time.time() - 3600
+    os.utime(cache_path, (old_time, old_time))
+    monkeypatch.setattr(collector, "_ts_call", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("network down")))
+
+    frame = collector.get_stock_daily("300750")
+
+    assert not frame.empty
+    assert float(frame["收盘"].iloc[-1]) == 256.0
+    assert frame.attrs["history_source"] == "tushare_stale_cache"
+
+
 def test_market_cn_stock_industry_prefers_tushare_stock_basic(monkeypatch):
     collector = ChinaMarketCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
     monkeypatch.setattr(
@@ -29,13 +111,37 @@ def test_market_cn_stock_industry_prefers_tushare_stock_basic(monkeypatch):
     assert collector.get_stock_industry("300750") == "新能源设备"
 
 
-def test_market_cn_open_fund_daily_returns_empty_when_tushare_is_missing(monkeypatch):
-    collector = ChinaMarketCollector({"storage": {"cache_dir": "data/cache", "cache_ttl_hours": 0}})
+def test_market_cn_open_fund_daily_returns_empty_when_tushare_is_missing(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
     monkeypatch.setattr(collector, "_ts_call", lambda api_name, **kwargs: pd.DataFrame() if api_name == "fund_nav" else (_ for _ in ()).throw(AssertionError(api_name)))
     monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare open fund fallback should not be used")))
 
     frame = collector.get_open_fund_daily("022365")
     assert frame.empty is True
+
+
+def test_market_cn_open_fund_daily_uses_stale_cache_when_live_fetch_fails(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    cache_key = "cn_market:ts_fund_nav:022365.OF"
+    cached = pd.DataFrame(
+        [
+            {"日期": pd.Timestamp("2026-04-02"), "开盘": 1.02, "最高": 1.02, "最低": 1.02, "收盘": 1.02, "成交量": 0.0, "成交额": 0.0},
+            {"日期": pd.Timestamp("2026-04-03"), "开盘": 1.03, "最高": 1.03, "最低": 1.03, "收盘": 1.03, "成交量": 0.0, "成交额": 0.0},
+        ]
+    )
+    collector._save_cache(cache_key, cached)
+    cache_path = collector._cache_path(cache_key)
+    old_time = time.time() - 3600
+    os.utime(cache_path, (old_time, old_time))
+    monkeypatch.setattr(collector, "_resolve_tushare_fund_code", lambda symbol, preferred_markets=("O", "L", "E"): "022365.OF")  # noqa: ARG005
+    monkeypatch.setattr(collector, "_ts_call", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("network down")))
+
+    frame = collector.get_open_fund_daily("022365")
+
+    assert not frame.empty
+    assert float(frame["收盘"].iloc[-1]) == 1.03
+    assert frame.attrs["history_source"] == "tushare_stale_cache"
+    assert frame.attrs["history_source_label"] == "Tushare 基金净值（历史缓存回退）"
 
 
 def test_market_cn_index_daily_falls_back_to_proxy_etf(monkeypatch):
@@ -487,6 +593,68 @@ def test_market_cn_etf_universe_snapshot_falls_back_to_previous_open_day_when_la
     assert frame.iloc[0]["trade_date"] == "2026-03-12"
 
 
+def test_market_cn_etf_universe_snapshot_ignores_corrupt_cache_and_refetches(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
+    monkeypatch.setattr(collector, "_recent_open_trade_dates", lambda *args, **kwargs: ["20260312"])
+    monkeypatch.setattr(
+        collector,
+        "_ts_fund_basic_snapshot",
+        lambda market="E": pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "ts_code": "515880.SH",
+                    "name": "通信ETF",
+                    "management": "国泰基金",
+                    "fund_type": "股票型",
+                    "benchmark": "中证全指通信设备指数收益率",
+                    "status": "L",
+                    "invest_type": "被动指数型",
+                    "list_date": "20200101",
+                }
+            ]
+        ),
+    )
+
+    cache_key = "cn_market:ts_etf_universe:v2:20260312"
+    collector._cache_path(cache_key).write_bytes(b"bad-cache")
+
+    calls = {"count": 0}
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        if api_name == "etf_basic":
+            return pd.DataFrame()
+        if api_name == "etf_share_size":
+            return pd.DataFrame()
+        assert api_name == "fund_daily"
+        calls["count"] += 1
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "515880.SH",
+                    "trade_date": "20260312",
+                    "pre_close": 1.00,
+                    "open": 1.01,
+                    "high": 1.05,
+                    "low": 0.99,
+                    "close": 1.03,
+                    "change": 0.03,
+                    "pct_chg": 3.0,
+                    "vol": 123456.0,
+                    "amount": 45678.0,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+
+    frame = collector.get_etf_universe_snapshot()
+
+    assert calls["count"] == 1
+    assert not frame.empty
+    assert frame.iloc[0]["symbol"] == "515880"
+    assert frame.iloc[0]["management"] == "国泰基金"
+
+
 def test_market_cn_unlock_pressure_flags_large_near_term_share_float(monkeypatch, tmp_path):
     collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
 
@@ -855,3 +1023,483 @@ def test_market_cn_stock_margin_snapshot_permission_block_does_not_fake_fresh(mo
     assert snapshot["diagnosis"] == "permission_blocked"
     assert snapshot["is_fresh"] is False
     assert snapshot["status"] == "ℹ️"
+
+
+def test_market_cn_stk_ah_comparison_normalizes_dates_and_uses_cache(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 24}})
+    calls = {"count": 0}
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "stk_ah_comparison"
+        calls["count"] += 1
+        assert kwargs.get("ts_code") == "600519.SH"
+        assert kwargs.get("hk_code") == "03690.HK"
+        assert kwargs.get("trade_date") == "20260403"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "600519.SH",
+                    "hk_code": "03690.HK",
+                    "trade_date": "20260403",
+                    "a_close": "1675.20",
+                    "hk_close": "154.60",
+                    "premium_rate": "8.15",
+                    "a_name": "贵州茅台",
+                    "hk_name": "中国食品",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare AH fallback should not be used")))
+
+    frame = collector.get_stk_ah_comparison("600519", hk_code="03690.HK", trade_date="20260403")
+    cached = collector.get_stk_ah_comparison("600519", hk_code="03690.HK", trade_date="20260403")
+
+    assert calls["count"] == 1
+    assert not frame.empty
+    assert frame.equals(cached)
+    assert frame.attrs["source"] == "tushare.stk_ah_comparison"
+    assert frame.attrs["latest_date"] == "2026-04-03"
+    assert frame.attrs["is_fresh"] is True
+    assert frame.attrs["fallback"] == "none"
+    assert "AH 股比价快照" in frame.attrs["disclosure"]
+    assert frame.iloc[0]["trade_date"] == "2026-04-03"
+    assert float(frame.iloc[0]["a_close"]) == 1675.20
+    assert float(frame.iloc[0]["premium_rate"]) == 8.15
+
+
+def test_market_cn_cb_basic_normalizes_dates_and_uses_cache(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 24}})
+    calls = {"count": 0}
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "cb_basic"
+        calls["count"] += 1
+        assert kwargs.get("ts_code") == "113632.SH"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "113632.SH",
+                    "bond_full_name": "鹤21转债",
+                    "bond_short_name": "鹤21转债",
+                    "cb_code": "191632",
+                    "stk_code": "603618.SH",
+                    "stk_short_name": "杭电股份",
+                    "maturity": "6.00",
+                    "par": "100",
+                    "issue_price": "100.00",
+                    "issue_size": "300000000",
+                    "remain_size": "280000000",
+                    "value_date": "20240301",
+                    "maturity_date": "20280301",
+                    "rate_type": "累进利率",
+                    "coupon_rate": "0.20",
+                    "add_rate": "0.30",
+                    "pay_per_year": "1",
+                    "list_date": "20240403",
+                    "delist_date": "",
+                    "exchange": "SH",
+                    "conv_start_date": "20240901",
+                    "conv_end_date": "20280301",
+                    "conv_stop_date": "",
+                    "first_conv_price": "12.00",
+                    "conv_price": "11.50",
+                    "rate_clause": "示例",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare cb_basic fallback should not be used")))
+
+    frame = collector.get_cb_basic("113632")
+    cached = collector.get_cb_basic("113632")
+
+    assert calls["count"] == 1
+    assert not frame.empty
+    assert frame.equals(cached)
+    assert frame.attrs["source"] == "tushare.cb_basic"
+    assert frame.attrs["latest_date"] == "2024-04-03"
+    assert frame.attrs["is_fresh"] is True
+    assert frame.attrs["fallback"] == "none"
+    assert "可转债基础信息" in frame.attrs["disclosure"]
+    assert frame.iloc[0]["list_date"] == "2024-04-03"
+    assert frame.iloc[0]["maturity"] == 6.0
+    assert frame.iloc[0]["issue_size"] == 300000000.0
+
+
+def test_market_cn_cb_daily_scales_amount_and_uses_cache(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 24}})
+    calls = {"count": 0}
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "cb_daily"
+        calls["count"] += 1
+        assert kwargs.get("ts_code") == "113632.SH"
+        assert kwargs.get("trade_date") == "20260403"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "113632.SH",
+                    "trade_date": "20260403",
+                    "pre_close": "110.20",
+                    "open": "110.10",
+                    "high": "111.00",
+                    "low": "109.80",
+                    "close": "110.65",
+                    "change": "0.45",
+                    "pct_chg": "0.41",
+                    "vol": "1234",
+                    "amount": "567.8",
+                    "bond_value": "104.55",
+                    "bond_over_rate": "5.20",
+                    "cb_value": "106.10",
+                    "cb_over_rate": "3.20",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare cb_daily fallback should not be used")))
+
+    frame = collector.get_cb_daily("113632", trade_date="20260403")
+    cached = collector.get_cb_daily("113632", trade_date="20260403")
+
+    assert calls["count"] == 1
+    assert not frame.empty
+    assert frame.equals(cached)
+    assert frame.attrs["source"] == "tushare.cb_daily"
+    assert frame.attrs["latest_date"] == "2026-04-03"
+    assert frame.attrs["is_fresh"] is True
+    assert frame.attrs["fallback"] == "none"
+    assert "可转债日线行情" in frame.attrs["disclosure"]
+    assert frame.iloc[0]["trade_date"] == "2026-04-03"
+    assert float(frame.iloc[0]["amount"]) == 5_678_000.0
+    assert float(frame.iloc[0]["close"]) == 110.65
+
+
+def test_market_cn_cb_factor_pro_normalizes_dates_and_sets_contract(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 24}})
+    calls = {"count": 0}
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "cb_factor_pro"
+        calls["count"] += 1
+        assert kwargs.get("ts_code") == "113632.SH"
+        assert kwargs.get("trade_date") == "20260403"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "113632.SH",
+                    "trade_date": "20260403",
+                    "close": "110.65",
+                    "ma5": "109.91",
+                    "ma10": "108.77",
+                    "rsi6": "61.2",
+                    "bias1_bfq": "1.35",
+                    "momentum": "0.88",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare cb_factor fallback should not be used")))
+
+    frame = collector.get_cb_factor_pro("113632", trade_date="20260403")
+    cached = collector.get_cb_factor_pro("113632", trade_date="20260403")
+
+    assert calls["count"] == 1
+    assert not frame.empty
+    assert frame.equals(cached)
+    assert frame.attrs["source"] == "tushare.cb_factor_pro"
+    assert frame.attrs["latest_date"] == "2026-04-03"
+    assert frame.attrs["is_fresh"] is True
+    assert frame.attrs["fallback"] == "none"
+    assert "可转债技术面因子" in frame.attrs["disclosure"]
+    assert frame.iloc[0]["trade_date"] == "2026-04-03"
+    assert float(frame.iloc[0]["ma5"]) == 109.91
+    assert float(frame.iloc[0]["bias1_bfq"]) == 1.35
+
+
+def test_market_cn_ggt_top10_normalizes_dates_and_sets_contract(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 24}})
+    calls = {"count": 0}
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "ggt_top10"
+        calls["count"] += 1
+        assert kwargs.get("ts_code") == "00700"
+        assert kwargs.get("trade_date") == "20260403"
+        assert kwargs.get("market_type") == "2"
+        return pd.DataFrame(
+            [
+                {
+                    "trade_date": "20260403",
+                    "ts_code": "00700",
+                    "name": "腾讯控股",
+                    "close": "373.0",
+                    "p_change": "-0.4803",
+                    "rank": "1",
+                    "market_type": "2",
+                    "amount": "519061900.0",
+                    "net_amount": "-219372420.0",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare ggt_top10 fallback should not be used")))
+
+    frame = collector.get_ggt_top10("00700", trade_date="20260403", market_type="2")
+    cached = collector.get_ggt_top10("00700", trade_date="20260403", market_type="2")
+
+    assert calls["count"] == 1
+    assert not frame.empty
+    assert frame.equals(cached)
+    assert frame.attrs["source"] == "tushare.ggt_top10"
+    assert frame.attrs["latest_date"] == "2026-04-03"
+    assert frame.attrs["is_fresh"] is True
+    assert frame.attrs["fallback"] == "none"
+    assert "港股通十大成交股" in frame.attrs["disclosure"]
+    assert frame.iloc[0]["trade_date"] == "2026-04-03"
+    assert float(frame.iloc[0]["amount"]) == 519061900.0
+    assert float(frame.iloc[0]["net_amount"]) == -219372420.0
+
+
+def test_market_cn_ggt_top10_empty_does_not_fake_fresh(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 24}})
+
+    monkeypatch.setattr(collector, "_ts_call", lambda api_name, **kwargs: pd.DataFrame() if api_name == "ggt_top10" else (_ for _ in ()).throw(AssertionError(api_name)))
+    monkeypatch.setattr(collector, "_ak_function", lambda *_: (_ for _ in ()).throw(AssertionError("AKShare ggt_top10 fallback should not be used")))
+
+    frame = collector.get_ggt_top10(trade_date="20260403")
+
+    assert frame.empty is True
+    assert frame.attrs["source"] == "tushare.ggt_top10"
+    assert frame.attrs["latest_date"] == ""
+    assert frame.attrs["is_fresh"] is False
+    assert frame.attrs["fallback"] == "none"
+    assert "空表" in frame.attrs["disclosure"]
+
+
+def test_market_cn_ccass_hold_normalizes_hk_code_and_sets_contract(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 24}})
+    calls = {"count": 0}
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "ccass_hold"
+        calls["count"] += 1
+        assert kwargs.get("ts_code") == "00960.HK"
+        assert kwargs.get("trade_date") == "20260403"
+        return pd.DataFrame(
+            [
+                {
+                    "trade_date": "20260403",
+                    "ts_code": "00960.HK",
+                    "name": "龙湖集团",
+                    "shareholding": "12345678",
+                    "share_ratio": "1.23",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+
+    frame = collector.get_ccass_hold("00960", trade_date="20260403")
+    cached = collector.get_ccass_hold("00960", trade_date="20260403")
+
+    assert calls["count"] == 1
+    assert not frame.empty
+    assert frame.equals(cached)
+    assert frame.attrs["source"] == "tushare.ccass_hold"
+    assert frame.attrs["latest_date"] == "2026-04-03"
+    assert frame.attrs["is_fresh"] is True
+    assert frame.attrs["fallback"] == "none"
+    assert "中央结算系统持股统计" in frame.attrs["disclosure"]
+    assert frame.iloc[0]["trade_date"] == "2026-04-03"
+    assert float(frame.iloc[0]["shareholding"]) == 12_345_678.0
+    assert float(frame.iloc[0]["share_ratio"]) == 1.23
+
+
+def test_market_cn_ccass_hold_detail_sets_contract(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 24}})
+    calls = {"count": 0}
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "ccass_hold_detail"
+        calls["count"] += 1
+        assert kwargs.get("hk_code") == "95009"
+        assert kwargs.get("trade_date") == "20260403"
+        return pd.DataFrame(
+            [
+                {
+                    "trade_date": "20260403",
+                    "ts_code": "00960.HK",
+                    "hk_code": "95009",
+                    "col_participant_id": "B01459",
+                    "col_participant_name": "中国国际金融股份有限公司上海分公司",
+                    "col_shareholding": "9988776",
+                    "col_shareholding_percent": "1.88",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+
+    frame = collector.get_ccass_hold_detail(hk_code="95009", trade_date="20260403")
+    cached = collector.get_ccass_hold_detail(hk_code="95009", trade_date="20260403")
+
+    assert calls["count"] == 1
+    assert not frame.empty
+    assert frame.equals(cached)
+    assert frame.attrs["source"] == "tushare.ccass_hold_detail"
+    assert frame.attrs["latest_date"] == "2026-04-03"
+    assert frame.attrs["is_fresh"] is True
+    assert frame.attrs["fallback"] == "none"
+    assert "中央结算系统机构席位持股明细" in frame.attrs["disclosure"]
+    assert frame.iloc[0]["trade_date"] == "2026-04-03"
+    assert float(frame.iloc[0]["col_shareholding"]) == 9_988_776.0
+    assert float(frame.iloc[0]["col_shareholding_percent"]) == 1.88
+
+
+def test_market_cn_hm_detail_sets_contract(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 24}})
+    calls = {"count": 0}
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "hm_detail"
+        calls["count"] += 1
+        assert kwargs.get("trade_date") == "20260403"
+        assert kwargs.get("ts_code") == "300750.SZ"
+        assert kwargs.get("hm_name") == "流沙河"
+        return pd.DataFrame(
+            [
+                {
+                    "trade_date": "20260403",
+                    "ts_code": "300750.SZ",
+                    "ts_name": "宁德时代",
+                    "buy_amount": "1234.5",
+                    "sell_amount": "234.5",
+                    "net_amount": "1000.0",
+                    "hm_name": "流沙河",
+                    "hm_orgs": "华泰证券股份有限公司总部",
+                    "tag": "示例",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+
+    frame = collector.get_hm_detail("20260403", ts_code="300750", hm_name="流沙河")
+    cached = collector.get_hm_detail("20260403", ts_code="300750", hm_name="流沙河")
+
+    assert calls["count"] == 1
+    assert not frame.empty
+    assert frame.equals(cached)
+    assert frame.attrs["source"] == "tushare.hm_detail"
+    assert frame.attrs["latest_date"] == "2026-04-03"
+    assert frame.attrs["is_fresh"] is True
+    assert frame.attrs["fallback"] == "none"
+    assert "游资交易明细" in frame.attrs["disclosure"]
+    assert frame.iloc[0]["trade_date"] == "2026-04-03"
+    assert float(frame.iloc[0]["buy_amount"]) == 1234.5
+    assert float(frame.iloc[0]["net_amount"]) == 1000.0
+
+
+def test_market_cn_cb_issue_normalizes_and_sets_contract(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 24}})
+    calls = {"count": 0}
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "cb_issue"
+        calls["count"] += 1
+        assert kwargs.get("ts_code") == "113632.SH"
+        assert kwargs.get("ann_date") == "20260403"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "113632.SH",
+                    "bond_short_name": "鹤21转债",
+                    "stk_code": "603618.SH",
+                    "stk_short_name": "杭电股份",
+                    "issue_size": "300000000",
+                    "convert_price_initial": "12.00",
+                    "convert_price": "11.50",
+                    "convert_val": "123456.78",
+                    "convert_vol": "9876.5",
+                    "convert_ratio": "1.23",
+                    "acc_convert_val": "456789.01",
+                    "acc_convert_vol": "2345.6",
+                    "acc_convert_ratio": "56.78",
+                    "remain_size": "280000000",
+                    "ann_date": "20260403",
+                    "res_ann_date": "20260404",
+                    "issue_date": "20260405",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+
+    frame = collector.get_cb_issue("113632", ann_date="20260403")
+    cached = collector.get_cb_issue("113632", ann_date="20260403")
+
+    assert calls["count"] == 1
+    assert not frame.empty
+    assert frame.equals(cached)
+    assert frame.attrs["source"] == "tushare.cb_issue"
+    assert frame.attrs["latest_date"] == "2026-04-05"
+    assert frame.attrs["is_fresh"] is True
+    assert frame.attrs["fallback"] == "none"
+    assert "可转债发行信息" in frame.attrs["disclosure"]
+    assert frame.iloc[0]["ann_date"] == "2026-04-03"
+    assert float(frame.iloc[0]["issue_size"]) == 300000000.0
+    assert float(frame.iloc[0]["convert_ratio"]) == 1.23
+
+
+def test_market_cn_cb_share_normalizes_and_sets_contract(monkeypatch, tmp_path):
+    collector = ChinaMarketCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 24}})
+    calls = {"count": 0}
+
+    def fake_ts_call(api_name: str, **kwargs: object) -> pd.DataFrame | None:
+        assert api_name == "cb_share"
+        calls["count"] += 1
+        assert kwargs.get("ts_code") == "113632.SH"
+        assert kwargs.get("ann_date") == "20260403"
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "113632.SH",
+                    "bond_short_name": "鹤21转债",
+                    "publish_date": "20260403",
+                    "end_date": "20260402",
+                    "convert_price": "11.50",
+                    "convert_val": "123456.78",
+                    "convert_vol": "9876.5",
+                    "convert_ratio": "1.23",
+                    "acc_convert_val": "456789.01",
+                    "acc_convert_vol": "2345.6",
+                    "acc_convert_ratio": "56.78",
+                    "remain_size": "280000000",
+                    "total_shares": "1000000000",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(collector, "_ts_call", fake_ts_call)
+
+    frame = collector.get_cb_share("113632", ann_date="20260403")
+    cached = collector.get_cb_share("113632", ann_date="20260403")
+
+    assert calls["count"] == 1
+    assert not frame.empty
+    assert frame.equals(cached)
+    assert frame.attrs["source"] == "tushare.cb_share"
+    assert frame.attrs["latest_date"] == "2026-04-03"
+    assert frame.attrs["is_fresh"] is True
+    assert frame.attrs["fallback"] == "none"
+    assert "可转债转股结果" in frame.attrs["disclosure"]
+    assert frame.iloc[0]["publish_date"] == "2026-04-03"
+    assert float(frame.iloc[0]["convert_val"]) == 123456.78
+    assert float(frame.iloc[0]["total_shares"]) == 1_000_000_000.0

@@ -17,6 +17,7 @@
 - 当前状态与 backlog：[docs/status_snapshot.md](./docs/status_snapshot.md)
 - 路线图：[plan.md](./plan.md)
 - YAML 入口：[config/README.md](./config/README.md)
+- 高频 repo workflow skills：`[.codex/skills/ai-finance-report-final/SKILL.md](./.codex/skills/ai-finance-report-final/SKILL.md)`、`[.codex/skills/ai-finance-tushare-rollout/SKILL.md](./.codex/skills/ai-finance-tushare-rollout/SKILL.md)`
 - `strategy` 专题：[docs/plans/strategy.md](./docs/plans/strategy.md)
 - 强因子专题：[docs/plans/strong_factors.md](./docs/plans/strong_factors.md)
 - 详细历史：[docs/history/2026-04.md](./docs/history/2026-04.md)、[docs/history/2026-03.md](./docs/history/2026-03.md)
@@ -27,6 +28,7 @@
 - 推荐产出：`stock_pick`、`etf_pick`、`fund_pick`
 - 市场简报：`briefing daily / weekly / noon / evening / market`
 - 研究问答：`research`、`assistant`、`lookup`
+- 自由情报采集：`intel`
 - 组合与风险：`portfolio`、`risk`
 - 策略学习：`strategy predict / list / replay / validate / attribute / experiment`
 - 正式交付：`client-final`、`release_check`、`report_guard`
@@ -68,6 +70,7 @@ python -m src.commands.stock_pick
 python -m src.commands.etf_pick
 python -m src.commands.fund_pick
 python -m src.commands.briefing market
+python -m src.commands.intel 收集有色金属相关情报
 
 python -m src.commands.strategy replay 600519 --start 2024-01-01 --end 2024-12-31 --max-samples 6
 python -m src.commands.strategy validate --symbol 600519 --limit 20 --preview

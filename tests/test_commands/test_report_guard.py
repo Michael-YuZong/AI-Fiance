@@ -323,11 +323,338 @@ def isolated_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_report_guard_blocks_missing_review_file(isolated_reports: Path) -> None:
-    target = isolated_reports / "reports/scans/etfs/final/scan_159981_2026-03-11_client_final.md"
+    target = isolated_reports / "reports/strategy/final/strategy_validation_2026-03-11_client_final.md"
     with pytest.raises(ReportGuardError, match="外部评审未完成"):
         export_reviewed_markdown_bundle(
-            report_type="scan",
-            markdown_text=SCAN_DETAIL_MARKDOWN,
+            report_type="strategy",
+            markdown_text=STRATEGY_VALIDATE_MARKDOWN,
+            markdown_path=target,
+            release_findings=[],
+        )
+
+
+@pytest.mark.parametrize(
+    ("report_type", "markdown_text", "target_name", "contract"),
+    [
+        (
+            "briefing",
+            "\n".join(
+                [
+                    "# 今日晨报 | 2026-03-23",
+                    "",
+                    "## 为什么今天这么判断",
+                    "",
+                    "- 原因一",
+                    "",
+                    "## 宏观领先指标",
+                    "",
+                    "- 指标一",
+                    "",
+                    "## 数据完整度",
+                    "",
+                    "- 覆盖完整",
+                    "",
+                    "## 怎么用这份晨报",
+                    "",
+                    "- 先观察",
+                    "",
+                    "## 重点观察",
+                    "",
+                    "- 方向一",
+                    "",
+                    "## 今日A股观察池",
+                    "",
+                    "| 排名 | 标的 |",
+                    "| --- | --- |",
+                    "| 1 | 演示标的 |",
+                ]
+            ),
+            "daily_briefing_2026-03-23_client_final.md",
+            {
+                "market_snapshot_contract": {
+                    "contract_version": "briefing.market_snapshot.v1",
+                    "stale_detected": False,
+                    "warning_line": "",
+                }
+            },
+        ),
+        (
+            "fund_pick",
+            "\n".join(
+                [
+                    "# 场外基金 pick | 2026-03-23",
+                    "",
+                    "## 数据完整度",
+                    "",
+                    "- 覆盖完整",
+                    "",
+                    "## 交付等级",
+                    "",
+                    "- 可发",
+                    "",
+                    "## 为什么推荐它",
+                    "",
+                    "- 原因一",
+                    "",
+                    "## 这只基金为什么是这个分",
+                    "",
+                    "- 分数构成一",
+                    "",
+                    "## 标准化分类",
+                    "",
+                    "- 主动权益",
+                    "",
+                    "## 为什么不是另外几只",
+                    "",
+                    "- 对比项一",
+                ]
+            ),
+            "fund_pick_2026-03-23_client_final.md",
+            {},
+        ),
+    ],
+)
+def test_report_guard_scaffolds_missing_review_and_blocks_delivery_for_briefing_and_fund_pick(
+    isolated_reports: Path,
+    report_type: str,
+    markdown_text: str,
+    target_name: str,
+    contract: dict,
+) -> None:
+    target = isolated_reports / f"reports/{'briefings' if report_type == 'briefing' else 'scans/funds'}/final/{target_name}"
+    with pytest.raises(ReportGuardError, match="外部评审尚未通过"):
+        export_reviewed_markdown_bundle(
+            report_type=report_type,
+            markdown_text=markdown_text,
+            markdown_path=target,
+            release_findings=[],
+            extra_manifest=contract,
+        )
+
+    review_path = review_path_for(target)
+    assert review_path.exists()
+    review_text = review_path.read_text(encoding="utf-8")
+    assert "状态：BLOCKED" in review_text
+    assert "pending_structural_reviewer" in review_text
+    assert not review_path.with_name(f"{review_path.stem}_round1{review_path.suffix}").exists()
+
+
+@pytest.mark.parametrize(
+    ("report_type", "markdown_text", "target_path"),
+    [
+        (
+            "stock_pick",
+            "\n".join(
+                [
+                    "# 今日个股推荐",
+                    "",
+                    "## 八维雷达",
+                    "",
+                    "- 技术面：示例",
+                    "",
+                    "## 催化拆解",
+                    "",
+                    "- 催化来源：研报/公告/资金行为",
+                    "",
+                    "## 硬排除检查",
+                    "",
+                    "- 硬排除：无",
+                    "",
+                    "## 风险拆解",
+                    "",
+                    "- 风险：业绩波动",
+                    "",
+                    "## 历史相似样本",
+                    "",
+                    "- 样本一",
+                ]
+            ),
+            "reports/stock_picks/final/stock_picks_cn_2026-03-23_final.md",
+        ),
+        (
+            "stock_analysis",
+            SCAN_DETAIL_MARKDOWN,
+            "reports/stock_analysis/final/stock_analysis_600519_2026-03-23_final.md",
+        ),
+        (
+            "etf_pick",
+            "\n".join(
+                [
+                    "# 今日ETF推荐",
+                    "",
+                    "## 数据完整度",
+                    "",
+                    "- 覆盖完整",
+                    "",
+                    "## 交付等级",
+                    "",
+                    "- 可发",
+                    "",
+                    "## 为什么先看它",
+                    "",
+                    "- 主题清晰",
+                    "",
+                    "## 这只ETF为什么是这个分",
+                    "",
+                    "- 分数构成",
+                    "",
+                    "## 标准化分类",
+                    "",
+                    "- 指数/增强指数",
+                    "",
+                    "## 基金画像",
+                    "",
+                    "- 规模/份额/跟踪指数",
+                    "",
+                    "## 关键证据",
+                    "",
+                    "- `黄金`：信号类型：`现货锚定`；强弱：`中`；结论：当前只做观察，不把它直接写成正式推荐。",
+                    "",
+                    "## 为什么不是另外几只",
+                    "",
+                    "- 因为别的更弱",
+                ]
+            ),
+            "reports/etf_picks/final/etf_pick_2026-03-23_final.md",
+        ),
+        (
+            "scan",
+            SCAN_DETAIL_MARKDOWN,
+            "reports/scans/etfs/final/scan_2026-03-23_client_final.md",
+        ),
+    ],
+)
+def test_report_guard_scaffolds_missing_review_and_blocks_delivery_for_stock_pick_stock_analysis_etf_pick_and_scan(
+    isolated_reports: Path,
+    report_type: str,
+    markdown_text: str,
+    target_path: str,
+) -> None:
+    target = isolated_reports / target_path
+    with pytest.raises(ReportGuardError, match="外部评审尚未通过"):
+        export_reviewed_markdown_bundle(
+            report_type=report_type,
+            markdown_text=markdown_text,
+            markdown_path=target,
+            release_findings=[],
+        )
+
+    review_path = review_path_for(target)
+    assert review_path.exists()
+    review_text = review_path.read_text(encoding="utf-8")
+    assert "状态：BLOCKED" in review_text
+    assert "pending_divergent_reviewer" in review_text
+
+
+@pytest.mark.parametrize(
+    ("report_type", "markdown_text", "target_path"),
+    [
+        (
+            "stock_pick",
+            "\n".join(
+                [
+                    "# 今日个股推荐",
+                    "",
+                    "## 八维雷达",
+                    "",
+                    "- 技术面：示例",
+                    "",
+                    "## 催化拆解",
+                    "",
+                    "- 催化来源：研报/公告/资金行为",
+                    "",
+                    "## 硬排除检查",
+                    "",
+                    "- 硬排除：无",
+                    "",
+                    "## 风险拆解",
+                    "",
+                    "- 风险：业绩波动",
+                    "",
+                    "## 历史相似样本",
+                    "",
+                    "- 样本一",
+                ]
+            ),
+            "reports/stock_picks/final/stock_picks_cn_2026-03-23_final.md",
+        ),
+        (
+            "etf_pick",
+            "\n".join(
+                [
+                    "# 今日ETF推荐",
+                    "",
+                    "## 数据完整度",
+                    "",
+                    "- 覆盖完整",
+                    "",
+                    "## 交付等级",
+                    "",
+                    "- 可发",
+                    "",
+                    "## 为什么先看它",
+                    "",
+                    "- 主题清晰",
+                    "",
+                    "## 这只ETF为什么是这个分",
+                    "",
+                    "- 分数构成",
+                    "",
+                    "## 标准化分类",
+                    "",
+                    "- 指数/增强指数",
+                    "",
+                    "## 基金画像",
+                    "",
+                    "- 规模/份额/跟踪指数",
+                    "",
+                    "## 关键证据",
+                    "",
+                    "- `黄金`：信号类型：`现货锚定`；强弱：`中`；结论：当前只做观察，不把它直接写成正式推荐。",
+                    "",
+                    "## 为什么不是另外几只",
+                    "",
+                    "- 因为别的更弱",
+                ]
+            ),
+            "reports/etf_picks/final/etf_pick_2026-03-23_final.md",
+        ),
+        (
+            "scan",
+            SCAN_DETAIL_MARKDOWN,
+            "reports/scans/etfs/final/scan_2026-03-23_client_final.md",
+        ),
+    ],
+)
+def test_report_guard_keeps_real_blocked_review_blocked_for_fastpath_types(
+    isolated_reports: Path,
+    report_type: str,
+    markdown_text: str,
+    target_path: str,
+) -> None:
+    target = isolated_reports / target_path
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="BLOCKED",
+            no_p1="否",
+            allow_delivery="否",
+            round_value=1,
+            converged="否",
+            continue_next="是",
+            summary="还不能发",
+            issues=["- 存在实质问题"],
+            independent=["- 需要继续回修"],
+            zero_prompt=["- 零提示复核后，仍有明显阻塞。"],
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReportGuardError, match="外部评审尚未通过"):
+        export_reviewed_markdown_bundle(
+            report_type=report_type,
+            markdown_text=markdown_text,
             markdown_path=target,
             release_findings=[],
         )
@@ -765,6 +1092,92 @@ def test_report_guard_allows_event_digest_section_when_contract_present(isolated
     assert bundle["review"] == review
 
 
+def test_report_guard_allows_event_digest_paraphrase_after_readability_tightening(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/etf_picks/final/etf_pick_demo_2026-04-06_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+            zero_prompt=["- 零提示复核后，没有新的高优先级问题。"],
+        ),
+        encoding="utf-8",
+    )
+    markdown = """# demo
+
+## 首页判断
+
+有解释层。
+
+## 数据完整度
+
+- 已写入。
+
+## 交付等级
+
+- 已写入。
+
+## 为什么先看它
+
+- 有理由。
+
+## 事件消化
+
+- 事件状态：`已消化`。
+- 事件分层：`行业主题事件`；当前优先级：`中`。
+- 事件细分：主题事件：标准指数框架；结论：按 `上海期货交易所有色金属期货价格指数` 的标准指数框架理解，别把模糊板块词当主线。
+- 影响层与性质：更直接影响 `景气 / 资金偏好`；当前更像 `一次性噪音`。
+- 优先级判断：只当辅助线索，不单独升级动作。
+- 这件事改变了什么：先影响 `景气 / 资金偏好` 这层，暂时还不改写主结论。
+
+## 这只ETF为什么是这个分
+
+- 技术偏弱。
+
+## 标准化分类
+
+- ETF。
+
+## 基金画像
+
+- 被动产品。
+
+## 关键证据
+
+- 有证据。
+
+## 为什么不是另外几只
+
+- 候选不足。
+"""
+
+    bundle = export_reviewed_markdown_bundle(
+        report_type="etf_pick",
+        markdown_text=markdown,
+        markdown_path=target,
+        release_findings=[],
+        extra_manifest={
+            "event_digest_contract": {
+                "status": "已消化",
+                "lead_layer": "行业主题事件",
+                "lead_detail": "主题事件：标准指数框架；结论：先按 `上海期货交易所有色金属期货价格指数` 的标准指数框架理解，不把模糊板块词当主线。",
+                "impact_summary": "景气 / 资金偏好",
+                "thesis_scope": "一次性噪音",
+                "importance_reason": "只当辅助线索，不单独升级动作。",
+                "changed_what": "先影响景气/资金偏好层。",
+            }
+        },
+    )
+
+    assert bundle["review"] == review
+
+
 def test_report_guard_blocks_missing_event_digest_deep_fields(isolated_reports: Path) -> None:
     target = isolated_reports / "reports/scans/etfs/final/scan_300502_2026-03-29_client_final.md"
     review = review_path_for(target)
@@ -1139,6 +1552,60 @@ def test_report_guard_allows_bridge_markdown_with_subtheme_hint(isolated_reports
     assert bundle["review"] == review
 
 
+def test_report_guard_blocks_financial_broker_packaged_as_dividend_theme(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/scans/stocks/final/scan_600030_2026-04-12_client_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+            zero_prompt=["- 零提示复核后，没有新的高优先级问题。"],
+        ),
+        encoding="utf-8",
+    )
+
+    markdown = "\n".join(
+        [
+            "# demo",
+            "",
+            "## 为什么这么判断",
+            "",
+            "- 中信证券 当前仍是券商龙头，先看分红预案和成交活跃度。",
+            "",
+            "## 硬检查",
+            "",
+            "| 项目 | 状态 |",
+            "| --- | --- |",
+            "| 流动性 | ✅ |",
+            "",
+            "## 分维度详解",
+            "",
+            "### 技术面",
+        ]
+    )
+
+    with pytest.raises(ReportGuardError, match="金融子行业"):
+        export_reviewed_markdown_bundle(
+            report_type="scan",
+            markdown_text=markdown,
+            markdown_path=target,
+            release_findings=[],
+            extra_manifest={
+                "theme_playbook_contract": {
+                    "label": "高股息 / 红利",
+                    "playbook_level": "theme",
+                    "hard_sector_label": "金融",
+                }
+            },
+        )
+
+
 def test_client_export_blocks_direct_write_to_final(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="禁止直接写入 final 目录"):
         export_markdown_bundle("# test", tmp_path / "reports/scans/etfs/final/demo.md")
@@ -1371,7 +1838,8 @@ def test_report_guard_accepts_etf_pick_markdown(isolated_reports: Path) -> None:
             "| 业绩比较基准 | 易盛郑商所能源化工指数A收益率 |",
             "",
             "## 关键证据",
-            "- [证据1](https://example.com)；信号：资金回流确认；强弱：中强；结论：偏利多，说明当前商品主线仍有配置支撑。",
+            "- 外部情报：[证据1](https://example.com)；信号：资金回流确认；强弱：中强；结论：偏利多，说明当前商品主线仍有配置支撑。",
+            "- 结构证据：信号类型：`跟踪指数修复`；信号强弱：`中`；结论：当前产品结构清晰，但执行上仍先看回踩确认。",
             "",
             "## 为什么不是另外几只",
             "### 1. 红利ETF (510880)",
@@ -1446,7 +1914,8 @@ def test_report_guard_accepts_observe_etf_pick_markdown(isolated_reports: Path) 
             "| 业绩比较基准 | 中证香港创新药指数收益率(人民币计价) |",
             "",
             "## 关键证据",
-            "- [证据1](https://example.com)；信号：防守资产相对占优；强弱：中等；结论：偏中性，当前更适合作为观察对象而不是立即升级推荐。",
+            "- 外部情报：[证据1](https://example.com)；信号：防守资产相对占优；强弱：中等；结论：偏中性，当前更适合作为观察对象而不是立即升级推荐。",
+            "- 结构证据：信号类型：`指数趋势未坏`；信号强弱：`中`；结论：方向还能跟，但今天还不够升级成正式推荐。",
             "",
             "## 为什么不是另外几只",
             "### 1. 红利ETF (510880)",
@@ -1460,6 +1929,246 @@ def test_report_guard_accepts_observe_etf_pick_markdown(isolated_reports: Path) 
         release_findings=[],
     )
     assert bundle["markdown"] == target
+
+
+def test_report_guard_blocks_observe_etf_pick_stale_formal_packaging(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/etf_picks/final/etf_pick_2026-04-23_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+        ),
+        encoding="utf-8",
+    )
+    markdown = "\n".join(
+        [
+            "# 今日ETF观察 | 2026-04-23",
+            "",
+            "## 数据完整度",
+            "- 覆盖存在降级",
+            "- 覆盖率的分母是今天进入完整分析的 2 只 ETF。",
+            "",
+            "## 交付等级",
+            "- 当前交付等级：降级观察稿。",
+            "- 这是一份 ETF 观察优先稿，不按正式推荐稿理解。",
+            "- 当前流程不是把全市场每只标的都做完整八维深扫，而是先初筛 4 只，再对其中 2 只做完整分析。",
+            "",
+            "## 为什么先看它",
+            "- 理由一",
+            "- 理由二",
+            "- 理由三",
+            "",
+            "## 这只ETF为什么是这个分",
+            "| 维度 | 分数 | 为什么是这个分 |",
+            "| --- | --- | --- |",
+            "| 技术面 | 52/100 | 不适合追高 |",
+            "",
+            "## 标准化分类",
+            "| 维度 | 结果 |",
+            "| --- | --- |",
+            "| 产品形态 | ETF |",
+            "| 载体角色 | 场内ETF |",
+            "| 管理方式 | 被动跟踪 |",
+            "| 暴露类型 | 行业主题 |",
+            "| 主方向 | 通信 |",
+            "| 份额类别 | 未分级 |",
+            "",
+            "## 基金画像",
+            "| 项目 | 内容 |",
+            "| --- | --- |",
+            "| 基金类型 | 股票型 / 被动指数型 |",
+            "| 基金公司 | 国泰基金 |",
+            "| 基金经理 | 艾小军 |",
+            "| 成立日期 | 2019-08-16 |",
+            "| 业绩比较基准 | 中证全指通信设备指数 |",
+            "",
+            "## 关键证据",
+            "- 外部情报：[证据1](https://example.com)；信号：通信链景气；强弱：中等；结论：等待确认。",
+            "- 结构证据：信号类型：`指数趋势未坏`；信号强弱：`中`；结论：方向还能跟。",
+            "",
+            "## 其余正式推荐",
+            "### 2. 半导体ETF (512480)",
+            "- 继续看。",
+            "",
+            "## 为什么不是另外几只",
+            "- 其余高分候选已并入上面的正式推荐层，不再把它们误写成被排除对象。",
+        ]
+    )
+
+    with pytest.raises(ReportGuardError, match="正式推荐包装"):
+        export_reviewed_markdown_bundle(
+            report_type="etf_pick",
+            markdown_text=markdown,
+            markdown_path=target,
+            release_findings=[],
+            extra_manifest={"delivery_tier": {"label": "降级观察稿", "observe_only": True}},
+        )
+
+
+def test_report_guard_blocks_observe_etf_pick_hard_action_row(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/etf_picks/final/etf_pick_2026-04-24_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+        ),
+        encoding="utf-8",
+    )
+    markdown = "\n".join(
+        [
+            "# 今日ETF观察 | 2026-04-24",
+            "",
+            "## 数据完整度",
+            "- 覆盖存在降级",
+            "- 覆盖率的分母是今天进入完整分析的 18 只 ETF。",
+            "",
+            "## 交付等级",
+            "- 当前交付等级：降级观察稿。",
+            "- 这是一份 ETF 观察优先稿，不按正式推荐稿理解。",
+            "",
+            "## 为什么先看它",
+            "- 理由一",
+            "- 理由二",
+            "- 理由三",
+            "",
+            "## 这只ETF为什么是这个分",
+            "| 维度 | 分数 | 为什么是这个分 |",
+            "| --- | --- | --- |",
+            "| 技术面 | 42/100 | 等确认 |",
+            "",
+            "## 标准化分类",
+            "| 维度 | 结果 |",
+            "| --- | --- |",
+            "| 产品形态 | ETF |",
+            "| 主方向 | 通信 |",
+            "",
+            "## 基金画像",
+            "| 项目 | 内容 |",
+            "| --- | --- |",
+            "| 基金类型 | ETF |",
+            "",
+            "## 关键证据",
+            "- 结构证据：信号类型：`通信链景气`；信号强弱：`中`；结论：等待确认。",
+            "",
+            "## 怎么做",
+            "| 项目 | 建议 |",
+            "| --- | --- |",
+            "| 当前动作 | 做多 |",
+            "| 触发条件 | 等回踩再看 |",
+            "",
+            "## 为什么不是另外几只",
+            "- 其余继续观察。",
+        ]
+    )
+
+    with pytest.raises(ReportGuardError, match="硬动作"):
+        export_reviewed_markdown_bundle(
+            report_type="etf_pick",
+            markdown_text=markdown,
+            markdown_path=target,
+            release_findings=[],
+            extra_manifest={"delivery_tier": {"label": "降级观察稿", "observe_only": True}},
+        )
+
+
+def test_report_guard_blocks_preferred_sector_track_escape(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/etf_picks/final/etf_pick_2026-04-24_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+        ),
+        encoding="utf-8",
+    )
+    markdown = "\n".join(
+        [
+            "# 今日ETF观察 | 2026-04-24",
+            "",
+            "## 数据完整度",
+            "- 覆盖存在降级",
+            "- 覆盖率的分母是今天进入完整分析的 3 只 ETF。",
+            "",
+            "## 交付等级",
+            "- 当前交付等级：降级观察稿。",
+            "- 这是一份 ETF 观察优先稿，不按正式推荐稿理解。",
+            "- 当前流程不是把全市场每只标的都做完整八维深扫，而是先初筛 6 只，再对其中 3 只做完整分析。",
+            "",
+            "## 当前分层建议",
+            "| 层次 | 标的 | 更适合的周期 | 为什么先看 |",
+            "| --- | --- | --- | --- |",
+            "| 优先观察 | 通信ETF (515880) | 波段 | CPO 仍在。 |",
+            "| 次级观察 | 华安黄金ETF (518880) | 中线 | 黄金趋势仍强。 |",
+            "",
+            "## 为什么先看它",
+            "- 理由一",
+            "- 理由二",
+            "- 理由三",
+            "",
+            "## 这只ETF为什么是这个分",
+            "| 维度 | 分数 | 为什么是这个分 |",
+            "| --- | --- | --- |",
+            "| 技术面 | 52/100 | 不适合追高 |",
+            "",
+            "## 标准化分类",
+            "| 维度 | 结果 |",
+            "| --- | --- |",
+            "| 产品形态 | ETF |",
+            "| 载体角色 | 场内ETF |",
+            "| 管理方式 | 被动跟踪 |",
+            "| 暴露类型 | 行业主题 |",
+            "| 主方向 | 通信 |",
+            "| 份额类别 | 未分级 |",
+            "",
+            "## 基金画像",
+            "| 项目 | 内容 |",
+            "| --- | --- |",
+            "| 基金类型 | 股票型 / 被动指数型 |",
+            "| 基金公司 | 国泰基金 |",
+            "| 基金经理 | 艾小军 |",
+            "| 成立日期 | 2019-08-16 |",
+            "| 业绩比较基准 | 中证全指通信设备指数 |",
+            "",
+            "## 关键证据",
+            "- 外部情报：[证据1](https://example.com)；信号：通信链景气；强弱：中等；结论：等待确认。",
+            "- 结构证据：信号类型：`指数趋势未坏`；信号强弱：`中`；结论：方向还能跟。",
+            "",
+            "## 为什么不是另外几只",
+            "- 其他候选暂不展开。",
+        ]
+    )
+
+    with pytest.raises(ReportGuardError, match="偏好主题"):
+        export_reviewed_markdown_bundle(
+            report_type="etf_pick",
+            markdown_text=markdown,
+            markdown_path=target,
+            release_findings=[],
+            extra_manifest={
+                "delivery_tier": {"label": "降级观察稿", "observe_only": True},
+                "preferred_sectors": ["科技", "半导体", "通信", "宽基"],
+            },
+        )
 
 
 def test_report_guard_blocks_observe_stock_pick_missing_feature_retention_sections(isolated_reports: Path) -> None:
@@ -1505,6 +2214,81 @@ def test_report_guard_blocks_observe_stock_pick_missing_feature_retention_sectio
     )
 
     with pytest.raises(ReportGuardError, match="第二批：继续跟踪"):
+        export_reviewed_markdown_bundle(
+            report_type="stock_pick",
+            markdown_text=markdown,
+            markdown_path=target,
+            release_findings=[],
+        )
+
+
+def test_report_guard_blocks_stock_pick_first_screen_that_hides_entry_and_stop(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/stock_picks/final/stock_picks_cn_2026-04-12_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+        ),
+        encoding="utf-8",
+    )
+    markdown = "\n".join(
+        [
+            "# 今日个股推荐（详细版） | 2026-04-12",
+            "",
+            "## 先看执行",
+            "",
+            "| 项目 | 建议 |",
+            "| --- | --- |",
+            "| 看不看 | 今天可以做，但只适合先小仓、分批确认。 |",
+            "| 怎么触发 | 短线先看 A股：药明康德；中线再看 A股：中信证券。真正出手要等对应个股复核卡里的介入条件兑现，首屏不硬拼统一买点。 |",
+            "| 多大仓位 | 单票 `2% - 5%` 试仓 |",
+            "| 哪里止损 | 首屏不写统一止损价；真的出手时，只按对应个股复核卡里的失效条件处理。 |",
+            "",
+            "## 名单结构",
+            "",
+            "| 项目 | 建议 |",
+            "| --- | --- |",
+            "| 报告定位 | 推荐稿 |",
+            "| 短线优先 | A股：药明康德 |",
+            "| 中线优先 | A股：中信证券 |",
+            "",
+            "## A股",
+            "",
+            "### 药明康德 (603259)",
+            "",
+            "**八维雷达：**",
+            "| 维度 | 得分 | 核心信号 |",
+            "| --- | --- | --- |",
+            "| 技术面 | 34/100 | 顶背离/假突破 |",
+            "",
+            "## 催化拆解",
+            "",
+            "- 结构化事件已命中。",
+            "",
+            "## 硬排除检查",
+            "",
+            "| 项目 | 状态 |",
+            "| --- | --- |",
+            "| 流动性 | 通过 |",
+            "",
+            "## 风险拆解",
+            "",
+            "- 波动偏大。",
+            "",
+            "## 历史相似样本",
+            "",
+            "- 非重叠样本 `12` 个。",
+        ]
+    )
+
+    with pytest.raises(ReportGuardError, match="具体建仓位|具体止损位|统一模板仓位"):
         export_reviewed_markdown_bundle(
             report_type="stock_pick",
             markdown_text=markdown,
@@ -1760,3 +2544,123 @@ def test_report_guard_blocks_briefing_without_linked_external_signal_items(isola
                 }
             },
         )
+
+
+def test_report_guard_allows_briefing_with_explicit_no_external_disclosure(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/briefings/final/daily_briefing_2026-04-08_client_final.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# 占位\n", encoding="utf-8")
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+            issues=["- 无新的实质问题。"],
+            independent=["- 结论一致。"],
+            zero_prompt=["- 零提示二审未发现新的实质性问题。"],
+            convergence_extra=["- closed_items：无"],
+        ),
+        encoding="utf-8",
+    )
+
+    markdown = "\n".join(
+        [
+            "# 今日晨报 | 2026-04-08",
+            "",
+            "### 关键新闻 / 关键证据",
+            "",
+            "- 外部情报：本轮未拿到可点击外部情报；当前先按结构证据和情报摘要理解，不把盘面摘要误写成可核验新闻。",
+            "- 结构证据：信号类型：`卖方共识升温`；信号强弱：`高`；结论：当前更像方向验证，不直接等于全市场主线确认。",
+            "- 情报摘要：这批外部情报大多围绕 `资金/交易`，去重后大致归成 `3` 组相近线索；这里说的是线索簇数量，不代表 `3` 个独立新增催化。",
+            "",
+            "## 为什么今天这么判断",
+            "",
+            "- 先看金融和宽基能否继续扩散。",
+            "",
+            "## 宏观领先指标",
+            "",
+            "- PMI 仍在跟踪。",
+            "",
+            "## 数据完整度",
+            "",
+            "- 当前缺失：实时RSS新闻。",
+            "",
+            "## 今天怎么做",
+            "",
+            "- 先看金融和宽基能否继续扩散。",
+            "",
+            "## 重点观察",
+            "",
+            "- 宽基修复。",
+            "",
+            "## 今日A股观察池",
+            "",
+            "| 排名 | 标的 |",
+            "| --- | --- |",
+            "| 1 | 宝丰能源 |",
+        ]
+    )
+
+    export_reviewed_markdown_bundle(
+        report_type="briefing",
+        markdown_text=markdown,
+        markdown_path=target,
+        release_findings=[],
+        extra_manifest={
+            "market_snapshot_contract": {
+                "contract_version": "briefing.market_snapshot.v1",
+                "stale_detected": False,
+                "warning_line": "",
+            }
+        },
+    )
+
+
+def test_report_guard_rejects_raw_intel_summary_on_homepage() -> None:
+    markdown = "\n".join(
+        [
+            "# demo",
+            "",
+            "### 关键新闻 / 关键证据",
+            "",
+            "- 情报摘要：主题聚类：价格/供需 6 条",
+            "- 结构证据：信号类型：`标准指数框架`；信号强弱：`中`；结论：先按跟踪指数理解。",
+        ]
+    )
+    with pytest.raises(ReportGuardError, match="原始情报聚类口径"):
+        report_guard._ensure_top_signal_quality("etf_pick", markdown)
+
+
+def test_report_guard_rejects_mixed_external_and_structured_evidence_without_labels() -> None:
+    markdown = "\n".join(
+        [
+            "# demo",
+            "",
+            "### 关键新闻 / 关键证据",
+            "",
+            "- **旧闻回放 / 搜索回退 / 主题级情报** · 2026-03-30 · 新浪财经：[几内亚铝土矿供应扰动延续](https://example.com/bauxite)",
+            "- 先看 **标准指数框架**：信号类型：`标准指数框架`；信号强弱：`中`；结论：先按跟踪指数理解。",
+        ]
+    )
+    with pytest.raises(ReportGuardError, match="外部情报 / 结构证据"):
+        report_guard._ensure_top_signal_quality("etf_pick", markdown)
+
+
+def test_report_guard_allows_labeled_external_signal_without_structure_line() -> None:
+    markdown = "\n".join(
+        [
+            "# demo",
+            "",
+            "### 关键新闻 / 关键证据",
+            "",
+            "- 外部情报：[核心持仓财报窗口：新易盛(300502) 预约披露 2026年一季报](https://example.com/300502)；信号类型：`核心持仓财报窗口`；信号强弱：`强`；结论：这是 ETF 前排权重股的确定披露日历，但不是财报结果。",
+        ]
+    )
+
+    report_guard._ensure_top_signal_quality("etf_pick", markdown)

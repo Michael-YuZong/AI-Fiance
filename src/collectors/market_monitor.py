@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import time
 from typing import Any, Dict, List, Mapping, Optional
 
 import pandas as pd
 
 from .base import BaseCollector
+from src.utils.concurrency import run_with_timeout
 from src.utils.config import resolve_project_path
 from src.utils.data import load_yaml
+from src.utils.yfinance_runtime import close_yfinance_runtime_caches
 
 try:
     import yfinance as yf
@@ -107,21 +108,23 @@ class MarketMonitorCollector(BaseCollector):
         return rows
 
     def _history_with_timeout(self, symbol: str) -> pd.DataFrame:
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(
-            self._execute_fetcher,
-            yf.Ticker(symbol).history,
-            period="3mo",
-            interval="1d",
-            auto_adjust=False,
+        def _load_history() -> pd.DataFrame:
+            try:
+                return self._execute_fetcher(
+                    yf.Ticker(symbol).history,
+                    period="3mo",
+                    interval="1d",
+                    auto_adjust=False,
+                )
+            finally:
+                close_yfinance_runtime_caches()
+
+        return run_with_timeout(
+            _load_history,
+            timeout_seconds=self.fetch_timeout_seconds,
+            timeout_exc=TimeoutError(f"{self.name} refresh timeout for {symbol}"),
+            thread_name=f"market_monitor_{symbol}",
         )
-        try:
-            return future.result(timeout=self.fetch_timeout_seconds)
-        except FutureTimeoutError as exc:
-            future.cancel()
-            raise TimeoutError(f"{self.name} refresh timeout for {symbol}") from exc
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
 
     def _stale_cache_age_hours(self, cache_key: str) -> Optional[float]:
         cache_path = self._cache_path(cache_key)

@@ -191,7 +191,7 @@ def test_market_renderer_outputs_core_sections():
         "overnight_rows": [["美股", "标普500", "5100.00", "+0.40%", "偏强"]],
         "watchlist_rows": [["510210", "1.026", "-0.20%", "+0.30%", "+1.00%", "震荡", "44", "宽基修复观察"]],
         "core_event_lines": ["**利率预期回落**\n  → 长久期资产压力缓和"],
-        "theme_tracking_rows": [["宽基", "利率预期回落", "指数修复观察", "短线观察", "量能不足"]],
+        "theme_tracking_rows": [["宽基", "利率预期回落", "指数修复观察", "短线观察", "量能不足", "当前更多是指数修复背景和信息环境支持，不等于直接催化已经兑现。"]],
         "theme_tracking_lines": ["与主线一致性: 宽基与利率修复方向一致。"],
         "capital_flow_lines": ["全市场主力资金最新为 `净流入` 23.10亿。"],
         "quality_lines": ["本次新闻覆盖源: Reuters / 财联社。"],
@@ -220,7 +220,7 @@ def test_market_renderer_outputs_core_sections():
     assert "# 全市场行情简报" in rendered
     assert "## 1. 市场结论" in rendered
     assert "### 1.1 今日主线" in rendered
-    assert "### 1.2 仓位与执行" in rendered
+    assert "### 1.2 今天怎么做" in rendered
     assert "## 2. 宏观与市场全景" in rendered
     assert "### 2.1 宏观框架" in rendered
     assert "### 2.2 国内市场概览" in rendered
@@ -235,6 +235,7 @@ def test_market_renderer_outputs_core_sections():
     assert "## 3. 资金与催化" in rendered
     assert "### 3.1 核心事件" in rendered
     assert "### 3.2 主线跟踪" in rendered
+    assert "信息环境" in rendered
     assert "### 3.3 盘面与资金" in rendered
     assert "## 4. A股观察池" in rendered
     assert "## 5. 今日验证点" in rendered

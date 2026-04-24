@@ -27,6 +27,7 @@ COMMAND_TIMEOUTS = {
     "scan": 90,
     "compare": 45,
     "briefing": 45,
+    "intel": 45,
     "backtest": 60,
     "risk": 30,
 }

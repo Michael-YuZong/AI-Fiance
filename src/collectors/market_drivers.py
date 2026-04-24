@@ -34,6 +34,16 @@ class MarketDriversCollector(BaseCollector):
         cn_market = ChinaMarketCollector(self.config)
         as_of_text = as_of.strftime("%Y-%m-%d %H:%M:%S")
 
+        def _maybe_frame(method_name: str) -> pd.DataFrame:
+            method = getattr(cn_market, method_name, None)
+            if not callable(method):
+                return pd.DataFrame()
+            try:
+                frame = method()
+            except Exception:
+                return pd.DataFrame()
+            return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
         result: Dict[str, Any] = {
             "as_of": as_of_text,
             "market_flow": self._market_flow(as_of),
@@ -41,7 +51,37 @@ class MarketDriversCollector(BaseCollector):
             "northbound_top10": self._ts_northbound_top10(),
             "margin_summary": cn_market.get_margin_trading(),
             "pledge_stat": self._ts_pledge_stat(),
+            "tdx_index": self.get_tdx_index(reference_date=as_of),
+            "tdx_member": self.get_tdx_member(reference_date=as_of),
+            "tdx_daily": self.get_tdx_daily(reference_date=as_of),
+            "dc_index": self.get_dc_index(reference_date=as_of),
+            "dc_daily": self.get_dc_daily(reference_date=as_of),
+            "moneyflow_mkt_dc": self.get_moneyflow_mkt_dc(reference_date=as_of),
+            "report_rc": self.get_report_rc(reference_date=as_of),
+            "ggt_top10": _maybe_frame("get_ggt_top10"),
+            "ccass_hold": _maybe_frame("get_ccass_hold"),
+            "ccass": _maybe_frame("get_ccass_hold_detail"),
+            "hm_detail": _maybe_frame("get_hm_detail"),
+            "cb_issue": _maybe_frame("get_cb_issue"),
+            "cb_share": _maybe_frame("get_cb_share"),
         }
+
+        for prefix, report_key, type_column in (
+            ("tdx", "tdx_daily", "板块类型"),
+            ("dc", "dc_daily", "板块类型"),
+        ):
+            report = dict(result.get(report_key) or {})
+            frame = report.get("frame")
+            if not isinstance(frame, pd.DataFrame) or frame.empty or type_column not in frame.columns:
+                continue
+            type_series = frame[type_column].astype(str).map(
+                self._normalize_tdx_board_type if prefix == "tdx" else self._normalize_dc_board_type
+            )
+            result[f"{prefix}_board"] = frame[type_series.isin({"industry", "concept"})].reset_index(drop=True)
+            result[f"{prefix}_industry"] = frame[type_series.eq("industry")].reset_index(drop=True)
+            result[f"{prefix}_concept"] = frame[type_series.eq("concept")].reset_index(drop=True)
+            result[f"{prefix}_style"] = frame[type_series.eq("style")].reset_index(drop=True)
+            result[f"{prefix}_region"] = frame[type_series.eq("region")].reset_index(drop=True)
 
         result["industry_fund_flow"] = self._ts_sector_fund_flow("industry")
         if result["industry_fund_flow"].empty:
@@ -234,6 +274,16 @@ class MarketDriversCollector(BaseCollector):
 
     def _ts_market_flow(self, reference_date: datetime) -> Dict[str, Any]:
         """Aggregate Tushare moneyflow into the market-flow shape used by briefing."""
+        dc_report = self.get_moneyflow_mkt_dc(reference_date=reference_date)
+        dc_frame = dc_report.get("frame") if isinstance(dc_report, Mapping) else None
+        if isinstance(dc_frame, pd.DataFrame) and not dc_frame.empty:
+            latest_date = self._extract_latest_date(dc_frame, "日期")
+            return {
+                "frame": dc_frame.reset_index(drop=True),
+                "latest_date": latest_date,
+                "is_fresh": self._is_fresh(latest_date, reference_date),
+            }
+
         cache_key = "market_drivers:ts_market_flow"
         cached = self._load_cache(cache_key, ttl_hours=2)
         if cached is not None and not cached.empty:
@@ -329,6 +379,830 @@ class MarketDriversCollector(BaseCollector):
 
     def _empty_rank_report(self) -> Dict[str, Any]:
         return {"frame": pd.DataFrame(), "is_fresh": False, "latest_date": "", "symbol": ""}
+
+    # ── Tushare: TDX 板块 / 风格 / 地区专题链 ────────────────────────────
+
+    def get_tdx_index(
+        self,
+        *,
+        reference_date: Optional[datetime] = None,
+        board_type: str = "",
+    ) -> Dict[str, Any]:
+        """Return a Tushare-first board/theme/region index snapshot."""
+        as_of = reference_date or datetime.now()
+        as_of_text = as_of.strftime("%Y-%m-%d %H:%M:%S")
+        board_type_text = self._normalize_tdx_board_type(board_type)
+        cache_key = f"market_drivers:tdx_index:{board_type_text or 'all'}:v1"
+        cached = self._load_cache(cache_key, ttl_hours=4)
+        if cached is not None:
+            frame = cached if isinstance(cached, pd.DataFrame) else pd.DataFrame(cached)
+            latest_date = self._extract_latest_date(frame, "日期")
+            is_fresh = self._is_fresh(latest_date, as_of, max_age_days=0) if latest_date else False
+            return {
+                "frame": frame.reset_index(drop=True),
+                "as_of": as_of_text,
+                "latest_date": latest_date,
+                "is_fresh": is_fresh,
+                "source": "tushare.tdx_index",
+                "fallback": "none",
+                "diagnosis": "live" if not frame.empty else "empty",
+                "disclosure": "Tushare tdx_index 提供板块/风格/地区专题的基础清单与盘面快照。",
+                "board_type": board_type_text or "all",
+                "status": "matched" if not frame.empty else "empty",
+            }
+
+        raw_error: BaseException | None = None
+        try:
+            raw = self._ts_call("tdx_index")
+        except Exception as exc:  # noqa: BLE001
+            raw = None
+            raw_error = exc
+        diagnosis = "live"
+        if raw_error is not None:
+            diagnosis = self._tushare_failure_diagnosis(raw_error)
+        elif raw is None:
+            diagnosis = "unavailable"
+
+        frame = self._normalize_tdx_index_frame(raw)
+        if board_type_text:
+            frame = self._filter_tdx_board_frame(frame, board_type_text)
+        if frame.empty and diagnosis == "live":
+            diagnosis = "empty"
+        latest_date = self._extract_latest_date(frame, "日期")
+        disclosure = (
+            "Tushare tdx_index 提供板块/风格/地区专题的基础清单与盘面快照。"
+            if diagnosis in {"live", "empty", "stale"}
+            else self._blocked_disclosure(diagnosis, source="Tushare tdx_index")
+        )
+        report = {
+            "frame": frame.reset_index(drop=True),
+            "as_of": as_of_text,
+            "latest_date": latest_date,
+            "is_fresh": self._is_fresh(latest_date, as_of, max_age_days=0) if latest_date else False,
+            "source": "tushare.tdx_index",
+            "fallback": "none",
+            "diagnosis": diagnosis,
+            "disclosure": disclosure,
+            "board_type": board_type_text or "all",
+            "status": "matched" if not frame.empty and diagnosis == "live" else "empty" if frame.empty else "blocked" if diagnosis not in {"live", "empty", "stale"} else "stale" if diagnosis == "stale" else "matched",
+        }
+        self._save_cache(cache_key, report["frame"])
+        return report
+
+    def get_tdx_member(
+        self,
+        *,
+        reference_date: Optional[datetime] = None,
+        board_type: str = "",
+        board_code: str = "",
+        board_name: str = "",
+    ) -> Dict[str, Any]:
+        """Return a Tushare-first board constituent snapshot."""
+        as_of = reference_date or datetime.now()
+        as_of_text = as_of.strftime("%Y-%m-%d %H:%M:%S")
+        board_type_text = self._normalize_tdx_board_type(board_type)
+        cache_key = f"market_drivers:tdx_member:{board_type_text or 'all'}:{board_code or 'all'}:{board_name or 'all'}:v1"
+        cached = self._load_cache(cache_key, ttl_hours=4)
+        if cached is not None:
+            frame = cached if isinstance(cached, pd.DataFrame) else pd.DataFrame(cached)
+            latest_date = self._extract_latest_date(frame, "日期")
+            is_fresh = self._is_fresh(latest_date, as_of, max_age_days=0) if latest_date else False
+            return {
+                "frame": frame.reset_index(drop=True),
+                "as_of": as_of_text,
+                "latest_date": latest_date,
+                "is_fresh": is_fresh,
+                "source": "tushare.tdx_member",
+                "fallback": "none",
+                "diagnosis": "live" if not frame.empty else "empty",
+                "disclosure": "Tushare tdx_member 提供板块成分快照，空表不代表看空，只代表当前未命中。",
+                "board_type": board_type_text or "all",
+                "board_code": board_code.strip(),
+                "board_name": board_name.strip(),
+                "status": "matched" if not frame.empty else "empty",
+            }
+
+        raw_error: BaseException | None = None
+        try:
+            raw = self._ts_call("tdx_member")
+        except Exception as exc:  # noqa: BLE001
+            raw = None
+            raw_error = exc
+        diagnosis = "live"
+        if raw_error is not None:
+            diagnosis = self._tushare_failure_diagnosis(raw_error)
+        elif raw is None:
+            diagnosis = "unavailable"
+
+        frame = self._normalize_tdx_member_frame(raw)
+        if board_type_text:
+            frame = self._filter_tdx_board_frame(frame, board_type_text)
+        if board_code.strip():
+            frame = frame[
+                frame.get("板块代码", pd.Series("", index=frame.index)).astype(str).str.strip().eq(board_code.strip())
+                | frame.get("板块名称", pd.Series("", index=frame.index)).astype(str).str.strip().eq(board_code.strip())
+            ]
+        if board_name.strip():
+            name_series = frame.get("板块名称", pd.Series("", index=frame.index)).astype(str).str.strip()
+            frame = frame[name_series.eq(board_name.strip()) | name_series.str.contains(board_name.strip(), regex=False, na=False)]
+        if frame.empty and diagnosis == "live":
+            diagnosis = "empty"
+        latest_date = self._extract_latest_date(frame, "日期")
+        disclosure = (
+            "Tushare tdx_member 提供板块成分快照，空表不代表看空，只代表当前未命中。"
+            if diagnosis in {"live", "empty", "stale"}
+            else self._blocked_disclosure(diagnosis, source="Tushare tdx_member")
+        )
+        report = {
+            "frame": frame.reset_index(drop=True),
+            "as_of": as_of_text,
+            "latest_date": latest_date,
+            "is_fresh": self._is_fresh(latest_date, as_of, max_age_days=0) if latest_date else False,
+            "source": "tushare.tdx_member",
+            "fallback": "none",
+            "diagnosis": diagnosis,
+            "disclosure": disclosure,
+            "board_type": board_type_text or "all",
+            "board_code": board_code.strip(),
+            "board_name": board_name.strip(),
+            "status": "matched" if not frame.empty and diagnosis == "live" else "empty" if frame.empty else "blocked" if diagnosis not in {"live", "empty", "stale"} else "stale" if diagnosis == "stale" else "matched",
+        }
+        self._save_cache(cache_key, report["frame"])
+        return report
+
+    def get_tdx_daily(
+        self,
+        *,
+        reference_date: Optional[datetime] = None,
+        board_type: str = "",
+        board_code: str = "",
+        board_name: str = "",
+    ) -> Dict[str, Any]:
+        """Return a Tushare-first board/theme/region daily snapshot."""
+        as_of = reference_date or datetime.now()
+        as_of_text = as_of.strftime("%Y-%m-%d %H:%M:%S")
+        board_type_text = self._normalize_tdx_board_type(board_type)
+        cache_key = f"market_drivers:tdx_daily:{board_type_text or 'all'}:{board_code or 'all'}:{board_name or 'all'}:v1"
+        cached = self._load_cache(cache_key, ttl_hours=2)
+        if cached is not None:
+            frame = cached if isinstance(cached, pd.DataFrame) else pd.DataFrame(cached)
+            latest_date = self._extract_latest_date(frame, "日期")
+            is_fresh = self._is_fresh(latest_date, as_of, max_age_days=0) if latest_date else False
+            return {
+                "frame": frame.reset_index(drop=True),
+                "as_of": as_of_text,
+                "latest_date": latest_date,
+                "is_fresh": is_fresh,
+                "source": "tushare.tdx_daily",
+                "fallback": "none",
+                "diagnosis": "live" if not frame.empty else "empty",
+                "disclosure": "Tushare tdx_daily 提供板块/风格/地区专题的日线行情快照。",
+                "board_type": board_type_text or "all",
+                "board_code": board_code.strip(),
+                "board_name": board_name.strip(),
+                "status": "matched" if not frame.empty else "empty",
+            }
+
+        raw_error: BaseException | None = None
+        try:
+            raw = self._ts_call("tdx_daily")
+        except Exception as exc:  # noqa: BLE001
+            raw = None
+            raw_error = exc
+        diagnosis = "live"
+        if raw_error is not None:
+            diagnosis = self._tushare_failure_diagnosis(raw_error)
+        elif raw is None:
+            diagnosis = "unavailable"
+
+        frame = self._normalize_tdx_daily_frame(raw)
+        if board_type_text:
+            frame = self._filter_tdx_board_frame(frame, board_type_text)
+        if board_code.strip():
+            frame = frame[
+                frame.get("板块代码", pd.Series("", index=frame.index)).astype(str).str.strip().eq(board_code.strip())
+                | frame.get("板块名称", pd.Series("", index=frame.index)).astype(str).str.strip().eq(board_code.strip())
+            ]
+        if board_name.strip():
+            name_series = frame.get("板块名称", pd.Series("", index=frame.index)).astype(str).str.strip()
+            frame = frame[name_series.eq(board_name.strip()) | name_series.str.contains(board_name.strip(), regex=False, na=False)]
+        if frame.empty and diagnosis == "live":
+            diagnosis = "empty"
+        latest_date = self._extract_latest_date(frame, "日期")
+        disclosure = (
+            "Tushare tdx_daily 提供板块/风格/地区专题的日线行情快照。"
+            if diagnosis in {"live", "empty", "stale"}
+            else self._blocked_disclosure(diagnosis, source="Tushare tdx_daily")
+        )
+        report = {
+            "frame": frame.reset_index(drop=True),
+            "as_of": as_of_text,
+            "latest_date": latest_date,
+            "is_fresh": self._is_fresh(latest_date, as_of, max_age_days=0) if latest_date else False,
+            "source": "tushare.tdx_daily",
+            "fallback": "none",
+            "diagnosis": diagnosis,
+            "disclosure": disclosure,
+            "board_type": board_type_text or "all",
+            "board_code": board_code.strip(),
+            "board_name": board_name.strip(),
+            "status": "matched" if not frame.empty and diagnosis == "live" else "empty" if frame.empty else "blocked" if diagnosis not in {"live", "empty", "stale"} else "stale" if diagnosis == "stale" else "matched",
+        }
+        self._save_cache(cache_key, report["frame"])
+        return report
+
+    @staticmethod
+    def _normalize_tdx_board_type(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        exact = {
+            "i": "industry",
+            "industry": "industry",
+            "概念": "concept",
+            "concept": "concept",
+            "n": "concept",
+            "region": "region",
+            "地区": "region",
+            "地域": "region",
+            "style": "style",
+            "风格": "style",
+        }
+        if text in exact:
+            return exact[text]
+        if text.startswith("行业") or text.startswith("申万") or text.startswith("中信"):
+            return "industry"
+        if text.startswith("概念") or text.startswith("题材"):
+            return "concept"
+        if text.startswith("地区") or text.startswith("地域"):
+            return "region"
+        if text.startswith("风格"):
+            return "style"
+        return text
+
+    def _filter_tdx_board_frame(self, frame: pd.DataFrame, board_type: str) -> pd.DataFrame:
+        if frame.empty or not board_type:
+            return frame.reset_index(drop=True) if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+        working = frame.copy()
+        type_col = self._first_existing_column(working, ("板块类型", "type", "category", "分类", "类型"))
+        if type_col is None:
+            return working.reset_index(drop=True)
+        normalized_type = working[type_col].astype(str).map(self._normalize_tdx_board_type)
+        aliases = {board_type}
+        if board_type == "industry":
+            aliases.update({"i"})
+        elif board_type == "concept":
+            aliases.update({"n"})
+        working = working[normalized_type.isin(aliases)].copy()
+        return working.reset_index(drop=True)
+
+    def _normalize_tdx_index_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        working = frame.copy()
+        code_col = self._first_existing_column(working, ("board_code", "tdx_code", "ts_code", "code", "板块代码", "指数代码"))
+        name_col = self._first_existing_column(working, ("board_name", "tdx_name", "name", "板块名称", "名称"))
+        type_col = self._first_existing_column(working, ("board_type", "type", "category", "板块类型", "分类", "类型"))
+        date_col = self._first_existing_column(working, ("trade_date", "日期", "date", "as_of", "update_date", "report_date"))
+        pct_col = self._first_existing_column(working, ("pct_change", "change_pct", "涨跌幅", "change"))
+        amount_col = self._first_existing_column(working, ("amount", "成交额", "turnover"))
+        normalized = pd.DataFrame(
+            {
+                "板块代码": working[code_col].astype(str).str.strip() if code_col else "",
+                "板块名称": working[name_col].astype(str).str.strip() if name_col else "",
+                "板块类型": working[type_col].astype(str).str.strip() if type_col else "",
+                "涨跌幅": pd.to_numeric(working[pct_col], errors="coerce") if pct_col else pd.Series(pd.NA, index=working.index),
+                "成交额": pd.to_numeric(working[amount_col], errors="coerce") if amount_col else pd.Series(pd.NA, index=working.index),
+                "日期": working[date_col].map(self._normalize_date_text) if date_col else pd.Series("", index=working.index),
+            }
+        )
+        for alias, source_name in (("名称", "板块名称"), ("代码", "板块代码")):
+            normalized[alias] = normalized[source_name]
+        return normalized.dropna(subset=["板块名称"], how="all").reset_index(drop=True)
+
+    def _normalize_tdx_member_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        working = frame.copy()
+        board_code_col = self._first_existing_column(working, ("board_code", "tdx_code", "board_ts_code", "ts_code", "code", "板块代码", "指数代码"))
+        board_name_col = self._first_existing_column(working, ("board_name", "tdx_name", "board", "name", "板块名称", "名称"))
+        type_col = self._first_existing_column(working, ("board_type", "type", "category", "板块类型", "分类", "类型"))
+        member_code_col = self._first_existing_column(working, ("member_code", "con_code", "stock_code", "symbol", "成分代码", "股票代码", "ts_code", "code"))
+        member_name_col = self._first_existing_column(working, ("member_name", "con_name", "stock_name", "name", "成分名称", "股票名称"))
+        weight_col = self._first_existing_column(working, ("weight", "ratio", "权重"))
+        date_col = self._first_existing_column(working, ("trade_date", "日期", "date", "as_of", "update_date", "report_date"))
+        normalized = pd.DataFrame(
+            {
+                "板块代码": working[board_code_col].astype(str).str.strip() if board_code_col else "",
+                "板块名称": working[board_name_col].astype(str).str.strip() if board_name_col else "",
+                "板块类型": working[type_col].astype(str).str.strip() if type_col else "",
+                "成分代码": working[member_code_col].astype(str).str.strip() if member_code_col else "",
+                "成分名称": working[member_name_col].astype(str).str.strip() if member_name_col else "",
+                "权重": pd.to_numeric(working[weight_col], errors="coerce") if weight_col else pd.Series(pd.NA, index=working.index),
+                "日期": working[date_col].map(self._normalize_date_text) if date_col else pd.Series("", index=working.index),
+            }
+        )
+        if "名称" not in normalized.columns:
+            normalized["名称"] = normalized["成分名称"]
+        if "代码" not in normalized.columns:
+            normalized["代码"] = normalized["成分代码"]
+        if not normalized["板块名称"].astype(str).str.strip().any() and "板块类型" in normalized.columns:
+            normalized["板块名称"] = normalized["板块类型"]
+        return normalized.dropna(subset=["成分代码", "成分名称"], how="all").reset_index(drop=True)
+
+    def _normalize_tdx_daily_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        working = frame.copy()
+        board_code_col = self._first_existing_column(working, ("board_code", "tdx_code", "ts_code", "code", "板块代码", "指数代码"))
+        board_name_col = self._first_existing_column(working, ("board_name", "tdx_name", "name", "板块名称", "名称"))
+        type_col = self._first_existing_column(working, ("board_type", "type", "category", "板块类型", "分类", "类型"))
+        date_col = self._first_existing_column(working, ("trade_date", "日期", "date", "as_of", "update_date", "report_date"))
+        open_col = self._first_existing_column(working, ("open", "开盘", "open_price"))
+        close_col = self._first_existing_column(working, ("close", "收盘", "close_price"))
+        high_col = self._first_existing_column(working, ("high", "最高", "high_price"))
+        low_col = self._first_existing_column(working, ("low", "最低", "low_price"))
+        pct_col = self._first_existing_column(working, ("pct_change", "change_pct", "涨跌幅", "change"))
+        amount_col = self._first_existing_column(working, ("amount", "成交额", "turnover"))
+        vol_col = self._first_existing_column(working, ("vol", "volume", "成交量"))
+        normalized = pd.DataFrame(
+            {
+                "板块代码": working[board_code_col].astype(str).str.strip() if board_code_col else "",
+                "板块名称": working[board_name_col].astype(str).str.strip() if board_name_col else "",
+                "板块类型": working[type_col].astype(str).str.strip() if type_col else "",
+                "开盘": pd.to_numeric(working[open_col], errors="coerce") if open_col else pd.Series(pd.NA, index=working.index),
+                "收盘": pd.to_numeric(working[close_col], errors="coerce") if close_col else pd.Series(pd.NA, index=working.index),
+                "最高": pd.to_numeric(working[high_col], errors="coerce") if high_col else pd.Series(pd.NA, index=working.index),
+                "最低": pd.to_numeric(working[low_col], errors="coerce") if low_col else pd.Series(pd.NA, index=working.index),
+                "涨跌幅": pd.to_numeric(working[pct_col], errors="coerce") if pct_col else pd.Series(pd.NA, index=working.index),
+                "成交额": pd.to_numeric(working[amount_col], errors="coerce") if amount_col else pd.Series(pd.NA, index=working.index),
+                "成交量": pd.to_numeric(working[vol_col], errors="coerce") if vol_col else pd.Series(pd.NA, index=working.index),
+                "日期": working[date_col].map(self._normalize_date_text) if date_col else pd.Series("", index=working.index),
+            }
+        )
+        for alias, source_name in (("名称", "板块名称"), ("代码", "板块代码")):
+            normalized[alias] = normalized[source_name]
+        return normalized.sort_values(["日期", "涨跌幅"], ascending=[True, False]).reset_index(drop=True)
+
+    # ── Tushare: 东方财富专题链（板块/资金流/研报） ──────────────────────
+
+    def get_dc_index(
+        self,
+        *,
+        reference_date: Optional[datetime] = None,
+        trade_date: str = "",
+        ts_code: str = "",
+        name: str = "",
+    ) -> Dict[str, Any]:
+        as_of = reference_date or datetime.now()
+        as_of_text = as_of.strftime("%Y-%m-%d %H:%M:%S")
+        query_date = self._normalize_date_key(trade_date) or self._latest_open_trade_date(lookback_days=14) or as_of.strftime("%Y%m%d")
+        cache_key = f"market_drivers:dc_index:{query_date}:{ts_code or 'all'}:{name or 'all'}:v1"
+        cached = self._load_cache(cache_key, ttl_hours=4)
+        if cached is not None:
+            frame = cached if isinstance(cached, pd.DataFrame) else pd.DataFrame(cached)
+            latest_date = self._extract_latest_date(frame, "日期")
+            return self._snapshot_report(
+                frame,
+                as_of=as_of,
+                source="tushare.dc_index",
+                fallback="none",
+                latest_date=latest_date,
+                diagnosis="live" if not frame.empty else "empty",
+                disclosure="Tushare dc_index 提供东方财富概念板块基础清单与盘面快照。",
+                extra={"board_type": "concept", "trade_date": query_date},
+            )
+
+        raw_error: BaseException | None = None
+        try:
+            raw = self._ts_call("dc_index", trade_date=query_date)
+        except Exception as exc:  # noqa: BLE001
+            raw = None
+            raw_error = exc
+        diagnosis = self._tushare_failure_diagnosis(raw_error) if raw_error is not None else "unavailable" if raw is None else "live"
+        frame = self._normalize_dc_index_frame(raw)
+        if ts_code.strip():
+            wanted = {item.strip() for item in ts_code.split(",") if item.strip()}
+            frame = frame[frame["板块代码"].astype(str).isin(wanted) | frame["代码"].astype(str).isin(wanted)]
+        if name.strip():
+            frame = frame[frame["板块名称"].astype(str).str.contains(name.strip(), regex=False, na=False)]
+        if frame.empty and diagnosis == "live":
+            diagnosis = "empty"
+        latest_date = self._extract_latest_date(frame, "日期")
+        report = self._snapshot_report(
+            frame,
+            as_of=as_of,
+            source="tushare.dc_index",
+            fallback="none",
+            latest_date=latest_date,
+            diagnosis=diagnosis,
+            disclosure=(
+                "Tushare dc_index 提供东方财富概念板块基础清单与盘面快照。"
+                if diagnosis in {"live", "empty", "stale"}
+                else self._blocked_disclosure(diagnosis, source="Tushare dc_index")
+            ),
+            extra={"board_type": "concept", "trade_date": query_date},
+        )
+        self._save_cache(cache_key, report["frame"])
+        return report
+
+    def get_dc_daily(
+        self,
+        *,
+        reference_date: Optional[datetime] = None,
+        idx_type: str = "",
+        trade_date: str = "",
+        ts_code: str = "",
+        name: str = "",
+    ) -> Dict[str, Any]:
+        as_of = reference_date or datetime.now()
+        as_of_text = as_of.strftime("%Y-%m-%d %H:%M:%S")
+        query_date = self._normalize_date_key(trade_date) or self._latest_open_trade_date(lookback_days=14) or as_of.strftime("%Y%m%d")
+        normalized_idx_type = self._normalize_dc_board_type(idx_type)
+        cache_key = f"market_drivers:dc_daily:{normalized_idx_type or 'all'}:{query_date}:{ts_code or 'all'}:{name or 'all'}:v1"
+        cached = self._load_cache(cache_key, ttl_hours=2)
+        if cached is not None:
+            frame = cached if isinstance(cached, pd.DataFrame) else pd.DataFrame(cached)
+            latest_date = self._extract_latest_date(frame, "日期")
+            return self._snapshot_report(
+                frame,
+                as_of=as_of,
+                source="tushare.dc_daily",
+                fallback="none",
+                latest_date=latest_date,
+                diagnosis="live" if not frame.empty else "empty",
+                disclosure="Tushare dc_daily 提供东方财富板块日线行情快照。",
+                extra={"board_type": normalized_idx_type or "all", "trade_date": query_date, "idx_type": normalized_idx_type or ""},
+            )
+
+        raw_error: BaseException | None = None
+        raw = None
+        query_kwargs: dict[str, Any] = {"trade_date": query_date}
+        if normalized_idx_type:
+            query_kwargs["idx_type"] = self._dc_idx_type_api_value(normalized_idx_type)
+        try:
+            raw = self._ts_call("dc_daily", **query_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            raw_error = exc
+        diagnosis = self._tushare_failure_diagnosis(raw_error) if raw_error is not None else "unavailable" if raw is None else "live"
+        frame = self._normalize_dc_daily_frame(raw)
+        if ts_code.strip():
+            wanted = {item.strip() for item in ts_code.split(",") if item.strip()}
+            frame = frame[frame["板块代码"].astype(str).isin(wanted) | frame["代码"].astype(str).isin(wanted)]
+        if name.strip():
+            frame = frame[frame["板块名称"].astype(str).str.contains(name.strip(), regex=False, na=False)]
+        if frame.empty and diagnosis == "live":
+            diagnosis = "empty"
+        latest_date = self._extract_latest_date(frame, "日期")
+        report = self._snapshot_report(
+            frame,
+            as_of=as_of,
+            source="tushare.dc_daily",
+            fallback="none",
+            latest_date=latest_date,
+            diagnosis=diagnosis,
+            disclosure=(
+                "Tushare dc_daily 提供东方财富板块日线行情快照。"
+                if diagnosis in {"live", "empty", "stale"}
+                else self._blocked_disclosure(diagnosis, source="Tushare dc_daily")
+            ),
+            extra={"board_type": normalized_idx_type or "all", "trade_date": query_date, "idx_type": normalized_idx_type or ""},
+        )
+        self._save_cache(cache_key, report["frame"])
+        return report
+
+    def get_moneyflow_mkt_dc(
+        self,
+        *,
+        reference_date: Optional[datetime] = None,
+        lookback_days: int = 20,
+    ) -> Dict[str, Any]:
+        as_of = reference_date or datetime.now()
+        as_of_text = as_of.strftime("%Y-%m-%d %H:%M:%S")
+        end_date = self._latest_open_trade_date(lookback_days=max(lookback_days, 14)) or as_of.strftime("%Y%m%d")
+        start_date = (datetime.strptime(end_date, "%Y%m%d") - timedelta(days=max(lookback_days, 1) - 1)).strftime("%Y%m%d")
+        cache_key = f"market_drivers:moneyflow_mkt_dc:{start_date}:{end_date}:v1"
+        cached = self._load_cache(cache_key, ttl_hours=2)
+        if cached is not None:
+            frame = cached if isinstance(cached, pd.DataFrame) else pd.DataFrame(cached)
+            latest_date = self._extract_latest_date(frame, "日期")
+            return self._snapshot_report(
+                frame,
+                as_of=as_of,
+                source="tushare.moneyflow_mkt_dc",
+                fallback="none",
+                latest_date=latest_date,
+                diagnosis="live" if not frame.empty else "empty",
+                disclosure="Tushare moneyflow_mkt_dc 提供东方财富大盘资金流向快照。",
+            )
+
+        raw_error: BaseException | None = None
+        try:
+            raw = self._ts_call("moneyflow_mkt_dc", start_date=start_date, end_date=end_date)
+        except Exception as exc:  # noqa: BLE001
+            raw = None
+            raw_error = exc
+        diagnosis = self._tushare_failure_diagnosis(raw_error) if raw_error is not None else "unavailable" if raw is None else "live"
+        frame = self._normalize_moneyflow_mkt_dc_frame(raw)
+        if frame.empty and diagnosis == "live":
+            diagnosis = "empty"
+        latest_date = self._extract_latest_date(frame, "日期")
+        report = self._snapshot_report(
+            frame,
+            as_of=as_of,
+            source="tushare.moneyflow_mkt_dc",
+            fallback="none",
+            latest_date=latest_date,
+            diagnosis=diagnosis,
+            disclosure=(
+                "Tushare moneyflow_mkt_dc 提供东方财富大盘资金流向快照。"
+                if diagnosis in {"live", "empty", "stale"}
+                else self._blocked_disclosure(diagnosis, source="Tushare moneyflow_mkt_dc")
+            ),
+            extra={"start_date": start_date, "end_date": end_date},
+        )
+        self._save_cache(cache_key, report["frame"])
+        return report
+
+    def get_report_rc(
+        self,
+        *,
+        reference_date: Optional[datetime] = None,
+        ts_code: str = "",
+        max_rows: int = 200,
+    ) -> Dict[str, Any]:
+        as_of = reference_date or datetime.now()
+        as_of_text = as_of.strftime("%Y-%m-%d %H:%M:%S")
+        ts_code_text = self._to_ts_code(ts_code) if ts_code else ""
+        recent_dates = self._recent_open_trade_dates(lookback_days=30)
+        cache_key = f"market_drivers:report_rc:{ts_code_text or 'all'}:{recent_dates[-1] if recent_dates else ''}:v1"
+        cached = self._load_cache(cache_key, ttl_hours=6)
+        if cached is not None:
+            frame = cached if isinstance(cached, pd.DataFrame) else pd.DataFrame(cached)
+            latest_date = self._extract_latest_date(frame, "日期")
+            return self._snapshot_report(
+                frame,
+                as_of=as_of,
+                source="tushare.report_rc",
+                fallback="none",
+                latest_date=latest_date,
+                diagnosis="live" if not frame.empty else "empty",
+                disclosure="Tushare report_rc 提供卖方盈利预测与研报快照。",
+                extra={"ts_code": ts_code_text or "", "limit": int(max_rows)},
+            )
+
+        raw_error: BaseException | None = None
+        raw = None
+        used_date = ""
+        for trade_date in reversed(recent_dates[-10:]):
+            try:
+                raw = self._ts_call("report_rc", ts_code=ts_code_text or "", report_date=trade_date)
+            except Exception as exc:  # noqa: BLE001
+                raw_error = exc
+                raw = None
+            if raw is not None and not raw.empty:
+                used_date = trade_date
+                raw_error = None
+                break
+        diagnosis = self._tushare_failure_diagnosis(raw_error) if raw_error is not None else "unavailable" if raw is None else "live"
+        frame = self._normalize_report_rc_frame(raw)
+        if ts_code_text:
+            frame = frame[frame["股票代码"].astype(str).eq(ts_code_text)]
+        if max_rows > 0 and not frame.empty:
+            frame = frame.sort_values(["报告日期", "机构名称", "预测季度"], ascending=[False, True, False]).head(int(max_rows)).reset_index(drop=True)
+        if frame.empty and diagnosis == "live":
+            diagnosis = "empty"
+        latest_date = self._extract_latest_date(frame, "日期")
+        report = self._snapshot_report(
+            frame,
+            as_of=as_of,
+            source="tushare.report_rc",
+            fallback="none",
+            latest_date=latest_date,
+            diagnosis=diagnosis,
+            disclosure=(
+                "Tushare report_rc 提供卖方盈利预测与研报快照。"
+                if diagnosis in {"live", "empty", "stale"}
+                else self._blocked_disclosure(diagnosis, source="Tushare report_rc")
+            ),
+            extra={"ts_code": ts_code_text or "", "report_date": used_date or latest_date, "limit": int(max_rows)},
+        )
+        self._save_cache(cache_key, report["frame"])
+        return report
+
+    @staticmethod
+    def _normalize_dc_board_type(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        if text in {"concept", "n", "概念", "题材"}:
+            return "concept"
+        if text in {"industry", "i", "行业", "申万", "中信"}:
+            return "industry"
+        if text in {"region", "地区", "地域"}:
+            return "region"
+        if text in {"style", "风格"}:
+            return "style"
+        return text
+
+    @staticmethod
+    def _dc_idx_type_api_value(board_type: str) -> str:
+        mapping = {
+            "concept": "概念板块",
+            "industry": "行业板块",
+            "region": "地域板块",
+            "style": "概念板块",
+        }
+        return mapping.get(board_type, board_type)
+
+    @staticmethod
+    def _normalize_date_key(value: Any) -> str:
+        text = str(value or "").strip().replace("-", "").replace("/", "")
+        return text if len(text) == 8 and text.isdigit() else ""
+
+    def _normalize_dc_index_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        working = frame.copy()
+        code_col = self._first_existing_column(working, ("ts_code", "code", "板块代码", "指数代码"))
+        name_col = self._first_existing_column(working, ("name", "板块名称", "名称"))
+        date_col = self._first_existing_column(working, ("trade_date", "日期", "date"))
+        leading_col = self._first_existing_column(working, ("leading", "领涨股票"))
+        leading_code_col = self._first_existing_column(working, ("leading_code", "领涨股票代码"))
+        pct_col = self._first_existing_column(working, ("pct_change", "涨跌幅", "change"))
+        leading_pct_col = self._first_existing_column(working, ("leading_pct", "领涨股票涨跌幅"))
+        total_mv_col = self._first_existing_column(working, ("total_mv", "总市值"))
+        turnover_col = self._first_existing_column(working, ("turnover_rate", "换手率"))
+        up_num_col = self._first_existing_column(working, ("up_num", "上涨家数"))
+        down_num_col = self._first_existing_column(working, ("down_num", "下跌家数"))
+        normalized = pd.DataFrame(
+            {
+                "板块代码": working[code_col].astype(str).str.strip() if code_col else "",
+                "板块名称": working[name_col].astype(str).str.strip() if name_col else "",
+                "领涨股票": working[leading_col].astype(str).str.strip() if leading_col else "",
+                "领涨代码": working[leading_code_col].astype(str).str.strip() if leading_code_col else "",
+                "涨跌幅": pd.to_numeric(working[pct_col], errors="coerce") if pct_col else pd.Series(pd.NA, index=working.index),
+                "领涨涨跌幅": pd.to_numeric(working[leading_pct_col], errors="coerce") if leading_pct_col else pd.Series(pd.NA, index=working.index),
+                "总市值": pd.to_numeric(working[total_mv_col], errors="coerce") if total_mv_col else pd.Series(pd.NA, index=working.index),
+                "换手率": pd.to_numeric(working[turnover_col], errors="coerce") if turnover_col else pd.Series(pd.NA, index=working.index),
+                "上涨家数": pd.to_numeric(working[up_num_col], errors="coerce") if up_num_col else pd.Series(pd.NA, index=working.index),
+                "下跌家数": pd.to_numeric(working[down_num_col], errors="coerce") if down_num_col else pd.Series(pd.NA, index=working.index),
+                "日期": working[date_col].map(self._normalize_date_text) if date_col else pd.Series("", index=working.index),
+            }
+        )
+        normalized["名称"] = normalized["板块名称"]
+        normalized["代码"] = normalized["板块代码"]
+        return normalized.dropna(subset=["板块名称"], how="all").reset_index(drop=True)
+
+    def _normalize_dc_daily_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        working = frame.copy()
+        code_col = self._first_existing_column(working, ("ts_code", "code", "板块代码", "指数代码"))
+        name_col = self._first_existing_column(working, ("name", "板块名称", "名称"))
+        type_col = self._first_existing_column(working, ("idx_type", "type", "板块类型", "分类"))
+        date_col = self._first_existing_column(working, ("trade_date", "日期", "date"))
+        open_col = self._first_existing_column(working, ("open", "开盘"))
+        close_col = self._first_existing_column(working, ("close", "收盘"))
+        high_col = self._first_existing_column(working, ("high", "最高"))
+        low_col = self._first_existing_column(working, ("low", "最低"))
+        change_col = self._first_existing_column(working, ("change", "涨跌点位"))
+        pct_col = self._first_existing_column(working, ("pct_change", "涨跌幅"))
+        vol_col = self._first_existing_column(working, ("vol", "成交量"))
+        amount_col = self._first_existing_column(working, ("amount", "成交额"))
+        swing_col = self._first_existing_column(working, ("swing", "振幅"))
+        turnover_col = self._first_existing_column(working, ("turnover_rate", "换手率"))
+        normalized = pd.DataFrame(
+            {
+                "板块代码": working[code_col].astype(str).str.strip() if code_col else "",
+                "板块名称": working[name_col].astype(str).str.strip() if name_col else "",
+                "板块类型": working[type_col].astype(str).str.strip() if type_col else "",
+                "开盘": pd.to_numeric(working[open_col], errors="coerce") if open_col else pd.Series(pd.NA, index=working.index),
+                "收盘": pd.to_numeric(working[close_col], errors="coerce") if close_col else pd.Series(pd.NA, index=working.index),
+                "最高": pd.to_numeric(working[high_col], errors="coerce") if high_col else pd.Series(pd.NA, index=working.index),
+                "最低": pd.to_numeric(working[low_col], errors="coerce") if low_col else pd.Series(pd.NA, index=working.index),
+                "涨跌点位": pd.to_numeric(working[change_col], errors="coerce") if change_col else pd.Series(pd.NA, index=working.index),
+                "涨跌幅": pd.to_numeric(working[pct_col], errors="coerce") if pct_col else pd.Series(pd.NA, index=working.index),
+                "成交量": pd.to_numeric(working[vol_col], errors="coerce") if vol_col else pd.Series(pd.NA, index=working.index),
+                "成交额": pd.to_numeric(working[amount_col], errors="coerce") if amount_col else pd.Series(pd.NA, index=working.index),
+                "振幅": pd.to_numeric(working[swing_col], errors="coerce") if swing_col else pd.Series(pd.NA, index=working.index),
+                "换手率": pd.to_numeric(working[turnover_col], errors="coerce") if turnover_col else pd.Series(pd.NA, index=working.index),
+                "日期": working[date_col].map(self._normalize_date_text) if date_col else pd.Series("", index=working.index),
+            }
+        )
+        normalized["名称"] = normalized["板块名称"]
+        normalized["代码"] = normalized["板块代码"]
+        return normalized.sort_values(["日期", "涨跌幅"], ascending=[True, False]).reset_index(drop=True)
+
+    def _normalize_moneyflow_mkt_dc_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        working = frame.copy()
+        date_col = self._first_existing_column(working, ("trade_date", "日期", "date"))
+        sh_close_col = self._first_existing_column(working, ("close_sh", "上证收盘价"))
+        sh_pct_col = self._first_existing_column(working, ("pct_change_sh", "上证涨跌幅"))
+        sz_close_col = self._first_existing_column(working, ("close_sz", "深证收盘价"))
+        sz_pct_col = self._first_existing_column(working, ("pct_change_sz", "深证涨跌幅"))
+        net_col = self._first_existing_column(working, ("net_amount", "今日主力净流入 净额"))
+        net_rate_col = self._first_existing_column(working, ("net_amount_rate", "今日主力净流入净占比%"))
+        elg_col = self._first_existing_column(working, ("buy_elg_amount", "今日超大单净流入 净额"))
+        elg_rate_col = self._first_existing_column(working, ("buy_elg_amount_rate", "今日超大单净流入 净占比%"))
+        lg_col = self._first_existing_column(working, ("buy_lg_amount", "今日大单净流入 净额"))
+        lg_rate_col = self._first_existing_column(working, ("buy_lg_amount_rate", "今日大单净流入 净占比%"))
+        md_col = self._first_existing_column(working, ("buy_md_amount", "今日中单净流入 净额"))
+        md_rate_col = self._first_existing_column(working, ("buy_md_amount_rate", "今日中单净流入 净占比%"))
+        sm_col = self._first_existing_column(working, ("buy_sm_amount", "今日小单净流入 净额"))
+        sm_rate_col = self._first_existing_column(working, ("buy_sm_amount_rate", "今日小单净流入 净占比%"))
+        normalized = pd.DataFrame(
+            {
+                "日期": working[date_col].map(self._normalize_date_text) if date_col else pd.Series("", index=working.index),
+                "上证收盘价": pd.to_numeric(working[sh_close_col], errors="coerce") if sh_close_col else pd.Series(pd.NA, index=working.index),
+                "上证涨跌幅": pd.to_numeric(working[sh_pct_col], errors="coerce") if sh_pct_col else pd.Series(pd.NA, index=working.index),
+                "深证收盘价": pd.to_numeric(working[sz_close_col], errors="coerce") if sz_close_col else pd.Series(pd.NA, index=working.index),
+                "深证涨跌幅": pd.to_numeric(working[sz_pct_col], errors="coerce") if sz_pct_col else pd.Series(pd.NA, index=working.index),
+                "主力净流入-净额": pd.to_numeric(working[net_col], errors="coerce") if net_col else pd.Series(pd.NA, index=working.index),
+                "主力净流入-净占比": pd.to_numeric(working[net_rate_col], errors="coerce") if net_rate_col else pd.Series(pd.NA, index=working.index),
+                "超大单净流入-净额": pd.to_numeric(working[elg_col], errors="coerce") if elg_col else pd.Series(pd.NA, index=working.index),
+                "超大单净流入-净占比": pd.to_numeric(working[elg_rate_col], errors="coerce") if elg_rate_col else pd.Series(pd.NA, index=working.index),
+                "大单净流入-净额": pd.to_numeric(working[lg_col], errors="coerce") if lg_col else pd.Series(pd.NA, index=working.index),
+                "大单净流入-净占比": pd.to_numeric(working[lg_rate_col], errors="coerce") if lg_rate_col else pd.Series(pd.NA, index=working.index),
+                "中单净流入-净额": pd.to_numeric(working[md_col], errors="coerce") if md_col else pd.Series(pd.NA, index=working.index),
+                "中单净流入-净占比": pd.to_numeric(working[md_rate_col], errors="coerce") if md_rate_col else pd.Series(pd.NA, index=working.index),
+                "小单净流入-净额": pd.to_numeric(working[sm_col], errors="coerce") if sm_col else pd.Series(pd.NA, index=working.index),
+                "小单净流入-净占比": pd.to_numeric(working[sm_rate_col], errors="coerce") if sm_rate_col else pd.Series(pd.NA, index=working.index),
+            }
+        )
+        return normalized.dropna(subset=["日期"]).reset_index(drop=True)
+
+    def _normalize_report_rc_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        working = frame.copy()
+        code_col = self._first_existing_column(working, ("ts_code", "股票代码"))
+        name_col = self._first_existing_column(working, ("name", "股票名称"))
+        date_col = self._first_existing_column(working, ("report_date", "日期"))
+        title_col = self._first_existing_column(working, ("report_title", "标题"))
+        type_col = self._first_existing_column(working, ("report_type", "报告类型"))
+        classify_col = self._first_existing_column(working, ("classify", "分类"))
+        org_col = self._first_existing_column(working, ("org_name", "机构名称"))
+        author_col = self._first_existing_column(working, ("author_name", "作者"))
+        quarter_col = self._first_existing_column(working, ("quarter", "预测季度"))
+        eps_col = self._first_existing_column(working, ("eps", "预测每股收益"))
+        pe_col = self._first_existing_column(working, ("pe", "预测市盈率"))
+        rating_col = self._first_existing_column(working, ("rating", "卖方评级"))
+        max_price_col = self._first_existing_column(working, ("max_price", "预测最高目标价"))
+        min_price_col = self._first_existing_column(working, ("min_price", "预测最低目标价"))
+        imp_col = self._first_existing_column(working, ("imp_dg", "机构关注度"))
+        normalized = pd.DataFrame(
+            {
+                "股票代码": working[code_col].astype(str).str.strip() if code_col else "",
+                "股票名称": working[name_col].astype(str).str.strip() if name_col else "",
+                "报告日期": working[date_col].map(self._normalize_date_text) if date_col else pd.Series("", index=working.index),
+                "标题": working[title_col].astype(str).str.strip() if title_col else "",
+                "报告类型": working[type_col].astype(str).str.strip() if type_col else "",
+                "分类": working[classify_col].astype(str).str.strip() if classify_col else "",
+                "机构名称": working[org_col].astype(str).str.strip() if org_col else "",
+                "作者": working[author_col].astype(str).str.strip() if author_col else "",
+                "预测季度": working[quarter_col].astype(str).str.strip() if quarter_col else "",
+                "预测每股收益": pd.to_numeric(working[eps_col], errors="coerce") if eps_col else pd.Series(pd.NA, index=working.index),
+                "预测市盈率": pd.to_numeric(working[pe_col], errors="coerce") if pe_col else pd.Series(pd.NA, index=working.index),
+                "卖方评级": working[rating_col].astype(str).str.strip() if rating_col else "",
+                "预测最高目标价": pd.to_numeric(working[max_price_col], errors="coerce") if max_price_col else pd.Series(pd.NA, index=working.index),
+                "预测最低目标价": pd.to_numeric(working[min_price_col], errors="coerce") if min_price_col else pd.Series(pd.NA, index=working.index),
+                "机构关注度": working[imp_col].astype(str).str.strip() if imp_col else "",
+            }
+        )
+        normalized["日期"] = normalized["报告日期"]
+        normalized["代码"] = normalized["股票代码"]
+        normalized["名称"] = normalized["股票名称"]
+        return normalized.dropna(subset=["股票代码", "报告日期"], how="all").reset_index(drop=True)
+
+    def _snapshot_report(
+        self,
+        frame: pd.DataFrame,
+        *,
+        as_of: datetime,
+        source: str,
+        fallback: str,
+        latest_date: str,
+        diagnosis: str,
+        disclosure: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        report = {
+            "frame": frame.reset_index(drop=True) if isinstance(frame, pd.DataFrame) else pd.DataFrame(),
+            "as_of": as_of.strftime("%Y-%m-%d %H:%M:%S"),
+            "latest_date": latest_date,
+            "is_fresh": self._is_fresh(latest_date, as_of, max_age_days=0) if latest_date else False,
+            "source": source,
+            "fallback": fallback,
+            "diagnosis": diagnosis,
+            "disclosure": disclosure,
+            "status": "matched" if not frame.empty and diagnosis == "live" else "empty" if frame.empty else "blocked" if diagnosis not in {"live", "empty", "stale"} else "stale" if diagnosis == "stale" else "matched",
+        }
+        if extra:
+            report.update(extra)
+        return report
 
     def _ts_board_spot(self, board_type: str) -> pd.DataFrame:
         cache_key = f"market_drivers:ts_board_spot:{board_type}:v1"
@@ -583,6 +1457,8 @@ class MarketDriversCollector(BaseCollector):
                 board_name = ""
             if not board_name:
                 continue
+            if self._skip_generic_theme_membership_board(board_name):
+                continue
             move = row.get("涨跌幅")
             if pd.notna(move):
                 move_float = float(move)
@@ -621,6 +1497,30 @@ class MarketDriversCollector(BaseCollector):
             "status": "matched" if items else "empty",
             "items": items,
         }
+
+    @staticmethod
+    def _skip_generic_theme_membership_board(board_name: str) -> bool:
+        normalized = str(board_name or "").strip()
+        if not normalized:
+            return True
+        broad_member_markers = (
+            "样本股",
+            "成分股",
+            "成份股",
+            "指数股",
+        )
+        broad_member_prefixes = (
+            "上证",
+            "深证",
+            "沪深",
+            "中证",
+            "科创",
+            "创业板",
+            "沪港深",
+        )
+        if any(marker in normalized for marker in broad_member_markers) and normalized.startswith(broad_member_prefixes):
+            return True
+        return False
 
     def get_stock_capital_flow_snapshot(
         self,
@@ -669,9 +1569,11 @@ class MarketDriversCollector(BaseCollector):
         direct_row: Dict[str, Any] = {}
         direct_5d_main_flow = None
         direct_is_fresh = False
+        direct_trade_gap_days = None
         if not direct_frame.empty:
             direct_frame = direct_frame.sort_values("日期").reset_index(drop=True)
             direct_latest_date = str(direct_frame.iloc[-1].get("日期", "")).strip()
+            direct_trade_gap_days = self._trade_day_gap(direct_latest_date, latest_trade_text, lookback_days=40)
             direct_is_fresh = bool(direct_latest_date and direct_latest_date == latest_trade_text)
             if not direct_is_fresh and direct_diagnosis == "live":
                 direct_diagnosis = "stale"
@@ -687,6 +1589,7 @@ class MarketDriversCollector(BaseCollector):
         board_name = ""
         board_latest_date = ""
         board_is_fresh = False
+        board_trade_gap_days = None
         theme_report: Dict[str, Any] = {
             "source": "tushare.ths_member",
             "latest_date": latest_trade_text,
@@ -750,6 +1653,7 @@ class MarketDriversCollector(BaseCollector):
                 board_source = "tushare.moneyflow_ind_ths"
             board_name = str(board_row.get("名称", board_row.get("行业", ""))).strip() if board_row else ""
             board_latest_date = str(board_row.get("日期", "")).strip() if board_row else ""
+            board_trade_gap_days = self._trade_day_gap(board_latest_date, latest_trade_text, lookback_days=40) if board_latest_date else None
             board_is_fresh = bool(board_latest_date and board_latest_date == latest_trade_text)
         board_component = {
             "source": board_source or "tushare.moneyflow_ind_ths+tushare.moneyflow_cnt_ths",
@@ -843,16 +1747,29 @@ class MarketDriversCollector(BaseCollector):
             status = "proxy"
             diagnosis = "proxy"
             fallback = "sector_or_concept_flow"
-            detail = (
-                f"个股主力资金当前未命中 fresh，先看{'概念' if board_type == 'concept' else '行业'}代理："
-                f"`{board_name}` 主力净{'流入' if float(board_main_flow or 0) >= 0 else '流出'} {_fmt_amount(board_main_flow)}。"
-            )
+            if direct_row and direct_trade_gap_days == 1:
+                detail = (
+                    f"个股主力资金最新停在 {direct_latest_date}（上一交易日，T+1 直连）；"
+                    f"当日先看{'概念' if board_type == 'concept' else '行业'}代理："
+                    f"`{board_name}` 主力净{'流入' if float(board_main_flow or 0) >= 0 else '流出'} {_fmt_amount(board_main_flow)}。"
+                )
+            else:
+                detail = (
+                    f"个股主力资金当前未命中 fresh，先看{'概念' if board_type == 'concept' else '行业'}代理："
+                    f"`{board_name}` 主力净{'流入' if float(board_main_flow or 0) >= 0 else '流出'} {_fmt_amount(board_main_flow)}。"
+                )
             is_fresh = True
         elif direct_row:
             status = "stale"
             diagnosis = direct_diagnosis
             fallback = "none"
-            detail = f"个股资金流最新停在 {direct_latest_date or '未知'}，当前不按 fresh 命中处理。"
+            if direct_trade_gap_days == 1:
+                detail = (
+                    f"个股资金流最新停在 {direct_latest_date or '未知'}（上一交易日，T+1 直连），"
+                    "当前不按当期 fresh 命中处理。"
+                )
+            else:
+                detail = f"个股资金流最新停在 {direct_latest_date or '未知'}，当前不按 fresh 命中处理。"
             is_fresh = False
         elif {str(component.get('diagnosis', '')) for component in components.values()}.issubset(blocked_diagnoses):
             status = "blocked"
@@ -888,10 +1805,12 @@ class MarketDriversCollector(BaseCollector):
             "direct_main_flow": None if direct_main_flow is None or pd.isna(direct_main_flow) else float(direct_main_flow),
             "direct_main_ratio": None if direct_main_ratio is None or pd.isna(direct_main_ratio) else float(direct_main_ratio),
             "direct_5d_main_flow": direct_5d_main_flow,
+            "direct_trade_gap_days": None if direct_trade_gap_days is None else int(direct_trade_gap_days),
             "board_name": board_name,
             "board_type": board_type if board_row else "",
             "board_main_flow": None if board_main_flow is None or pd.isna(board_main_flow) else float(board_main_flow),
             "board_main_ratio": None if board_main_ratio is None or pd.isna(board_main_ratio) else float(board_main_ratio),
+            "board_trade_gap_days": None if board_trade_gap_days is None else int(board_trade_gap_days),
             "components": components,
         }
 

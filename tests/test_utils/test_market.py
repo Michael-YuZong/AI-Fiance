@@ -8,6 +8,86 @@ import pytest
 from src.utils import market
 
 
+def test_fetch_intraday_history_routes_cn_stock_to_a_share_collector(monkeypatch):
+    calls: list[tuple[str, str]] = []
+    expected = pd.DataFrame(
+        {
+            "时间": pd.to_datetime(["2026-04-16 09:31:00"]),
+            "开盘": [43.7],
+            "收盘": [43.8],
+            "最高": [43.9],
+            "最低": [43.6],
+            "成交量": [1000],
+        }
+    )
+
+    class _Collector:
+        def __init__(self, config):
+            self.config = config
+
+        def get_cn_stock_intraday_chart(self, symbol: str, period: str = "1") -> pd.DataFrame:
+            calls.append(("stock", symbol))
+            return expected
+
+        def get_intraday_chart(self, symbol: str, period: str = "1") -> pd.DataFrame:
+            calls.append(("etf", symbol))
+            return expected
+
+    import src.collectors.intraday as intraday_module
+
+    monkeypatch.setattr(
+        market,
+        "get_asset_context",
+        lambda *args, **kwargs: market.AssetContext("600584", "长电科技", "cn_stock", "600584", {}),
+    )
+    monkeypatch.setattr(intraday_module, "IntradayCollector", _Collector)
+
+    frame = market.fetch_intraday_history("600584", "cn_stock", {})
+
+    assert frame is expected
+    assert calls == [("stock", "600584")]
+
+
+def test_fetch_intraday_history_keeps_cn_etf_on_etf_collector(monkeypatch):
+    calls: list[tuple[str, str]] = []
+    expected = pd.DataFrame(
+        {
+            "时间": pd.to_datetime(["2026-04-16 09:31:00"]),
+            "开盘": [0.9],
+            "收盘": [0.91],
+            "最高": [0.92],
+            "最低": [0.9],
+            "成交量": [1000],
+        }
+    )
+
+    class _Collector:
+        def __init__(self, config):
+            self.config = config
+
+        def get_cn_stock_intraday_chart(self, symbol: str, period: str = "1") -> pd.DataFrame:
+            calls.append(("stock", symbol))
+            return expected
+
+        def get_intraday_chart(self, symbol: str, period: str = "1") -> pd.DataFrame:
+            calls.append(("etf", symbol))
+            return expected
+
+    import src.collectors.intraday as intraday_module
+
+    monkeypatch.setattr(
+        market,
+        "get_asset_context",
+        lambda *args, **kwargs: market.AssetContext("159516", "半导体材料设备ETF", "cn_etf", "159516", {}),
+    )
+    monkeypatch.setattr(intraday_module, "IntradayCollector", _Collector)
+
+    frame = market.fetch_intraday_history("159516", "cn_etf", {})
+
+    assert frame is expected
+    assert calls == [("etf", "159516")]
+
+
 def test_infer_previous_close_uses_latest_daily_close_for_new_intraday_day():
     history = pd.DataFrame(
         {
@@ -181,6 +261,8 @@ def test_build_intraday_snapshot_for_cn_stock_includes_auction_metrics(monkeypat
     )
 
     snapshot = market.build_intraday_snapshot("300502", "cn_stock", {}, history)
+    assert snapshot["snapshot_time"] == pd.Timestamp("2026-03-12 10:00:00")
+    assert snapshot["updated_at"] == pd.Timestamp("2026-03-12 10:00:00")
     assert snapshot["auction_price"] == pytest.approx(400.01)
     assert snapshot["auction_volume_ratio"] == pytest.approx(1.35)
     assert snapshot["auction_gap"] == pytest.approx(400.01 / 393.23 - 1)
@@ -280,6 +362,93 @@ def test_get_asset_context_fast_paths_direct_cn_symbol_without_lookup(monkeypatc
     assert context.metadata["sector"] == "农业"
 
 
+def test_get_asset_context_fast_paths_direct_cn_symbol_backfills_name_from_cached_stock_basic(monkeypatch):
+    class _FailLookup:
+        def __init__(self, _config):  # noqa: ANN001
+            raise AssertionError("AssetLookupCollector should not be created when stock_basic cache already has the name")
+
+    class _FakeChinaCollector:
+        def __init__(self, _config):  # noqa: ANN001
+            pass
+
+        def _load_cache(self, key: str, ttl_hours=None, allow_stale=False):  # noqa: ANN001
+            assert allow_stale is True
+            if key == "cn_market:ts_stock_basic_snapshot:v1":
+                return pd.DataFrame(
+                    [
+                        {"ts_code": "300274.SZ", "symbol": "300274", "name": "阳光电源", "industry": "电网设备"},
+                    ]
+                )
+            if key == "cn_market:ts_stock_company:300274.SZ:v1":
+                return None
+            raise AssertionError(f"unexpected cache key: {key}")
+
+        def _ts_call(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            raise AssertionError("live stock_basic should not be fetched when cache already exists")
+
+        def _save_cache(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            raise AssertionError("cache should not be rewritten in this path")
+
+    monkeypatch.setattr(market, "AssetLookupCollector", _FailLookup)
+    monkeypatch.setattr(market, "ChinaMarketCollector", _FakeChinaCollector)
+    monkeypatch.setattr(market, "load_asset_aliases", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(market, "load_watchlist", lambda *_args, **_kwargs: [])
+
+    context = market.get_asset_context("300274", "cn_stock", {})
+
+    assert context.symbol == "300274"
+    assert context.asset_type == "cn_stock"
+    assert context.name == "阳光电源"
+    assert context.metadata["sector"] == "电网设备"
+
+
+def test_get_asset_context_fast_paths_direct_cn_symbol_backfills_company_profile_from_tushare(monkeypatch):
+    class _FakeChinaCollector:
+        def __init__(self, _config):  # noqa: ANN001
+            pass
+
+        def _load_cache(self, key: str, ttl_hours=None, allow_stale=False):  # noqa: ANN001
+            if key == "cn_market:ts_stock_basic_snapshot:v1":
+                return pd.DataFrame(
+                    [
+                        {"ts_code": "300274.SZ", "symbol": "300274", "name": "阳光电源", "industry": "电气设备"},
+                    ]
+                )
+            if key == "cn_market:ts_stock_company:300274.SZ:v1":
+                return pd.DataFrame(
+                    [
+                        {
+                            "ts_code": "300274.SZ",
+                            "main_business": "主营业务是太阳能光伏逆变器、储能系统和风能变流器。",
+                            "business_scope": "新能源发电设备、储能电源及相关电力电子设备。",
+                            "introduction": "专注于太阳能、风能、储能等新能源电源设备。",
+                            "province": "安徽",
+                            "city": "合肥市",
+                        }
+                    ]
+                )
+            raise AssertionError(f"unexpected cache key: {key}")
+
+        def _ts_call(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            raise AssertionError("live tushare should not be fetched when cache already exists")
+
+        def _save_cache(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            raise AssertionError("cache should not be rewritten in this path")
+
+        def _to_ts_code(self, symbol: str) -> str:
+            return f"{symbol}.SZ"
+
+    monkeypatch.setattr(market, "ChinaMarketCollector", _FakeChinaCollector)
+    monkeypatch.setattr(market, "load_asset_aliases", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(market, "load_watchlist", lambda *_args, **_kwargs: [])
+
+    context = market.get_asset_context("300274", "cn_stock", {})
+
+    assert context.metadata["main_business"].startswith("主营业务是太阳能光伏逆变器")
+    assert context.metadata["business_scope"].startswith("新能源发电设备")
+    assert context.metadata["company_profile_source"] == "tushare_stock_company_cache"
+
+
 def test_market_regime_proxy_skips_timeout_ticker(monkeypatch):
     calls: list[str] = []
 
@@ -306,24 +475,10 @@ def test_load_global_proxy_snapshot_disabled_by_default() -> None:
 
 
 def test_ticker_history_with_timeout_raises_timeout(monkeypatch):
-    class _NeverDoneFuture:
-        def result(self, timeout=None):  # noqa: ANN001, ANN201
-            raise market.FutureTimeoutError()
+    def _fake_timeout(_loader, **kwargs):  # noqa: ANN001, ANN003
+        raise kwargs["timeout_exc"]
 
-        def cancel(self) -> None:
-            return None
-
-    class _FakeExecutor:
-        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
-            pass
-
-        def submit(self, fn, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN201
-            return _NeverDoneFuture()
-
-        def shutdown(self, wait=False, cancel_futures=False) -> None:  # noqa: ANN001
-            return None
-
-    monkeypatch.setattr(market, "ThreadPoolExecutor", _FakeExecutor)
+    monkeypatch.setattr(market, "run_with_timeout", _fake_timeout)
 
     with pytest.raises(TimeoutError, match="market_regime_proxy timeout for \\^VIX"):
         market._ticker_history_with_timeout("^VIX")
