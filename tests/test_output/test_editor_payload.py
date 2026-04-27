@@ -252,6 +252,45 @@ def test_news_lines_with_event_digest_stock_prioritizes_company_event_over_theme
     assert not lines[0].startswith("结构证据：信号类型")
 
 
+def test_news_lines_with_event_digest_stock_deduplicates_linked_event_signal_bundle() -> None:
+    subject = {
+        "asset_type": "cn_stock",
+        "name": "中际旭创",
+        "symbol": "300308",
+        "metadata": {"sector": "AI算力"},
+        "news_report": {
+            "items": [
+                {
+                    "title": "午评：创业板指涨0.63% CPO概念大涨",
+                    "source": "证券时报",
+                    "date": "2026-04-21",
+                    "link": "https://example.com/cpo",
+                }
+            ]
+        },
+    }
+    digest = {
+        "status": "已消化",
+        "lead_layer": "公告",
+        "lead_title": "中际旭创互动平台问答：公司1.6T系列产品使用自研硅光方案",
+        "lead_link": "https://irm.cninfo.com.cn/",
+        "signal_type": "公告类型：投资者关系/路演纪要",
+        "signal_strength": "强",
+        "signal_conclusion": "中性偏多，先看 `盈利 / 景气` 能否继续拿到确认。",
+        "impact_summary": "盈利 / 景气",
+        "latest_signal_at": "2026-04-26",
+        "thesis_scope": "待确认",
+    }
+
+    lines = _news_lines_with_event_digest(subject, digest)
+    joined = "\n".join(lines)
+
+    assert "中际旭创互动平台问答" in lines[0]
+    assert "公告类型：投资者关系/路演纪要" in lines[0]
+    assert not any(line.startswith("结构证据：信号类型：`公告类型：投资者关系/路演纪要`") for line in lines)
+    assert joined.count("公告类型：投资者关系/路演纪要") == 1
+
+
 def test_news_lines_with_event_digest_for_etf_prefers_linked_news_before_digest_lead() -> None:
     subject = {
         "asset_type": "cn_etf",
@@ -571,7 +610,7 @@ def test_news_lines_with_event_digest_filters_stock_day_theme_background_links()
     assert "创新药" not in joined
     assert "AI、算力" not in joined
     assert any("紫金矿业 已于 2026-04-22 披露 2026年一季报" in line for line in lines)
-    assert any(line.startswith("结构证据：") for line in lines)
+    assert not any(line.startswith("结构证据：信号类型：`财报摘要：盈利/指引`") for line in lines)
 
 
 def test_news_lines_with_event_digest_keeps_structured_label_when_summary_lines_exist() -> None:
@@ -600,8 +639,8 @@ def test_news_lines_with_event_digest_keeps_structured_label_when_summary_lines_
 
     lines = _news_lines_with_event_digest(subject, digest)
 
-    assert any(line.startswith("结构证据：") for line in lines)
     assert any(line.startswith("外部情报：") for line in lines)
+    assert not any(line.startswith("结构证据：信号类型：`公告类型：分红/回报`") for line in lines)
 
 
 def test_news_lines_with_event_digest_drops_irrelevant_market_lead_event_link() -> None:

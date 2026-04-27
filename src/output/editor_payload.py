@@ -1589,7 +1589,10 @@ def _news_lines_with_event_digest(subject: Mapping[str, Any], event_digest: Mapp
         asset_type = _safe_text(subject.get("asset_type"))
         duplicate_signal_bundle = bool(signal_type and signal_type in lead_evidence_line)
         product_profile_subject = asset_type in {"cn_etf", "cn_fund", "cn_index"}
-        if lead_evidence_line.startswith("结构证据：") or (duplicate_signal_bundle and product_profile_subject):
+        stock_direct_subject = asset_type == "cn_stock"
+        if lead_evidence_line.startswith("结构证据：") or (
+            duplicate_signal_bundle and (product_profile_subject or stock_direct_subject)
+        ):
             structure_line = ""
     digest_context_line = ""
     for item in digest_lines:
