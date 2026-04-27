@@ -86,6 +86,8 @@ def recommendation_bucket(
     analysis: Mapping[str, Any],
     watch_symbols: Optional[set[str]] = None,
 ) -> str:
+    if bool(analysis.get("excluded")):
+        return "观察为主"
     if _etf_requires_observe_bucket(analysis):
         return "观察为主"
     rating_rank = int(analysis.get("rating", {}).get("rank", 0) or 0)

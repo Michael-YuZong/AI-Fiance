@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
 from src.reporting.review_lessons import active_lesson_ids
+from src.reporting.score_consistency import format_stock_signal_gate_problem, stock_signal_gate_problem
 from src.reporting.review_record_utils import (
     bullet_block_items,
     canonicalize_sections,
@@ -95,6 +96,14 @@ def _strategy_required_markers(markdown_text: str) -> tuple[Any, ...]:
         "## 执行摘要",
         ("## 总体结果", "## Promotion Gate"),
         "## Rollback Gate",
+    )
+
+
+def _is_pick_no_signal_report(report_type: str, markdown_text: str) -> bool:
+    return report_type in {"etf_pick", "fund_pick"} and (
+        "NO_SIGNAL" in str(markdown_text or "")
+        or "今日ETF无信号" in str(markdown_text or "")
+        or "今日场外基金无信号" in str(markdown_text or "")
     )
 
 
@@ -372,7 +381,9 @@ def promote_clean_review_scaffold_to_pass(
 
 
 def ensure_detailed_final_content(report_type: str, markdown_text: str) -> None:
-    if report_type == "stock_pick":
+    if _is_pick_no_signal_report(report_type, markdown_text):
+        required_markers = ("## 结论", "## 为什么是 NO_SIGNAL", "## 候选池排序", "## 事件消化", "## 事件决策树", "## 触发后再评估", "## 数据边界")
+    elif report_type == "stock_pick":
         required_markers = _stock_pick_required_markers(markdown_text)
     elif report_type == "strategy":
         required_markers = _strategy_required_markers(markdown_text)
@@ -395,6 +406,18 @@ def ensure_detailed_final_content(report_type: str, markdown_text: str) -> None:
 def _contains_any(text: str, needles: Sequence[str]) -> bool:
     haystack = str(text or "")
     return any(str(needle).strip() and str(needle) in haystack for needle in needles)
+
+
+def _ensure_stock_signal_score_gate(report_type: str, markdown_text: str) -> None:
+    if report_type not in {"stock_analysis", "scan"}:
+        return
+    problem = stock_signal_gate_problem(markdown_text)
+    if not problem:
+        return
+    failed_text = format_stock_signal_gate_problem(problem)
+    raise ReportGuardError(
+        f"分数结论硬门槛错配：{failed_text} 已低于个股硬门槛，但正文仍给出较强机会/强机会。"
+    )
 
 
 def _normalize_event_digest_surface_text(text: str) -> str:
@@ -589,6 +612,8 @@ def _ensure_stock_pick_first_screen_execution(markdown_text: str) -> None:
 
 def _ensure_theme_playbook_alignment(report_type: str, markdown_text: str, extra_manifest: Mapping[str, Any] | None) -> None:
     if report_type not in _THEME_PLAYBOOK_ALIGNMENT_REPORT_TYPES:
+        return
+    if _is_pick_no_signal_report(report_type, markdown_text):
         return
     contract = dict((extra_manifest or {}).get("theme_playbook_contract") or {})
     if not contract:
@@ -920,6 +945,7 @@ def export_reviewed_markdown_bundle(
         raise ReportGuardError("发布前一致性校验失败: " + "；".join(findings))
     _ensure_completed_catalyst_web_review(extra_manifest)
     ensure_detailed_final_content(report_type, markdown_text)
+    _ensure_stock_signal_score_gate(report_type, markdown_text)
     _ensure_briefing_market_snapshot_freshness(report_type, markdown_text, extra_manifest)
     _ensure_top_signal_quality(report_type, markdown_text)
     if report_type == "stock_pick":

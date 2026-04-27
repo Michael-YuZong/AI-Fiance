@@ -4651,6 +4651,99 @@ def test_render_etf_pick_has_fund_profile_and_alternatives() -> None:
     assert "## 标准化分类" in rendered
 
 
+def test_fund_evidence_lines_filter_brand_noise_news() -> None:
+    subject = {
+        "asset_type": "cn_fund",
+        "name": "南方创业板人工智能ETF联接A",
+        "symbol": "024725",
+        "metadata": {
+            "sector": "科技",
+            "benchmark": "创业板人工智能指数收益率*95%+银行活期存款利率(税后)*5%",
+            "chain_nodes": ["AI算力", "软件服务"],
+            "taxonomy": {
+                "theme_profile": {
+                    "primary_chain": "AI/成长科技",
+                    "evidence_keywords": ["人工智能", "AI算力"],
+                }
+            },
+        },
+    }
+    digest = {
+        "lead_title": "AI服务器需求拉动算力产业链景气",
+        "items": [
+            {
+                "title": "AI服务器需求拉动算力产业链景气",
+                "source": "财联社",
+                "date": "2026-04-23",
+                "link": "https://example.com/ai-server",
+                "signal_type": "主题事件：产业链映射",
+                "signal_strength": "中",
+                "signal_conclusion": "中性偏多，先看景气能否继续确认。",
+            },
+            {
+                "title": "全国首单数字人民币跨境双边电力结算业务落地南方电网",
+                "source": "新浪财经",
+                "date": "2026-04-23",
+                "link": "https://example.com/power-grid",
+                "signal_type": "信息环境：新闻/舆情脉冲",
+                "signal_strength": "弱",
+                "signal_conclusion": "中性，别把它单独升级成动作。",
+            },
+        ]
+    }
+
+    lines = _evidence_lines_with_event_digest([], event_digest=digest, subject=subject, symbol="024725")
+    joined = "\n".join(lines)
+
+    assert "AI服务器需求拉动算力产业链景气" in joined
+    assert "南方电网" not in joined
+
+
+def test_render_etf_pick_observe_tracks_prioritize_current_winner() -> None:
+    winner = _sample_analysis("159363", "华宝创业板人工智能ETF", "cn_etf", rank=1)
+    winner["trade_state"] = "观察为主"
+    winner["action"] = {
+        **dict(winner.get("action") or {}),
+        "direction": "观察为主",
+        "entry": "等回踩确认",
+        "horizon": {"code": "watch", "label": "观察期", "fit_reason": "先等高位分歧消化后的再确认。"},
+    }
+    winner["metadata"] = {"sector": "科技", "chain_nodes": ["AI算力"], "benchmark": "创业板人工智能指数"}
+    winner["fund_sections"] = []
+    winner["taxonomy_rows"] = [["产品形态", "ETF"], ["主方向", "科技"]]
+    winner["taxonomy_summary"] = "ETF / 场内ETF / 被动跟踪 / AI主题"
+    payload = {
+        "generated_at": "2026-04-24 12:00:00",
+        "selection_context": {
+            "delivery_observe_only": True,
+            "delivery_summary_only": True,
+            "delivery_tier_label": "观察优先稿",
+        },
+        "recommendation_tracks": {
+            "short_term": {
+                "name": "A500基金",
+                "symbol": "563360",
+                "horizon_label": "观察期",
+                "reason": "旧 track 里的宽基观察对象。",
+            },
+            "medium_term": {
+                "name": "华宝创业板人工智能ETF",
+                "symbol": "159363",
+                "horizon_label": "观察期",
+                "reason": "主线和相对强弱未必坏，但要等确认。",
+            },
+        },
+        "winner": winner,
+        "alternatives": [],
+    }
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    assert "| 优先观察 | 华宝创业板人工智能ETF (159363)" in rendered
+    assert "| 次级观察 | A500基金 (563360)" in rendered
+    assert rendered.index("| 优先观察 | 华宝创业板人工智能ETF (159363)") < rendered.index("| 次级观察 | A500基金 (563360)")
+
+
 def test_render_etf_pick_observe_first_screen_surfaces_numeric_watch_level_and_stop() -> None:
     payload = {
         "generated_at": "2026-04-12 01:22:00",
@@ -5513,6 +5606,92 @@ def test_render_etf_pick_summary_only_sanitizes_scan_failure_and_keeps_action_pr
     assert "港股创新药指数" in rendered
 
 
+def test_render_etf_pick_no_signal_short_circuits_low_technical_and_catalyst(monkeypatch) -> None:
+    analysis = _sample_analysis("159363", "华宝创业板人工智能ETF", "cn_etf", rank=1)
+    analysis["trade_state"] = "观察为主"
+    analysis["dimensions"]["technical"]["score"] = 25
+    analysis["dimensions"]["catalyst"]["score"] = 4
+    analysis["dimensions"]["relative_strength"]["score"] = 87
+    analysis["dimensions"]["risk"]["score"] = 45
+    analysis["dimension_rows"] = [
+        ["技术面", "25/100", "技术结构仍偏弱，暂不支持介入。"],
+        ["催化面", "4/100", "直接催化偏弱。"],
+        ["相对强弱", "87/100", "更多是前一段主线惯性。"],
+        ["风险特征", "45/100", "风险偏高。"],
+    ]
+    analysis["action"] = {
+        "direction": "回避",
+        "entry": "先等顶背离/假突破消化、MACD/OBV 重新同步",
+        "stop_ref": 1.208,
+        "target_ref": 1.353,
+    }
+    payload = {
+        "generated_at": "2026-04-24 12:00:00",
+        "selection_context": {
+            "scan_pool": 18,
+            "passed_pool": 18,
+            "coverage_note": "高置信直接新闻覆盖仍偏弱。",
+            "coverage_lines": ["结构化事件覆盖 50%（9/18）", "高置信直接新闻覆盖 0%（0/18）"],
+            "coverage_total": 18,
+            "delivery_tier_label": "观察优先稿",
+            "delivery_observe_only": True,
+        },
+        "winner": analysis,
+        "catalyst_analyses": [
+            analysis,
+            {
+                **_sample_analysis("512480", "国联安半导体ETF", "cn_etf", rank=1),
+                "dimensions": {
+                    **_sample_analysis("512480", "国联安半导体ETF", "cn_etf", rank=1)["dimensions"],
+                    "technical": {"score": 32},
+                    "catalyst": {"score": 4},
+                    "relative_strength": {"score": 86},
+                    "risk": {"score": 35},
+                },
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        client_report_module,
+        "build_etf_pick_editor_packet",
+        lambda _payload: {
+            "theme_playbook": {},
+            "event_digest": {
+                "status": "已消化",
+                "lead_layer": "财报",
+                "lead_detail": "财报日历：待披露窗口",
+                "lead_title": "核心持仓财报窗口：新易盛(300502) 预约披露 2025年年报 / 2026年一季报",
+                "impact_summary": "盈利 / 资金偏好",
+                "thesis_scope": "待确认",
+                "changed_what": "财报日历把观察重点推到核心持仓披露窗口。",
+                "importance_reason": "优先前置，但它不是财报结果，不能单独升级动作。",
+                "next_step": "等正式披露后再看营收、净利和价格确认。",
+            },
+            "what_changed": {
+                "previous_view": "首次跟踪。",
+                "change_summary": "这次先记录财报披露窗口。",
+                "conclusion_label": "首次跟踪",
+                "current_event_understanding": "财报日历：待披露窗口；当前更像待确认。",
+            },
+        },
+    )
+
+    rendered = ClientReportRenderer().render_etf_pick(payload)
+
+    assert "# 今日ETF无信号 | 2026-04-24" in rendered
+    assert "技术 `25` / 催化 `4`" in rendered
+    assert "相对强弱 `87` 只作滞后备注" in rendered
+    assert "## 候选池排序" in rendered
+    assert "| 1 | 华宝创业板人工智能ETF (159363) | NO_SIGNAL | 技术25 / 催化4 / 风险45 / 相对强弱87 |" in rendered
+    assert "## 事件决策树" in rendered
+    assert "新易盛" in rendered
+    assert "`1.353`" in rendered
+    assert "`1.208`" in rendered
+    assert "## 这只ETF为什么是这个分" not in rendered
+    assert "## 首页判断" not in rendered
+    assert len(rendered.splitlines()) < 90
+
+
 def test_render_etf_pick_single_standard_candidate_does_not_self_downgrade() -> None:
     analysis = _sample_analysis("159981", "能源化工ETF", "cn_etf", rank=3)
     payload = {
@@ -5770,6 +5949,34 @@ def test_render_briefing_includes_macro_leading_section() -> None:
     assert "## 执行补充" in rendered
     assert "## 今日A股观察池" in rendered
     assert "## A股观察池升级条件" in rendered
+
+
+def test_render_briefing_first_screen_does_not_put_theme_label_in_view_row() -> None:
+    payload = {
+        "generated_at": "2026-04-24 09:00:00",
+        "headline_lines": ["**硬科技 / AI硬件链**"],
+        "action_lines": ["今天先围绕 `硬科技 / AI硬件链` 做跟踪，动作上先验证主线，再决定是否加大风险暴露。"],
+        "theme_tracking_rows": [["AI硬件链", "资本开支验证", "先看主线扩散。", "中线配置", "冲高回落", "信息环境基本一致。"]],
+        "verification_rows": [["1", "HSTECH 止跌", "日内不创新低 + 尾盘翻红", "风险偏好回暖", "继续回避港股科技"]],
+        "macro_asset_rows": [],
+        "macro_items": [],
+        "regime": {"current_regime": "recovery"},
+        "day_theme": "硬科技 / AI硬件链",
+        "data_coverage": "中国宏观",
+        "missing_sources": "",
+        "evidence_rows": [],
+        "quality_lines": [],
+        "proxy_contract": {},
+        "a_share_watch_candidates": [],
+        "a_share_watch_rows": [],
+        "a_share_watch_lines": [],
+        "alerts": [],
+    }
+
+    rendered = ClientReportRenderer().render_briefing(payload)
+
+    assert "| 看不看 | 先跟踪主线验证，不因为单日修复直接放大仓位。 |" in rendered
+    assert "| 看不看 | **硬科技 / AI硬件链** |" not in rendered
 
 
 def test_render_briefing_surfaces_weekly_and_monthly_rhythm_lines() -> None:

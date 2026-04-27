@@ -564,6 +564,40 @@ def _observe_pick_track_rows(track_rows: Sequence[Sequence[str]]) -> List[List[s
     return rewritten
 
 
+def _track_rows_with_subject_first(
+    track_rows: Sequence[Sequence[str]],
+    subject: Mapping[str, Any],
+) -> List[List[str]]:
+    symbol = str(subject.get("symbol") or "").strip()
+    name = str(subject.get("name") or symbol).strip()
+    if not symbol:
+        return [list(row) for row in track_rows]
+
+    def _row_symbol(row: Sequence[str]) -> str:
+        if len(row) < 2:
+            return ""
+        match = re.search(r"\(([^()]+)\)\s*$", str(row[1]).strip())
+        return match.group(1).strip() if match else ""
+
+    subject_row: List[str] | None = None
+    remaining_rows: List[List[str]] = []
+    for raw_row in track_rows:
+        row = list(raw_row)
+        if _row_symbol(row) == symbol:
+            subject_row = row
+            continue
+        remaining_rows.append(row)
+    if subject_row is None:
+        horizon = _analysis_horizon_profile(subject)
+        subject_row = [
+            "优先推荐",
+            f"{name} ({symbol})",
+            horizon.get("label", "观察期"),
+            _analysis_track_reason(subject),
+        ]
+    return [subject_row, *remaining_rows]
+
+
 def _observe_pick_track_summary(track_rows: Sequence[Sequence[str]]) -> str:
     names: List[str] = []
     for row in track_rows[:3]:
@@ -741,6 +775,325 @@ def _score_value(value: Any) -> Optional[float]:
         return float(digits)
     except ValueError:
         return None
+
+
+_PICK_DIMENSION_LABELS: Dict[str, Tuple[str, ...]] = {
+    "technical": ("技术面", "技术"),
+    "catalyst": ("催化面", "催化"),
+    "relative_strength": ("相对强弱",),
+    "risk": ("风险特征", "风险"),
+    "fundamental": ("产品质量/基本面代理", "基本面", "产品/基本面"),
+}
+
+
+def _pick_dimension_score(analysis: Mapping[str, Any], dimension: str) -> Optional[int]:
+    """Return a visible pick score only when the report actually carries one."""
+
+    dimensions = dict(analysis.get("dimensions") or {})
+    raw_dimension = dimensions.get(dimension)
+    if isinstance(raw_dimension, Mapping):
+        value = _score_value(raw_dimension.get("score"))
+        if value is not None:
+            return int(round(value))
+    labels = _PICK_DIMENSION_LABELS.get(dimension, (dimension,))
+    for row in list(analysis.get("dimension_rows") or []):
+        row_values = list(row) if isinstance(row, (list, tuple)) else []
+        if len(row_values) < 2:
+            continue
+        label = str(row_values[0]).strip()
+        if any(label == candidate or candidate in label for candidate in labels):
+            value = _score_value(row_values[1])
+            if value is not None:
+                return int(round(value))
+    return None
+
+
+def _pick_signal_state(analysis: Mapping[str, Any], *, has_existing_position: bool = False) -> Dict[str, Any]:
+    technical = _pick_dimension_score(analysis, "technical")
+    catalyst = _pick_dimension_score(analysis, "catalyst")
+    relative = _pick_dimension_score(analysis, "relative_strength")
+    risk = _pick_dimension_score(analysis, "risk")
+    fundamental = _pick_dimension_score(analysis, "fundamental")
+    scores = {
+        "technical": technical,
+        "catalyst": catalyst,
+        "relative_strength": relative,
+        "risk": risk,
+        "fundamental": fundamental,
+    }
+    rating = dict(analysis.get("rating") or {})
+    action = dict(analysis.get("action") or {})
+    action_text = " ".join(
+        str(action.get(key, "")).strip()
+        for key in ("direction", "entry", "position", "scaling_plan")
+        if str(action.get(key, "")).strip()
+    )
+    rating_label = str(rating.get("label", "")).strip()
+    if (
+        technical is not None
+        and catalyst is not None
+        and technical < 30
+        and catalyst < 20
+    ) or rating_label == "无信号":
+        reason = f"技术{technical if technical is not None else '—'} / 催化{catalyst if catalyst is not None else '—'}"
+        if risk is not None:
+            reason += f" / 风险{risk}"
+        if relative is not None and relative >= 80:
+            reason += f"；相对强弱{relative}只作滞后备注，不抵消双低信号"
+        return {"code": "NO_SIGNAL", "label": "今日无信号", "scores": scores, "reason": reason}
+    if technical is not None and catalyst is not None and technical >= 60 and catalyst >= 60 and (risk is None or risk >= 50):
+        reason = f"技术{technical} / 催化{catalyst}"
+        if risk is not None:
+            reason += f" / 风险{risk}"
+        return {"code": "BUY_CANDIDATE", "label": "可执行候选", "scores": scores, "reason": reason}
+    if has_existing_position and catalyst is not None and catalyst < 40:
+        return {
+            "code": "REDUCE",
+            "label": "已有仓位降风险",
+            "scores": scores,
+            "reason": f"已有仓位但催化{catalyst}偏弱，优先降风险而不是加仓",
+        }
+    if any(token in action_text for token in ("减仓", "降风险", "卖出", "降低仓位")):
+        return {"code": "REDUCE", "label": "降风险", "scores": scores, "reason": _pick_client_safe_line(action_text)}
+    reason_parts = []
+    if technical is not None:
+        reason_parts.append(f"技术{technical}")
+    if catalyst is not None:
+        reason_parts.append(f"催化{catalyst}")
+    if relative is not None:
+        reason_parts.append(f"相对强弱{relative}")
+    return {
+        "code": "HOLD_WATCH",
+        "label": "持仓/观察",
+        "scores": scores,
+        "reason": " / ".join(reason_parts) or "信号不完整，先保留观察",
+    }
+
+
+def _pick_scores_text(scores: Mapping[str, Any]) -> str:
+    labels = (
+        ("technical", "技术"),
+        ("catalyst", "催化"),
+        ("risk", "风险"),
+        ("relative_strength", "相对强弱"),
+    )
+    parts = [f"{label}{scores.get(key)}" for key, label in labels if scores.get(key) is not None]
+    return " / ".join(parts) if parts else "未完整评分"
+
+
+def _pick_state_summary(state: Mapping[str, Any]) -> str:
+    reason = str(state.get("reason", "")).strip()
+    if reason:
+        return _pick_client_safe_line(reason)
+    return _pick_scores_text(dict(state.get("scores") or {}))
+
+
+def _pick_no_signal_next_review(event_digest: Mapping[str, Any], state: Mapping[str, Any]) -> str:
+    title = str(event_digest.get("lead_title") or "").strip()
+    next_step = str(event_digest.get("next_step") or "").strip()
+    if any(token in title for token in ("财报", "披露", "一季报", "年报")):
+        return "正式披露后 24 小时内重评；披露前不把预约日历当成业绩兑现。"
+    if next_step:
+        return _pick_client_safe_line(next_step)
+    scores = dict(state.get("scores") or {})
+    technical = scores.get("technical")
+    catalyst = scores.get("catalyst")
+    if technical is not None and catalyst is not None:
+        return f"等技术从 {technical} 修复到 30 以上，或催化从 {catalyst} 修复到 20 以上后再重评。"
+    return "等技术面或催化面至少一项改善后再重评。"
+
+
+def _pick_no_signal_candidate_items(payload: Mapping[str, Any], winner: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+    candidates: List[Mapping[str, Any]] = []
+    seen: set[str] = set()
+
+    def _append(item: Mapping[str, Any]) -> None:
+        symbol = str(dict(item).get("symbol", "")).strip()
+        name = str(dict(item).get("name", "")).strip()
+        key = symbol or name
+        if not key or key in seen:
+            return
+        candidates.append(dict(item))
+        seen.add(key)
+
+    for item in [winner, *list(payload.get("catalyst_analyses") or [])]:
+        if isinstance(item, Mapping):
+            _append(item)
+    for item in list(dict(payload.get("recommendation_tracks") or {}).values()):
+        if isinstance(item, Mapping):
+            _append(item)
+    for item in list(payload.get("alternatives") or []):
+        if isinstance(item, Mapping):
+            _append(item)
+    return candidates
+
+
+def _pick_no_signal_ranking_rows(payload: Mapping[str, Any], winner: Mapping[str, Any]) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for index, item in enumerate(_pick_no_signal_candidate_items(payload, winner)[:8], start=1):
+        state = _pick_signal_state(item)
+        name = str(item.get("name") or item.get("symbol") or "—").strip()
+        symbol = str(item.get("symbol") or "").strip()
+        label = f"{name} ({symbol})" if symbol and symbol not in name else name
+        rows.append(
+            [
+                str(index),
+                label,
+                str(state.get("code", "HOLD_WATCH")),
+                _pick_scores_text(dict(state.get("scores") or {})),
+                _pick_state_summary(state),
+            ]
+        )
+    if not rows:
+        state = _pick_signal_state(winner)
+        rows.append(["1", str(winner.get("name") or winner.get("symbol") or "—"), str(state.get("code")), _pick_scores_text(dict(state.get("scores") or {})), _pick_state_summary(state)])
+    return rows
+
+
+def _pick_no_signal_event_tree_lines(winner: Mapping[str, Any], event_digest: Mapping[str, Any], asset_label: str) -> List[str]:
+    title = str(event_digest.get("lead_title") or "").strip() or "当前前置事件"
+    action = dict(winner.get("action") or {})
+    upper = action.get("target_ref") or action.get("target")
+    lower = action.get("stop_ref") or action.get("stop")
+    upper_text = f"{float(upper):.3f}" if isinstance(upper, (int, float)) else str(upper or "关键压力位").strip()
+    lower_text = f"{float(lower):.3f}" if isinstance(lower, (int, float)) else str(lower or "关键失效位").strip()
+    if len(upper_text) > 24:
+        upper_text = "关键压力位"
+    if len(lower_text) > 24:
+        lower_text = "关键失效位"
+    return [
+        f"- 事件：{_pick_client_safe_line(title)}",
+        f"- 超预期：先看 `{upper_text}` 能否放量站稳；只有价格确认和技术/催化分数同步修复后，{asset_label} 才从 `NO_SIGNAL` 升到 `HOLD_WATCH / BUY_CANDIDATE` 复核。",
+        f"- 符合预期：继续 `NO_SIGNAL`，让估值和拥挤度消化，不因为事件发生本身追价。",
+        f"- 低于预期：若跌破 `{lower_text}` 或主线情绪继续退潮，已有仓位优先降风险；空仓继续不介入。",
+    ]
+
+
+def _pick_no_signal_event_digest_lines(event_digest: Mapping[str, Any]) -> List[str]:
+    if not event_digest:
+        return ["- 事件状态：暂无足够强的前置事件，本轮只保留信号闸门结论。"]
+    status = str(event_digest.get("status") or "待复核").strip()
+    lead_layer = str(event_digest.get("lead_layer") or "事件").strip()
+    lead_detail = str(event_digest.get("lead_detail") or "").strip()
+    impact_summary = str(event_digest.get("impact_summary") or "待确认").strip()
+    thesis_scope = str(event_digest.get("thesis_scope") or "待确认").strip()
+    changed = str(event_digest.get("changed_what") or "").strip()
+    importance = str(event_digest.get("importance_reason") or "").strip()
+    next_step = str(event_digest.get("next_step") or "").strip()
+    lines = [
+        f"- 事件状态：{status}",
+        f"- 事件分层：{lead_layer}" + (f" / {lead_detail}" if lead_detail else ""),
+        f"- 影响层与性质：{impact_summary}；{thesis_scope}",
+    ]
+    if changed:
+        lines.append(f"- 这件事改变了什么：{_pick_client_safe_line(changed)}")
+    if importance:
+        lines.append(f"- 优先级判断：{_pick_client_safe_line(importance)}")
+    if next_step:
+        lines.append(f"- 下一步：{_pick_client_safe_line(next_step)}")
+    return lines
+
+
+def _pick_no_signal_what_changed_lines(what_changed: Mapping[str, Any]) -> List[str]:
+    if not what_changed:
+        return []
+    lines: List[str] = []
+    previous = str(what_changed.get("previous_view") or "").strip()
+    change = str(what_changed.get("change_summary") or "").strip()
+    conclusion = str(what_changed.get("conclusion_label") or "").strip()
+    current_event = str(what_changed.get("current_event_understanding") or "").strip()
+    trigger = str(what_changed.get("state_trigger") or "").strip()
+    summary = str(what_changed.get("state_summary") or "").strip()
+    if previous:
+        lines.append(f"- 上次怎么看：{_pick_client_safe_line(previous)}")
+    if change:
+        lines.append(f"- 这次什么变了：{_pick_client_safe_line(change)}")
+    if conclusion:
+        lines.append(f"- 结论变化：{_pick_client_safe_line(conclusion)}")
+    if current_event:
+        lines.append(f"- 当前事件理解：{_pick_client_safe_line(current_event)}")
+    if trigger:
+        lines.append(f"- 触发：{_pick_client_safe_line(trigger)}")
+    if summary:
+        lines.append(f"- 状态解释：{_pick_client_safe_line(summary)}")
+    return lines
+
+
+def _render_pick_no_signal_report(
+    payload: Mapping[str, Any],
+    winner: Mapping[str, Any],
+    *,
+    generated_at: str,
+    asset_label: str,
+    selection_context: Mapping[str, Any],
+    theme_packet: Mapping[str, Any],
+) -> str:
+    state = _pick_signal_state(winner)
+    event_digest = dict(theme_packet.get("event_digest") or {})
+    what_changed = dict(theme_packet.get("what_changed") or {})
+    name = str(winner.get("name") or winner.get("symbol") or asset_label).strip()
+    symbol = str(winner.get("symbol") or "").strip()
+    subject = f"{name} ({symbol})" if symbol and symbol not in name else name
+    next_review = _pick_no_signal_next_review(event_digest, state)
+    scores = dict(state.get("scores") or {})
+    technical = scores.get("technical", "—")
+    catalyst = scores.get("catalyst", "—")
+    risk = scores.get("risk", "—")
+    relative = scores.get("relative_strength", "—")
+    lines = [
+        f"# 今日{asset_label}无信号 | {generated_at}",
+        "",
+        "## 结论",
+        "",
+        f"- 今日 `{subject}` 为 `NO_SIGNAL`：技术 `{technical}` / 催化 `{catalyst}` / 风险 `{risk}`；不新开仓。",
+        f"- 相对强弱 `{relative}` 只作滞后备注，不能抵消技术和催化的双低信号。",
+        f"- 下次评估：{next_review}",
+        "",
+        "## 为什么是 NO_SIGNAL",
+        "",
+        f"- 闸门规则：`技术面 < 30` 且 `催化面 < 20` 时，直接短路为 `NO_SIGNAL`，不再展开长篇八维叙事。",
+        "- 当前动作：空仓不介入；已有仓位只按既有组合纪律处理，不能因为这份稿新增仓位。",
+        "- 这份短稿的目标是减少噪音：没有可执行信号时，结论必须比解释更靠前。",
+        "",
+        "## 候选池排序",
+        "",
+        f"- 本轮初筛 `{selection_context.get('scan_pool', '—')}` 只，完整分析 `{selection_context.get('passed_pool', '—')}` 只；下表只展开动作状态，不把低信号标的包装成推荐。",
+        "",
+        *_table(["排名", "标的", "状态", "分数", "说明"], _pick_no_signal_ranking_rows(payload, winner)),
+        "",
+        "## 事件消化",
+        "",
+        *_pick_no_signal_event_digest_lines(event_digest),
+        "",
+        "## 事件决策树",
+        "",
+        *_pick_no_signal_event_tree_lines(winner, event_digest, asset_label),
+    ]
+    what_changed_lines = _pick_no_signal_what_changed_lines(what_changed)
+    if what_changed_lines:
+        lines.extend(["", "## What Changed", "", *what_changed_lines])
+    coverage_lines = [str(item).strip() for item in list(selection_context.get("coverage_lines") or []) if str(item).strip()]
+    lines.extend(
+        [
+            "",
+            "## 触发后再评估",
+            "",
+            "- 从 `NO_SIGNAL` 升到 `HOLD_WATCH`：技术或催化至少一项修复到闸门线上方，再看价格是否确认。",
+            "- 从 `HOLD_WATCH` 升到 `BUY_CANDIDATE`：技术和催化都要过 60，且风险分不能继续恶化。",
+            "- 如果只有相对强弱高、但催化和技术没有修复，维持 `NO_SIGNAL / HOLD_WATCH`，不写成交易机会。",
+            "",
+            "## 数据边界",
+            "",
+            f"- 交付等级：`{selection_context.get('delivery_tier_label', '观察优先稿')}`。观察优先不是正式买入稿。",
+        ]
+    )
+    if selection_context.get("coverage_note"):
+        lines.append(f"- 覆盖说明：{selection_context.get('coverage_note')}")
+    for item in coverage_lines[:2]:
+        lines.append(f"- {item}")
+    if selection_context.get("coverage_total"):
+        lines.append(f"- 覆盖率的分母是今天进入完整分析的 `{selection_context.get('coverage_total')}` 只{asset_label}。")
+    return "\n".join(lines).rstrip()
 
 
 def _market_label(asset_type: str) -> str:
@@ -1597,11 +1950,94 @@ def _evidence_identity(item: Mapping[str, Any]) -> tuple[str, str, str]:
     )
 
 
+def _subject_evidence_terms(subject: Mapping[str, Any], event_digest: Mapping[str, Any]) -> List[str]:
+    payload = dict(subject or {})
+    metadata = dict(payload.get("metadata") or {})
+    taxonomy = dict(metadata.get("taxonomy") or metadata.get("fund_taxonomy") or {})
+    theme_profile = dict(metadata.get("theme_profile") or taxonomy.get("theme_profile") or {})
+    digest = dict(event_digest or {})
+    values: List[Any] = [
+        metadata.get("sector"),
+        metadata.get("industry"),
+        metadata.get("industry_framework_label"),
+        metadata.get("tracked_index_name"),
+        metadata.get("benchmark"),
+        metadata.get("benchmark_name"),
+        metadata.get("index_framework_label"),
+        metadata.get("chain_nodes"),
+        metadata.get("primary_chain"),
+        metadata.get("theme_family"),
+        metadata.get("theme_role"),
+        taxonomy.get("primary_chain"),
+        taxonomy.get("theme_family"),
+        taxonomy.get("theme_role"),
+        theme_profile.get("primary_chain"),
+        theme_profile.get("theme_family"),
+        theme_profile.get("theme_role"),
+        theme_profile.get("evidence_keywords"),
+        theme_profile.get("preferred_sector_aliases"),
+        theme_profile.get("mainline_tags"),
+        payload.get("taxonomy_summary"),
+        dict(payload.get("theme_playbook") or {}).get("label"),
+        digest.get("theme_label"),
+        digest.get("lead_title"),
+    ]
+    values.extend(subject_theme_terms(payload, allow_day_theme=False))
+    terms: List[str] = []
+    seen: set[str] = set()
+    generic = {"基金", "ETF", "etf", "指数", "主题", "市场", "南方", "平安", "长城", "华夏", "招商"}
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, Mapping):
+            values.extend(value.values())
+            continue
+        if isinstance(value, (list, tuple, set)):
+            values.extend(list(value))
+            continue
+        text = _pick_client_safe_line(str(value or "").strip()).strip("`")
+        if len(text) < 2 or text in generic:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        terms.append(text)
+    return sorted(terms, key=len, reverse=True)
+
+
+def _evidence_item_matches_subject(
+    item: Mapping[str, Any],
+    subject: Mapping[str, Any] | None,
+    event_digest: Mapping[str, Any] | None,
+) -> bool:
+    payload = dict(subject or {})
+    asset_type = str(payload.get("asset_type") or "").strip()
+    if asset_type != "cn_fund":
+        return True
+    row = dict(item or {})
+    text = " ".join(
+        str(row.get(key) or "").strip()
+        for key in ("title", "lead_detail", "signal_type", "signal_conclusion", "impact_summary", "source")
+        if str(row.get(key) or "").strip()
+    )
+    if not text:
+        return False
+    terms = _subject_evidence_terms(payload, dict(event_digest or {}))
+    if any(term and term in text for term in terms):
+        return True
+    # Product-structure rows are still valid for fund reports even when they
+    # do not mention the theme by name. Generic news/舆情 rows are not.
+    structural_markers = ("成分权重", "跟踪指数", "行业/指数框架", "标准指数框架", "业绩基准", "费率结构")
+    return any(marker in text for marker in structural_markers)
+
+
 def _merged_evidence_items(
     items: Sequence[Mapping[str, Any]],
     *,
     event_digest: Mapping[str, Any] | None = None,
     seen_identities: set[tuple[str, str, str]] | None = None,
+    subject: Mapping[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     merged: List[Dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set(seen_identities or set())
@@ -1610,6 +2046,8 @@ def _merged_evidence_items(
         if not str(row.get("title", "") or "").strip():
             continue
         if _is_diagnostic_intelligence_row(row):
+            continue
+        if not _evidence_item_matches_subject(row, subject, event_digest):
             continue
         identity = _evidence_identity(row)
         if identity in seen:
@@ -1624,6 +2062,8 @@ def _merged_evidence_items(
         if not str(row.get("title", "") or "").strip():
             continue
         if _is_diagnostic_intelligence_row(row):
+            continue
+        if not _evidence_item_matches_subject(row, subject, event_digest):
             continue
         identity = _evidence_identity(row)
         if identity in seen:
@@ -1643,10 +2083,11 @@ def _evidence_lines_with_event_digest(
     as_of: Any = None,
     symbol: Any = "",
     seen_identities: set[tuple[str, str, str]] | None = None,
+    subject: Mapping[str, Any] | None = None,
 ) -> List[str]:
     digest = dict(event_digest or {})
     return _evidence_lines(
-        _merged_evidence_items(items, event_digest=digest, seen_identities=seen_identities),
+        _merged_evidence_items(items, event_digest=digest, seen_identities=seen_identities, subject=subject),
         max_items=max_items,
         as_of=as_of,
         previous_reviewed_at=digest.get("previous_reviewed_at"),
@@ -5060,6 +5501,16 @@ def _briefing_first_screen_block(
 ) -> str:
     view_text = _pick_client_safe_line(headline_lines[0] if headline_lines else "") or "今天先看风险控制，再看进攻节奏。"
     action_text = _pick_client_safe_line(action_lines[0] if action_lines else "") or "先按常规节奏分批确认。"
+    plain_view = view_text.strip("*` ").strip()
+    action_markers = ("观察", "跟踪", "确认", "防守", "进攻", "回避", "修复", "行情", "趋势", "出手", "仓位", "风险")
+    looks_like_theme_label = (
+        bool(plain_view)
+        and len(plain_view) <= 24
+        and not any(marker in plain_view for marker in action_markers)
+        and ("/" in plain_view or "链" in plain_view or "主线" in plain_view or "方向" in plain_view)
+    )
+    if looks_like_theme_label:
+        view_text = "先跟踪主线验证，不因为单日修复直接放大仓位。"
     trigger_parts: List[str] = [action_text]
     if verification_rows:
         row = list(verification_rows[0] or [])
@@ -7874,6 +8325,16 @@ class ClientReportRenderer:
         compact_observe = observe_only
         theme_packet = build_fund_pick_editor_packet(payload)
         playbook = {**playbook, **dict(theme_packet.get("theme_playbook") or {})}
+        signal_state = _pick_signal_state(winner)
+        if signal_state.get("code") == "NO_SIGNAL":
+            return _render_pick_no_signal_report(
+                payload,
+                winner,
+                generated_at=generated_at,
+                asset_label="场外基金",
+                selection_context=selection_context,
+                theme_packet=theme_packet,
+            )
         summary_rows = _single_asset_exec_summary_rows(
             winner,
             horizon,
@@ -8104,6 +8565,7 @@ class ClientReportRenderer:
             max_items=3,
             as_of=winner.get("generated_at") or payload.get("generated_at"),
             symbol=winner.get("symbol"),
+            subject=winner,
         )
         lines.extend(["", "## 关键证据", ""])
         if evidence_lines:
@@ -8244,9 +8706,21 @@ class ClientReportRenderer:
         compact_observe = observe_only
         theme_packet = build_etf_pick_editor_packet(payload)
         playbook = {**playbook, **dict(theme_packet.get("theme_playbook") or {})}
+        signal_state = _pick_signal_state(winner)
+        if signal_state.get("code") == "NO_SIGNAL":
+            return _render_pick_no_signal_report(
+                payload,
+                winner,
+                generated_at=generated_at,
+                asset_label="ETF",
+                selection_context=selection_context,
+                theme_packet=theme_packet,
+            )
         why_heading = "## 为什么先看它" if observe_only else "## 为什么推荐它"
         track_summary = _payload_track_summary_text(recommendation_tracks)
         track_rows = _payload_track_rows(recommendation_tracks)
+        if observe_only:
+            track_rows = _track_rows_with_subject_first(track_rows, winner)
         display_track_rows = _observe_pick_track_rows(track_rows) if observe_only else track_rows
         display_track_summary = _observe_pick_track_summary(display_track_rows) if observe_only else track_summary
         track_count = len(track_rows)
@@ -8493,6 +8967,7 @@ class ClientReportRenderer:
             max_items=3,
             as_of=winner.get("generated_at") or payload.get("generated_at"),
             symbol=winner.get("symbol"),
+            subject=winner,
         )
         lines.extend(["", "## 关键证据", ""])
         if evidence_lines:

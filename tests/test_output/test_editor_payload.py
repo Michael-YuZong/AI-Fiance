@@ -168,9 +168,88 @@ def test_news_lines_with_event_digest_prioritize_linked_news_before_digest_summa
     assert any(line.startswith("结构证据：") for line in lines)
     assert any(line.startswith("外部情报：") for line in lines)
     assert any("信号强弱" in line or "结论：" in line for line in lines[:2])
+    assert any("传导：" in line for line in lines[:2])
     assert any("https://example.com/semiconductor" in line for line in lines)
     assert any("财联社" in line for line in lines)
     assert sum("成分权重结构" in line for line in lines) == 1
+
+
+def test_news_lines_with_event_digest_interprets_raw_news_without_signal_fields() -> None:
+    subject = {
+        "asset_type": "cn_stock",
+        "name": "新易盛",
+        "symbol": "300502",
+        "generated_at": "2026-04-24 08:30:00",
+        "metadata": {"sector": "AI算力"},
+        "news_report": {
+            "items": [
+                {
+                    "title": "新易盛预约披露年报和一季报，市场关注AI算力订单兑现",
+                    "source": "财联社",
+                    "date": "2026-04-24",
+                    "link": "https://example.com/ai-compute",
+                }
+            ]
+        },
+        "dimensions": {"catalyst": {"evidence": []}},
+    }
+
+    lines = _news_lines_with_event_digest(subject, {})
+    joined = "\n".join(lines)
+
+    assert "信号类型" in joined
+    assert "财报摘要" in joined or "AI硬件" in joined
+    assert "主要影响" in joined
+    assert "结论：" in joined
+    assert "传导：" in joined
+
+
+def test_news_lines_with_event_digest_stock_prioritizes_company_event_over_theme_links() -> None:
+    subject = {
+        "asset_type": "cn_stock",
+        "name": "新易盛",
+        "symbol": "300502",
+        "generated_at": "2026-04-24 18:30:00",
+        "metadata": {"sector": "AI算力"},
+        "news_report": {
+            "items": [
+                {
+                    "title": "亚马逊云科技与全球AI伙伴共话AI应用生态",
+                    "source": "新浪财经",
+                    "date": "2026-04-23",
+                    "link": "https://example.com/ai-app",
+                },
+                {
+                    "title": "新易盛光模块需求延续，市场关注算力订单",
+                    "source": "财联社",
+                    "date": "2026-04-23",
+                    "link": "https://example.com/eoptolink",
+                },
+            ]
+        },
+        "dimensions": {"catalyst": {"evidence": []}},
+    }
+    digest = {
+        "status": "已消化",
+        "lead_layer": "公告",
+        "lead_title": "新易盛 披露现金分红预案（每10股派现 1.00 元）",
+        "lead_link": "https://www.cninfo.com.cn/new/disclosure/detail?stockCode=300502",
+        "signal_type": "公告类型：分红/回报",
+        "signal_strength": "强",
+        "signal_conclusion": "偏利多，已开始改写 `估值 / 资金偏好` 这层。",
+        "impact_summary": "估值 / 资金偏好",
+        "latest_signal_at": "2026-04-24",
+        "thesis_scope": "thesis变化",
+        "importance": "high",
+    }
+
+    lines = _news_lines_with_event_digest(subject, digest)
+
+    assert lines
+    assert "新易盛 披露现金分红预案" in lines[0]
+    assert "主要影响：`估值 / 资金偏好`" in lines[0]
+    assert "传导：" in lines[0]
+    assert not lines[0].startswith("结构证据：信号类型")
 
 
 def test_news_lines_with_event_digest_for_etf_prefers_linked_news_before_digest_lead() -> None:
@@ -318,6 +397,86 @@ def test_news_lines_with_event_digest_filters_etf_proxy_news_when_coverage_is_ze
     assert "theme_news" not in dict(packet["subject"]["dimensions"]["catalyst"] or {})
     assert "159558" not in subject_sidecar
     assert "北方华创股价连续上涨" not in subject_sidecar
+
+
+def test_news_lines_with_event_digest_filters_fund_brand_noise_links() -> None:
+    subject = {
+        "asset_type": "cn_fund",
+        "name": "南方创业板人工智能ETF联接A",
+        "symbol": "024725",
+        "metadata": {
+            "sector": "科技",
+            "benchmark": "创业板人工智能指数收益率*95%+银行活期存款利率(税后)*5%",
+            "chain_nodes": ["AI算力", "软件服务"],
+            "taxonomy": {
+                "theme_profile": {
+                    "primary_chain": "AI/成长科技",
+                    "evidence_keywords": ["人工智能", "AI算力"],
+                }
+            },
+        },
+        "news_report": {
+            "items": [
+                {
+                    "title": "全国首单数字人民币跨境双边电力结算业务落地南方电网",
+                    "source": "新浪财经",
+                    "date": "2026-04-23",
+                    "link": "https://example.com/power-grid",
+                },
+                {
+                    "title": "AI服务器需求拉动算力产业链景气",
+                    "source": "财联社",
+                    "date": "2026-04-23",
+                    "link": "https://example.com/ai-server",
+                },
+            ]
+        },
+    }
+    digest = {
+        "status": "已消化",
+        "lead_layer": "行业主题事件",
+        "lead_title": "AI服务器需求拉动算力产业链景气",
+        "lead_link": "https://example.com/ai-server",
+        "signal_type": "主题事件：产业链映射",
+        "signal_strength": "中",
+        "signal_conclusion": "中性偏多，先看景气能否继续确认。",
+        "thesis_scope": "thesis变化",
+    }
+
+    lines = _news_lines_with_event_digest(subject, digest)
+    joined = "\n".join(lines)
+
+    assert "AI服务器需求拉动算力产业链景气" in joined
+    assert "南方电网" not in joined
+
+
+def test_news_lines_with_event_digest_fund_relevance_uses_product_benchmark_not_relative_benchmark() -> None:
+    subject = {
+        "asset_type": "cn_fund",
+        "name": "南方创业板人工智能ETF联接A",
+        "symbol": "024725",
+        "benchmark_name": "沪深300ETF",
+        "metadata": {
+            "sector": "科技",
+            "benchmark": "创业板人工智能指数收益率*95%+银行活期存款利率(税后)*5%",
+            "taxonomy": {"theme_profile": {"primary_chain": "AI/成长科技"}},
+        },
+    }
+    digest = {
+        "status": "已消化",
+        "lead_layer": "行业主题事件",
+        "lead_title": "AI服务器需求拉动算力产业链景气",
+        "lead_link": "https://example.com/ai-server",
+        "signal_type": "主题事件：产业链映射",
+        "signal_strength": "中",
+        "signal_conclusion": "中性偏多，先看景气能否继续确认。",
+    }
+
+    lines = _news_lines_with_event_digest(subject, digest)
+    joined = "\n".join(lines)
+
+    assert "创业板人工智能指数收益率" in joined
+    assert "沪深300ETF" not in joined
 
 
 def test_news_lines_with_event_digest_filters_irrelevant_market_background_when_only_structure_evidence_exists() -> None:
@@ -634,6 +793,24 @@ def test_build_theme_playbook_context_resolves_ai_computing() -> None:
     playbook = build_theme_playbook_context("AI算力ETF", "光模块和服务器景气仍在")
     assert playbook["key"] == "ai_computing"
     assert playbook["bullish_drivers"]
+
+
+def test_build_theme_playbook_context_prefers_ai_index_over_chuangye_beta() -> None:
+    playbook = build_theme_playbook_context(
+        {
+            "name": "南方创业板人工智能ETF联接A",
+            "sector": "科技",
+            "benchmark": "创业板人工智能指数收益率*95%+银行活期存款利率(税后)*5%",
+            "chain_nodes": ["AI算力", "软件服务", "成长股估值修复"],
+            "primary_chain": "AI/成长科技",
+            "theme_family": "泛科技",
+            "theme_role": "主题成长",
+            "evidence_keywords": ["人工智能", "AI算力"],
+        }
+    )
+    assert playbook["key"] == "ai_computing"
+    assert playbook["label"] == "AI算力"
+    assert playbook["hard_sector_label"] == "信息技术"
 
 
 def test_build_theme_playbook_context_distinguishes_hardtech_expansion_from_core() -> None:
@@ -2828,7 +3005,7 @@ def test_format_homepage_evidence_line_preserves_signal_bundle_for_linked_news()
     assert "信号类型：`地缘缓和/风险偏好修复`" in formatted
     assert "信号强弱：`中`" in formatted
     assert "结论：中性偏多" in formatted
-    assert "情报属性：" not in formatted
+    assert "情报属性：" in formatted
     assert "来源层级：" not in formatted
     assert "事件理解：" not in formatted
 
@@ -2845,6 +3022,7 @@ def test_ensure_homepage_news_signal_bundle_adds_conclusion_for_linked_market_ne
     assert "信号类型：" in enriched
     assert "信号强弱：" in enriched
     assert "结论：" in enriched
+    assert "传导：" in enriched
 
 
 def test_render_editor_homepage_marks_since_last_review_search_fallback(monkeypatch) -> None:
@@ -3166,6 +3344,101 @@ def test_build_stock_pick_editor_packet_separates_market_day_theme_from_subject_
     assert "当前市场主线背景偏 `硬科技 / AI硬件链`" in summary
     assert "但这页真正先看 `黄金 / 有色资源` 这条线里谁已经先走到可执行边界。" in summary
     assert "当前主线偏 `硬科技 / AI硬件链`，已经有少数标的从方向判断走到可执行边界。" not in summary
+
+
+def test_build_stock_pick_editor_packet_resistance_level_ignores_ma_window_number() -> None:
+    packet = build_stock_pick_editor_packet(
+        {
+            "generated_at": "2026-04-24 10:00:00",
+            "day_theme": {"label": "硬科技 / AI硬件链"},
+            "regime": {"current_regime": "recovery"},
+            "market_label": "A股",
+            "top": [
+                {
+                    "name": "宝丰能源",
+                    "symbol": "600989",
+                    "asset_type": "cn_stock",
+                    "trade_state": "看好但暂不推荐",
+                    "action": {
+                        "direction": "做多",
+                        "entry": "先等 MACD 再次转强或站回 MA20",
+                        "position": "首次建仓 ≤3%",
+                        "stop": "跌破 26.478 或主线/催化失效时重新评估",
+                        "buy_range": "26.951 - 28.348",
+                        "stop_ref": 26.4776,
+                        "target_ref": 36.49,
+                    },
+                    "dimensions": {
+                        **_sample_dimensions(),
+                        "technical": {
+                            "score": 38,
+                            "max_score": 100,
+                            "summary": "技术面仍需确认。",
+                            "factors": [
+                                {
+                                    "factor_id": "j1_resistance_zone",
+                                    "name": "压力位",
+                                    "signal": "上方存在近端压力：MA20 29.033（上方 0.9%）",
+                                    "detail": "优先看 MA20、斐波那契 0.786、近20/60日高点和摆动前高；上方压制越近，反弹越容易先进入承压消化。",
+                                }
+                            ],
+                        },
+                    },
+                    "metadata": {"sector": "煤炭"},
+                    "theme_playbook": {
+                        "key": "energy_resources",
+                        "label": "能源 / 资源",
+                        "playbook_level": "theme",
+                    },
+                }
+            ],
+            "watch_positive": [],
+        }
+    )
+
+    action_lines = "\n".join(packet["homepage"]["action_lines"])
+    assert "`29.033`" in action_lines
+    assert "`20.000`" not in action_lines
+
+
+def test_build_stock_pick_editor_packet_surfaces_hard_exclusion_before_watch_trigger() -> None:
+    packet = build_stock_pick_editor_packet(
+        {
+            "generated_at": "2026-04-24 10:00:00",
+            "day_theme": {"label": "硬科技 / AI硬件链"},
+            "regime": {"current_regime": "recovery"},
+            "market_label": "A股",
+            "top": [
+                {
+                    "name": "中际旭创",
+                    "symbol": "300308",
+                    "asset_type": "cn_stock",
+                    "trade_state": "观察为主",
+                    "excluded": True,
+                    "exclusion_reasons": ["个股估值处于极高区间"],
+                    "action": {
+                        "direction": "回避",
+                        "entry": "等 RSI 回落到 60 附近且 MACD 不死叉",
+                        "position": "首次建仓 ≤3%",
+                        "stop_ref": 825.240,
+                        "target_ref": 1004.640,
+                    },
+                    "dimensions": _sample_dimensions(),
+                    "metadata": {"sector": "科技", "industry": "通信设备", "chain_nodes": ["光模块", "CPO"]},
+                    "theme_playbook": {
+                        "key": "ai_compute",
+                        "label": "AI算力",
+                        "playbook_level": "theme",
+                    },
+                }
+            ],
+            "watch_positive": [],
+        }
+    )
+
+    action_lines = packet["homepage"]["action_lines"]
+    assert action_lines[0].startswith("执行卡：已触发硬排除")
+    assert "不能按正式推荐执行" in action_lines[0]
 
 
 def test_build_stock_pick_editor_packet_prefers_top_subject_when_observe_only() -> None:
@@ -3677,6 +3950,41 @@ def test_build_fund_pick_editor_packet_has_theme_homepage() -> None:
     assert packet["homepage"]["theme_lines"]
 
 
+def test_build_fund_pick_editor_packet_prefers_ai_taxonomy_over_market_beta() -> None:
+    packet = build_fund_pick_editor_packet(
+        {
+            "generated_at": "2026-04-24 15:00:00",
+            "day_theme": {"label": "硬科技 / AI硬件链"},
+            "selection_context": {"delivery_observe_only": True},
+            "winner": {
+                "name": "南方创业板人工智能ETF联接A",
+                "symbol": "024725",
+                "asset_type": "cn_fund",
+                "trade_state": "观察为主",
+                "action": {"direction": "观察为主", "entry": "等确认", "stop": "跌破支撑"},
+                "dimensions": _sample_dimensions(),
+                "metadata": {
+                    "sector": "科技",
+                    "benchmark": "创业板人工智能指数收益率*95%+银行活期存款利率(税后)*5%",
+                    "chain_nodes": ["AI算力", "软件服务", "成长股估值修复"],
+                    "taxonomy": {
+                        "theme_profile": {
+                            "primary_chain": "AI/成长科技",
+                            "theme_family": "泛科技",
+                            "theme_role": "主题成长",
+                            "evidence_keywords": ["人工智能", "AI算力"],
+                        }
+                    },
+                },
+            },
+        }
+    )
+    theme_lines = "\n".join(packet["homepage"]["theme_lines"])
+    assert packet["theme_playbook"]["key"] == "ai_computing"
+    assert "AI算力" in theme_lines
+    assert "宽基 / 市场Beta" not in theme_lines
+
+
 def test_build_fund_pick_editor_packet_surfaces_strategy_background_confidence(monkeypatch) -> None:
     class _FakeStrategyRepo:
         def summarize_background_confidence(self, symbol, lookback=8):
@@ -4100,6 +4408,7 @@ def test_build_briefing_editor_packet_news_lines_surface_intelligence_tags() -> 
     assert packet["homepage"]["news_lines"]
     assert any("新鲜情报" in line for line in packet["homepage"]["news_lines"])
     assert any("一手直连" in line for line in packet["homepage"]["news_lines"])
+    assert any("传导：" in line for line in packet["homepage"]["news_lines"])
 
 
 def test_build_briefing_editor_packet_prefers_raw_news_lines_over_internal_validation_lead() -> None:

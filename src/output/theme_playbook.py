@@ -246,6 +246,10 @@ PLAYBOOK_REGISTRY: Dict[str, Dict[str, Any]] = {
         "path": "docs/theme_playbooks/ai_computing.md",
         "keywords": (
             "ai算力",
+            "人工智能",
+            "ai人工智能",
+            "ai/成长科技",
+            "成长科技",
             "算力",
             "光模块",
             "服务器",
@@ -1209,12 +1213,23 @@ THEME_STRUCTURED_MAPPING_KEYS = (
     "industry",
     "industry_framework_label",
     "tushare_theme_industry",
+    "tracked_index_name",
+    "benchmark",
+    "benchmark_name",
+    "index_framework_label",
+    "primary_chain",
+    "theme_family",
+    "theme_role",
+    "theme_profile_terms",
     "main_business",
 )
 
 THEME_STRUCTURED_SEQUENCE_KEYS = (
     "chain_nodes",
     "tushare_theme_membership_labels",
+    "evidence_keywords",
+    "preferred_sector_aliases",
+    "mainline_tags",
 )
 
 

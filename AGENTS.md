@@ -164,11 +164,12 @@
 
 这里只保留会影响默认开发判断的短摘要；逐日 log 放到 history 文档，不再堆在这里。
 
-- `briefing / scan / stock_analysis / stock_pick / etf_pick / fund_pick` 现在都按“情报链”口径写作：多条相关情报、`signal_type / signal_strength / signal_conclusion`、client-safe 空情报窗口已进入共享层。
+- `briefing / scan / stock_analysis / stock_pick / etf_pick / fund_pick` 现在都按“情报链”口径写作：多条相关情报、`signal_type / signal_strength / signal_conclusion`、`主要影响 / 传导`、client-safe 空情报窗口已进入共享层；首页关键情报不能只贴标题，必须写清偏利多/偏利空/中性、先影响什么、再看什么验证。
 - `briefing / market_drivers / market_pulse` 已承认 same-day freshness 合同；空 frame 不再写成 fresh，负涨幅行业/概念也不会再被写成 `走强 / 领涨`。
 - `Tushare 10000 分` 第一阶段已基本收口：股票、指数/行业、ETF 非实时主链都已切到 `Tushare-first`；当前重点改成退已被覆盖的 `AKShare` 旧链、统一 `index_weekly / index_monthly` 的可见写法，并推进第二阶段 backlog。
 - 默认分析合同已正式分叉：个股主链不再把指数专题当默认补充层，优先写公司、板块/主题、行业行情和资金承接；ETF / 指数 / 被动或联接类基金保留 `index_topic_bundle / 周月节奏 / 跟踪指数技术状态` 这套指数主线；主动基金回到基金经理、持仓和风格暴露主线。这套主动/被动判断现已抽成共享 helper，并已下沉到 `scan / stock_analysis / fund_pick / compare / renderer`，后续不要再在命令层各写一版启发式。
 - `stock_analysis / scan` 的单标的个股 detailed 现在明确拆成两层：首屏继续只回答 `看不看 / 怎么触发 / 多大仓位 / 哪里止损`，正文前段新增 `公司研究层判断`，单独解释“公司/赛道还值不值得跟”“基本面低分怎么理解”“为什么还不适合中线重仓”。`基本面低分` 默认解释成当前位置/性价比不足，不再默认等同于公司价值判死；同时个股观察稿首屏也必须直接落当前触发位 / 观察仓上限 / 失效位，不再允许退回“先别给精确买点 / 不先给机械止损位”这类泛化提示；ETF / 基金 detailed 仍不进入这层公司研究口径。
+- 个股聚合层现在有硬 gate：`technical < 30 / catalyst < 20 / risk < 20` 任一项未过时，`cn_stock` 不能输出 `较强机会 / 强机会`；两项及以上未过直接 `无信号`，单项未过封顶观察级。这条合同已同步到 `trade_state / action_plan / discover_next_step / release_check / report_guard`，不要再补回“基本面或相对强弱单维度把弱信号抬成推荐”的捷径。
 - `etf_pick --client-final` 当前已回到单一路径：不再复用 same-day internal/payload 快路径，也不再对入围 ETF 逐只做 full reanalysis 慢链；现在统一走 `discover -> hydrate full profile for finalists -> refresh shared ETF report fields -> finalize/export`。后续如果要提速，优先修共享 export/runtime，不要再补回旧 bundle 复用分支。
 - `stock_pick / briefing --client-final` 当前也已回到单一路径：仍会落 `payload / editor_payload / prompt` 侧车做审计与 continuity，但默认不再复用 same-day `internal -> finalize/export` 或 `editor fallback` 捷径。后续如果要提速，优先修共享 collector/runtime/export，不要再补回私有复用分支。
 - `stock_pick / stock_analysis / scan` 的 `theme_playbook` 现在默认按“结构化 metadata 优先”收主题：先看 `sector / industry / industry_framework_label / tushare_theme_industry / chain_nodes`，只有 `day_theme` 与个股真实行业对齐时，才允许把它抬成个股主线；`business_scope` 这类超长经营范围默认不再直接参与主题归因，避免把 `旅游 / 餐饮 / 再生资源` 之类噪音误写成个股主题边界。

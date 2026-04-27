@@ -289,6 +289,13 @@ ACTIVE_REVIEW_LESSONS: List[ReviewLesson] = [
         owner_layer="opportunity_engine",
         rationale="A股个股稿里，宏观晨报、行业早报和泛主题新闻只能作为宏观背景或主题线索，不能同时写成个股级龙头公告/业绩或直接催化；否则会把弱催化误包装成可执行信号。",
     ),
+    ReviewLesson(
+        lesson_id="L040",
+        title="分数和结论必须通过硬门槛",
+        scope="cn_stock_reports",
+        owner_layer="release_check",
+        rationale="技术、催化或风险任一硬门槛未过时，个股稿不能继续输出较强机会或强机会；否则单一亮点会覆盖关键负信号。",
+    ),
 ]
 
 

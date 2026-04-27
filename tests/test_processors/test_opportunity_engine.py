@@ -3995,6 +3995,31 @@ def test_catalyst_dimension_cn_stock_uses_tushare_capital_return_events(monkeypa
     assert any(item["source"] in {"Tushare repurchase", "Tushare dividend"} for item in dimension["evidence"])
 
 
+def test_catalyst_dimension_dividend_formats_tushare_per_share_fields_as_per_ten(monkeypatch):
+    monkeypatch.setattr(NewsCollector, "get_stock_news", lambda self, symbol, limit=10: [])  # noqa: ARG005
+    monkeypatch.setattr(NewsCollector, "search_by_keywords", lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_disclosure_dates", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_holder_trades", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(ValuationCollector, "get_cn_stock_repurchase", lambda self, symbol: [])  # noqa: ARG005
+    monkeypatch.setattr(
+        ValuationCollector,
+        "get_cn_stock_dividend",
+        lambda self, symbol: [  # noqa: ARG005
+            {"ann_date": "2026-04-24", "div_proc": "预案", "cash_div_tax": 1.0, "stk_co_rate": 0.4},
+        ],
+    )
+    context = {"config": {}, "news_report": {"all_items": [], "mode": "live"}, "events": [], "now": "2026-04-24"}
+
+    dimension = _catalyst_dimension(
+        {"symbol": "300502", "name": "新易盛", "asset_type": "cn_stock", "sector": "科技", "chain_nodes": ["AI算力"]},
+        context,
+    )
+
+    structured_factor = next(f for f in dimension["factors"] if f["name"] == "结构化事件")
+    assert "每10股派现 10.00 元" in structured_factor["signal"]
+    assert "每10股转增 4.00 股" in structured_factor["signal"]
+
+
 def test_catalyst_dimension_rebalances_forward_event_weight_by_sector(monkeypatch):
     monkeypatch.setattr(NewsCollector, "get_stock_news", lambda self, symbol, limit=10: [])  # noqa: ARG005
     monkeypatch.setattr(NewsCollector, "search_by_keywords", lambda self, keywords, preferred_sources=None, limit=6, recent_days=7: [])  # noqa: ARG005
@@ -6782,7 +6807,7 @@ def test_rating_from_dimensions_promotes_borderline_trend_candidate_after_calibr
     assert "不必因为赔率还不完美就过度降级" in rating["meaning"]
 
 
-def test_rating_from_dimensions_promotes_sideways_recovery_candidate() -> None:
+def test_rating_from_dimensions_caps_sideways_stock_when_hard_gates_fail() -> None:
     dimensions = {
         "technical": {"score": 22},
         "fundamental": {"score": 78, "available_max": 100},
@@ -6794,11 +6819,12 @@ def test_rating_from_dimensions_promotes_sideways_recovery_candidate() -> None:
 
     rating = _rating_from_dimensions(dimensions, [], asset_type="cn_stock")
 
-    assert rating["rank"] == 3
-    assert "震荡市里逻辑、事件和相对位置已开始共振" in rating["meaning"]
+    assert rating["rank"] == 0
+    assert rating["label"] == "无信号"
+    assert any("个股信号硬门槛未过" in item for item in rating["warnings"])
 
 
-def test_rating_from_dimensions_promotes_high_quality_recovery_leader() -> None:
+def test_rating_from_dimensions_caps_high_quality_stock_when_signal_gates_fail() -> None:
     dimensions = {
         "technical": {"score": 22},
         "fundamental": {"score": 88, "available_max": 100},
@@ -6810,8 +6836,9 @@ def test_rating_from_dimensions_promotes_high_quality_recovery_leader() -> None:
 
     rating = _rating_from_dimensions(dimensions, [], asset_type="cn_stock")
 
-    assert rating["rank"] == 3
-    assert "高质量龙头在震荡市里已有相对强度和事件线索" in rating["meaning"]
+    assert rating["rank"] == 0
+    assert rating["label"] == "无信号"
+    assert any("个股信号硬门槛未过" in item for item in rating["warnings"])
 
 
 def test_rating_from_dimensions_promotes_defensive_etf_candidate() -> None:
@@ -6846,7 +6873,7 @@ def test_rating_from_dimensions_promotes_cross_border_theme_etf_with_continuatio
     assert "跨境主题产品已经有相对强弱和延续催化" in rating["meaning"]
 
 
-def test_rating_from_dimensions_promotes_stock_with_structured_event_and_hard_fundamental_base() -> None:
+def test_rating_from_dimensions_caps_structured_event_stock_when_hard_gates_fail() -> None:
     dimensions = {
         "technical": {"score": 18},
         "fundamental": {"score": 72, "available_max": 100},
@@ -6858,11 +6885,12 @@ def test_rating_from_dimensions_promotes_stock_with_structured_event_and_hard_fu
 
     rating = _rating_from_dimensions(dimensions, [], asset_type="cn_stock")
 
-    assert rating["rank"] == 3
-    assert "结构化事件或直连情报已经在抬升确定性" in rating["meaning"]
+    assert rating["rank"] == 0
+    assert rating["label"] == "无信号"
+    assert any("个股信号硬门槛未过" in item for item in rating["warnings"])
 
 
-def test_rating_from_dimensions_keeps_sideways_stock_rank_three_under_macro_reverse_with_resilient_combo() -> None:
+def test_rating_from_dimensions_hard_gate_overrides_macro_resilient_stock_combo() -> None:
     dimensions = {
         "technical": {"score": 18},
         "fundamental": {"score": 74, "available_max": 100},
@@ -6874,8 +6902,26 @@ def test_rating_from_dimensions_keeps_sideways_stock_rank_three_under_macro_reve
 
     rating = _rating_from_dimensions(dimensions, [], asset_type="cn_stock")
 
-    assert rating["rank"] == 3
-    assert any("保留" in warning for warning in rating["warnings"])
+    assert rating["rank"] == 0
+    assert rating["label"] == "无信号"
+    assert any("个股信号硬门槛未过" in warning for warning in rating["warnings"])
+
+
+def test_rating_from_dimensions_single_stock_gate_failure_caps_to_observe() -> None:
+    dimensions = {
+        "technical": {"score": 32},
+        "fundamental": {"score": 78, "available_max": 100},
+        "catalyst": {"score": 26, "coverage": {"structured_event": True}},
+        "relative_strength": {"score": 42},
+        "risk": {"score": 16},
+        "macro": {"score": 12, "macro_reverse": False},
+    }
+
+    rating = _rating_from_dimensions(dimensions, [], asset_type="cn_stock")
+
+    assert rating["rank"] == 1
+    assert rating["label"] == "有信号但不充分"
+    assert any("结论封顶为观察级" in item for item in rating["warnings"])
 
 
 def test_rating_from_dimensions_promotes_defensive_etf_in_shaky_market_without_same_day_catalyst() -> None:
@@ -6965,6 +7011,22 @@ def test_discover_ready_for_next_step_blocks_thematic_etf_without_confirmation()
     assert _discover_ready_for_next_step(analysis) is False
 
 
+def test_discover_ready_for_next_step_blocks_cn_stock_hard_gate() -> None:
+    analysis = {
+        "asset_type": "cn_stock",
+        "rating": {"rank": 3},
+        "metadata": {},
+        "dimensions": {
+            "technical": {"score": 25},
+            "catalyst": {"score": 18},
+            "relative_strength": {"score": 51},
+            "risk": {"score": 45},
+        },
+    }
+
+    assert _discover_ready_for_next_step(analysis) is False
+
+
 def test_action_plan_differentiated_when_risk_high_relative_high():
     """rating <= 1 but risk >= 70 and relative >= 60 should NOT be '暂不出手'."""
     analysis = _make_action_plan_analysis(rating_rank=1, tech=35, risk=75, relative=65, catalyst=20)
@@ -6974,6 +7036,26 @@ def test_action_plan_differentiated_when_risk_high_relative_high():
     assert "暂不出手" not in result["position"]
     assert "试探" in result["position"] or "2%" in result["position"]
     assert result["direction"] == "观望偏多"
+
+
+def test_action_plan_blocks_cn_stock_hard_gate_even_if_rating_is_stale() -> None:
+    analysis = _make_action_plan_analysis(
+        rating_rank=3,
+        tech=25,
+        risk=11,
+        relative=51,
+        catalyst=18,
+        asset_type="cn_stock",
+        fundamental=67,
+    )
+    history = _make_simple_history()
+    technical = {"rsi": {"RSI": 50.0}, "fibonacci": {"levels": {}}, "ma_system": {"mas": {"MA20": 10.2, "MA60": 10.0}}}
+
+    result = _action_plan(analysis, history, technical, None, {"volatility_percentile_1y": 0.4})
+
+    assert result["direction"] == "回避"
+    assert "不设正式建仓" in result["position"]
+    assert "硬门槛" in result["entry"]
 
 
 def test_action_plan_keeps_thematic_etf_as_observation_when_confirmation_missing() -> None:
@@ -7041,7 +7123,7 @@ def test_action_plan_promotes_rank_three_confirming_setup_to_long() -> None:
     assert "首次建仓" in result["position"]
 
 
-def test_action_plan_keeps_rank_three_cn_stock_in_formal_frame_even_when_tech_is_early() -> None:
+def test_action_plan_caps_rank_three_cn_stock_when_tech_hard_gate_fails() -> None:
     analysis = _make_action_plan_analysis(
         rating_rank=3,
         tech=18,
@@ -7055,8 +7137,8 @@ def test_action_plan_keeps_rank_three_cn_stock_in_formal_frame_even_when_tech_is
     technical = {"rsi": {"RSI": 49.0}, "fibonacci": {"levels": {}}, "ma_system": {"mas": {"MA20": 10.0, "MA60": 9.8}}}
     result = _action_plan(analysis, history, technical, None, {"volatility_percentile_1y": 0.4, "price_percentile_1y": 0.58})
 
-    assert result["direction"] == "做多"
-    assert "首次建仓" in result["position"]
+    assert result["direction"] == "观望"
+    assert "不设正式建仓" in result["position"]
 
 
 def test_action_plan_keeps_rank_three_cn_etf_in_formal_frame_when_relative_and_risk_stand_up() -> None:
@@ -8600,6 +8682,99 @@ def test_discover_stock_opportunities_keeps_excluded_observe_candidates_for_fall
     assert len(payload["coverage_analyses"]) == 1
     assert payload["top"][0]["symbol"] == "300274"
     assert payload["watch_positive"][0]["symbol"] == "300274"
+
+
+def test_discover_stock_opportunities_keeps_specific_day_theme_ahead_of_off_theme_formal_pick(monkeypatch):
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.build_market_context",
+        lambda config, relevant_asset_types=None: {"day_theme": {"label": "硬科技 / AI硬件链"}},  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.build_stock_pool",
+        lambda config, market="all", sector_filter="", max_candidates=60: (  # noqa: ARG005
+            [
+                type(
+                    "PoolItemStub",
+                    (),
+                    {
+                        "symbol": "600989",
+                        "asset_type": "cn_stock",
+                        "name": "宝丰能源",
+                        "sector": "能源",
+                        "chain_nodes": ["煤炭"],
+                        "region": "CN",
+                        "in_watchlist": False,
+                        "metadata": {"industry": "煤炭"},
+                    },
+                )(),
+                type(
+                    "PoolItemStub",
+                    (),
+                    {
+                        "symbol": "300308",
+                        "asset_type": "cn_stock",
+                        "name": "中际旭创",
+                        "sector": "科技",
+                        "chain_nodes": ["光模块", "CPO"],
+                        "region": "CN",
+                        "in_watchlist": False,
+                        "metadata": {"industry": "通信设备"},
+                    },
+                )(),
+            ],
+            [],
+        ),
+    )
+
+    def _analysis(symbol, asset_type, config, context=None, metadata_override=None):  # noqa: ARG001
+        if symbol == "600989":
+            return {
+                "symbol": symbol,
+                "name": "宝丰能源",
+                "asset_type": asset_type,
+                "metadata": {"sector": "能源", "industry": "煤炭"},
+                "rating": {"rank": 3, "label": "较强机会", "stars": "⭐⭐⭐"},
+                "dimensions": {
+                    "technical": {"score": 40},
+                    "fundamental": {"score": 72},
+                    "catalyst": {"score": 51},
+                    "relative_strength": {"score": 50},
+                    "chips": {"score": 20},
+                    "risk": {"score": 32},
+                    "seasonality": {"score": 10},
+                    "macro": {"score": 24},
+                },
+                "excluded": False,
+            }
+        return {
+            "symbol": symbol,
+            "name": "中际旭创",
+            "asset_type": asset_type,
+            "metadata": {"sector": "科技", "industry": "通信设备", "chain_nodes": ["光模块", "CPO"]},
+            "rating": {"rank": 1, "label": "有信号但不充分", "stars": "⭐"},
+            "dimensions": {
+                "technical": {"score": 38},
+                "fundamental": {"score": 60},
+                "catalyst": {"score": 16},
+                "relative_strength": {"score": 64},
+                "chips": {"score": 70},
+                "risk": {"score": 15},
+                "seasonality": {"score": 10},
+                "macro": {"score": 24},
+            },
+            "excluded": True,
+            "exclusion_reasons": ["个股估值处于极高区间"],
+        }
+
+    monkeypatch.setattr("src.processors.opportunity_engine.analyze_opportunity", _analysis)
+
+    payload = discover_stock_opportunities({}, top_n=5, market="cn")
+
+    assert payload["passed_pool"] == 1
+    assert payload["top"][0]["symbol"] == "300308"
+    assert payload["top"][0]["excluded"] is True
+    assert payload["selection_context"]["theme_gate_applied"] is True
+    assert "不退到非主线" in payload["selection_context"]["theme_gate_reason"]
 
 
 def test_discover_opportunities_builds_prepick_candidate_layers(monkeypatch):

@@ -6927,8 +6927,24 @@ def _cn_capital_return_items(metadata: Mapping[str, Any], context: Mapping[str, 
         div_proc = str(row.get("div_proc", "")).strip() or "进展"
         cash_div = pd.to_numeric(pd.Series([row.get("cash_div")]), errors="coerce").iloc[0]
         cash_div_tax = pd.to_numeric(pd.Series([row.get("cash_div_tax")]), errors="coerce").iloc[0]
-        per_ten = cash_div_tax if not pd.isna(cash_div_tax) and float(cash_div_tax) > 0 else cash_div
-        ratio_text = f"（每10股派现 {float(per_ten):.2f} 元）" if not pd.isna(per_ten) and float(per_ten) > 0 else ""
+        cash_per_share = cash_div_tax if not pd.isna(cash_div_tax) and float(cash_div_tax) > 0 else cash_div
+        ratio_parts: List[str] = []
+        if not pd.isna(cash_per_share) and float(cash_per_share) > 0:
+            ratio_parts.append(f"每10股派现 {float(cash_per_share) * 10:.2f} 元")
+        bonus_share = pd.to_numeric(pd.Series([row.get("stk_bo_rate")]), errors="coerce").iloc[0]
+        transfer_share = pd.to_numeric(pd.Series([row.get("stk_co_rate")]), errors="coerce").iloc[0]
+        stock_share = pd.to_numeric(pd.Series([row.get("stk_div")]), errors="coerce").iloc[0]
+        if not pd.isna(bonus_share) and float(bonus_share) > 0:
+            ratio_parts.append(f"每10股送股 {float(bonus_share) * 10:.2f} 股")
+        if not pd.isna(transfer_share) and float(transfer_share) > 0:
+            ratio_parts.append(f"每10股转增 {float(transfer_share) * 10:.2f} 股")
+        elif (
+            (pd.isna(bonus_share) or float(bonus_share) <= 0)
+            and not pd.isna(stock_share)
+            and float(stock_share) > 0
+        ):
+            ratio_parts.append(f"每10股送转 {float(stock_share) * 10:.2f} 股")
+        ratio_text = f"（{'，'.join(ratio_parts)}）" if ratio_parts else ""
         items.append(
             {
                 "title": f"{display_name} 披露现金分红{div_proc}{ratio_text}",
@@ -12396,6 +12412,40 @@ def _macro_dimension(metadata: Mapping[str, Any], context: Mapping[str, Any]) ->
     }
 
 
+def _stock_signal_consistency_gate(
+    asset_type: str,
+    dimensions: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    if asset_type != "cn_stock":
+        return {"applies": False}
+
+    def score(key: str) -> Optional[int]:
+        value = dimensions.get(key, {}).get("score")
+        return int(value) if value is not None else None
+
+    checks = (
+        ("技术面", score("technical"), 30),
+        ("催化面", score("catalyst"), 20),
+        ("风险特征", score("risk"), 20),
+    )
+    failed = [(label, item_score, threshold) for label, item_score, threshold in checks if item_score is not None and item_score < threshold]
+    if not failed:
+        return {"applies": False}
+
+    target_rank = 0 if len(failed) >= 2 else 1
+    failed_text = "、".join(f"{label}{item_score}/{threshold}" for label, item_score, threshold in failed)
+    if target_rank == 0:
+        warning = f"⚠️ 个股信号硬门槛未过（{failed_text}），结论直接压回无信号，不允许靠单一强因子包装成推荐。"
+    else:
+        warning = f"⚠️ 个股信号存在硬门槛短板（{failed_text}），结论封顶为观察级，不允许输出较强机会。"
+    return {
+        "applies": True,
+        "target_rank": target_rank,
+        "failed": failed,
+        "warning": warning,
+    }
+
+
 def _rating_from_dimensions(
     dimensions: Mapping[str, Mapping[str, Any]],
     warnings: Sequence[str],
@@ -12513,6 +12563,13 @@ def _rating_from_dimensions(
         rank = 2
         warnings = list(warnings) + ["⚠️ 短线相对强弱与同类业绩/样本长度不匹配，ETF 结论先压回观察/储备级别"]
 
+    stock_signal_gate = _stock_signal_consistency_gate(asset_type, dimensions)
+    if stock_signal_gate.get("applies"):
+        target_rank = int(stock_signal_gate.get("target_rank") if stock_signal_gate.get("target_rank") is not None else 1)
+        if rank > target_rank:
+            rank = target_rank
+        warnings = list(warnings) + [str(stock_signal_gate.get("warning") or "")]
+
     theme_confirmation_gate = _fund_like_theme_confirmation_gate(asset_type, metadata, dimensions)
     if theme_confirmation_gate.get("applies") and rank >= 2:
         rank = 1
@@ -12523,6 +12580,31 @@ def _rating_from_dimensions(
 
     stars = "—" if rank == 0 else "⭐" * rank
     return {"rank": rank, "stars": stars, "label": label, "meaning": meaning, "warnings": list(dict.fromkeys(warnings))}
+
+
+def _cap_rating_for_hard_exclusions(rating: Mapping[str, Any], exclusion_reasons: Sequence[str]) -> Dict[str, Any]:
+    reasons = [str(item).strip() for item in exclusion_reasons if str(item).strip()]
+    capped = dict(rating or {})
+    if not reasons:
+        return capped
+
+    valuation_only = all(any(token in reason for token in ("估值", "价格位置")) for reason in reasons)
+    target_rank = 1 if valuation_only else 0
+    current_rank = int(capped.get("rank", 0) or 0)
+    if current_rank > target_rank:
+        capped["rank"] = target_rank
+        if target_rank == 1:
+            capped["label"] = "有信号但不充分"
+            capped["meaning"] = "已触发硬排除，只能作为主线观察或风险提示，不能按正式推荐处理。"
+            capped["stars"] = "⭐"
+        else:
+            capped["label"] = "无信号"
+            capped["meaning"] = "已触发硬排除，当前不进入可执行推荐。"
+            capped["stars"] = "—"
+    warnings = list(capped.get("warnings") or [])
+    warnings.append(f"⚠️ 已触发硬排除：{'；'.join(reasons[:3])}，结论只能按观察/风险提示处理")
+    capped["warnings"] = list(dict.fromkeys(warnings))
+    return capped
 
 
 def _dimension_score(dimensions: Mapping[str, Mapping[str, Any]], key: str) -> Optional[int]:
@@ -12604,7 +12686,10 @@ def _trade_state_label(
     risk = _dimension_score(dimensions, "risk") or 0
     relative_cross_check_failed = bool(dimensions.get("relative_strength", {}).get("cross_check_failed"))
     theme_confirmation_gate = _fund_like_theme_confirmation_gate(asset_type, metadata, dimensions)
+    stock_signal_gate = _stock_signal_consistency_gate(asset_type, dimensions)
 
+    if stock_signal_gate.get("applies"):
+        return "观察为主"
     if direction in {"明确偏多", "中性偏多"} and odds == "低":
         return "持有优于追高"
     if theme_confirmation_gate.get("applies"):
@@ -13357,9 +13442,13 @@ def _action_plan(
     computed_pressure_award, _pressure_detail, nearest_pressure_level = _pressure_signals(history, technical)
     if pressure_award == 0:
         pressure_award = computed_pressure_award
+    stock_signal_gate = _stock_signal_consistency_gate(asset_type, analysis["dimensions"])
 
     if theme_confirmation_gate.get("applies"):
         direction = "观察为主"
+    elif stock_signal_gate.get("applies"):
+        target_rank = int(stock_signal_gate.get("target_rank") if stock_signal_gate.get("target_rank") is not None else 1)
+        direction = "回避" if target_rank <= 0 or rating <= 0 else "观望"
     elif rating >= 3:
         if macro_reverse:
             direction = "观望偏多"
@@ -13398,6 +13487,8 @@ def _action_plan(
     # --- Entry conditions: incorporate risk and relative strength ---
     if theme_confirmation_gate.get("applies"):
         entry = "主题主线还缺技术/催化确认，先放在观察名单，等价格与情报一起补齐后再讨论第一笔。"
+    elif stock_signal_gate.get("applies"):
+        entry = "技术、催化或风险硬门槛还没过，今天不设买点；至少等技术修复、直接催化或风险收益比补上一项再重评。"
     elif divergence_signal == "bearish" or bearish_candle or false_break_award < 0:
         entry = "先等顶背离/假突破消化、MACD/OBV 重新同步，再考虑分批介入"
     elif rsi > 70 or compression_award < 0:
@@ -13434,6 +13525,8 @@ def _action_plan(
     # --- Position sizing: differentiated by risk/relative when rating is low ---
     if theme_confirmation_gate.get("applies"):
         position = "先按观察仓理解，不预设正式建仓"
+    elif stock_signal_gate.get("applies") and rating >= 1:
+        position = "不设正式建仓；若已有仓位，按观察仓或风控线管理，不用新增资金去验证。"
     elif rating >= 3:
         if tech is not None and tech >= 70:
             position = "首次建仓 ≤8%，确认突破后可加到 15%"
@@ -13805,7 +13898,15 @@ def analyze_opportunity(
         fund_profile,
     )
     rating = _rating_from_dimensions(dimensions, warnings, asset_type=asset_type, metadata=metadata)
-    action = _action_plan({"rating": rating, "dimensions": dimensions}, history, technical, correlation_pair, metrics)
+    if exclusion_reasons:
+        rating = _cap_rating_for_hard_exclusions(rating, exclusion_reasons)
+    action = _action_plan(
+        {"rating": rating, "dimensions": dimensions, "asset_type": asset_type, "metadata": metadata},
+        history,
+        technical,
+        correlation_pair,
+        metrics,
+    )
     if history_fallback_mode:
         action = dict(action)
         action["entry"] = "当前缺少完整日线历史，先按观察仓处理；更适合等补齐日线后再确认趋势。"
@@ -15032,6 +15133,8 @@ def _discover_ready_for_next_step(analysis: Mapping[str, Any]) -> bool:
     risk = int(dict(dimensions.get("risk") or {}).get("score") or 0)
     if _fund_like_theme_confirmation_gate(asset_type, metadata, dimensions).get("applies"):
         return False
+    if _stock_signal_consistency_gate(asset_type, dimensions).get("applies"):
+        return False
     return rating >= 2 or (rating >= 1 and ((catalyst >= 60 and tech >= 40) or (risk >= 75 and relative >= 45)))
 
 
@@ -15925,6 +16028,24 @@ def discover_stock_opportunities(
             or support_dims >= 3
         )
 
+    def _specific_day_theme() -> Dict[str, Any]:
+        day_theme = dict(runtime_context.get("day_theme") or {})
+        labels = _day_theme_labels(day_theme)
+        if not labels:
+            return {}
+        if not any(_theme_alignment_tokens_for_label(label) for label in labels):
+            return {}
+        return day_theme
+
+    def _analysis_matches_day_theme(analysis: Mapping[str, Any], day_theme: Mapping[str, Any]) -> bool:
+        metadata = dict(analysis.get("metadata") or {})
+        metadata.setdefault("name", str(analysis.get("name", "")).strip())
+        metadata.setdefault("sector", str(analysis.get("sector", "")).strip())
+        return _theme_alignment_level(metadata, dict(day_theme or {})) in {"direct", "indirect"}
+
+    def _meaningful_theme_candidate(analysis: Mapping[str, Any]) -> bool:
+        return int(dict(analysis.get("rating") or {}).get("rank", 0) or 0) >= 1 or _qualified_watch_candidate(analysis)
+
     def _coverage_state(analyses: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         rows = list(analyses or [])
         if not rows:
@@ -16058,6 +16179,28 @@ def discover_stock_opportunities(
     top_candidates = analyses[:top_n]
     if not top_candidates:
         top_candidates = watch_positive[:top_n] or coverage_analyses[:top_n]
+    theme_gate_applied = False
+    theme_gate_reason = ""
+    day_theme_for_gate = _specific_day_theme()
+    if day_theme_for_gate and not str(sector_filter).strip():
+        aligned_passed = [
+            analysis
+            for analysis in analyses
+            if _analysis_matches_day_theme(analysis, day_theme_for_gate) and _meaningful_theme_candidate(analysis)
+        ]
+        aligned_observe = [
+            analysis
+            for analysis in coverage_analyses
+            if _analysis_matches_day_theme(analysis, day_theme_for_gate) and _meaningful_theme_candidate(analysis)
+        ]
+        if aligned_passed:
+            top_candidates = aligned_passed[:top_n]
+            theme_gate_applied = True
+            theme_gate_reason = "今日主线有可跟踪候选，首页前排优先保持在主线内。"
+        elif aligned_observe:
+            top_candidates = aligned_observe[:top_n]
+            theme_gate_applied = True
+            theme_gate_reason = "今日主线候选触发估值/拥挤等约束，首页改为主线观察稿，不退到非主线寻找形式上的推荐。"
     confidence_targets: List[Dict[str, Any]] = []
     seen_symbols: set[str] = set()
     for bucket in (top_candidates, watch_positive[:6]):
@@ -16089,6 +16232,11 @@ def discover_stock_opportunities(
             market_proxy=runtime_context.get("global_flow"),
         ),
         "blind_spots": blind_spots[:10],
+        "selection_context": {
+            "theme_gate_applied": theme_gate_applied,
+            "theme_gate_reason": theme_gate_reason,
+            "day_theme": dict(day_theme_for_gate or {}),
+        },
         "sector_filter": sector_filter,
         "candidate_limit": candidate_limit,
     }

@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Tuple
 
+from src.reporting.score_consistency import format_stock_signal_gate_problem, stock_signal_gate_problem
 from src.reporting.review_lessons import format_lesson_finding
 from src.utils.config import resolve_project_path
 
@@ -220,6 +221,12 @@ def _section_exists(text: str, heading: str) -> bool:
     return any(line.strip() == heading for line in text.splitlines())
 
 
+def _is_pick_no_signal_report(text: str, report_type: str) -> bool:
+    return report_type in {"etf_pick", "fund_pick"} and (
+        "NO_SIGNAL" in str(text or "") or "今日ETF无信号" in str(text or "") or "今日场外基金无信号" in str(text or "")
+    )
+
+
 def _contains_any(text: str, needles: Tuple[str, ...]) -> bool:
     haystack = str(text or "")
     return any(str(needle) and str(needle) in haystack for needle in needles)
@@ -326,6 +333,8 @@ def _text_without_section(text: str, heading: str) -> str:
 
 def _homepage_v2_findings(client_text: str, report_type: str) -> List[str]:
     findings: List[str] = []
+    if _is_pick_no_signal_report(client_text, report_type):
+        return findings
     requires_homepage = report_type in {"etf_pick", "fund_pick", "stock_pick", "stock_analysis", "briefing", "scan"}
     if "## 首页判断" not in client_text:
         if requires_homepage:
@@ -354,6 +363,8 @@ def _homepage_v2_findings(client_text: str, report_type: str) -> List[str]:
 
 def _homepage_decision_layer_findings(client_text: str, report_type: str) -> List[str]:
     if report_type not in {"stock_pick", "stock_analysis", "etf_pick", "fund_pick", "scan"}:
+        return []
+    if _is_pick_no_signal_report(client_text, report_type):
         return []
     findings: List[str] = []
     theme_items = _section_items(client_text, "### 板块 / 主题认知")
@@ -719,6 +730,21 @@ def _what_changed_surface_findings(
             )
         )
     return findings
+
+
+def _score_conclusion_gate_findings(client_text: str, report_type: str) -> List[str]:
+    if report_type not in {"stock_analysis", "scan"}:
+        return []
+    problem = stock_signal_gate_problem(client_text)
+    if not problem:
+        return []
+    failed_text = format_stock_signal_gate_problem(problem)
+    return [
+        format_lesson_finding(
+            "L040",
+            f"[P1] {report_type} 分数和结论硬门槛不一致：{failed_text} 已低于个股硬门槛，但正文仍给出较强机会/强机会。",
+        )
+    ]
 
 
 def _normalize_duplicate_text(text: str) -> str:
@@ -1831,6 +1857,7 @@ def check_generic_client_report(
     what_changed_contract: Mapping[str, Any] | None = None,
 ) -> List[str]:
     findings: List[str] = []
+    pick_no_signal = _is_pick_no_signal_report(client_text, report_type)
     for phrase in BANNED_CLIENT_PHRASES:
         if phrase in client_text:
             findings.append(format_lesson_finding("L001", f"[P1] 客户稿出现内部过程词: {phrase}"))
@@ -1847,7 +1874,7 @@ def check_generic_client_report(
         "retrospect": 1,
         "strategy": 0,
     }.get(report_type, 1)
-    if client_text.count("为什么") < minimum_why:
+    if not pick_no_signal and client_text.count("为什么") < minimum_why:
         findings.append(format_lesson_finding("L002", f"[P2] {report_type} 客户稿解释性不足：缺少足够的“为什么”说明"))
     findings.extend(_duplicate_explanation_findings(client_text, max_repeat=2))
     findings.extend(_intraday_claim_findings(client_text))
@@ -1866,13 +1893,17 @@ def check_generic_client_report(
     findings.extend(_editor_prompt_theme_findings(client_text, report_type, editor_prompt_text))
     findings.extend(_event_digest_surface_findings(client_text, report_type, event_digest_contract))
     findings.extend(_what_changed_surface_findings(client_text, report_type, what_changed_contract))
+    findings.extend(_score_conclusion_gate_findings(client_text, report_type))
 
     scan_observe_only = (
         report_type == "scan"
         and ("当前更适合按 `观察为主`" in client_text or "观察名单里" in client_text or "当前建议仍是 `回避`" in client_text)
     )
 
-    required_headings = {
+    if pick_no_signal:
+        required_headings = ["## 结论", "## 为什么是 NO_SIGNAL", "## 候选池排序", "## 事件消化", "## 事件决策树", "## 触发后再评估", "## 数据边界"]
+    else:
+        required_headings = {
         "briefing": [("## 市场结构摘要", "## 执行摘要"), "## 为什么今天这么判断", "## 宏观判断依据", "## 宏观领先指标", "## 数据完整度", "## 证据时点与来源", ("## 怎么用这份晨报", "## 执行补充", "## 今天怎么做"), "## 重点观察", "## 今日A股观察池", "## A股观察池升级条件"],
         "fund_pick": ["## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只基金为什么是这个分", "## 标准化分类"],
         "etf_pick": ["## 数据完整度", "## 交付等级", ("## 为什么推荐它", "## 为什么先看它"), "## 这只ETF为什么是这个分", "## 标准化分类", "## 关键证据"],
@@ -1880,7 +1911,7 @@ def check_generic_client_report(
         "stock_analysis": ["## 为什么这么判断", "## 当前更合适的动作"],
         "retrospect": ["## 原始决策", "## 为什么当时会做这个决定", "## 后验路径", "## 复盘结论"],
         "strategy": ["## 动作卡片", "## 当前结论", "## 这套策略是什么", "## 这次到底看出来什么", "## 执行摘要"],
-    }.get(report_type, [])
+        }.get(report_type, [])
     for heading in required_headings:
         if isinstance(heading, tuple):
             if not any(option in client_text for option in heading):
@@ -1928,6 +1959,12 @@ def check_generic_client_report(
         if "直接催化：" not in client_text or "信息环境：" not in client_text:
             findings.append(format_lesson_finding("L040", "[P2] briefing 的主题跟踪还没拆成“直接催化 / 信息环境”，容易把热度和催化混在一起。"))
     elif report_type == "fund_pick":
+        if pick_no_signal:
+            if "| NO_SIGNAL |" not in client_text:
+                findings.append(format_lesson_finding("L002", "[P1] fund_pick 无信号短稿缺少候选池 `NO_SIGNAL` 状态行"))
+            if "技术面 < 30" not in client_text or "催化面 < 20" not in client_text:
+                findings.append(format_lesson_finding("L040", "[P1] fund_pick 无信号短稿没有写清技术/催化短路闸门"))
+            return findings
         why_heading = _pick_reason_heading(report_type, client_text)
         if len(_bullets_in_section(client_text, why_heading)) < 3:
             findings.append(format_lesson_finding("L002", f"[P2] fund_pick 客户稿解释性不足：'{why_heading.replace('## ', '')}' 至少需要 3 条理由"))
@@ -1944,6 +1981,14 @@ def check_generic_client_report(
         findings.extend(_fund_holdings_readability_findings(client_text, report_type))
         findings.extend(_absolute_asset_path_findings(client_text, report_type))
     elif report_type == "etf_pick":
+        if pick_no_signal:
+            if "| NO_SIGNAL |" not in client_text:
+                findings.append(format_lesson_finding("L002", "[P1] etf_pick 无信号短稿缺少候选池 `NO_SIGNAL` 状态行"))
+            if "技术面 < 30" not in client_text or "催化面 < 20" not in client_text:
+                findings.append(format_lesson_finding("L040", "[P1] etf_pick 无信号短稿没有写清技术/催化短路闸门"))
+            if "事件决策树" not in client_text:
+                findings.append(format_lesson_finding("L040", "[P1] etf_pick 无信号短稿缺少事件驱动决策树"))
+            return findings
         why_heading = _pick_reason_heading(report_type, client_text)
         if len(_bullets_in_section(client_text, why_heading)) < 3:
             findings.append(format_lesson_finding("L002", f"[P2] etf_pick 客户稿解释性不足：'{why_heading.replace('## ', '')}' 至少需要 3 条理由"))
@@ -2104,6 +2149,11 @@ def _execution_safety_findings(text: str, report_type: str) -> List[str]:
         upper_match = re.search(r"上沿(?:先|再)看\s*`?([0-9]+(?:\.[0-9]+)?)`?", watch_text)
         pressure_values: List[float] = []
         for match in re.finditer(r"(?:高点|前高|压力)[^0-9]{0,12}([0-9]+(?:\.[0-9]+)?)", text):
+            start, end = match.span(1)
+            prev_char = text[start - 1 : start]
+            next_text = text[end : end + 4]
+            if prev_char.isalpha() or re.match(r"\s*(?:日|/)", next_text):
+                continue
             try:
                 value = float(match.group(1))
             except (TypeError, ValueError):
@@ -2112,7 +2162,14 @@ def _execution_safety_findings(text: str, report_type: str) -> List[str]:
                 pressure_values.append(value)
         if upper_match and pressure_values:
             upper_ref = float(upper_match.group(1))
-            nearest_pressure = min(pressure_values)
+            same_scale_pressures = [
+                value
+                for value in pressure_values
+                if upper_ref * 0.90 <= value <= upper_ref * 1.20
+            ]
+            if not same_scale_pressures:
+                return findings
+            nearest_pressure = min(same_scale_pressures)
             if upper_ref > nearest_pressure * 1.03:
                 findings.append(format_lesson_finding("L036", f"[P2] {report_type} 的首屏上沿 `{upper_ref:.3f}` 跳过了更近的压力位 `{nearest_pressure:.3f}`，执行位和强因子压力位不自洽。"))
     return findings

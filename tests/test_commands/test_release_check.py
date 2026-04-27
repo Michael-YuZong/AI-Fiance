@@ -139,6 +139,79 @@ P1_STOCK_EVENT_DIGEST_SECTION = """## 事件消化
 """
 
 
+def test_release_check_accepts_etf_pick_no_signal_short_report() -> None:
+    client = """# 今日ETF无信号 | 2026-04-24
+
+## 结论
+
+- 今日 `华宝创业板人工智能ETF (159363)` 为 `NO_SIGNAL`：技术 `25` / 催化 `4` / 风险 `45`；不新开仓。
+- 相对强弱 `87` 只作滞后备注，不能抵消技术和催化的双低信号。
+
+## 为什么是 NO_SIGNAL
+
+- 闸门规则：`技术面 < 30` 且 `催化面 < 20` 时，直接短路为 `NO_SIGNAL`，不再展开长篇八维叙事。
+
+## 候选池排序
+
+| 排名 | 标的 | 状态 | 分数 | 说明 |
+| --- | --- | --- | --- | --- |
+| 1 | 华宝创业板人工智能ETF (159363) | NO_SIGNAL | 技术25 / 催化4 / 风险45 / 相对强弱87 | 相对强弱只作滞后备注 |
+
+## 事件消化
+
+- 事件状态：已消化
+- 事件分层：财报 / 财报日历：待披露窗口
+- 影响层与性质：盈利 / 资金偏好；待确认
+- 这件事改变了什么：财报日历把观察重点推到核心持仓披露窗口。
+- 优先级判断：优先前置，但它不是财报结果，不能单独升级动作。
+
+## 事件决策树
+
+- 事件：新易盛财报披露窗口
+- 超预期：先看 `1.353` 能否放量站稳。
+- 符合预期：继续 `NO_SIGNAL`。
+- 低于预期：跌破 `1.208` 继续回避。
+
+## What Changed
+
+- 上次怎么看：首次跟踪。
+- 这次什么变了：这次先记录财报披露窗口。
+- 结论变化：首次跟踪
+- 当前事件理解：财报日历：待披露窗口；当前更像待确认。
+
+## 触发后再评估
+
+- 从 `NO_SIGNAL` 升到 `HOLD_WATCH`：技术或催化至少一项修复到闸门线上方。
+- 从 `HOLD_WATCH` 升到 `BUY_CANDIDATE`：技术和催化都要过 60。
+
+## 数据边界
+
+- 交付等级：`观察优先稿`。观察优先不是正式买入稿。
+- 高置信直接新闻覆盖 0%（0/18）
+- 覆盖率的分母是今天进入完整分析的 `18` 只ETF。
+"""
+    findings = check_generic_client_report(
+        client,
+        "etf_pick",
+        event_digest_contract={
+            "status": "已消化",
+            "lead_layer": "财报",
+            "lead_detail": "财报日历：待披露窗口",
+            "impact_summary": "盈利 / 资金偏好",
+            "thesis_scope": "待确认",
+            "changed_what": "财报日历把观察重点推到核心持仓披露窗口。",
+            "importance_reason": "优先前置，但它不是财报结果，不能单独升级动作。",
+        },
+        what_changed_contract={
+            "previous_view": "首次跟踪。",
+            "change_summary": "这次先记录财报披露窗口。",
+            "conclusion_label": "首次跟踪",
+            "current_event_understanding": "财报日历：待披露窗口；当前更像待确认。",
+        },
+    )
+    assert findings == []
+
+
 def test_release_check_flags_internal_process_and_score_drift() -> None:
     client = """# 今日个股推荐
 
@@ -3939,6 +4012,58 @@ def test_release_check_flags_observe_upper_level_skipping_near_pressure() -> Non
     assert any("跳过了更近的压力位" in item for item in findings)
 
 
+def test_release_check_ignores_other_candidate_pressure_on_different_price_scale() -> None:
+    client = f"""# 今日基金观察 | 2026-04-24
+
+{HOMEPAGE_V2}
+
+## 先看执行
+
+| 项目 | 建议 |
+| --- | --- |
+| 怎么触发 | 关键观察位：下沿先看 `1.405` 上方能不能稳住；上沿先看 `1.554` 附近能不能放量突破。 |
+
+## 数据完整度
+
+- 当前证据正常。
+
+## 交付等级
+
+- 当前交付等级：`观察优先稿`。
+- 这是一份基金观察优先稿，不按正式推荐稿理解。
+
+## 这只基金为什么是这个分
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 38/100 | 技术结构仍偏弱。 |
+
+## 标准化分类
+
+| 维度 | 结果 |
+| --- | --- |
+| 产品形态 | 场外基金 |
+
+## 关键强因子拆解
+
+| 因子 | 当前信号 | 这意味着什么 |
+| --- | --- | --- |
+| 压力位（主体） | 上方存在近端压力：近20日高点 1.554（上方 1.8%） / 近60日高点 1.554（上方 1.8%） | 先确认承压位能不能被有效消化。 |
+| 压力位（其他候选） | 上方存在近端压力：近20日高点 0.830（上方 2.0%） | 这是另一个候选的价格尺度，不应拿来约束主体首屏上沿。 |
+| 压力位（另一候选） | 上方存在近端压力：近20日高点 1.169（上方 2.0%） | 这也是另一个候选的价格尺度，不应拿来约束主体首屏上沿。 |
+
+## 关键证据
+
+- 外部情报：[证据](https://example.com)；信号：主题线索；强弱：中；结论：中性。
+
+## 为什么不是另外几只
+
+- 其余候选更弱。
+"""
+    findings = check_generic_client_report(client, "fund_pick")
+    assert not any("跳过了更近的压力位" in item for item in findings)
+
+
 def test_release_check_flags_generic_market_headline_in_key_evidence() -> None:
     client = """# 今日ETF推荐 | 2026-03-12
 
@@ -4360,6 +4485,26 @@ def test_release_check_flags_linked_top_news_without_signal_conclusion() -> None
 """
     findings = check_generic_client_report(client, "etf_pick")
     assert any("没有把 `信号/强弱/结论` 写清" in item for item in findings)
+
+
+def test_release_check_flags_stock_analysis_strong_label_below_hard_gates() -> None:
+    client = """# 新易盛 (300502)  ⭐⭐⭐ 较强机会
+
+## 为什么这么判断
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 25/100 | 技术结构仍偏弱 |
+| 催化面 | 4/100 | 缺少直接新增催化 |
+| 风险特征 | 45/100 | 风险偏高 |
+
+## 当前更合适的动作
+
+- 观察为主。
+"""
+    findings = check_generic_client_report(client, "stock_analysis")
+
+    assert any("L040" in item and "技术面25/30" in item and "催化面4/20" in item for item in findings)
 
 
 def test_release_check_flags_raw_intel_summary_terms_on_homepage() -> None:

@@ -55,6 +55,17 @@ def test_recommendation_bucket_downgrades_etf_when_direct_coverage_is_zero_and_s
     assert pick_ranking.recommendation_bucket(candidate) == "观察为主"
 
 
+def test_recommendation_bucket_downgrades_excluded_candidate() -> None:
+    candidate = _watch_candidate("300308")
+    candidate["asset_type"] = "cn_stock"
+    candidate["rating"] = {"rank": 3, "label": "较强机会"}
+    candidate["excluded"] = True
+    candidate["exclusion_reasons"] = ["个股估值处于极高区间"]
+
+    assert pick_ranking.recommendation_bucket(candidate) == "观察为主"
+    assert not pick_ranking.analysis_is_actionable(candidate)
+
+
 def test_rank_market_items_uses_lazy_strategy_confidence_for_tie_break(monkeypatch) -> None:
     pick_ranking._STRATEGY_CONFIDENCE_CACHE.clear()
 

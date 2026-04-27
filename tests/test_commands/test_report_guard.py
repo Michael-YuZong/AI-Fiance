@@ -1219,6 +1219,22 @@ def test_report_guard_blocks_missing_event_digest_deep_fields(isolated_reports: 
         )
 
 
+def test_report_guard_blocks_stock_analysis_strong_label_below_hard_gates() -> None:
+    markdown = """# 新易盛 (300502)  ⭐⭐⭐ 较强机会
+
+## 为什么这么判断
+
+| 维度 | 分数 | 为什么是这个分 |
+| --- | --- | --- |
+| 技术面 | 25/100 | 技术结构仍偏弱 |
+| 催化面 | 4/100 | 缺少直接新增催化 |
+| 风险特征 | 45/100 | 风险偏高 |
+"""
+
+    with pytest.raises(ReportGuardError, match="分数结论硬门槛错配"):
+        report_guard._ensure_stock_signal_score_gate("stock_analysis", markdown)
+
+
 def test_report_guard_blocks_missing_event_digest_priority_reason(isolated_reports: Path) -> None:
     target = isolated_reports / "reports/scans/etfs/final/scan_300502_2026-03-29_client_final.md"
     review = review_path_for(target)
@@ -1920,6 +1936,65 @@ def test_report_guard_accepts_observe_etf_pick_markdown(isolated_reports: Path) 
             "## 为什么不是另外几只",
             "### 1. 红利ETF (510880)",
             "- 今天弹性更弱。",
+        ]
+    )
+    bundle = export_reviewed_markdown_bundle(
+        report_type="etf_pick",
+        markdown_text=markdown,
+        markdown_path=target,
+        release_findings=[],
+    )
+    assert bundle["markdown"] == target
+
+
+def test_report_guard_accepts_etf_pick_no_signal_markdown(isolated_reports: Path) -> None:
+    target = isolated_reports / "reports/etf_picks/final/etf_pick_2026-04-24_final.md"
+    review = review_path_for(target)
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(
+        _review_text(
+            status="PASS",
+            no_p1="是",
+            allow_delivery="是",
+            round_value=1,
+            converged="是",
+            continue_next="否",
+            summary="可发",
+        ),
+        encoding="utf-8",
+    )
+    markdown = "\n".join(
+        [
+            "# 今日ETF无信号 | 2026-04-24",
+            "",
+            "## 结论",
+            "- 今日 `华宝创业板人工智能ETF (159363)` 为 `NO_SIGNAL`：技术 `25` / 催化 `4` / 风险 `45`；不新开仓。",
+            "",
+            "## 为什么是 NO_SIGNAL",
+            "- 闸门规则：`技术面 < 30` 且 `催化面 < 20` 时，直接短路为 `NO_SIGNAL`。",
+            "",
+            "## 候选池排序",
+            "| 排名 | 标的 | 状态 | 分数 | 说明 |",
+            "| --- | --- | --- | --- | --- |",
+            "| 1 | 华宝创业板人工智能ETF (159363) | NO_SIGNAL | 技术25 / 催化4 / 风险45 / 相对强弱87 | 相对强弱只作滞后备注 |",
+            "",
+            "## 事件消化",
+            "- 事件状态：已消化",
+            "- 事件分层：财报 / 财报日历：待披露窗口",
+            "- 影响层与性质：盈利 / 资金偏好；待确认",
+            "- 这件事改变了什么：财报日历把观察重点推到核心持仓披露窗口。",
+            "",
+            "## 事件决策树",
+            "- 事件：新易盛财报披露窗口",
+            "- 超预期：先看 `1.353` 能否放量站稳。",
+            "- 符合预期：继续 `NO_SIGNAL`。",
+            "- 低于预期：跌破 `1.208` 继续回避。",
+            "",
+            "## 触发后再评估",
+            "- 从 `NO_SIGNAL` 升到 `HOLD_WATCH`：技术或催化至少一项修复到闸门线上方。",
+            "",
+            "## 数据边界",
+            "- 交付等级：`观察优先稿`。观察优先不是正式买入稿。",
         ]
     )
     bundle = export_reviewed_markdown_bundle(

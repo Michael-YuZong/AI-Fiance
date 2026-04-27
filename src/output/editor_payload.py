@@ -156,6 +156,12 @@ def _homepage_signal_conclusion(signal_type: str, impact: str = "") -> str:
         return f"偏利多，但先按 `{target}` 的跟涨/扩散确认处理。"
     if signal in {"医药催化", "AI应用催化", "AI硬件催化"}:
         return f"偏利多，先看 `{target}` 能否继续拿到价格与成交确认。"
+    if signal in {"政策催化", "电网投资催化"}:
+        return f"偏利多，先看 `{target}` 能否从政策/招标线索落到订单、盈利或价格承接。"
+    if signal.startswith("财报摘要"):
+        return f"中性偏事件驱动，先等 `{target}` 的实际披露结果验证，不把日历本身写成超预期。"
+    if signal in {"资金承接", "卖方共识"}:
+        return f"中性偏多，先看 `{target}` 是否继续获得资金和预期差确认。"
     if signal == "地缘缓和":
         return "偏利多风险偏好，先看黄金/原油回落与成长弹性修复。"
     if signal in {"地缘扰动", "避险交易", "能源冲击"}:
@@ -167,20 +173,206 @@ def _homepage_signal_conclusion(signal_type: str, impact: str = "") -> str:
     return f"中性偏观察，先把它当 `{target}` 的辅助线索。"
 
 
+def _homepage_news_direction(conclusion: Any) -> str:
+    text = _safe_text(conclusion)
+    if "偏利空" in text or "利空" in text:
+        return "偏利空"
+    if "偏利多" in text or "利多" in text or "中性偏多" in text:
+        return "偏利多"
+    if "待复核" in text:
+        return "待复核"
+    return "中性"
+
+
+def _infer_homepage_news_signal(title: Any, category: Any = "") -> Tuple[str, str]:
+    blob = f"{_safe_text(title)} {_safe_text(category)}".lower()
+    geo_blocker = any(
+        token in blob
+        for token in ("陷入僵局", "僵局", "遭袭", "遇袭", "袭击", "空袭", "受损", "受创", "紧张升级", "冲突升级")
+    )
+    if any(token in blob for token in ("停火", "休战", "缓和", "结束战争", "ceasefire", "truce", "de-escalat")) and not geo_blocker:
+        return "地缘缓和", "黄金/原油/风险偏好"
+    if geo_blocker or any(token in blob for token in ("伊朗", "以色列", "中东", "war", "strike", "missile", "conflict")):
+        return "地缘扰动", "黄金/原油/风险偏好"
+    if any(token in blob for token in ("创新药", "医药", "制药", "药业", "cxo", "fda", "临床", "license-out", "bd", "授权")):
+        return "医药催化", "创新药/医药"
+    if any(token in blob for token in ("国家电网", "南方电网", "特高压", "输变电", "配网", "变压器", "电力设备", "电网招标")):
+        return "电网投资催化", "电网/特高压"
+    if any(token in blob for token in ("新易盛", "中际旭创", "华工科技", "cpo", "光模块", "算力", "服务器", "液冷", "hbm", "semiconductor", "芯片", "半导体", "nvidia", "nvda", "6g")):
+        return "AI硬件催化", "AI硬件链"
+    if any(token in blob for token in ("智谱", "kimi", "deepseek", "大模型", "模型", "agent", "应用")):
+        return "AI应用催化", "AI软件/应用"
+    if any(token in blob for token in ("业绩", "财报", "年报", "一季报", "季报", "盈利", "指引")):
+        return "财报摘要：盈利/指引", "盈利/估值"
+    if any(token in blob for token in ("政策", "国务院", "部署", "支持", "规划", "招标")):
+        return "政策催化", "政策预期/景气"
+    if any(token in blob for token in ("主力资金", "净买入", "资金流", "融资", "北向")):
+        return "资金承接", "资金偏好"
+    if any(token in blob for token in ("金股", "券商", "评级", "研报", "目标价")):
+        return "卖方共识", "资金偏好/预期差"
+    if any(token in blob for token in ("黄金", "gold", "贵金属")):
+        return "避险交易", "黄金/防守"
+    if any(token in blob for token in ("原油", "oil", "opec")):
+        return "能源冲击", "原油/能源"
+    if any(token in blob for token in ("债券", "bond", "fed", "rate", "yield", "利率")):
+        return "利率预期", "成长估值/风险偏好"
+    return "信息环境：新闻/舆情脉冲", "估值/资金偏好"
+
+
+def _subject_news_impact_target(subject: Mapping[str, Any], row: Mapping[str, Any] | None = None, fallback: Any = "") -> str:
+    payload = dict(subject or {})
+    raw = dict(row or {})
+    explicit = (
+        _safe_text(raw.get("impact_summary"))
+        or _safe_text(raw.get("impact"))
+        or _safe_text(raw.get("main_impact"))
+        or _safe_text(raw.get("target"))
+        or _safe_text(raw.get("signal_target"))
+        or _safe_text(fallback)
+    )
+    if explicit and explicit not in {"相关方向", "观察池核心资产"}:
+        return explicit
+    metadata = dict(payload.get("metadata") or {})
+    taxonomy = dict(metadata.get("taxonomy") or metadata.get("fund_taxonomy") or {})
+    theme_profile = dict(metadata.get("theme_profile") or taxonomy.get("theme_profile") or {})
+    fund_profile = dict(payload.get("fund_profile") or {})
+    overview = dict(fund_profile.get("overview") or {})
+    etf_info = dict(fund_profile.get("etf_info") or {})
+    day_theme = dict(payload.get("day_theme") or {}).get("label") if isinstance(payload.get("day_theme"), Mapping) else payload.get("day_theme")
+    candidates = (
+        metadata.get("primary_chain"),
+        theme_profile.get("primary_chain"),
+        metadata.get("theme_role"),
+        theme_profile.get("theme_role"),
+        metadata.get("tracked_index_name"),
+        etf_info.get("跟踪指数"),
+        overview.get("业绩比较基准"),
+        metadata.get("industry_framework_label"),
+        metadata.get("industry"),
+        metadata.get("sector"),
+        dict(payload.get("theme_playbook") or {}).get("label"),
+        day_theme,
+        payload.get("name"),
+    )
+    for item in candidates:
+        text = _safe_text(item)
+        if text and text not in {"—", "未指定", "综合/其他"}:
+            return text
+    return explicit or "相关方向"
+
+
+def _homepage_news_transmission_text(
+    signal_type: Any,
+    impact: Any,
+    subject: Mapping[str, Any] | None = None,
+    conclusion: Any = "",
+) -> str:
+    signal = _safe_text(signal_type)
+    target = _safe_text(impact) or _subject_news_impact_target(dict(subject or {}))
+    direction = _homepage_news_direction(conclusion)
+    asset_type = _safe_text(dict(subject or {}).get("asset_type"))
+    if "地缘" in signal or "避险" in signal or "能源冲击" in signal:
+        return f"{direction}，先影响 `{target}`，再看黄金/原油、成长和防守资产的相对强弱是否验证。"
+    if asset_type in {"cn_etf", "cn_fund", "cn_index"}:
+        return f"{direction}，先影响 `{target}` 的主题预期，再看跟踪指数、核心成分和份额/价格是否同向确认。"
+    if asset_type in {"cn_stock", "hk", "us"}:
+        return f"{direction}，先影响 `{target}` 的景气或资金偏好，再看订单、财报、价格和成交能否验证。"
+    if asset_type == "market_briefing":
+        return f"{direction}，先影响 `{target}` 的风险偏好，再看成交、宽度和主线扩散是否验证。"
+    return f"{direction}，先影响 `{target}`，再看价格、成交和后续事件是否验证。"
+
+
+def _append_news_interpretation(
+    line: Any,
+    *,
+    subject: Mapping[str, Any] | None = None,
+    signal_type: Any = "",
+    signal_strength: Any = "",
+    impact: Any = "",
+    conclusion: Any = "",
+) -> str:
+    text = _safe_text(line)
+    if not text:
+        return ""
+    row: Dict[str, Any] = {}
+    signal = _safe_text(signal_type)
+    strength = _safe_text(signal_strength)
+    target = _safe_text(impact)
+    if target in {"相关方向", "观察池核心资产"}:
+        target = ""
+    if not signal:
+        signal_match = re.search(r"信号(?:类型)?：[`*]*([^`*；）)]+)[`*]*", text)
+        if signal_match:
+            signal = _safe_text(signal_match.group(1))
+    if not strength:
+        strength_match = re.search(r"(?:信号强弱|强弱)：[`*]*([^`*；）)]+)[`*]*", text)
+        if strength_match:
+            strength = _safe_text(strength_match.group(1))
+    inferred_signal, inferred_target = ("", "")
+    if not signal or not target or signal in {"信息环境：新闻/舆情脉冲", "主题/市场情报"}:
+        inferred_signal, inferred_target = _infer_homepage_news_signal(text)
+    if inferred_signal and (
+        not signal
+        or (
+            signal in {"信息环境：新闻/舆情脉冲", "主题/市场情报"}
+            and inferred_signal != "信息环境：新闻/舆情脉冲"
+        )
+    ):
+        signal = inferred_signal
+    if not target and inferred_target and (
+        inferred_signal != "信息环境：新闻/舆情脉冲"
+        or signal in {"信息环境：新闻/舆情脉冲", "主题/市场情报"}
+    ):
+        target = inferred_target
+    if not target:
+        target = _subject_news_impact_target(dict(subject or {}), row, impact)
+    if not strength:
+        strength = "中"
+    conclusion_text = _safe_text(conclusion)
+    if not conclusion_text:
+        conclusion_match = re.search(r"结论：([^；）)]+)", text)
+        if conclusion_match:
+            conclusion_text = _safe_text(conclusion_match.group(1))
+    if not conclusion_text:
+        conclusion_text = _homepage_signal_conclusion(signal, target)
+    additions: List[str] = []
+    if "信号类型：" not in text and "信号：" not in text and signal:
+        additions.append(f"信号类型：`{signal}`")
+    if "信号强弱：" not in text and "强弱：" not in text and strength:
+        additions.append(f"信号强弱：`{strength}`")
+    if "主要影响：" not in text and "关注 `" not in text and target:
+        additions.append(f"主要影响：`{target}`")
+    if "结论：" not in text and conclusion_text:
+        additions.append(f"结论：{conclusion_text}")
+    if "传导：" not in text:
+        additions.append(f"传导：{_homepage_news_transmission_text(signal, target, subject, conclusion_text)}")
+    if not additions:
+        return text
+    return f"{text}；" + "；".join(additions)
+
+
 def _ensure_homepage_news_signal_bundle(text: Any) -> str:
     line = _safe_text(text)
-    if not line or "结论：" in line:
+    if not line:
         return line
     signal_match = re.search(r"信号类型：[`*]*([^`*；]+)[`*]*", line) or re.search(r"信号：[`*]*([^`*；]+)[`*]*", line)
     if not signal_match:
         return line
     signal_type = _safe_text(signal_match.group(1))
-    impact_match = re.search(r"主要影响：[`*]*([^`*；]+)[`*]*", line) or re.search(r"关注 [`*]*([^`*；]+)[`*]*", line)
+    impact_match = (
+        re.search(r"主要影响：[`*]*([^`*；]+)[`*]*", line)
+        or re.search(r"关注 [`*]*([^`*；]+)[`*]*", line)
+        or re.search(r"更直接影响 [`*]*([^`*；]+)[`*]*", line)
+    )
     impact = _safe_text(impact_match.group(1)) if impact_match else ""
-    conclusion = _homepage_signal_conclusion(signal_type, impact)
-    if not conclusion:
-        return line
-    return f"{line}；结论：{conclusion}"
+    conclusion_match = re.search(r"结论：([^；）)]+)", line)
+    conclusion = _safe_text(conclusion_match.group(1)) if conclusion_match else _homepage_signal_conclusion(signal_type, impact)
+    if "结论：" not in line and conclusion:
+        line = f"{line}；结论：{conclusion}"
+    if "传导：" not in line:
+        transmission = _homepage_news_transmission_text(signal_type, impact, {}, conclusion)
+        line = f"{line}；传导：{transmission}"
+    return line
 
 
 def _briefing_client_safe_text(value: Any) -> str:
@@ -578,15 +770,33 @@ def _extract_price_candidates(text: Any) -> List[float]:
 
 
 def _extract_labeled_resistance_prices(text: Any) -> List[float]:
-    values: List[float] = []
     blob = _safe_text(text)
-    for match in re.finditer(r"(?:高点|前高|压力)[^0-9]{0,12}([0-9]+(?:\.[0-9]+)?)", blob):
+    values: List[float] = []
+
+    def append_match(match: re.Match[str]) -> None:
+        raw = match.group(1)
+        start, end = match.span(1)
+        prev_char = blob[start - 1 : start]
+        next_text = blob[end : end + 4]
+        # Do not treat the window length in labels like MA20 / 近20日高点 as a price.
+        if prev_char.isalpha() or re.match(r"\s*(?:日|/)", next_text):
+            return
         try:
-            value = float(match.group(1))
+            value = float(raw)
         except (TypeError, ValueError):
-            continue
-        if value > 0:
+            return
+        if value > 0 and value not in values:
             values.append(value)
+
+    specific_patterns = (
+        r"\bMA\d+\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"近\s*\d+(?:\s*/\s*\d+)?\s*日高点[^0-9]{0,12}([0-9]+(?:\.[0-9]+)?)",
+        r"(?:摆动前高|前高|高点|压力位|压力|压制)[^0-9A-Za-z]{0,16}([0-9]+(?:\.[0-9]+)?)",
+        r"(?:摆动前高|前高|高点|压力位|压力|压制)[^。；;\n]{0,40}?([0-9]+(?:\.[0-9]+)?)",
+    )
+    for pattern in specific_patterns:
+        for match in re.finditer(pattern, blob):
+            append_match(match)
     return values
 
 
@@ -854,7 +1064,17 @@ def _news_lines(subject: Mapping[str, Any], *, previous_reviewed_at: Any = None)
             title_text = _markdown_link(title, link)
             tags = _intelligence_tags(row, as_of=as_of, theme_level=True, previous_reviewed_at=previous_reviewed_at)
             tag_text = f"`{format_intelligence_attributes(tags)}` · " if tags else ""
-            lines.append(f"{tag_text}{prefix}：{title_text}" if prefix else f"{tag_text}{title_text}")
+            base_line = f"{tag_text}{prefix}：{title_text}" if prefix else f"{tag_text}{title_text}"
+            lines.append(
+                _append_news_interpretation(
+                    base_line,
+                    subject=subject,
+                    signal_type=row.get("signal_type") or row.get("lead_detail"),
+                    signal_strength=row.get("signal_strength") or row.get("importance_label"),
+                    impact=row.get("impact_summary") or row.get("impact"),
+                    conclusion=row.get("signal_conclusion") or row.get("conclusion"),
+                )
+            )
 
     if not lines:
         for item in list(catalyst.get("evidence") or [])[:max_items]:
@@ -871,7 +1091,17 @@ def _news_lines(subject: Mapping[str, Any], *, previous_reviewed_at: Any = None)
             title_text = _markdown_link(title, link)
             tags = _intelligence_tags(row, as_of=as_of, previous_reviewed_at=previous_reviewed_at)
             tag_text = f"`{format_intelligence_attributes(tags)}` · " if tags else ""
-            lines.append(f"{tag_text}{prefix}：{title_text}" if prefix else f"{tag_text}{title_text}")
+            base_line = f"{tag_text}{prefix}：{title_text}" if prefix else f"{tag_text}{title_text}"
+            lines.append(
+                _append_news_interpretation(
+                    base_line,
+                    subject=subject,
+                    signal_type=row.get("signal_type") or row.get("lead_detail"),
+                    signal_strength=row.get("signal_strength") or row.get("importance_label"),
+                    impact=row.get("impact_summary") or row.get("impact"),
+                    conclusion=row.get("signal_conclusion") or row.get("conclusion"),
+                )
+            )
     if not lines:
         for item in list(catalyst.get("theme_news") or [])[:max_items]:
             row = dict(item or {})
@@ -890,7 +1120,17 @@ def _news_lines(subject: Mapping[str, Any], *, previous_reviewed_at: Any = None)
             tags = _intelligence_tags(row, as_of=as_of, theme_level=True, previous_reviewed_at=previous_reviewed_at)
             tag_text = f"`{format_intelligence_attributes(tags)}` · " if tags else ""
             theme_line = f"{tag_text}{prefix}：{title_text}" if prefix else f"{tag_text}{title_text}"
-            lines.append(f"主题级新闻：{theme_line}")
+            lines.append(
+                "主题级新闻："
+                + _append_news_interpretation(
+                    theme_line,
+                    subject=subject,
+                    signal_type=row.get("signal_type") or row.get("lead_detail"),
+                    signal_strength=row.get("signal_strength") or row.get("importance_label"),
+                    impact=row.get("impact_summary") or row.get("impact"),
+                    conclusion=row.get("signal_conclusion") or row.get("conclusion"),
+                )
+            )
     if not lines:
         for item in list(subject.get("evidence") or [])[:max_items]:
             row = dict(item or {})
@@ -906,7 +1146,17 @@ def _news_lines(subject: Mapping[str, Any], *, previous_reviewed_at: Any = None)
             title_text = _markdown_link(title, link)
             tags = _intelligence_tags(row, as_of=as_of, previous_reviewed_at=previous_reviewed_at)
             tag_text = f"`{format_intelligence_attributes(tags)}` · " if tags else ""
-            lines.append(f"{tag_text}{prefix}：{title_text}" if prefix else f"{tag_text}{title_text}")
+            base_line = f"{tag_text}{prefix}：{title_text}" if prefix else f"{tag_text}{title_text}"
+            lines.append(
+                _append_news_interpretation(
+                    base_line,
+                    subject=subject,
+                    signal_type=row.get("signal_type") or row.get("lead_detail"),
+                    signal_strength=row.get("signal_strength") or row.get("importance_label"),
+                    impact=row.get("impact_summary") or row.get("impact"),
+                    conclusion=row.get("signal_conclusion") or row.get("conclusion"),
+                )
+            )
     return [*context_lines[:2], *lines[:max_items]]
 
 
@@ -962,8 +1212,21 @@ def _intelligence_relevance_line(subject: Mapping[str, Any]) -> str:
         if sector:
             return f"这些情报先用来解释 `{sector}` 这条主题线的背景，不能把每条行业旧闻都直接当成 `{name}` 的新增催化。"
     if asset_type == "cn_fund":
-        benchmark = _safe_text(subject.get("benchmark_name")) or _safe_text(dict(subject.get("fund_profile") or {}).get("overview", {}).get("业绩比较基准"))
-        style = _safe_text(metadata.get("sector")) or _safe_text(metadata.get("category"))
+        taxonomy = dict(metadata.get("taxonomy") or metadata.get("fund_taxonomy") or {})
+        taxonomy_profile = dict(metadata.get("theme_profile") or taxonomy.get("theme_profile") or {})
+        benchmark = (
+            _safe_text(metadata.get("tracked_index_name"))
+            or _safe_text(metadata.get("benchmark"))
+            or _safe_text(metadata.get("benchmark_name"))
+            or _safe_text(dict(subject.get("fund_profile") or {}).get("overview", {}).get("业绩比较基准"))
+        )
+        style = (
+            _safe_text(metadata.get("primary_chain"))
+            or _safe_text(taxonomy.get("primary_chain"))
+            or _safe_text(taxonomy_profile.get("primary_chain"))
+            or _safe_text(metadata.get("sector"))
+            or _safe_text(metadata.get("category"))
+        )
         if benchmark:
             return f"这些情报先用来解释 `{benchmark}` 方向，只有落到持仓和经理风格上，才算对 `{name}` 更直接。"
         if style:
@@ -1022,6 +1285,20 @@ _GENERIC_INTELLIGENCE_KEYWORDS = {
     "华夏",
     "易方达",
     "招商",
+    "南方",
+    "平安",
+    "长城",
+    "汇添富",
+    "广发",
+    "富国",
+    "嘉实",
+    "博时",
+    "银华",
+    "鹏华",
+    "华宝",
+    "天弘",
+    "工银瑞信",
+    "基金公司",
     "市场",
     "A股",
     "a股",
@@ -1126,14 +1403,16 @@ def _news_line_subject_relevance(line: Any, subject: Mapping[str, Any], digest: 
     text = _safe_text(line)
     if not text:
         return -99
+    base_text = re.split(r"；(?:信号类型|信号|信号强弱|主要影响|结论|传导)：", text, maxsplit=1)[0]
     score = 0
     keywords = _subject_intelligence_keywords(subject, digest)
-    if any(keyword and keyword in text for keyword in keywords):
+    keyword_hit = any(keyword and keyword in base_text for keyword in keywords)
+    if keyword_hit:
         score += 5
     lead_title = _safe_text(dict(digest).get("lead_title"))
     if lead_title and lead_title in text:
         score += 4
-    if any(marker in text for marker in ("公告类型：", "财报摘要：", "扩产", "投产", "业绩", "订单", "净创设", "成分权重")):
+    if any(marker in base_text for marker in ("公告类型：", "财报摘要：", "扩产", "投产", "业绩", "订单", "净创设", "成分权重")):
         score += 2
     market_background_markers = (
         "美伊",
@@ -1149,7 +1428,7 @@ def _news_line_subject_relevance(line: Any, subject: Mapping[str, Any], digest: 
         "市场爆涨",
         "市场大涨",
     )
-    if any(marker in text for marker in market_background_markers) and not any(keyword and keyword in text for keyword in keywords):
+    if any(marker in base_text for marker in market_background_markers) and not keyword_hit:
         score -= 6
     return score
 
@@ -1172,7 +1451,7 @@ def _filter_homepage_linked_news_lines(
     digest: Mapping[str, Any],
 ) -> List[str]:
     asset_type = _safe_text(subject.get("asset_type"))
-    min_score = 1 if asset_type in {"cn_stock", "hk", "us"} else 0
+    min_score = 1 if asset_type in {"cn_stock", "hk", "us", "cn_fund"} else 0
     scored = [
         (item, _news_line_subject_relevance(item, subject, digest))
         for item in lines
@@ -1208,11 +1487,8 @@ def _format_homepage_evidence_line(line: Any) -> str:
         preserve_signal_bundle = any(marker in clean for marker in ("；信号：", "；信号类型：", "；信号强弱：", "；结论："))
         trim_markers = (
             (
-                "；情报属性：",
                 "；来源层级：",
                 "；复查语境：",
-                "；更直接影响",
-                "；当前更像",
                 "；事件理解：",
             )
             if preserve_signal_bundle
@@ -1241,7 +1517,7 @@ def _missing_clickable_intelligence_line() -> str:
     return "外部情报：本轮未拿到可点击外部情报；当前先按结构证据和情报摘要理解，不把盘面摘要误写成可核验新闻。"
 
 
-def _event_digest_lead_evidence_line(event_digest: Mapping[str, Any]) -> str:
+def _event_digest_lead_evidence_line(event_digest: Mapping[str, Any], subject: Mapping[str, Any] | None = None) -> str:
     digest = dict(event_digest or {})
     title = _safe_text(digest.get("lead_title"))
     if not title:
@@ -1261,7 +1537,14 @@ def _event_digest_lead_evidence_line(event_digest: Mapping[str, Any]) -> str:
         parts.append(f"结论：{signal_conclusion}")
     if latest_signal_at:
         parts.append(f"最新情报时点：`{latest_signal_at}`")
-    return "；".join(parts)
+    return _append_news_interpretation(
+        "；".join(parts),
+        subject=subject or {},
+        signal_type=signal_type,
+        signal_strength=signal_strength,
+        impact=digest.get("impact_summary"),
+        conclusion=signal_conclusion,
+    )
 
 
 def _has_clickable_homepage_evidence(lines: Sequence[str]) -> bool:
@@ -1285,10 +1568,19 @@ def _news_lines_with_event_digest(subject: Mapping[str, Any], event_digest: Mapp
     plain_news_lines = _sort_news_lines_by_subject_relevance(plain_news_lines, subject, digest)
     linked_news_lines = _filter_homepage_linked_news_lines(linked_news_lines, subject, digest)
     raw_news_lines = [*linked_news_lines, *plain_news_lines]
-    lead_evidence_line = _event_digest_lead_evidence_line(digest)
+    lead_evidence_line = _event_digest_lead_evidence_line(digest, subject)
     if lead_evidence_line and _news_line_subject_relevance(lead_evidence_line, subject, digest) < 0:
         lead_evidence_line = ""
     structure_line = _format_homepage_evidence_line(_event_digest_signal_line(digest))
+    if structure_line:
+        structure_line = _append_news_interpretation(
+            structure_line,
+            subject=subject,
+            signal_type=digest.get("signal_type") or digest.get("lead_detail") or digest.get("lead_layer"),
+            signal_strength=digest.get("signal_strength") or digest.get("importance_label"),
+            impact=digest.get("impact_summary"),
+            conclusion=digest.get("signal_conclusion") or digest.get("conclusion"),
+        )
     if lead_evidence_line and structure_line:
         signal_type = _safe_text(digest.get("signal_type"))
         asset_type = _safe_text(subject.get("asset_type"))
@@ -1344,7 +1636,9 @@ def _news_lines_with_event_digest(subject: Mapping[str, Any], event_digest: Mapp
             for item in summary_lines[:1]:
                 _append_unique_news_line(lines, seen_keys, item, limit=limit)
         else:
-            _append_unique_news_line(lines, seen_keys, structure_line, limit=limit)
+            _append_unique_news_line(lines, seen_keys, lead_evidence_line, limit=limit)
+            if not lead_evidence_line:
+                _append_unique_news_line(lines, seen_keys, structure_line, limit=limit)
             linked_added = 0
             for item in linked_news_lines:
                 before = len(lines)
@@ -1353,14 +1647,15 @@ def _news_lines_with_event_digest(subject: Mapping[str, Any], event_digest: Mapp
                     linked_added += 1
                 if linked_added >= max(limit - 1, 1):
                     break
-            _append_unique_news_line(lines, seen_keys, lead_evidence_line, limit=limit)
+            if lead_evidence_line:
+                _append_unique_news_line(lines, seen_keys, structure_line, limit=limit)
             _append_unique_news_line(lines, seen_keys, digest_context_line, limit=limit)
             if len(lines) < limit:
                 for item in summary_lines[:1]:
                     _append_unique_news_line(lines, seen_keys, item, limit=limit)
     else:
-        _append_unique_news_line(lines, seen_keys, structure_line, limit=limit)
         _append_unique_news_line(lines, seen_keys, lead_evidence_line, limit=limit)
+        _append_unique_news_line(lines, seen_keys, structure_line, limit=limit)
         _append_unique_news_line(lines, seen_keys, digest_context_line, limit=limit)
         for item in plain_news_lines:
             _append_unique_news_line(lines, seen_keys, _format_homepage_evidence_line(item), limit=limit)
@@ -1380,6 +1675,7 @@ def _news_lines_with_event_digest(subject: Mapping[str, Any], event_digest: Mapp
         _append_unique_news_line(deduped, final_seen, item, limit=limit)
     if (
         structure_line
+        and not lead_evidence_line
         and any("http://" in _safe_text(item) or "https://" in _safe_text(item) for item in deduped)
         and not any(_safe_text(item).startswith("结构证据：") for item in deduped)
     ):
@@ -1749,6 +2045,12 @@ def _decision_execution_card_lines(
     buy_range = _usable_range(buy_range)
     trim_range = _usable_range(trim_range)
     lines: List[str] = []
+    exclusion_reasons = [str(item).strip() for item in list(subject.get("exclusion_reasons") or []) if str(item).strip()]
+    if bool(subject.get("excluded")) and exclusion_reasons:
+        lines.append(
+            "执行卡：已触发硬排除 "
+            f"`{'；'.join(exclusion_reasons[:2])}`，这页只能当观察和风险提示，不能按正式推荐执行。"
+        )
     trigger_line = f"执行卡：{'没触发前只记' if observe_only else '触发前先等'} {_homepage_focus_text(entry_focus)}"
     if buy_range and not observe_only:
         trigger_line += f"，优先看 `{buy_range}` 一带承接"
@@ -2122,15 +2424,58 @@ def _subject_theme_context(subject: Mapping[str, Any], *, explicit_key: str = ""
         sector_text = _safe_text(metadata.get("sector"))
         industry_text = _safe_text(metadata.get("industry_framework_label"))
         day_theme_label = _safe_text(dict(subject.get("day_theme") or {}).get("label"))
+        taxonomy = dict(metadata.get("taxonomy") or metadata.get("fund_taxonomy") or {})
+        taxonomy_profile = dict(metadata.get("theme_profile") or taxonomy.get("theme_profile") or {})
+        theme_profile_terms = [
+            item
+            for item in (
+                taxonomy_profile.get("primary_chain"),
+                taxonomy_profile.get("theme_family"),
+                taxonomy_profile.get("theme_role"),
+                metadata.get("primary_chain"),
+                metadata.get("theme_family"),
+                metadata.get("theme_role"),
+                taxonomy.get("primary_chain"),
+                taxonomy.get("theme_family"),
+                taxonomy.get("theme_role"),
+            )
+            if _safe_text(item)
+        ]
+        for sequence_key in ("evidence_keywords", "preferred_sector_aliases", "mainline_tags"):
+            for item in list(metadata.get(sequence_key) or taxonomy.get(sequence_key) or taxonomy_profile.get(sequence_key) or []):
+                if _safe_text(item):
+                    theme_profile_terms.append(item)
+        raw_chain_nodes = list(metadata.get("chain_nodes") or taxonomy.get("chain_nodes") or taxonomy_profile.get("chain_nodes") or [])
+        # Fund/ETF chain_nodes are often noisy expansion hints. Only let them
+        # steer identity when a structured theme profile supports them, or when
+        # the harder index/sector identity is missing.
+        chain_nodes = raw_chain_nodes if theme_profile_terms or not (sector_text or benchmark_hint or industry_text) else []
         identity_metadata = {
             "name": subject.get("name"),
             "symbol": subject.get("symbol"),
             "sector": sector_text,
             "industry_framework_label": industry_text,
+            "tracked_index_name": metadata.get("tracked_index_name"),
+            "benchmark": metadata.get("benchmark") or benchmark_hint,
+            "benchmark_name": metadata.get("benchmark_name"),
+            "index_framework_label": metadata.get("index_framework_label"),
+            "primary_chain": metadata.get("primary_chain") or taxonomy.get("primary_chain") or taxonomy_profile.get("primary_chain"),
+            "theme_family": metadata.get("theme_family") or taxonomy.get("theme_family") or taxonomy_profile.get("theme_family"),
+            "theme_role": metadata.get("theme_role") or taxonomy.get("theme_role") or taxonomy_profile.get("theme_role"),
+            "theme_profile_terms": theme_profile_terms,
+            "chain_nodes": chain_nodes,
+            "evidence_keywords": metadata.get("evidence_keywords")
+            or taxonomy.get("evidence_keywords")
+            or taxonomy_profile.get("evidence_keywords"),
+            "preferred_sector_aliases": metadata.get("preferred_sector_aliases")
+            or taxonomy.get("preferred_sector_aliases")
+            or taxonomy_profile.get("preferred_sector_aliases"),
+            "mainline_tags": metadata.get("mainline_tags")
+            or taxonomy.get("mainline_tags")
+            or taxonomy_profile.get("mainline_tags"),
             "main_business": benchmark_hint,
             "tushare_theme_industry": metadata.get("tushare_theme_industry"),
         }
-        optional_chain_nodes = metadata.get("chain_nodes") if not (sector_text or benchmark_hint or industry_text) else []
         base_values = (
             explicit_key,
             identity_metadata,
@@ -2139,7 +2484,8 @@ def _subject_theme_context(subject: Mapping[str, Any], *, explicit_key: str = ""
             sector_text,
             industry_text,
             benchmark_hint,
-            optional_chain_nodes,
+            chain_nodes,
+            theme_profile_terms,
             subject.get("taxonomy_summary"),
             subject.get("fund_sections"),
         )
@@ -2407,6 +2753,11 @@ def _briefing_news_lines(payload: Mapping[str, Any], event_digest: Mapping[str, 
         "复核日内强弱",
         "次日晨报",
     )
+    briefing_subject = {
+        "asset_type": "market_briefing",
+        "name": "市场晨报",
+        "day_theme": {"label": _safe_text(payload.get("day_theme"))},
+    }
 
     def _signal_hint(title: str, category: str = "") -> tuple[str, str]:
         blob = f"{title} {category}".lower()
@@ -2420,10 +2771,16 @@ def _briefing_news_lines(payload: Mapping[str, Any], event_digest: Mapping[str, 
             return "地缘扰动", "黄金/原油/风险偏好"
         if any(token in blob for token in ("创新药", "医药", "制药", "药业", "cxo", "fda", "临床", "license-out", "bd", "授权")):
             return "医药催化", "创新药/医药"
-        if any(token in blob for token in ("新易盛", "中际旭创", "华工科技", "cpo", "光模块", "算力", "服务器", "液冷", "hbm", "semiconductor", "芯片", "nvidia", "nvda")):
+        if any(token in blob for token in ("国家电网", "南方电网", "特高压", "输变电", "配网", "变压器", "电力设备", "电网招标")):
+            return "电网投资催化", "电网/特高压"
+        if any(token in blob for token in ("新易盛", "中际旭创", "华工科技", "cpo", "光模块", "算力", "服务器", "液冷", "hbm", "semiconductor", "芯片", "nvidia", "nvda", "6g")):
             return "AI硬件催化", "AI硬件链"
         if any(token in blob for token in ("智谱", "kimi", "deepseek", "大模型", "模型", "agent", "应用")):
             return "AI应用催化", "AI软件/应用"
+        if any(token in blob for token in ("业绩", "财报", "年报", "一季报", "季报", "盈利", "指引")):
+            return "财报摘要：盈利/指引", "盈利/估值"
+        if any(token in blob for token in ("政策", "国务院", "部署", "支持", "规划", "招标")):
+            return "政策催化", "政策预期/景气"
         if any(token in blob for token in ("黄金", "gold", "贵金属")):
             return "避险交易", "黄金/防守"
         if any(token in blob for token in ("原油", "oil", "opec")):
@@ -2441,6 +2798,10 @@ def _briefing_news_lines(payload: Mapping[str, Any], event_digest: Mapping[str, 
             return f"偏利多，但先按 `{target}` 的跟涨/扩散确认处理。"
         if signal in {"医药催化", "AI应用催化", "AI硬件催化"}:
             return f"偏利多，先看 `{target}` 能否继续拿到价格与成交确认。"
+        if signal in {"政策催化", "电网投资催化"}:
+            return f"偏利多，先看 `{target}` 能否从政策/招标线索落到订单、盈利或价格承接。"
+        if signal.startswith("财报摘要"):
+            return f"中性偏事件驱动，先等 `{target}` 的实际披露结果验证，不把日历本身写成超预期。"
         if signal == "地缘缓和":
             return "偏利多风险偏好，先看黄金/原油回落与成长弹性修复。"
         if signal in {"地缘扰动", "避险交易", "能源冲击"}:
@@ -2472,12 +2833,13 @@ def _briefing_news_lines(payload: Mapping[str, Any], event_digest: Mapping[str, 
             return line
         signal_type, impact = _signal_hint(title, source)
         conclusion = _signal_conclusion(signal_type, impact)
+        transmission = _homepage_news_transmission_text(signal_type, impact, briefing_subject, conclusion)
         link = _google_news_search_link(title, source)
         if not link:
             return line
         return (
             f"外部情报：{_markdown_link(title, link)}"
-            f"（搜索回退：`{source}`；信号：`{signal_type}`；强弱：`中`；结论：{conclusion}）"
+            f"（搜索回退：`{source}`；信号：`{signal_type}`；强弱：`中`；结论：{conclusion}；传导：{transmission}）"
         )
 
     def _format_item(row: Mapping[str, Any]) -> str:
@@ -2525,6 +2887,8 @@ def _briefing_news_lines(payload: Mapping[str, Any], event_digest: Mapping[str, 
             detail += f"；信号类型：`{signal_type}`"
         if signal_strength:
             detail += f"；信号强弱：`{signal_strength}`"
+        if impact:
+            detail += f"；主要影响：`{impact}`"
         if tags:
             detail += f"；情报属性：`{format_intelligence_attributes(tags)}`"
         if conclusion:
@@ -2582,18 +2946,22 @@ def _briefing_news_lines(payload: Mapping[str, Any], event_digest: Mapping[str, 
 
     def _ensure_signal_conclusion_line(text: str) -> str:
         line = _safe_text(text)
-        if not line or "结论：" in line:
+        if not line:
             return line
         signal_match = re.search(r"信号类型：`([^`]+)`", line) or re.search(r"信号：`([^`]+)`", line)
-        if not signal_match:
-            return line
-        signal_type = _safe_text(signal_match.group(1))
-        impact_match = re.search(r"关注 `([^`]+)`", line)
+        signal_type = _safe_text(signal_match.group(1)) if signal_match else ""
+        impact_match = re.search(r"主要影响：`([^`]+)`", line) or re.search(r"关注 `([^`]+)`", line)
         impact = _safe_text(impact_match.group(1)) if impact_match else ""
-        conclusion = _signal_conclusion(signal_type, impact)
-        if not conclusion:
-            return line
-        return f"{line}；结论：{conclusion}"
+        conclusion_match = re.search(r"结论：([^；）)]+)", line)
+        conclusion = _safe_text(conclusion_match.group(1)) if conclusion_match else (_signal_conclusion(signal_type, impact) if signal_type else "")
+        return _append_news_interpretation(
+            line,
+            subject=briefing_subject,
+            signal_type=signal_type,
+            signal_strength="",
+            impact=impact,
+            conclusion=conclusion,
+        )
 
     def _append_line(text: str) -> bool:
         text = _ensure_signal_conclusion_line(text)
