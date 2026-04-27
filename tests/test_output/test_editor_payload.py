@@ -4555,6 +4555,51 @@ def test_build_briefing_editor_packet_prioritizes_market_event_rows_over_raw_new
     assert "结论：" in joined
 
 
+def test_build_briefing_editor_packet_does_not_let_encoded_urls_pollute_ai_news_impact() -> None:
+    packet = build_briefing_editor_packet(
+        {
+            "generated_at": "2026-04-27 11:46:41",
+            "day_theme": "硬科技 / AI硬件链",
+            "regime": {"current_regime": "recovery"},
+            "headline_lines": ["前排主线集中在 `创新药/医药 / AI硬件链`。"],
+            "core_event_lines": [
+                "**国内创新药“大单品”竞相涌现 商业化进程全面提速 - 证券时报** (证券时报)\n  → 消息面 -> 风险偏好 -> 相关资产表现。",
+                "**国务院重磅部署！事关AI、算力、6G、卫星互联网等 - 财联社** (财联社)\n  → 消息面 -> 风险偏好 -> 相关资产表现。",
+            ],
+            "action_lines": ["先看扩散。"],
+        }
+    )
+
+    ai_line = next(line for line in packet["homepage"]["news_lines"] if "国务院重磅部署" in line)
+
+    assert "信号：`AI硬件催化`" in ai_line
+    assert "主要影响：`AI硬件链`" in ai_line
+    assert "主要影响：`创新药/医药`" not in ai_line
+
+
+def test_build_briefing_editor_packet_keeps_ai_hardware_theme_line_as_hardware() -> None:
+    packet = build_briefing_editor_packet(
+        {
+            "generated_at": "2026-04-27 11:46:41",
+            "day_theme": "硬科技 / AI硬件链",
+            "regime": {"current_regime": "recovery"},
+            "theme_tracking_rows": [
+                ["AI硬件链", "模型/产品发布 + 资本开支验证", "说明", "中线配置", "若产品催化停留在标题级，板块容易冲高回落。", True],
+            ],
+            "headline_lines": ["今天先看 AI硬件链。"],
+            "core_event_lines": [],
+            "action_lines": ["先看扩散。"],
+        }
+    )
+
+    joined = "\n".join(packet["homepage"]["news_lines"])
+
+    assert "结构证据：AI硬件链" in joined
+    assert "信号类型：`AI硬件催化`" in joined
+    assert "主要影响：`AI硬件链`" in joined
+    assert "信号类型：`AI应用催化`" not in joined
+
+
 def test_build_briefing_editor_packet_keeps_one_linked_external_news_before_structured_rows() -> None:
     packet = build_briefing_editor_packet(
         {

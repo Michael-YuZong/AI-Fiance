@@ -2709,6 +2709,15 @@ def _context_industry_index_snapshot(
     fund_profile: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     asset_type = str(metadata.get("asset_type", "")).strip()
+    if asset_type == "cn_stock" and _runtime_feature_disabled(context, "stock_pool_skip_industry_lookup_runtime"):
+        return {
+            "status": "skipped",
+            "diagnosis": "runtime_skip",
+            "items": [],
+            "fallback": "runtime_skip",
+            "is_fresh": False,
+            "disclosure": "个股标准行业/指数框架逐票补查已按快路径跳过，本轮先使用候选池已有行业画像。",
+        }
     cache = _runtime_cache_bucket(context, "industry_index_snapshot")
     key = (
         asset_type,

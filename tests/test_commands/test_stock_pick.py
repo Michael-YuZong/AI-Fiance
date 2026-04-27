@@ -266,6 +266,8 @@ def test_client_final_runtime_overrides_apply_lightweight_stock_profile_by_defau
     assert config["stock_news_finalist_search_recent_days"] == 21
     assert config["skip_analysis_proxy_signals_runtime"] is True
     assert config["skip_signal_confidence_runtime"] is True
+    assert config["skip_cn_stock_board_action_runtime"] is True
+    assert config["skip_stock_capital_flow_board_proxy_runtime"] is True
     assert config["stock_pool_skip_industry_lookup_runtime"] is True
     assert config["stock_pool_prefer_cached_realtime_runtime"] is True
     assert any("跨市场代理" in item for item in notes)
@@ -278,6 +280,8 @@ def test_client_final_runtime_overrides_apply_lightweight_stock_profile_by_defau
     assert any("finalist 模式" in item for item in notes)
     assert any("单票情报条数上限" in item for item in notes)
     assert any("情绪代理" in item for item in notes)
+    assert any("龙虎榜/竞价/涨跌停" in item for item in notes)
+    assert any("资金流行业/概念代理慢链" in item for item in notes)
 
 
 def test_run_market_attaches_shared_intel_news_report_when_context_missing(monkeypatch) -> None:
@@ -354,6 +358,8 @@ def test_preview_runtime_overrides_apply_lightweight_preview_profile_by_default(
     assert config["stock_news_search_recent_days"] == 14
     assert config["skip_analysis_proxy_signals_runtime"] is True
     assert config["skip_signal_confidence_runtime"] is True
+    assert config["skip_cn_stock_board_action_runtime"] is True
+    assert config["skip_stock_capital_flow_board_proxy_runtime"] is True
     assert config["stock_pool_skip_industry_lookup_runtime"] is True
     assert config["stock_pool_prefer_cached_realtime_runtime"] is True
     assert any("跨市场代理" in item for item in notes)
@@ -363,6 +369,8 @@ def test_preview_runtime_overrides_apply_lightweight_preview_profile_by_default(
     assert any("结构化情报" in item for item in notes)
     assert any("高价值官方/结构化催化" in item for item in notes)
     assert any("单票情报条数上限" in item for item in notes)
+    assert any("龙虎榜/竞价/涨跌停" in item for item in notes)
+    assert any("资金流行业/概念代理慢链" in item for item in notes)
     assert any("情绪代理" in item for item in notes)
 
 
@@ -382,7 +390,12 @@ def test_client_final_discovery_config_uses_focused_catalyst_runtime() -> None:
 
     assert config["skip_index_topic_bundle_runtime"] is True
     assert config["skip_catalyst_dynamic_search_runtime"] is True
-    assert config["stock_news_runtime_mode"] == "focused"
+    assert config["skip_cn_stock_board_action_runtime"] is True
+    assert config["skip_cn_stock_direct_news_runtime"] is True
+    assert config["skip_stock_capital_flow_board_proxy_runtime"] is True
+    assert config["structured_stock_intelligence_apis"] == ["forecast", "express", "dividend"]
+    assert config["stock_news_limit"] == 4
+    assert config["stock_news_runtime_mode"] == "structured_only"
     assert config["stock_news_official_query_cap"] == 2
     assert config["stock_news_search_query_cap"] == 1
     assert config["stock_news_search_recent_days"] == 14
@@ -473,8 +486,10 @@ def test_repo_stock_pick_fast_profile_keeps_lightweight_runtime_contract() -> No
     assert config["stock_news_official_query_cap"] == 2
     assert config["stock_news_search_query_cap"] == 1
     assert config["stock_news_search_recent_days"] == 14
+    assert config["skip_cn_stock_board_action_runtime"] is True
     assert config["skip_analysis_proxy_signals_runtime"] is True
     assert config["skip_signal_confidence_runtime"] is True
+    assert config["skip_stock_capital_flow_board_proxy_runtime"] is True
     assert config["stock_pool_skip_industry_lookup_runtime"] is True
     assert config["stock_pool_prefer_cached_realtime_runtime"] is True
     assert config["market_context"]["skip_global_proxy"] is True

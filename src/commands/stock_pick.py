@@ -71,6 +71,11 @@ FAST_STRUCTURED_STOCK_INTELLIGENCE_APIS = [
     "irm_qa_sh",
     "irm_qa_sz",
 ]
+DISCOVERY_STRUCTURED_STOCK_INTELLIGENCE_APIS = [
+    "forecast",
+    "express",
+    "dividend",
+]
 EXPECTED_CHART_THEMES = ("terminal", "abyss-gold", "institutional", "clinical", "erdtree", "neo-brutal")
 
 
@@ -334,9 +339,11 @@ def _client_final_runtime_overrides(
 
     effective["skip_analysis_proxy_signals_runtime"] = True
     effective["skip_signal_confidence_runtime"] = True
+    effective["skip_cn_stock_board_action_runtime"] = True
+    effective["skip_stock_capital_flow_board_proxy_runtime"] = True
     effective["stock_pool_skip_industry_lookup_runtime"] = True
     effective["stock_pool_prefer_cached_realtime_runtime"] = True
-    notes.append("本轮 `client-final` 已自动跳过情绪代理、历史信号置信度和逐票行业补查慢链，优先保证正式稿稳定落盘。")
+    notes.append("本轮 `client-final` 已自动跳过情绪代理、历史信号置信度、龙虎榜/竞价/涨跌停、逐票行业补查与资金流行业/概念代理慢链，优先保证正式稿稳定落盘。")
     notes.append("本轮 `client-final` 的候选池会优先复用本地 A 股快照缓存，不再为 live 实时快照白等长超时。")
     notes.append("本轮 `client-final` 不再给整段个股分析套线程超时；正式稿稳定性改由底层 fetcher timeout 和快照缓存兜住，避免把观察池误裁空。")
 
@@ -402,9 +409,11 @@ def _preview_runtime_overrides(
 
     effective["skip_analysis_proxy_signals_runtime"] = True
     effective["skip_signal_confidence_runtime"] = True
+    effective["skip_cn_stock_board_action_runtime"] = True
+    effective["skip_stock_capital_flow_board_proxy_runtime"] = True
     effective["stock_pool_skip_industry_lookup_runtime"] = True
     effective["stock_pool_prefer_cached_realtime_runtime"] = True
-    notes.append("默认预览已自动跳过情绪代理、历史信号置信度和逐票行业补查慢链，优先保证首屏筛选速度。")
+    notes.append("默认预览已自动跳过情绪代理、历史信号置信度、龙虎榜/竞价/涨跌停、逐票行业补查与资金流行业/概念代理慢链，优先保证首屏筛选速度。")
     notes.append("默认预览会优先复用本地 A 股快照缓存，避免 stock_pool 为 live 实时快照白等长超时。")
     notes.append("默认预览不再给整段个股分析套线程超时；首屏稳定性改由底层 fetcher timeout 和快照缓存兜住。")
 
@@ -415,7 +424,12 @@ def _client_final_discovery_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     effective = deepcopy(dict(config or {}))
     effective["skip_index_topic_bundle_runtime"] = True
     effective["skip_catalyst_dynamic_search_runtime"] = True
-    effective["stock_news_runtime_mode"] = "focused"
+    effective["skip_cn_stock_board_action_runtime"] = True
+    effective["skip_cn_stock_direct_news_runtime"] = True
+    effective["skip_stock_capital_flow_board_proxy_runtime"] = True
+    effective["structured_stock_intelligence_apis"] = list(DISCOVERY_STRUCTURED_STOCK_INTELLIGENCE_APIS)
+    effective["stock_news_limit"] = min(int(effective.get("stock_news_limit", 8) or 8), 4)
+    effective["stock_news_runtime_mode"] = "structured_only"
     effective["stock_news_official_query_cap"] = 2
     effective["stock_news_search_query_cap"] = 1
     effective["stock_news_search_recent_days"] = 14

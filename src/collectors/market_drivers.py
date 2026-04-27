@@ -1583,6 +1583,14 @@ class MarketDriversCollector(BaseCollector):
                 direct_5d_main_flow = float(main_flow_series.tail(5).sum())
 
         needs_proxy_context = not (direct_row and direct_is_fresh)
+        market_context = dict(self.config.get("market_context") or {})
+        skip_board_proxy = bool(
+            self.config.get("skip_stock_capital_flow_board_proxy_runtime")
+            or self.config.get("stock_pool_skip_industry_lookup_runtime")
+            or market_context.get("skip_stock_capital_flow_board_proxy")
+            or market_context.get("skip_market_drivers")
+        )
+        board_proxy_skipped = bool(needs_proxy_context and skip_board_proxy)
         board_row: Dict[str, Any] = {}
         board_type = ""
         board_source = ""
@@ -1623,7 +1631,17 @@ class MarketDriversCollector(BaseCollector):
                         return dict(row)
             return {}
 
-        if needs_proxy_context:
+        if board_proxy_skipped:
+            theme_report = {
+                "source": "tushare.ths_member",
+                "latest_date": latest_trade_text,
+                "fallback": "runtime_skip",
+                "diagnosis": "skipped",
+                "disclosure": "行业/概念资金流代理已按快路径跳过，本轮不把代理缺口写成主力承接或撤退。",
+                "status": "skipped",
+                "items": [],
+            }
+        elif needs_proxy_context:
             theme_report = self.get_stock_theme_membership(symbol, reference_date=as_of, limit=3)
             theme_items = list(theme_report.get("items") or [])
             industry_frame = self._ts_sector_fund_flow("industry")
@@ -1658,9 +1676,17 @@ class MarketDriversCollector(BaseCollector):
         board_component = {
             "source": board_source or "tushare.moneyflow_ind_ths+tushare.moneyflow_cnt_ths",
             "as_of": board_latest_date or latest_trade_text,
-            "fallback": "theme_membership" if theme_items else ("metadata" if needs_proxy_context else "skipped_direct_moneyflow"),
+            "fallback": (
+                "runtime_skip"
+                if board_proxy_skipped
+                else "theme_membership"
+                if theme_items
+                else ("metadata" if needs_proxy_context else "skipped_direct_moneyflow")
+            ),
             "diagnosis": (
-                "live"
+                "skipped"
+                if board_proxy_skipped
+                else "live"
                 if board_is_fresh
                 else "stale"
                 if board_row
@@ -1671,15 +1697,19 @@ class MarketDriversCollector(BaseCollector):
             "disclosure": (
                 f"{'概念' if board_type == 'concept' else '行业'}资金流当前命中 `{board_name}`。"
                 if board_row
+                else "行业/概念资金流代理已按快路径跳过，本轮不把代理缺口写成主力承接或撤退。"
+                if board_proxy_skipped
                 else "行业/概念资金流当前未命中该股票的直接主题映射。"
                 if needs_proxy_context
                 else "个股 moneyflow 当期已命中，本轮未再额外拉取行业/概念资金流代理。"
             ),
-            "status": "matched" if board_row else "empty" if needs_proxy_context else "skipped",
+            "status": "matched" if board_row else "skipped" if board_proxy_skipped else "empty" if needs_proxy_context else "skipped",
             "detail": (
                 f"{board_name} 主力净{'流入' if float(board_row.get('今日主力净流入-净额') or 0) >= 0 else '流出'} "
                 f"{_fmt_amount(board_row.get('今日主力净流入-净额'))}"
                 if board_row
+                else "行业/概念资金流代理已跳过，当前只使用个股 direct moneyflow 或按缺失披露。"
+                if board_proxy_skipped
                 else "当前未命中相关行业/概念资金流。"
                 if needs_proxy_context
                 else "个股资金流已直接命中，当期判断优先使用个股主力净流入。"

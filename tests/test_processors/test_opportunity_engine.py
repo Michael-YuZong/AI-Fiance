@@ -20,6 +20,7 @@ from src.collectors.news import NewsCollector
 from src.processors.opportunity_engine import PoolItem, _action_guidance_hint, _action_plan, _analysis_theme_playbook_context, _board_keywords, _build_narrative, _catalyst_dimension, _catalyst_search_groups, _chips_dimension, _client_safe_issue, _cn_holdertrade_snapshot, _cn_pledge_risk_snapshot, _cn_stock_board_action_snapshot, _cn_stock_broker_recommend_snapshot, _cn_stock_capital_flow_snapshot, _cn_stock_chip_snapshot, _cn_stock_margin_snapshot, _cn_stock_regulatory_risk_snapshot, _cn_stock_unlock_pressure_snapshot, _collect_fund_profile, _company_forward_events, _context_index_topic_bundle, _correlation_to_watchlist, _direct_company_event_search_terms, _discover_driver_type, _discover_next_step_commands, _discover_ready_for_next_step, _discover_today_reason_lines, _formal_scaling_plan_from_setup, _fund_specific_catalyst_profile, _fundamental_dimension, _hard_checks, _is_high_confidence_company_news, _macro_dimension, _map_industry_to_sector, _market_context_watch_hint_lines, _market_event_rows_from_context, _merge_metadata, _nearest_support_reference, _normalize_sector, _northbound_sector_snapshot, _preferred_catalyst_sources, _preferred_fund_sectors, _rating_from_dimensions, _refresh_action_from_signal_confidence, _relative_strength_dimension, _risk_dimension, _seasonality_dimension, _sector_flow_snapshot, _signal_confidence_warning_line, _stock_name_tokens, _technical_dimension, _theme_alignment, _today_theme, _trim_market_event_rows, _valuation_keywords, analyze_opportunity, build_default_pool, build_fund_pool, build_market_context, build_stock_pool, discover_fund_opportunities, discover_opportunities, discover_stock_opportunities, summarize_proxy_contracts_from_analyses
 from src.processors.opportunity_engine import _asset_note
 from src.processors.horizon import build_analysis_horizon_profile
+from src.processors import opportunity_engine as opportunity_engine_module
 from src.utils.market import compute_history_metrics
 
 
@@ -7962,6 +7963,22 @@ def test_build_stock_pool_can_skip_per_symbol_industry_lookup(monkeypatch):
 
     assert warnings == []
     assert [item.symbol for item in pool] == ["600000"]
+
+
+def test_context_industry_index_snapshot_skips_cn_stock_lookup_on_fast_runtime(monkeypatch):
+    monkeypatch.setattr(
+        "src.processors.opportunity_engine.IndustryIndexCollector.get_stock_industry_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fast runtime should skip industry index lookup")),
+    )
+
+    snapshot = opportunity_engine_module._context_industry_index_snapshot(
+        {"asset_type": "cn_stock", "symbol": "300308"},
+        {"config": {"stock_pool_skip_industry_lookup_runtime": True}, "runtime_caches": {}},
+    )
+
+    assert snapshot["status"] == "skipped"
+    assert snapshot["fallback"] == "runtime_skip"
+    assert "快路径跳过" in snapshot["disclosure"]
 
 
 def test_analyze_opportunity_can_skip_proxy_signals_via_runtime_flag(monkeypatch):

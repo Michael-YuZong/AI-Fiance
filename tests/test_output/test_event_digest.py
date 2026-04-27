@@ -1760,6 +1760,33 @@ def test_build_event_digest_uses_tushare_irm_note_to_classify_interactive_qa() -
     assert digest["lead_detail"] == "公告类型：投资者关系/路演纪要"
 
 
+def test_build_event_digest_keeps_leader_ir_product_solution_out_of_policy_layer() -> None:
+    digest = build_event_digest(
+        {
+            "name": "中际旭创",
+            "symbol": "300308",
+            "generated_at": "2026-04-27 12:30:00",
+            "dimensions": {
+                "catalyst": {
+                    "evidence": [
+                        {
+                            "layer": "龙头公告/业绩",
+                            "title": "中际旭创互动平台问答：公司1.6T系列产品中，使用自研硅光方案",
+                            "source": "Tushare",
+                            "link": "https://irm.cninfo.com.cn/",
+                            "date": "2026-04-26",
+                        }
+                    ]
+                }
+            },
+        }
+    )
+
+    assert digest["lead_layer"] == "公告"
+    assert digest["lead_detail"] == "公告类型：投资者关系/路演纪要"
+    assert digest["signal_type"] == "公告类型：投资者关系/路演纪要"
+
+
 def test_event_digest_homepage_and_section_preserve_lead_markdown_link() -> None:
     digest = build_event_digest(
         {

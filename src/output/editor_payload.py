@@ -185,7 +185,10 @@ def _homepage_news_direction(conclusion: Any) -> str:
 
 
 def _infer_homepage_news_signal(title: Any, category: Any = "") -> Tuple[str, str]:
-    blob = f"{_safe_text(title)} {_safe_text(category)}".lower()
+    raw_text = f"{_safe_text(title)} {_safe_text(category)}"
+    raw_text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", raw_text)
+    raw_text = re.sub(r"https?://\S+", "", raw_text)
+    blob = raw_text.lower()
     geo_blocker = any(
         token in blob
         for token in ("陷入僵局", "僵局", "遭袭", "遇袭", "袭击", "空袭", "受损", "受创", "紧张升级", "冲突升级")
@@ -198,7 +201,7 @@ def _infer_homepage_news_signal(title: Any, category: Any = "") -> Tuple[str, st
         return "医药催化", "创新药/医药"
     if any(token in blob for token in ("国家电网", "南方电网", "特高压", "输变电", "配网", "变压器", "电力设备", "电网招标")):
         return "电网投资催化", "电网/特高压"
-    if any(token in blob for token in ("新易盛", "中际旭创", "华工科技", "cpo", "光模块", "算力", "服务器", "液冷", "hbm", "semiconductor", "芯片", "半导体", "nvidia", "nvda", "6g")):
+    if any(token in blob for token in ("ai硬件", "硬科技", "新易盛", "中际旭创", "华工科技", "cpo", "光模块", "算力", "服务器", "液冷", "hbm", "semiconductor", "芯片", "半导体", "nvidia", "nvda", "6g")):
         return "AI硬件催化", "AI硬件链"
     if any(token in blob for token in ("智谱", "kimi", "deepseek", "大模型", "模型", "agent", "应用")):
         return "AI应用催化", "AI软件/应用"
@@ -2773,7 +2776,7 @@ def _briefing_news_lines(payload: Mapping[str, Any], event_digest: Mapping[str, 
             return "医药催化", "创新药/医药"
         if any(token in blob for token in ("国家电网", "南方电网", "特高压", "输变电", "配网", "变压器", "电力设备", "电网招标")):
             return "电网投资催化", "电网/特高压"
-        if any(token in blob for token in ("新易盛", "中际旭创", "华工科技", "cpo", "光模块", "算力", "服务器", "液冷", "hbm", "semiconductor", "芯片", "nvidia", "nvda", "6g")):
+        if any(token in blob for token in ("ai硬件", "硬科技", "新易盛", "中际旭创", "华工科技", "cpo", "光模块", "算力", "服务器", "液冷", "hbm", "semiconductor", "芯片", "半导体", "nvidia", "nvda", "6g")):
             return "AI硬件催化", "AI硬件链"
         if any(token in blob for token in ("智谱", "kimi", "deepseek", "大模型", "模型", "agent", "应用")):
             return "AI应用催化", "AI软件/应用"

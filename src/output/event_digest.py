@@ -858,13 +858,16 @@ def _normalize_event_layer(layer: Any = "", title: Any = "", signal: Any = "", *
     layer_text = _safe_text(layer)
     content_blob = _flatten_text(title, signal)
     blob = _flatten_text(layer, title, signal)
+    announcement_layer = layer_text in {"结构化事件", "个股公告/事件", "负面事件", "龙头公告/业绩"}
     if prefer_theme_event or layer_text in {"海外映射", "产品/跟踪方向催化", "主题级关键新闻"}:
         return "行业主题事件"
     if _contains_any(content_blob, _EARNINGS_TOKENS):
         return "财报"
+    if announcement_layer and "政策" not in layer_text:
+        return "公告"
     if "政策" in layer_text or _contains_any(content_blob, _POLICY_TOKENS):
         return "政策"
-    if layer_text in {"结构化事件", "个股公告/事件", "负面事件", "龙头公告/业绩"} or _contains_any(content_blob, _ANNOUNCEMENT_TOKENS):
+    if announcement_layer or _contains_any(content_blob, _ANNOUNCEMENT_TOKENS):
         return "公告"
     if prefer_theme_event or layer_text in {"海外映射", "产品/跟踪方向催化"} or _contains_any(content_blob, _THEME_EVENT_TOKENS):
         return "行业主题事件"

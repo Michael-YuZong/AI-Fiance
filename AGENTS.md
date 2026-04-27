@@ -165,6 +165,7 @@
 这里只保留会影响默认开发判断的短摘要；逐日 log 放到 history 文档，不再堆在这里。
 
 - `briefing / scan / stock_analysis / stock_pick / etf_pick / fund_pick` 现在都按“情报链”口径写作：多条相关情报、`signal_type / signal_strength / signal_conclusion`、`主要影响 / 传导`、client-safe 空情报窗口已进入共享层；首页关键情报不能只贴标题，必须写清偏利多/偏利空/中性、先影响什么、再看什么验证。
+- 个股 IR / 互动易 / e互动 / 投资者问答属于公司管理层口径，默认归入 `公告类型：投资者关系/路演纪要`；只有真实政策主体或政策文件才允许写成 `政策影响层`，不要把公司产品问答包装成政策催化。
 - `briefing / market_drivers / market_pulse` 已承认 same-day freshness 合同；空 frame 不再写成 fresh，负涨幅行业/概念也不会再被写成 `走强 / 领涨`。
 - `Tushare 10000 分` 第一阶段已基本收口：股票、指数/行业、ETF 非实时主链都已切到 `Tushare-first`；当前重点改成退已被覆盖的 `AKShare` 旧链、统一 `index_weekly / index_monthly` 的可见写法，并推进第二阶段 backlog。
 - 默认分析合同已正式分叉：个股主链不再把指数专题当默认补充层，优先写公司、板块/主题、行业行情和资金承接；ETF / 指数 / 被动或联接类基金保留 `index_topic_bundle / 周月节奏 / 跟踪指数技术状态` 这套指数主线；主动基金回到基金经理、持仓和风格暴露主线。这套主动/被动判断现已抽成共享 helper，并已下沉到 `scan / stock_analysis / fund_pick / compare / renderer`，后续不要再在命令层各写一版启发式。
@@ -172,6 +173,7 @@
 - 个股聚合层现在有硬 gate：`technical < 30 / catalyst < 20 / risk < 20` 任一项未过时，`cn_stock` 不能输出 `较强机会 / 强机会`；两项及以上未过直接 `无信号`，单项未过封顶观察级。这条合同已同步到 `trade_state / action_plan / discover_next_step / release_check / report_guard`，不要再补回“基本面或相对强弱单维度把弱信号抬成推荐”的捷径。
 - `etf_pick --client-final` 当前已回到单一路径：不再复用 same-day internal/payload 快路径，也不再对入围 ETF 逐只做 full reanalysis 慢链；现在统一走 `discover -> hydrate full profile for finalists -> refresh shared ETF report fields -> finalize/export`。后续如果要提速，优先修共享 export/runtime，不要再补回旧 bundle 复用分支。
 - `stock_pick / briefing --client-final` 当前也已回到单一路径：仍会落 `payload / editor_payload / prompt` 侧车做审计与 continuity，但默认不再复用 same-day `internal -> finalize/export` 或 `editor fallback` 捷径。后续如果要提速，优先修共享 collector/runtime/export，不要再补回私有复用分支。
+- `stock_pick --client-final` 的 discovery / preview 快路径已明确分层：预筛阶段会跳过逐票 direct news、龙虎榜/竞价/涨跌停、行业指数逐票补查、资金流行业/概念代理和 IR/调研慢结构化接口，只保留轻量高价值结构化源；入围补强再补公司级情报。不要再把这些慢链补回 discovery。
 - `stock_pick / stock_analysis / scan` 的 `theme_playbook` 现在默认按“结构化 metadata 优先”收主题：先看 `sector / industry / industry_framework_label / tushare_theme_industry / chain_nodes`，只有 `day_theme` 与个股真实行业对齐时，才允许把它抬成个股主线；`business_scope` 这类超长经营范围默认不再直接参与主题归因，避免把 `旅游 / 餐饮 / 再生资源` 之类噪音误写成个股主题边界。
 - `stock_analysis / scan` 的单标的直跑链这轮也补上了同一套 shared contract：`cn_stock` 在已有标准行业时，`_merge_metadata(...)` 先按 `industry / sector` 做 broad sector 和 chain 节点归因，只有行业仍缺失时才让 `main_business / business_scope / company_intro` 做 fallback。`000792` 的真实 spot check 已确认这能把错误的 `光伏主链` 拉回 `农业 / 种植链`，且 `client-final` 的 `事件消化 / What Changed / 分数口径` 已重新对齐并可交付。
 - `stock_analysis / scan` 的主题收口这轮又补了一层“行业层旧 context 不得压住公司画像重算”合同：如果现成 `theme_playbook` 还只是 sector-level，占位旧上下文不能直接复用；共享 `_subject_theme_context(...)` 必须结合 `business_scope / company_intro` 再重算一次。同样重要的是，新算出来的细主题只有落在该硬行业的默认 bridge 里才允许升级；否则继续退回行业层，避免 `600096` 这类农业票被公司简介里的 `新能源 / 新材料` 反向带偏。真实 spot check 里，`002709` 已能从泛 `材料` 升成 `锂电`，而 `600096 / 000792` 仍稳定停在 `农业 / 种植链`。

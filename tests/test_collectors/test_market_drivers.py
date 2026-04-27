@@ -1122,6 +1122,59 @@ def test_market_drivers_stock_capital_flow_snapshot_skips_proxy_fetch_when_direc
     assert snapshot["components"]["board_flow"]["status"] == "skipped"
 
 
+def test_market_drivers_stock_capital_flow_snapshot_skips_board_proxy_on_fast_runtime(monkeypatch, tmp_path):
+    collector = MarketDriversCollector(
+        {
+            "storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0},
+            "skip_stock_capital_flow_board_proxy_runtime": True,
+        }
+    )
+    monkeypatch.setattr(collector, "_latest_open_trade_date", lambda *args, **kwargs: "20260401")
+    monkeypatch.setattr(
+        collector,
+        "_ts_stock_moneyflow_snapshot",
+        lambda **kwargs: pd.DataFrame(
+            [
+                {
+                    "ts_code": "300308.SZ",
+                    "trade_date": "20260331",
+                    "buy_lg_amount": 10_000.0,
+                    "sell_lg_amount": 8_000.0,
+                    "buy_elg_amount": 5_000.0,
+                    "sell_elg_amount": 4_000.0,
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        collector,
+        "get_stock_theme_membership",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fast runtime should skip theme proxy fetch")),
+    )
+    monkeypatch.setattr(
+        collector,
+        "_ts_sector_fund_flow",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fast runtime should skip board proxy fetch")),
+    )
+
+    snapshot = collector.get_stock_capital_flow_snapshot(
+        "300308",
+        reference_date=datetime(2026, 4, 1, 18, 0, 0),
+        display_name="中际旭创",
+        sector="科技",
+        chain_nodes=["光模块"],
+    )
+
+    assert snapshot["status"] == "stale"
+    assert snapshot["diagnosis"] == "stale"
+    assert snapshot["components"]["theme_membership"]["status"] == "skipped"
+    assert snapshot["components"]["theme_membership"]["fallback"] == "runtime_skip"
+    assert snapshot["components"]["board_flow"]["status"] == "skipped"
+    assert snapshot["components"]["board_flow"]["fallback"] == "runtime_skip"
+    assert "快路径跳过" in snapshot["components"]["board_flow"]["disclosure"]
+    assert snapshot["direct_trade_gap_days"] == 1
+
+
 def test_market_drivers_stock_capital_flow_snapshot_falls_back_to_board_proxy(monkeypatch, tmp_path):
     collector = MarketDriversCollector({"storage": {"cache_dir": str(tmp_path), "cache_ttl_hours": 0}})
     monkeypatch.setattr(collector, "_latest_open_trade_date", lambda *args, **kwargs: "20260401")

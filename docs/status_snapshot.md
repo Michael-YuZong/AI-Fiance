@@ -82,6 +82,7 @@
 - `intel v2` 这轮也开始真正下沉到摘要层：`news_report` 现在会统一带 `summary_lines / lead_summary`，`editor_payload / client_report` 会优先前置这些聚类摘要，再补原始链接证据。也就是说，报告首页不再只能吃“原始新闻条目”，而是开始直接消费共享情报摘要。
 - `intel` 这轮又补了“市场级大事假设”共享层：当上游只剩 `proxy`、摘要却已经明显在说 `地缘/停火/风险偏好/利率/关税` 这类市场级变化时，`collect_market_aware_intel_news_report(...)` 会先按这类大事假设优先补搜，再回到主题/标的查询；这层已经接到 `stock_analysis / scan / stock_pick / research / fund_pick / etf_pick`，不再只在 `briefing` 里单点修补。
 - `event_digest -> editor_payload -> client_report` 共享情报链 v1 已收口：多条相关情报、信号类型/强弱、主要影响、结论、传导路径、来源层级、空情报窗口表达，已在 mature 主链统一；首页关键情报不能退回“只贴新闻标题”。
+- `event_digest` 对个股 IR / 互动易 / e互动 / 投资者问答的分类已补硬边界：这类管理层口径默认归入 `公告类型：投资者关系/路演纪要`，只有真实政策主体或政策文件才允许写成 `政策影响层`，避免把公司产品问答包装成政策催化。
 - 个股聚合层已补 `technical < 30 / catalyst < 20 / risk < 20` 硬 gate：两项及以上未过直接 `无信号`，单项未过封顶观察级；`trade_state / action_plan / discover_next_step / release_check / report_guard` 同步承认这条合同，不能再靠基本面、相对强弱或结构化事件把弱信号包装成 `较强机会`。
 - 共享首页 `情报摘要` 这轮又继续去机器口径：如果聚类只落到 `综合/其他` 这类默认桶，首页现在会明确改写成“暂未稳定归到单一主题、先按背景线索理解”，不再把分类器默认标签和“独立利好数量”直接暴露给客户。
 - `10000` 分 Tushare 升级仍是 repo 级优先主线，但口径已经从“广撒接口”切到“补剩余缺口 + 退已覆盖旧链”：股票主链、指数/行业标准链和 ETF 非实时主链第一阶段已基本接好，当前优先是统一 `index_weekly / index_monthly` 的成熟稿面表达、继续退已被覆盖的 `AKShare` 主路径，并把可见性和最终收口做稳。`fund_factor_pro / broker_recommend / e互动` 已经进入稳定消费，不再算主缺口。
@@ -97,6 +98,7 @@
 - `fund_profile / valuation` 这轮又补了一层“退旧链但不吞成熟信息块”的边界：`cn_etf` 只有在 Tushare 已拿到 ETF 核心身份时，才允许旧 `AKShare overview` 做经理/基准等轻量补洞；如果 Tushare 核心仍是空表，就明确按 `基金概况缺失` 降级，不再偷偷回到旧主链。同时 ETF `fund_nav` 若只返回较旧净值，也会回传最新可用时点，不再因为相对今天超过窗口而被硬清空。
 - `event_digest / editor_payload / client_report` 又收了一轮首屏证据排序：`e互动 / 投资者关系 / 路演纪要 / 业绩说明会 / broker` 这类更直接的证据现在会排在 generic framework rows 之前；`stock_analysis / stock_pick` 命中 `stk_factor_pro / A-H 比价 / 可转债映射 / 机构调研` 时，也会更早前置到正文前段，而不是只埋在因子表里。
 - `stock_pick` 的 `client-final` discovery 快路径也补齐了最后一个共享缺口：现在只继续跳 `unlock/pledge` 这类硬慢源，不再默认跳过 `broker_recommend`。这意味着卖方共识命中时，已经能更稳定地进入候选筛选和前段证据层，不会再被 fastpath 自己静默掐掉。
+- `stock_pick --client-final` 的 discovery / preview 快路径现在明确分层：预筛阶段跳过逐票 direct news、龙虎榜/竞价/涨跌停、行业指数逐票补查、资金流行业/概念代理和 IR/调研慢结构化接口，只保留轻量高价值结构化源；入围补强再补公司级情报。缺口会按 `runtime_skip` 披露，不允许慢链偷偷绕回导致正式稿卡死。
 - `stock_pick / stock_analysis / scan` 的主题归因这轮又补了一层“结构化优先”合同：`theme_playbook` 不再把市场 `day_theme` 或 `business_scope` 里的 `旅游 / 餐饮 / 再生资源` 之类噪音直接写成个股主线。现在会先看 `sector / industry / industry_framework_label / chain_nodes / tushare_theme_industry`，只有确实对齐时才允许 `day_theme` 进入个股主线叙述。
 - `stock_analysis / scan` 的单标的直跑 metadata merge 这轮也补掉了同类污染：`cn_stock` 在已有标准行业时，会先按 `industry / sector` 做 broad-sector 与 chain 节点归因，再把 `main_business / business_scope / company_intro` 只当 fallback。`盐湖股份 (000792)` 这类同时写了 `碳酸锂 / 电池 / AI材料` 的公司，当前真实 spot check 已从错误的 `光伏主链` 拉回 `农业 / 种植链`。
 - 上面这条合同已经不只停在 sidecar：`000792` 的 `stock_analysis / scan` 外审都已从 scaffold 收敛到 `PASS`，`client-final` 真实导出也已完成。也就是说，这次修的是共享主题归因合同，不是只修 payload、不敢重刷 final 的半收口。

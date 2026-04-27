@@ -11,11 +11,13 @@ structured_stock_intelligence_apis:
 stock_news_runtime_mode: focused
 stock_news_limit: 8
 skip_catalyst_dynamic_search_runtime: true
+skip_cn_stock_board_action_runtime: true
 stock_news_official_query_cap: 2
 stock_news_search_query_cap: 1
 stock_news_search_recent_days: 14
 skip_analysis_proxy_signals_runtime: true
 skip_signal_confidence_runtime: true
+skip_stock_capital_flow_board_proxy_runtime: true
 stock_pool_skip_industry_lookup_runtime: true
 stock_pool_prefer_cached_realtime_runtime: true
 
